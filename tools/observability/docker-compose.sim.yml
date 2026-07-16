@@ -1,0 +1,27 @@
+# LOCAL VALIDATION ONLY — reproduces the production topology
+# (DKG node → Alloy → Loki 2.5.0) on your laptop to verify config.alloy before
+# deploying. NOT for production. Production runs only Alloy (see RUNBOOK.md),
+# pointed at the existing host Loki.
+services:
+  loki25:
+    image: grafana/loki:2.5.0
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3105:3100" # query API (avoids clashing with the 3.x PoC Loki on 3100)
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    environment:
+      - INGEST_TOKEN=test-ingest-token
+      - LOKI_PUSH_URL=http://loki25:3100/loki/api/v1/push
+    ports:
+      - "4328:4318" # OTLP/HTTP in (4318 is used by the PoC otel-collector)
+      - "12346:12345" # Alloy UI
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+    depends_on:
+      - loki25

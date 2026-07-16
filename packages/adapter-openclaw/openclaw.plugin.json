@@ -1,39 +1,69 @@
 {
   "id": "adapter-openclaw",
-  "name": "DKG Node — Decentralized Knowledge Graph",
-  "version": "0.0.1",
-  "description": "Connects your OpenClaw agent to a DKG V9 node. Enables verifiable memory, publishing knowledge, querying the graph, discovering agents, and invoking remote skills over a decentralized P2P network.",
+  "name": "DKG Node UI Bridge",
+  "version": "10.0.0-rc.19",
+  "description": "Connects a local OpenClaw agent to a DKG V10 node for node-backed chat, memory, and agent-network capabilities.",
+  "kind": "memory",
+  "channels": ["dkg-ui"],
   "configSchema": {
     "type": "object",
     "properties": {
-      "daemonUrl": { "type": "string", "default": "http://127.0.0.1:9200", "description": "DKG daemon HTTP URL" },
+      "daemonUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:9200",
+        "description": "DKG daemon HTTP URL"
+      },
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for adapter runtime state such as chat-turn watermarks. Setup writes the workspace-scoped default <workspace>/.dkg-adapter when available."
+      },
+      "stateDirSource": {
+        "type": "string",
+        "enum": ["setup-default"],
+        "description": "Internal setup metadata marking stateDir as the setup-written workspace default."
+      },
+      "installedWorkspace": {
+        "type": "string",
+        "description": "Internal setup metadata for the workspace that installed this adapter entry."
+      },
       "memory": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG memory tools and file-watcher sync" },
-          "memoryDir": { "type": "string", "description": "Override watched memory directory" },
-          "watchDebounceMs": { "type": "number", "default": 1500, "description": "File watcher debounce interval (ms)" }
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Register the DKG memory-slot capability (slot-backed recall via api.registerMemoryCapability). No conventional tools are exposed: reads flow through the slot, and writes flow directly through daemon HTTP routes documented in the agent SKILL.md (POST /api/knowledge-assets + POST /api/knowledge-assets/:name/wm/write)."
+          }
         },
-        "description": "DKG memory integration"
+        "description": "DKG memory integration. Reads flow through api.registerMemoryCapability (slot-backed recall via DkgMemorySearchManager's WM+SWM+VM fan-out). Writes are NOT exposed as an adapter tool in v1 — the agent persists memory through direct daemon routes listed in packages/cli/skills/dkg-node/SKILL.md §5 (POST /api/knowledge-assets + POST /api/knowledge-assets/:name/wm/write). The retired memoryDir / watchDebounceMs / file-watcher-sync configuration surface and the retired dkg_memory_import / dkg_memory_search adapter tools are no longer accepted."
       },
       "channel": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG UI ↔ OpenClaw bridge" },
-          "port": { "type": "number", "default": 9201, "description": "Standalone bridge port (when gateway route registration unavailable)" }
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable DKG UI to OpenClaw chat bridge"
+          },
+          "port": {
+            "type": "number",
+            "default": 9201,
+            "description": "Standalone bridge port when gateway route registration is unavailable"
+          }
         },
         "description": "DKG UI channel bridge"
       },
-      "game": {
+      "dkgSetupState": {
         "type": "object",
+        "description": "Internal setup metadata for connect/disconnect round-trip restoration (previous tools profile, previous/merged dkg-ui channel shape, merged tools shape, previous memory-slot owner). Written and consumed only by adapter setup/unmerge — never read at runtime.",
         "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable OriginTrail Game tools (lobby, join, play, autopilot)" },
-          "pollIntervalMs": { "type": "number", "default": 2000, "description": "Autopilot poll interval in ms" },
-          "decisionTimeoutMs": { "type": "number", "default": 15000, "description": "Agent consultation timeout per turn in ms" }
-        },
-        "description": "OriginTrail Game integration"
+          "previousToolsProfile": { "type": ["string", "null"] },
+          "previousChannelsDkgUi": { "type": ["object", "null"] },
+          "mergedChannelsDkgUi": { "type": "object" },
+          "mergedToolsShape": { "type": "object" },
+          "previousMemorySlotOwner": { "type": "string" }
+        }
       }
     }
-  },
-  "skills": ["skills"]
+  }
 }

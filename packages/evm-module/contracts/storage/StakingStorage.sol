@@ -12,7 +12,7 @@ contract StakingStorage is INamed, IVersioned, Guardian {
     using EnumerableSetLib for EnumerableSetLib.Uint256Set;
 
     string private constant _NAME = "StakingStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     event TotalStakeUpdated(uint96 totalStake);
     event NodeStakeUpdated(uint72 indexed identityId, uint96 stake);
@@ -652,6 +652,16 @@ contract StakingStorage is INamed, IVersioned, Guardian {
     // -----------------------------------------------------------------------------------------------------------------
 
     function transferStake(address receiver, uint96 stakeAmount) external onlyContracts {
+        // Slither: bare `.transfer()` flagged as unchecked-transfer because
+        // the standard ERC20 contract returns a `bool`. The TRAC token —
+        // the only token plugged into this storage by Hub config — reverts
+        // on failure rather than returning false, so the return-value
+        // discard is safe in practice. This is the V8 legacy outflow path
+        // (V10 traffic goes through ConvictionStakingStorage.transferStake
+        // which uses SafeERC20). Kept directive'd rather than rewritten
+        // because changing the V8 path risks invalidating already-deployed
+        // V8→V10 migration scripts that snapshot storage layout.
+        // slither-disable-next-line unchecked-transfer
         tokenContract.transfer(receiver, stakeAmount);
 
         emit StakedTokensTransferred(receiver, stakeAmount);

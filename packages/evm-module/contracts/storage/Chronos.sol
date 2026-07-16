@@ -47,6 +47,14 @@ contract Chronos {
         if (block.timestamp < START_TIME) {
             return START_TIME + EPOCH_LENGTH - block.timestamp;
         }
+        // Slither: `block.timestamp % EPOCH_LENGTH` is flagged as weak-PRNG
+        // because miners can nudge `block.timestamp` within a small window.
+        // This is deterministic time math, NOT randomness — the modulo
+        // computes "seconds elapsed since the start of the current epoch",
+        // which has the same minor miner-influence as `block.timestamp`
+        // itself does (already trusted protocol-wide for epoch advancement).
+        // No randomness derivation, no PRNG semantics.
+        // slither-disable-next-line weak-prng
         uint256 elapsed = (block.timestamp - START_TIME) % EPOCH_LENGTH;
         return EPOCH_LENGTH - elapsed;
     }
@@ -66,6 +74,9 @@ contract Chronos {
         if (block.timestamp < START_TIME) {
             return 0;
         }
+        // Slither weak-prng — deterministic time math, not randomness.
+        // See `timeUntilNextEpoch` above for the long-form rationale.
+        // slither-disable-next-line weak-prng
         return (block.timestamp - START_TIME) % EPOCH_LENGTH;
     }
 

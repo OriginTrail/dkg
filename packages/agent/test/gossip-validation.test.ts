@@ -6,30 +6,46 @@
  * - Gossip-received data is always stored as tentative (never confirmed from self-reported fields)
  * - On-chain verification promotes tentative → confirmed
  * - Malformed gossip messages are handled gracefully with logging
- * - Integration: real gossip flow through subscribeToParanet triggers verification
+ * - Integration: real gossip flow through subscribeToContextGraph triggers verification
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import {
   encodePublishRequest,
   decodePublishRequest,
-  TypedEventBus,
-  createOperationContext,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { type Quad } from '@origintrail-official/dkg-storage';
 import {
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computePublicRootV10 as computePublicRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
   autoPartition,
   generateTentativeMetadata,
   generateKCMetadata,
   getConfirmedStatusQuad,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 
-const PARANET = 'test-gossip';
+const CONTEXT_GRAPH = 'test-gossip';
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -43,7 +59,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -69,7 +85,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -93,7 +109,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const msg = {
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -108,7 +124,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const decoded = decodePublishRequest(encoded);
 
     expect(decoded.ual).toBe(msg.ual);
-    expect(decoded.paranetId).toBe(msg.paranetId);
+    expect(decoded.contextGraphId).toBe(msg.contextGraphId);
     expect(decoded.publisherAddress).toBe(msg.publisherAddress);
   });
 });
@@ -122,9 +138,10 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // After the fix, all gossip data should be stored as tentative first.
     // We simulate what the gossip handler does and verify the output is tentative.
 
-    const entity = 'did:dkg:agent:QmGossipEntity';
+    // A-12 migration: agent DIDs are EVM-address form.
+    const entity = 'did:dkg:agent:0x' + 'aa'.repeat(20);
     const triples = [
-      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
 
     const partitioned = autoPartition(triples);
@@ -147,7 +164,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     const kcMeta = {
       ual: 'did:dkg:mock:31337/0xAttacker/1',
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       merkleRoot,
       kaCount: kaMetadata.length,
       publisherPeerId: '0xAttacker',
@@ -164,7 +181,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // Verify that the old behavior (confirmed) is NOT used
     const confirmedQuads = [
       ...generateKCMetadata(kcMeta, kaMetadata),
-      getConfirmedStatusQuad(kcMeta.ual, PARANET),
+      getConfirmedStatusQuad(kcMeta.ual, CONTEXT_GRAPH),
     ];
     const hasConfirmedStatus = confirmedQuads.some(
       tq => tq.predicate.includes('status') && tq.object.includes('confirmed'),
@@ -177,49 +194,58 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     expect(tentativeStatuses.map(s => s.object)).not.toEqual(confirmedStatuses.map(s => s.object));
   });
 
-  it('on-chain verification uses MockChainAdapter listenForEvents to match events', async () => {
-    const publisherAddress = '0x1111111111111111111111111111111111111111';
-    const chain = new MockChainAdapter('mock:31337', publisherAddress);
-
-    const publishResult = await chain.publishKnowledgeAssets({
-      kaCount: 2,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0xab),
-      publicByteSize: 100n,
-      epochs: 1,
-      tokenAmount: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
+  it('on-chain verification uses EVMChainAdapter listenForEvents to match events', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const agent = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EventVerifier',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chain,
+      nodeRole: 'core',
     });
+    await agent.start();
+    await installHardhatACKProvider(agent, chain);
 
-    expect(publishResult.txHash).toBeTruthy();
-    expect(publishResult.blockNumber).toBeGreaterThan(0);
+    try {
+      await agent.createContextGraph({ id: 'event-test', name: 'Event Test' });
+      await agent.registerContextGraph('event-test');
+      agent.subscribeToContextGraph('event-test');
+      await sleep(500);
 
-    // Verify the event is findable via listenForEvents at the correct block
-    let found = false;
-    const filter = {
-      eventTypes: ['KnowledgeBatchCreated'],
-      fromBlock: publishResult.blockNumber,
-    };
-    for await (const event of chain.listenForEvents(filter)) {
-      if (event.blockNumber === publishResult.blockNumber) {
-        expect(event.data['publisherAddress']).toBe(publisherAddress);
-        found = true;
-        break;
+      const result = await agent.publish('event-test', [
+        { subject: 'did:dkg:test:EventEntity', predicate: 'http://schema.org/name', object: '"EventBot"', graph: '' },
+      ]);
+
+      expect(result.onChainResult?.txHash).toBeTruthy();
+      expect(result.onChainResult?.blockNumber).toBeGreaterThan(0);
+
+      let found = false;
+      for await (const event of chain.listenForEvents({
+        eventTypes: ['KCCreated'],
+        fromBlock: result.onChainResult!.blockNumber,
+        toBlock: result.onChainResult!.blockNumber,
+      })) {
+        if (event.blockNumber === result.onChainResult!.blockNumber) {
+          found = true;
+          break;
+        }
       }
+      expect(found).toBe(true);
+    } finally {
+      await agent.stop();
     }
-    expect(found).toBe(true);
-  });
+  }, 30000);
 
   it('proto round-trips full gossip message with on-chain proof fields', () => {
-    const entity = 'did:dkg:agent:QmRoundTrip';
+    const entity = 'did:dkg:agent:0x' + 'bb'.repeat(20);
     const ntriples = `<${entity}> <http://schema.org/name> "RoundTrip" .`;
     const txHash = '0x' + 'ff'.repeat(32);
 
     const msg = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode(ntriples),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{
         tokenId: 1,
         rootEntity: entity,
@@ -240,7 +266,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     const decoded = decodePublishRequest(msg);
     expect(decoded.ual).toBe('did:dkg:mock:31337/0x1/1');
     expect(decoded.txHash).toBe(txHash);
-    expect(decoded.paranetId).toBe(PARANET);
+    expect(decoded.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(decoded.kas).toHaveLength(1);
     expect(decoded.kas[0].rootEntity).toBe(entity);
 
@@ -256,62 +282,66 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   });
 
   it('listenForEvents respects toBlock and filters by txHash in event data', async () => {
-    const publisherAddress = '0x2222222222222222222222222222222222222222';
-    const chain = new MockChainAdapter('mock:31337', publisherAddress);
-
-    const result1 = await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n,
-      epochs: 1,
-      tokenAmount: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const agent = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'EventFilter',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chain,
+      nodeRole: 'core',
     });
-    const result2 = await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x02),
-      publicByteSize: 100n,
-      epochs: 1,
-      tokenAmount: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
-    });
+    await agent.start();
+    await installHardhatACKProvider(agent, chain);
 
-    const eventsBlock1: { blockNumber: number; txHash: unknown }[] = [];
-    for await (const evt of chain.listenForEvents({
-      eventTypes: ['KnowledgeBatchCreated'],
-      fromBlock: result1.blockNumber,
-      toBlock: result1.blockNumber,
-    })) {
-      eventsBlock1.push({ blockNumber: evt.blockNumber, txHash: evt.data['txHash'] });
+    try {
+      await agent.createContextGraph({ id: 'event-filter', name: 'Event Filter' });
+      await agent.registerContextGraph('event-filter');
+      agent.subscribeToContextGraph('event-filter');
+      await sleep(500);
+
+      const result1 = await agent.publish('event-filter', [
+        { subject: 'did:dkg:test:Filter1', predicate: 'http://schema.org/name', object: '"Filter1"', graph: '' },
+      ]);
+      const result2 = await agent.publish('event-filter', [
+        { subject: 'did:dkg:test:Filter2', predicate: 'http://schema.org/name', object: '"Filter2"', graph: '' },
+      ]);
+
+      const eventsBlock1: { blockNumber: number; txHash: unknown }[] = [];
+      for await (const evt of chain.listenForEvents({
+        eventTypes: ['KCCreated'],
+        fromBlock: result1.onChainResult!.blockNumber,
+        toBlock: result1.onChainResult!.blockNumber,
+      })) {
+        eventsBlock1.push({ blockNumber: evt.blockNumber, txHash: evt.data['txHash'] });
+      }
+
+      expect(eventsBlock1).toHaveLength(1);
+      expect(eventsBlock1[0].blockNumber).toBe(result1.onChainResult!.blockNumber);
+      expect(eventsBlock1[0].txHash).toBe(result1.onChainResult!.txHash);
+
+      const eventsAll: number[] = [];
+      for await (const evt of chain.listenForEvents({
+        eventTypes: ['KCCreated'],
+        fromBlock: result1.onChainResult!.blockNumber,
+      })) {
+        eventsAll.push(evt.blockNumber);
+      }
+      expect(eventsAll.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await agent.stop();
     }
-
-    expect(eventsBlock1).toHaveLength(1);
-    expect(eventsBlock1[0].blockNumber).toBe(result1.blockNumber);
-    expect(eventsBlock1[0].txHash).toBe(result1.txHash);
-
-    const eventsAll: number[] = [];
-    for await (const evt of chain.listenForEvents({
-      eventTypes: ['KnowledgeBatchCreated'],
-      fromBlock: result1.blockNumber,
-    })) {
-      eventsAll.push(evt.blockNumber);
-    }
-    expect(eventsAll.length).toBeGreaterThanOrEqual(2);
-  });
+  }, 30000);
 
   it('merkle verification detects tampered gossip data', () => {
-    const entity = 'did:dkg:agent:QmTampered';
+    const entity = 'did:dkg:agent:0x' + 'cc'.repeat(20);
     const legitimateTriples = [
-      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:paranet:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
     const tamperedTriples = [
-      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:paranet:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:paranet:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
 
     const legitimatePartitioned = autoPartition(legitimateTriples);
@@ -337,7 +367,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 });
 
 // ---------------------------------------------------------------------------
-// Integration: gossip flow through subscribeToParanet with on-chain verification
+// Integration: gossip flow through subscribeToContextGraph with on-chain verification
 // ---------------------------------------------------------------------------
 const integrationAgents: DKGAgent[] = [];
 
@@ -348,23 +378,25 @@ afterEach(async () => {
   integrationAgents.length = 0;
 });
 
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
-
 describe('Integration: gossip ingestion verifies on-chain and promotes to confirmed', () => {
   it('receiver gossip data starts tentative and promotes to confirmed via shared chain', async () => {
-    const sharedChain = new MockChainAdapter('mock:31337', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
 
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'GossipSender',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'GossipReceiver',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     integrationAgents.push(agentA, agentB);
 
@@ -373,9 +405,10 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'gossip-verify', name: 'GV', description: '' });
-    agentA.subscribeToParanet('gossip-verify');
-    agentB.subscribeToParanet('gossip-verify');
+    await agentA.createContextGraph({ id: 'gossip-verify', name: 'GV', description: '' });
+    await agentA.registerContextGraph('gossip-verify');
+    agentA.subscribeToContextGraph('gossip-verify');
+    agentB.subscribeToContextGraph('gossip-verify');
     await sleep(500);
 
     await agentA.publish('gossip-verify', [
@@ -386,7 +419,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const statusResult = await agentB.query(
       `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-verify/_meta> {
+        GRAPH <did:dkg:context-graph:gossip-verify/_meta> {
           ?kc <http://dkg.io/ontology/status> ?status
         }
       }`,
@@ -401,21 +434,25 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     expect(hasTentative).toBe(false);
   }, 25000);
 
-  it('receiver without shared chain leaves gossip data as tentative', async () => {
-    const chainA = new MockChainAdapter('mock:31337', '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB');
-    const chainB = new MockChainAdapter('mock:31337', '0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC');
+  it('receiver on the same chain verifies and promotes gossip data to confirmed', async () => {
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const chainB = createEVMAdapter(HARDHAT_KEYS.REC1_OP);
 
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'TentSender',
       listenPort: 0,
       skills: [],
       chainAdapter: chainA,
+      nodeRole: 'core',
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'TentReceiver',
       listenPort: 0,
       skills: [],
       chainAdapter: chainB,
+      nodeRole: 'core',
     });
     integrationAgents.push(agentA, agentB);
 
@@ -424,9 +461,10 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'gossip-tent', name: 'GT', description: '' });
-    agentA.subscribeToParanet('gossip-tent', { trackSyncScope: false });
-    agentB.subscribeToParanet('gossip-tent', { trackSyncScope: false });
+    await agentA.createContextGraph({ id: 'gossip-tent', name: 'GT', description: '' });
+    await agentA.registerContextGraph('gossip-tent');
+    agentA.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
+    agentB.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     await sleep(500);
 
     await agentA.publish('gossip-tent', [
@@ -437,7 +475,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
 
     const statusResult = await agentB.query(
       `SELECT ?status WHERE {
-        GRAPH <did:dkg:paranet:gossip-tent/_meta> {
+        GRAPH <did:dkg:context-graph:gossip-tent/_meta> {
           ?kc <http://dkg.io/ontology/status> ?status
         }
       }`,
@@ -445,10 +483,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     );
 
     const statuses = statusResult.bindings.map(b => b['status']);
-    const hasTentative = statuses.some(s => s === '"tentative"');
-    expect(hasTentative).toBe(true);
-
     const hasConfirmed = statuses.some(s => s === '"confirmed"');
-    expect(hasConfirmed).toBe(false);
+    expect(hasConfirmed).toBe(true);
   }, 25000);
 });

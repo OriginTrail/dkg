@@ -1,0 +1,337 @@
+/* ── AgentChip (attribution pill) ── */
+.v10-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 2px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  vertical-align: middle;
+  max-width: 100%;
+  user-select: none;
+}
+.v10-agent-chip.interactive { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.v10-agent-chip.interactive:hover {
+  background: color-mix(in srgb, var(--agent-color, #64748b) 14%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+}
+.v10-agent-chip-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--agent-color, #64748b);
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+}
+.v10-agent-chip-initials {
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.v10-agent-chip-glyph {
+  position: absolute;
+  bottom: -2px;
+  right: -4px;
+  background: var(--bg-surface, #1a1d23);
+  border: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 50%, var(--border-default));
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--agent-color, #64748b);
+  line-height: 1;
+}
+.v10-agent-chip-body {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+  max-width: 100%;
+}
+.v10-agent-chip-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-agent-chip-sub {
+  display: inline-flex;
+  gap: 4px;
+  font-size: 9px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v10-agent-chip-fw { font-weight: 700; color: var(--agent-color, #64748b); }
+.v10-agent-chip-sep { opacity: 0.5; }
+.v10-agent-chip-op { opacity: 0.85; }
+
+/* Size variants */
+.v10-agent-chip-sm { font-size: 10px; padding: 1px 7px 1px 1px; }
+.v10-agent-chip-sm .v10-agent-chip-avatar { width: 16px; height: 16px; font-size: 8px; }
+.v10-agent-chip-sm .v10-agent-chip-glyph { width: 9px; height: 9px; font-size: 7px; bottom: -1px; right: -2px; }
+
+.v10-agent-chip-md { font-size: 11px; padding: 2px 9px 2px 2px; }
+.v10-agent-chip-md .v10-agent-chip-avatar { width: 22px; height: 22px; font-size: 9px; }
+.v10-agent-chip-md .v10-agent-chip-glyph  { width: 11px; height: 11px; font-size: 8px; }
+
+.v10-agent-chip-lg { font-size: 13px; padding: 4px 12px 4px 4px; }
+.v10-agent-chip-lg .v10-agent-chip-avatar { width: 30px; height: 30px; font-size: 11px; }
+.v10-agent-chip-lg .v10-agent-chip-glyph  { width: 14px; height: 14px; font-size: 10px; bottom: -2px; right: -4px; }
+
+/* ── Activity feed ── */
+.v10-activity-feed {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.015);
+}
+.v10-activity-feed-title {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.v10-activity-feed-title-label { flex: 0 1 auto; }
+.v10-activity-feed-title-count {
+  /* N6 polish (item 3) — total-feed count next to the heading.
+   * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
+   * so the two read as the same kind of signal at different scopes. */
+  font-family: var(--font-mono); font-weight: 400;
+  font-size: 10px; letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-tertiary);
+}
+.v10-overview-activity.v10-activity-feed-empty {
+  min-height: 140px;
+}
+.v10-activity-feed-empty-hint {
+  /* N6 polish (item 2) — quieter than the prior centered/bold
+   * EmptyState primitive; recedes so the rest of the Overview
+   * stays the focal area. */
+  margin-top: 8px;
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.v10-activity-feed-error {
+  /* PR #694 Comment 8 — distinguishable from `.v10-activity-feed-empty-hint`
+   * so the user can tell "couldn't load" apart from "no activity
+   * yet", but still quieter than the loud `EmptyState` primitive. */
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent-warn, #f59e0b);
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
+.v10-activity-feed-bucket-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 2px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+.v10-activity-feed-bucket-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.v10-activity-feed-bucket-count {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
+}
+.v10-activity-feed-items { display: flex; flex-direction: column; }
+
+.v10-activity-feed-row {
+  display: grid;
+  grid-template-columns: 16px auto 1fr auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  transition: background 0.12s;
+}
+.v10-activity-feed-row:hover { background: rgba(255,255,255,0.04); }
+.v10-activity-feed-row + .v10-activity-feed-row {
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+}
+/* Non-clickable rows — both PR #656-era stub rows (promotion of a
+ * root not in `rawMemory.entities`) and the lifecycle rows that are
+ * non-interactive by design (PR #694 Comment 12 (A) — assertion
+ * click-through lands in the S4 PR). Disabledness is signalled by
+ * `cursor: default` + `aria-disabled="true"` + the missing hover
+ * surface; the prior `opacity: 0.7` was redundant and dimmed the
+ * bulk of the feed once lifecycle rows became the dominant
+ * non-clickable kind, making the whole feed read muted vs the rest
+ * of the Overview chrome. */
+.v10-activity-feed-row-static {
+  cursor: default;
+}
+.v10-activity-feed-row-static:hover { background: none; }
+.v10-activity-feed-layer {
+  font-size: 14px; line-height: 1;
+  justify-self: center;
+}
+.v10-activity-feed-type {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--type-color, #a855f7) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--type-color, #a855f7) 30%, var(--border-subtle));
+  white-space: nowrap;
+}
+.v10-activity-feed-type-icon { font-size: 11px; color: var(--type-color, #a855f7); }
+.v10-activity-feed-title-text {
+  /* Entity / assertion name in each row (e.g.
+   * "pharmaceutical-derived-product-metadata"). Was `600` to
+   * compensate for the `.v10-activity-feed-row-static` opacity dim;
+   * with the dim gone (prior commit), `600` over-emphasised the row
+   * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
+   * title, `TODAY` bucket label, agent chips). Dropped one notch
+   * to `500` to bring it inline with the chrome's body weight. */
+  font-size: 12px; font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.v10-activity-feed-status {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+}
+.v10-activity-feed-status.status-good  { color: var(--text-success); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
+.v10-activity-feed-status.status-warn  { color: var(--text-warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
+.v10-activity-feed-status.status-bad   { color: var(--text-danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+.v10-activity-feed-author { display: inline-flex; }
+.v10-activity-feed-time {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  min-width: 54px; text-align: right;
+}
+
+/* ── Agent profile page ── */
+.v10-agent-profile {
+  display: flex; flex-direction: column;
+  overflow: auto;
+  padding: 12px 0;
+}
+.v10-agent-profile-header {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 12px 20px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(
+    180deg,
+    rgba(255,255,255,0.04) 0%,
+    transparent 100%
+  );
+}
+.v10-agent-profile-head {
+  display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
+}
+.v10-agent-profile-reputation {
+  font-size: 13px; color: var(--text-secondary);
+  line-height: 1.55;
+  max-width: 640px;
+  flex: 1 1 260px;
+}
+.v10-agent-profile-meta {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-top: 4px;
+}
+.v10-agent-profile-meta-row {
+  display: flex; gap: 10px; align-items: center;
+  font-size: 11px;
+}
+.v10-agent-profile-meta-lbl {
+  text-transform: uppercase;
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  min-width: 80px;
+}
+.v10-agent-profile-meta-val { color: var(--text-secondary); }
+.v10-agent-profile-meta-val.mono { font-family: var(--font-mono); font-size: 11px; }
+.v10-agent-profile-wallet {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-primary);
+}
+.v10-agent-profile-copy {
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-ghost);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s;
+}
+.v10-agent-profile-copy:hover { border-color: var(--border-strong); color: var(--text-primary); }
+
+.v10-agent-profile-stats {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-agent-profile-stat {
+  display: inline-flex; flex-direction: column; gap: 2px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-elevated, rgba(255,255,255,0.03));
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.v10-agent-profile-stat:hover {
+  border-color: var(--stat-color, var(--border-strong));
+  color: var(--text-primary);
+}
+.v10-agent-profile-stat.active {
+  border-color: var(--stat-color, var(--accent-green));
+  background: color-mix(in srgb, var(--stat-color, var(--accent-green)) 12%, transparent);
+  color: var(--text-primary);
+}
+.v10-agent-profile-stat-val {
+  font-size: 17px; font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1;
+  color: var(--stat-color, var(--text-primary));
+}
+.v10-agent-profile-stat-lbl {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+.v10-agent-profile-feed-sub {
+  font-weight: 400;
+  color: var(--text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+}

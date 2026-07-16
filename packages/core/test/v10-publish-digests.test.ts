@@ -1,0 +1,155 @@
+import { describe, it, expect } from 'vitest';
+import {
+  computePublishACKDigest,
+  computePublishPublisherDigest,
+  keccak256Hex,
+} from '../src/index.js';
+
+// Golden reference vectors computed via ethers.solidityPackedKeccak256 against
+// the exact abi.encodePacked shapes in KnowledgeAssetsLifecycle.sol:
+//   - ACK digest            → `_executePublishCore` (ACK_DIGEST_VERSION, chainid,
+//     address(this), contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize,
+//     epochs, tokenAmount, merkleLeafCount, catalogRoot, catalogLeafCount,
+//     isImmutable). OT-RFC-49 prepended the version member (Trap 3) and swapped
+//     the ciphertext pair for the catalog pair (same byte widths/positions).
+//   - Publisher digest      → contract lines 327-335 (unchanged by RFC-49)
+//
+// The contract prefixes the ACK with (ACK_DIGEST_VERSION, block.chainid,
+// address(this)) for version + H5 replay protection; the publisher digest field
+// order is (identityId, cgId, merkleRoot) per N26. Any drift in packing width,
+// order, or prefix breaks both gates SILENTLY (signature recovers wrong signer).
+
+const CHAIN_ID = 31337n;
+const KAV10_ADDRESS = '0x0000000000000000000000000000000000000042';
+const CG_ID = 1337n;
+const MERKLE_ROOT = new Uint8Array(32).fill(0xaa);
+const KA_COUNT = 3n;
+const BYTE_SIZE = 777n;
+const EPOCHS = 2n;
+const TOKEN_AMOUNT = 1000n;
+const MERKLE_LEAF_COUNT = 7n;
+const IDENTITY_ID = 5n;
+
+// Golden hex reference — precomputed offline with ethers.solidityPackedKeccak256.
+// If either of these diverges from the contract, on-chain _verifySignatures and
+// _verifySignature revert on every publish; keep these vectors pinned.
+// OT-RFC-49 layout: keccak256(abi.encodePacked(ACK_DIGEST_VERSION=1, chainId,
+// addr, cgId, merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount,
+// catalogRoot=0, catalogLeafCount=0, isImmutable=0)). Recomputed offline with
+// ethers v6 solidityPackedKeccak256 and cross-checked against computePublishACKDigest.
+const ACK_DIGEST_GOLDEN =
+  '0x7d7ee24eaaa7cf64ed7900bcc1287923c9778c4b3286f20e60a537365d8c8743';
+const PUBLISHER_DIGEST_GOLDEN =
+  '0x511ca6d1022288492fb07cd51c6285513790e6ac1e99745ad1a369bb5b53d991';
+// The same fields in the WRONG order (cgId before identityId) — must NOT match.
+const PUBLISHER_DIGEST_SWAPPED_ORDER =
+  '0xc187cc01681cb99adc14ce4146c0d4995d655c151dcbeb9badb3ca1ae51caaf2';
+
+describe('computePublishACKDigest', () => {
+  it('matches the H5-prefixed golden reference', () => {
+    const digest = computePublishACKDigest(
+      CHAIN_ID,
+      KAV10_ADDRESS,
+      CG_ID,
+      MERKLE_ROOT,
+      KA_COUNT,
+      BYTE_SIZE,
+      EPOCHS,
+      TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
+    );
+    expect(keccak256Hex(new Uint8Array(0))).toMatch(/^0x/); // sanity on helper import
+    expect('0x' + Buffer.from(digest).toString('hex')).toBe(ACK_DIGEST_GOLDEN);
+  });
+
+  it('is deterministic for identical inputs', () => {
+    const a = computePublishACKDigest(
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    const b = computePublishACKDigest(
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    expect(a).toEqual(b);
+  });
+
+  it('different chainId produces a different digest (H5 chain-pin)', () => {
+    const a = computePublishACKDigest(
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    const b = computePublishACKDigest(
+      CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    expect(a).not.toEqual(b);
+  });
+
+  it('different kav10Address produces a different digest (H5 contract-pin)', () => {
+    const a = computePublishACKDigest(
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    const b = computePublishACKDigest(
+      CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+    );
+    expect(a).not.toEqual(b);
+  });
+
+  it('rejects merkleRoot with wrong length', () => {
+    expect(() =>
+      computePublishACKDigest(
+        CHAIN_ID, KAV10_ADDRESS, CG_ID, new Uint8Array(16), KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+      ),
+    ).toThrow(/merkleRoot/);
+  });
+
+  it('rejects malformed kav10Address', () => {
+    expect(() =>
+      computePublishACKDigest(
+        CHAIN_ID, '0xnope', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
+      ),
+    ).toThrow(/kav10Address/);
+  });
+});
+
+describe('computePublishPublisherDigest', () => {
+  it('matches the H5-prefixed, N26-ordered golden reference', () => {
+    const digest = computePublishPublisherDigest(
+      CHAIN_ID,
+      KAV10_ADDRESS,
+      IDENTITY_ID,
+      CG_ID,
+      MERKLE_ROOT,
+    );
+    expect('0x' + Buffer.from(digest).toString('hex')).toBe(PUBLISHER_DIGEST_GOLDEN);
+  });
+
+  it('does NOT produce the cgId-before-identityId shape (N26 regression guard)', () => {
+    const digest = computePublishPublisherDigest(
+      CHAIN_ID, KAV10_ADDRESS, IDENTITY_ID, CG_ID, MERKLE_ROOT,
+    );
+    const asHex = '0x' + Buffer.from(digest).toString('hex');
+    // The swapped-order digest is the one that would pass signature verification
+    // on-chain iff the contract also had the fields reversed — it does not.
+    // If this assertion ever fires, someone put cgId ahead of identityId in the
+    // pack and every publisher digest will fail _verifySignature on chain.
+    expect(asHex).not.toBe(PUBLISHER_DIGEST_SWAPPED_ORDER);
+    expect(asHex).toBe(PUBLISHER_DIGEST_GOLDEN);
+  });
+
+  it('is deterministic for identical inputs', () => {
+    const a = computePublishPublisherDigest(CHAIN_ID, KAV10_ADDRESS, IDENTITY_ID, CG_ID, MERKLE_ROOT);
+    const b = computePublishPublisherDigest(CHAIN_ID, KAV10_ADDRESS, IDENTITY_ID, CG_ID, MERKLE_ROOT);
+    expect(a).toEqual(b);
+  });
+
+  it('rejects identityId overflow (> uint72 max)', () => {
+    const uint72Max = (1n << 72n) - 1n;
+    expect(() =>
+      computePublishPublisherDigest(CHAIN_ID, KAV10_ADDRESS, uint72Max + 1n, CG_ID, MERKLE_ROOT),
+    ).toThrow(/uint72|identityId/);
+  });
+
+  it('rejects merkleRoot with wrong length', () => {
+    expect(() =>
+      computePublishPublisherDigest(CHAIN_ID, KAV10_ADDRESS, IDENTITY_ID, CG_ID, new Uint8Array(31)),
+    ).toThrow(/merkleRoot/);
+  });
+});

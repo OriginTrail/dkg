@@ -1,0 +1,255 @@
+{
+  "chain": "gnosis",
+  "generatedAt": "2026-04-10T17:05:42.363Z",
+  "sourceFile": "gnosis_publisher_snapshot_epoch16.json",
+  "epochsCovered": [
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73
+  ],
+  "count": 37,
+  "totalWei": "2467346417212454329281389",
+  "totalTRAC": 2467346.417212454,
+  "publishers": [
+    {
+      "address": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+      "totalWei": "377571376630249753006299",
+      "totalTRAC": 377571.3766302497
+    },
+    {
+      "address": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+      "totalWei": "241250596381863216002720",
+      "totalTRAC": 241250.59638186323
+    },
+    {
+      "address": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+      "totalWei": "183770545287278563435520",
+      "totalTRAC": 183770.54528727857
+    },
+    {
+      "address": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+      "totalWei": "173364535477762917153648",
+      "totalTRAC": 173364.53547776293
+    },
+    {
+      "address": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+      "totalWei": "173334135594203106563775",
+      "totalTRAC": 173334.1355942031
+    },
+    {
+      "address": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+      "totalWei": "172687500481115662978486",
+      "totalTRAC": 172687.50048111565
+    },
+    {
+      "address": "0xf707fbbc7beb511259d125335553535175c05a07",
+      "totalWei": "148115717937824499315979",
+      "totalTRAC": 148115.7179378245
+    },
+    {
+      "address": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+      "totalWei": "111256240106212581373756",
+      "totalTRAC": 111256.24010621259
+    },
+    {
+      "address": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+      "totalWei": "111127385188095445123219",
+      "totalTRAC": 111127.38518809545
+    },
+    {
+      "address": "0x67be45a88ca887ca3cf0936313d588c893257214",
+      "totalWei": "110676101076709588504356",
+      "totalTRAC": 110676.10107670959
+    },
+    {
+      "address": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+      "totalWei": "104849411900506940977355",
+      "totalTRAC": 104849.41190050694
+    },
+    {
+      "address": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+      "totalWei": "104606226296956344881988",
+      "totalTRAC": 104606.22629695635
+    },
+    {
+      "address": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+      "totalWei": "104413989171435508978905",
+      "totalTRAC": 104413.9891714355
+    },
+    {
+      "address": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+      "totalWei": "48977341607664009508479",
+      "totalTRAC": 48977.341607664006
+    },
+    {
+      "address": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+      "totalWei": "44998808291494674451282",
+      "totalTRAC": 44998.80829149467
+    },
+    {
+      "address": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+      "totalWei": "29322197487534668653096",
+      "totalTRAC": 29322.197487534668
+    },
+    {
+      "address": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+      "totalWei": "29268588964791493197016",
+      "totalTRAC": 29268.588964791492
+    },
+    {
+      "address": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+      "totalWei": "29147502887089384955730",
+      "totalTRAC": 29147.502887089384
+    },
+    {
+      "address": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+      "totalWei": "28857074311455519932682",
+      "totalTRAC": 28857.07431145552
+    },
+    {
+      "address": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+      "totalWei": "28794400287579600103538",
+      "totalTRAC": 28794.4002875796
+    },
+    {
+      "address": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+      "totalWei": "28682066150107906366879",
+      "totalTRAC": 28682.066150107905
+    },
+    {
+      "address": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+      "totalWei": "28226369790920069078771",
+      "totalTRAC": 28226.369790920067
+    },
+    {
+      "address": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+      "totalWei": "28210889943206169903077",
+      "totalTRAC": 28210.88994320617
+    },
+    {
+      "address": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+      "totalWei": "12873218888306726768176",
+      "totalTRAC": 12873.218888306727
+    },
+    {
+      "address": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+      "totalWei": "12871462907597257952837",
+      "totalTRAC": 12871.462907597257
+    },
+    {
+      "address": "0x53e660f903ec72b0c1290bd580dfb2e1adb62e20",
+      "totalWei": "9017283295734641164",
+      "totalTRAC": 9.017283295734641
+    },
+    {
+      "address": "0x3261cb952e231611f24a6c0283cdd867b7501221",
+      "totalWei": "8999175651945741140",
+      "totalTRAC": 8.999175651945741
+    },
+    {
+      "address": "0x8cfcf4e2eb8116b8cef567e98ad5b829e518015d",
+      "totalWei": "8988750081170131475",
+      "totalTRAC": 8.988750081170132
+    },
+    {
+      "address": "0xa74a7a2e0e3bcf29eb320feb1848ea16ece838f0",
+      "totalWei": "8952468631805914779",
+      "totalTRAC": 8.952468631805914
+    },
+    {
+      "address": "0xccb46a23006edf123c7a102e5021094fd705b470",
+      "totalWei": "8610660521712718684",
+      "totalTRAC": 8.610660521712719
+    },
+    {
+      "address": "0x24fada8c64173404c135649cc7afaa908ea93ebe",
+      "totalWei": "7712251034806524175",
+      "totalTRAC": 7.712251034806524
+    },
+    {
+      "address": "0x522cdf114a48a95f4ac07dae2703f2d97ea93b7c",
+      "totalWei": "6993196385802743467",
+      "totalTRAC": 6.993196385802744
+    },
+    {
+      "address": "0x771fd565c77e1f64364f426d15d79eb7bb1547d6",
+      "totalWei": "6971236209878387088",
+      "totalTRAC": 6.971236209878387
+    },
+    {
+      "address": "0x11a3de7705c2d597d268be10770477927e0fbec8",
+      "totalWei": "6930100223549143096",
+      "totalTRAC": 6.930100223549143
+    },
+    {
+      "address": "0xf14a7794fde266a3d58b36f87200997230c30a54",
+      "totalWei": "6921258974265563438",
+      "totalTRAC": 6.921258974265563
+    },
+    {
+      "address": "0x065e9a77a67c6b21f92c7fe4ac3d2bd1b13722c8",
+      "totalWei": "6749865776094681826",
+      "totalTRAC": 6.749865776094682
+    },
+    {
+      "address": "0x0d3a8615beacddeed5dad9ec9f676896e0f7c144",
+      "totalWei": "5887917705953923488",
+      "totalTRAC": 5.887917705953924
+    }
+  ]
+}

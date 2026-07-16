@@ -14,7 +14,7 @@ contract IdentityStorage is IERC734Extended, INamed, IVersioned, HubDependent {
     using ByteArr for bytes32[];
 
     string private constant _NAME = "IdentityStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     uint72 public lastIdentityId;
 

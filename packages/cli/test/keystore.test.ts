@@ -1,30 +1,23 @@
-import { describe, it, expect, vi } from 'vitest';
-
-/**
- * Mock scryptSync to use lightweight params (N=2^14 instead of 2^18)
- * so the real encryptKeystore/decryptKeystore can be tested without
- * exceeding memory limits in CI.
- */
-vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:crypto')>();
-  return {
-    ...actual,
-    scryptSync: (password: any, salt: any, keylen: any, options: any) => {
-      return actual.scryptSync(password, salt, keylen, {
-        ...options,
-        N: 2 ** 14,
-        maxmem: 64 * 1024 * 1024,
-      });
-    },
-  };
-});
-
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   encryptKeystore,
   decryptKeystore,
   isEncryptedKeystore,
+  _setScryptN,
   type EncryptedKeystore,
 } from '../src/keystore.js';
+
+beforeAll(() => {
+  // Production scrypt N for the keystore is 2^18, but that's ~128 MB
+  // per derivation which OOMs constrained CI workers running 4 vitest
+  // shards in parallel. Use 2^15 — the *minimum production floor*
+  // enforced by `decryptKeystore` (see CLI-1 in
+  // . test-audit/. This keeps the test fast while still
+  // exercising a parameter set that the production-hardened loader
+  // accepts (a previous value of 2^14 was below the floor and would
+  // now correctly be refused as a weak keystore).
+  _setScryptN(2 ** 15);
+});
 
 const TEST_KEY = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
 const PASSPHRASE = 'test-passphrase-123';
@@ -96,6 +89,27 @@ describe('decryptKeystore error handling', () => {
     ks.crypto.tag = '00'.repeat(16);
     await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
       /Decryption failed/,
+    );
+  });
+
+  it('rejects keystore whose hex salt has odd length (silent-truncation guard)', async () => {
+    // a 33-character hex salt advertises
+    // floor(33/2)=16 bytes (>= MIN_SALT_BYTES under integer division) so
+    // the previous length check let it through, but `Buffer.from(s, 'hex')`
+    // silently drops the dangling nibble and derives from a 16-byte salt
+    // instead of the 17 the operator believed they had configured.
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.salt = 'a'.repeat(33);
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /weak keystore/,
+    );
+  });
+
+  it('rejects keystore whose hex salt has non-hex characters', async () => {
+    const ks = await encryptKeystore(TEST_KEY, PASSPHRASE);
+    ks.crypto.kdfparams.salt = 'zz'.repeat(20);
+    await expect(decryptKeystore(ks, PASSPHRASE)).rejects.toThrow(
+      /weak keystore/,
     );
   });
 });

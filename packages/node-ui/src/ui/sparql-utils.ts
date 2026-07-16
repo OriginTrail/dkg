@@ -185,7 +185,7 @@ type ProvenanceRow = {
   o: string;
   g: string;
   graphType: string;
-  paranet: string;
+  contextGraph: string;
   source: string;
   ual: string;
   txHash: string;
@@ -221,7 +221,7 @@ export function buildTripleRowsWithProvenance(
         o: triple.o,
         g: '',
         graphType: '',
-        paranet: '',
+        contextGraph: '',
         source: '',
         ual: '',
         txHash: '',
@@ -236,7 +236,7 @@ export function buildTripleRowsWithProvenance(
         o: triple.o,
         g: match.g || '',
         graphType: match.graphType || '',
-        paranet: match.paranet || '',
+        contextGraph: match.contextGraph || '',
         source: match.source || '',
         ual: match.ual || '',
         txHash: match.txHash || '',

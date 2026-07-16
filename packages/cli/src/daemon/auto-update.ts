@@ -1,0 +1,1772 @@
+// Auto-update subsystem extracted from the legacy monolithic
+// `daemon.ts`.
+//
+// OT-RFC-41 / rc.12+ update mechanism:
+//   - `performNpmUpdateEdge` — Edge nodes (single-tree, npm-global).
+//   - `performNpmUpdate`     — Core nodes (blue-green slots, npm install
+//                              into inactive slot + swap).
+//
+// The git-clone + build-from-source path (`performUpdate`,
+// `_performUpdateInner`, `checkForUpdate`, `checkForNewCommit*`,
+// `runBuildStep`, `cleanGeneratedOutputs`, `sweepOrphanBuildProcesses`,
+// `resolveBuildTimeouts`) is intentionally retained for advanced Core nodes
+// that opt into `autoUpdate.source = "git"`. NPM/dist-tag updates remain the
+// default and recommended path.
+//
+// Live "last check" state is shared with `handleRequest`'s `/status`
+// endpoint via `daemonState` in `./state.js`.
+
+import { execSync, exec, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  existsSync, readFileSync, openSync, closeSync, unlinkSync,
+  writeFileSync as fsWriteFileSync,
+} from 'node:fs';
+import {
+  readFile, writeFile, mkdir, rm, chmod, copyFile, stat, rename, unlink,
+} from 'node:fs/promises';
+import { join, resolve, dirname } from 'node:path';
+import { createRequire } from 'node:module';
+import { randomUUID, createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+import {
+  dkgDir,
+  releasesDir,
+  activeSlot,
+  inactiveSlot,
+  swapSlot,
+  gitCommandArgs,
+  gitCommandEnv,
+  isStandaloneInstall,
+  slotEntryPoint,
+  CLI_NPM_PACKAGE,
+  type DkgConfig,
+  type ResolvedAutoUpdateConfig,
+} from '../config.js';
+import type { DaemonNodeCommand } from '../daemon-entrypoint.js';
+import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import {
+  _autoUpdateIo,
+  DAEMON_EXIT_CODE_RESTART,
+  currentBundledMarkItDownAssetName,
+  carryForwardBundledMarkItDownBinary,
+} from './manifest.js';
+import { writeFileAtomic } from './fs-utils.js';
+import { daemonState } from './state.js';
+import {
+  expectedBundledMarkItDownBuildMetadata,
+  readCliPackageVersion,
+} from '../extraction/markitdown-bundle-metadata.js';
+import {
+  FULL_BUILD_COMMAND,
+  NODE_UI_PACKAGE_NAME_FALLBACKS,
+  nodeUiPackageJsonPath,
+  nodeUiPackageNamesFromCliPackageJson,
+  nodeUiPackageNameFromPackageJson,
+  nodeUiNpmStaticIndexPaths,
+  nodeUiStaticBuildCommand,
+  nodeUiStaticBuildLabel,
+  nodeUiStaticIndexPath,
+  runtimeBuildCommandFromPackageJson,
+} from '../node-ui-static.js';
+
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+const daemonRequire = createRequire(import.meta.url);
+
+/** Normalize repo to "owner/name" (strip URL prefix or .git suffix). */
+export function normalizeRepo(repo: string): string {
+  const t = repo.trim().replace(/\.git$/i, "");
+  const m = t.match(/github\.com[/:](\S+\/\S+?)(?:\/|$)/);
+  if (m) return m[1];
+  return t;
+}
+
+export function isValidRepoSpec(repo: string): boolean {
+  const trimmed = repo.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("-")) return false;
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) return false;
+  if (/\s/.test(trimmed)) return false;
+
+  if (trimmed.startsWith("/") || /^[A-Za-z]:\\/.test(trimmed)) return true; // Absolute local path.
+  if (trimmed.startsWith("file://")) return true;
+  if (
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("ssh://") ||
+    trimmed.startsWith("git@")
+  )
+    return true;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(trimmed)) return true; // owner/name or owner/name.git
+  if (/^[A-Za-z0-9._/\-]+$/.test(trimmed)) return true; // Relative local path.
+
+  return false;
+}
+
+export function repoToFetchUrl(repo: string): string {
+  const trimmed = repo.trim();
+  if (!isValidRepoSpec(trimmed)) {
+    throw new Error(`invalid autoUpdate.repo "${repo}"`);
+  }
+  if (!trimmed) return trimmed;
+  if (
+    trimmed.startsWith("/") ||
+    trimmed.includes("://") ||
+    trimmed.startsWith("git@")
+  )
+    return trimmed;
+  const normalized = normalizeRepo(trimmed);
+  if (/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    return `https://github.com/${normalized}.git`;
+  }
+  return trimmed;
+}
+
+export function githubRepoForApi(repo: string): string | null {
+  const trimmed = repo.trim().replace(/\.git$/i, "");
+  if (!trimmed) return null;
+  const urlMatch = trimmed.match(
+    /github\.com[/:]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/|$)/i,
+  );
+  if (urlMatch) return urlMatch[1];
+  // Treat plain owner/name as GitHub shorthand; explicit paths should use ./ or / prefixes.
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+export async function resolveRemoteCommitSha(
+  repoSpec: string,
+  ref: string,
+  log: (msg: string) => void,
+  gitEnv: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const { fetch, execFile: execFileAsync } = _autoUpdateIo;
+  let fetchUrl = "";
+  try {
+    fetchUrl = repoToFetchUrl(repoSpec);
+  } catch (err: any) {
+    log(`Auto-update (git): ${err?.message ?? "invalid autoUpdate.repo"}`);
+    return null;
+  }
+  const githubRepo = githubRepoForApi(repoSpec);
+  const isSshRepo =
+    fetchUrl.startsWith("git@") || fetchUrl.startsWith("ssh://");
+  const apiRef = ref.replace(/^refs\/heads\//, "").replace(/^refs\/tags\//, "");
+
+  // Fast path for GitHub repos to preserve token-authenticated checks.
+  if (githubRepo && !isSshRepo) {
+    const url = `https://api.github.com/repos/${githubRepo}/commits/${encodeURIComponent(apiRef)}`;
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github.v3+json",
+    };
+    const token = process.env.GITHUB_TOKEN;
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      if (res.status === 422 && ref.startsWith("refs/tags/")) {
+        log(`Auto-update (git): tag "${apiRef}" not found in ${githubRepo}`);
+        return null;
+      }
+      if (res.status === 404) {
+        log(
+          `Auto-update (git): GitHub returned 404 for ${githubRepo} ref "${ref}". ` +
+            "If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.",
+        );
+      } else {
+        log(`Auto-update (git): GitHub API returned ${res.status} for ${url}`);
+      }
+      return null;
+    }
+    const data = (await res.json()) as { sha?: string };
+    return data.sha ? String(data.sha).trim() : null;
+  }
+
+  // Generic path for local/non-GitHub repositories.
+  const queryRefs = ref.startsWith("refs/tags/") ? [ref, `${ref}^{}`] : [ref];
+  try {
+    const raw = await execFileAsync(
+      "git",
+      [...gitCommandArgs(fetchUrl, null), "ls-remote", fetchUrl, ...queryRefs],
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: gitEnv,
+      },
+    );
+    const stdout =
+      typeof raw === "string" ? raw : String((raw as any)?.stdout ?? "");
+    const lines = String(stdout).trim().split("\n").filter(Boolean);
+    if (lines.length === 0) {
+      log(`Auto-update (git): ref "${ref}" not found in ${fetchUrl}`);
+      return null;
+    }
+    const peeledTagRef = `${ref}^{}`;
+    const parsed = lines
+      .map((line) => line.split(/\s+/))
+      .filter((parts) => parts.length >= 2)
+      .map(([sha, remoteRef]) => ({
+        sha: sha.trim(),
+        remoteRef: remoteRef.trim(),
+      }))
+      .filter((entry) => /^[0-9a-f]{7,40}$/i.test(entry.sha));
+    const peeled = parsed.find((entry) => entry.remoteRef === peeledTagRef);
+    if (peeled) return peeled.sha;
+    const exact = parsed.find((entry) => entry.remoteRef === ref);
+    if (exact) return exact.sha;
+    return parsed[0]?.sha ?? null;
+  } catch (err: any) {
+    log(
+      `Auto-update: failed to resolve remote ref ${ref} from ${fetchUrl} (${err?.message ?? String(err)})`,
+    );
+    return null;
+  }
+}
+
+export type PendingUpdateState = {
+  target: "a" | "b";
+  commit: string;
+  version?: string;
+  ref: string;
+  createdAt: string;
+};
+
+export type CommitCheckStatus = {
+  status: "available" | "up-to-date" | "error";
+  commit?: string;
+};
+
+function shortCommit(commit: string): string {
+  return commit ? commit.slice(0, 12) : "unknown";
+}
+
+export async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
+  const { dkgDir, readFile } = _autoUpdateIo;
+  const pendingFile = join(dkgDir(), ".update-pending.json");
+  try {
+    const raw = await readFile(pendingFile, "utf-8");
+    const parsed = JSON.parse(raw) as PendingUpdateState;
+    if ((parsed.target !== "a" && parsed.target !== "b") || !parsed.ref)
+      return null;
+    if (!parsed.commit && !parsed.version) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearPendingUpdateState(): Promise<void> {
+  const { dkgDir, unlink } = _autoUpdateIo;
+  const pendingFile = join(dkgDir(), ".update-pending.json");
+  try {
+    await unlink(pendingFile);
+  } catch {
+    /* ok */
+  }
+}
+
+export async function writePendingUpdateState(
+  state: PendingUpdateState,
+): Promise<void> {
+  const pendingFile = join(_autoUpdateIo.dkgDir(), ".update-pending.json");
+  await writeFileAtomic(pendingFile, JSON.stringify(state, null, 2));
+}
+
+// ─── NPM-based auto-update helpers ──────────────────────────────────
+
+/**
+ * Query the NPM registry for the latest published version of the CLI package.
+ * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
+ * checks `beta` / `next` tags and picks the highest semver. When `channel`
+ * is set, follows ONLY that dist-tag instead (still honouring `allowPrerelease`).
+ */
+export type NpmVersionResult =
+  | { version: string; error?: false }
+  | { version: null; error: true }
+  | { version: null; error: false };
+
+// Official semver.org grammar (anchored). Rejects malformed values that a
+// loose shape check would accept (e.g. `10.0.0-alpha..1` — empty prerelease
+// identifier) before they reach `compareSemver` (a non-numeric part makes it
+// return NaN, which is not `<= 0` and would slip the forward-only gate).
+const SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+
+/** True when `v` is a valid semver string. */
+export function isValidSemver(v: string): boolean {
+  return SEMVER_RE.test(v.trim());
+}
+
+/**
+ * True when `v` carries a prerelease component (the `-…` segment) — build
+ * metadata (`+…`) is NOT a prerelease, so `1.0.0+mainnet-build.1` is stable
+ * even though it contains a hyphen. Used for the `allowPrerelease` gate.
+ */
+export function isPrerelease(v: string): boolean {
+  return v.trim().split("+")[0].includes("-");
+}
+
+export async function resolveLatestNpmVersion(
+  log: (msg: string) => void,
+  allowPrerelease = true,
+  channel?: string,
+): Promise<NpmVersionResult> {
+  const { fetch } = _autoUpdateIo;
+  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/vnd.npm.install-v1+json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      log(
+        `Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`,
+      );
+      return { version: null, error: true };
+    }
+    const data = (await res.json()) as { "dist-tags"?: Record<string, string> };
+    const tags = data["dist-tags"];
+    if (!tags) return { version: null, error: true };
+
+    // Channel pin: follow ONLY this dist-tag (e.g. "testnet"), ignoring the
+    // default latest/dev/beta/next set. Lets a cohort track its own release
+    // line without being captured by whatever `latest` points at.
+    if (channel) {
+      const pinned = tags[channel] ?? null;
+      if (!pinned) {
+        log(
+          `Auto-update (npm): channel "${channel}" has no published version, skipping`,
+        );
+        return { version: null, error: false };
+      }
+      if (!isValidSemver(pinned)) {
+        log(
+          `Auto-update (npm): channel "${channel}" → "${pinned}" is not a valid semver, skipping`,
+        );
+        return { version: null, error: false };
+      }
+      if (!allowPrerelease && isPrerelease(pinned)) {
+        log(
+          `Auto-update (npm): channel "${channel}" points at a pre-release and allowPrerelease=false, skipping`,
+        );
+        return { version: null, error: false };
+      }
+      return { version: pinned };
+    }
+
+    const stable = tags.latest ?? null;
+    if (!allowPrerelease) {
+      if (stable && !isPrerelease(stable)) return { version: stable };
+      log(
+        "Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping",
+      );
+      return { version: null, error: false };
+    }
+
+    const candidates = [stable, tags.dev, tags.beta, tags.next].filter(
+      Boolean,
+    ) as string[];
+    if (candidates.length === 0) return { version: null, error: false };
+    candidates.sort((a, b) => compareSemver(b, a));
+    return { version: candidates[0] };
+  } catch (err: any) {
+    log(
+      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
+    );
+    return { version: null, error: true };
+  }
+}
+
+export function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
+  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  }
+  const stripBuild = (s: string) => s.replace(/\+.*$/, "");
+  const preA = a.includes("-")
+    ? stripBuild(a.split("-").slice(1).join("-"))
+    : "";
+  const preB = b.includes("-")
+    ? stripBuild(b.split("-").slice(1).join("-"))
+    : "";
+  if (!preA && preB) return 1;
+  if (preA && !preB) return -1;
+  return preA.localeCompare(preB, undefined, { numeric: true });
+}
+
+export function getCurrentCliVersion(): string {
+  const { readFileSync } = _autoUpdateIo;
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
+    );
+    return String(pkg.version ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+export type NpmVersionStatus = {
+  status: "available" | "up-to-date" | "error" | "no-target";
+  version?: string;
+  /** Set on "no-target": the pinned channel that has no acceptable version. */
+  channel?: string;
+};
+
+export async function checkForNpmVersionUpdate(
+  log: (msg: string) => void,
+  allowPrerelease = true,
+  channel?: string,
+): Promise<NpmVersionStatus> {
+  const { dkgDir, readFile } = _autoUpdateIo;
+  const versionFile = join(dkgDir(), ".current-version");
+  let currentVersion = "";
+  try {
+    currentVersion = (await readFile(versionFile, "utf-8")).trim();
+  } catch {
+    currentVersion = getCurrentCliVersion();
+  }
+
+  if (!currentVersion) {
+    log("Auto-update (npm): unable to determine current version");
+    return { status: "error" };
+  }
+
+  const result = await resolveLatestNpmVersion(log, allowPrerelease, channel);
+  if (result.version === null) {
+    if (result.error) return { status: "error" };
+    // A pinned channel with no acceptable target (tag missing / prerelease
+    // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
+    // misconfigured or unpublished channel (e.g. mainnet) is visible rather
+    // than silently reported as current.
+    if (channel) return { status: "no-target", channel };
+    return { status: "up-to-date" };
+  }
+
+  // Never trust a non-semver target through the forward-only gate below
+  // (compareSemver would return NaN, which is not <= 0). The channel path
+  // already guards this upstream; this also covers the default tag set
+  // without changing its candidate selection.
+  if (!isValidSemver(result.version)) {
+    log(
+      `Auto-update (npm): resolved version "${result.version}" is not valid semver, skipping`,
+    );
+    return channel ? { status: "no-target", channel } : { status: "up-to-date" };
+  }
+
+  if (result.version === currentVersion) return { status: "up-to-date" };
+  if (compareSemver(result.version, currentVersion) <= 0)
+    return { status: "up-to-date" };
+
+  return { status: "available", version: result.version };
+}
+
+/**
+ * Pure mapping from an {@link NpmVersionStatus} to the daemon's
+ * `lastUpdateCheck` fields. Extracted so the runCheck → /api/status
+ * derivation is unit-testable. The `no-target` case in particular MUST report
+ * `upToDate: true` (there is no update to apply) so `/api/status` does not flip
+ * to `updateAvailable: true`; `channelTargetMissing` carries the distinct
+ * signal. Returns null for `error` — the caller leaves prior state unchanged.
+ */
+export function deriveUpdateCheckState(
+  npmStatus: NpmVersionStatus,
+): { upToDate: boolean; channelTargetMissing: boolean; latestVersion: string } | null {
+  if (npmStatus.status === "error") return null;
+  if (npmStatus.status === "no-target")
+    return { upToDate: true, channelTargetMissing: true, latestVersion: "" };
+  return {
+    upToDate: npmStatus.status === "up-to-date",
+    channelTargetMissing: false,
+    // Only an "available" result has a newer version to report; clear it on
+    // up-to-date / no-target so `/api/status` never shows a stale latestVersion.
+    latestVersion:
+      npmStatus.status === "available" ? npmStatus.version ?? "" : "",
+  };
+}
+
+/**
+ * Install a specific version of the CLI package into a blue-green slot via npm.
+ * The slot contains a minimal package.json; `npm install` fetches the
+ * pre-built package and all its dependencies.
+ */
+async function _performNpmUpdateInner(
+  targetVersion: string,
+  log: (msg: string) => void,
+): Promise<UpdateStatus> {
+  const { readFile, writeFile, mkdir, rm, existsSync, exec: execAsync, dkgDir, releasesDir, activeSlot, swapSlot, readCliPackageVersion, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
+  const rDir = releasesDir();
+  await mkdir(rDir, { recursive: true });
+
+  const versionFile = join(dkgDir(), ".current-version");
+  const pending = await readPendingUpdateState();
+  if (pending) {
+    const active = await activeSlot();
+    if (active === pending.target && pending.version === targetVersion) {
+      await writeFileAtomic(versionFile, pending.version);
+      await clearPendingUpdateState();
+      log(
+        `Auto-update (npm): recovered pending update state for slot ${pending.target} (v${pending.version}).`,
+      );
+      return "updated";
+    }
+    await clearPendingUpdateState();
+    if (active === pending.target && pending.version !== targetVersion) {
+      log(
+        `Auto-update (npm): pending version ${pending.version} differs from target ${targetVersion}, proceeding with fresh install.`,
+      );
+    } else {
+      log("Auto-update (npm): cleared stale pending update state.");
+    }
+  }
+
+  const active = (await activeSlot()) ?? "a";
+  const activeDir = join(rDir, active);
+  const target = active === "a" ? "b" : "a";
+  const targetDir = join(rDir, target);
+
+  log(
+    `Auto-update (npm): installing ${CLI_NPM_PACKAGE}@${targetVersion} into slot ${target}...`,
+  );
+
+  try {
+    // Clean the target slot to prevent stale artifacts (e.g. old git builds)
+    // from being mistaken for a valid entry point after install.
+    await rm(targetDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 200,
+    });
+    await mkdir(targetDir, { recursive: true });
+
+    const slotPkg = {
+      name: "dkg-release-slot",
+      private: true,
+      dependencies: { [CLI_NPM_PACKAGE]: targetVersion },
+    };
+    await writeFile(
+      join(targetDir, "package.json"),
+      JSON.stringify(slotPkg, null, 2),
+    );
+
+    const installStart = Date.now();
+    await execAsync(`npm install --production --no-audit --no-fund`, {
+      cwd: targetDir,
+      encoding: "utf-8",
+      timeout: 180_000,
+    });
+    const installMs = Date.now() - installStart;
+    log(`Auto-update (npm): npm install completed in ${installMs}ms.`);
+  } catch (installErr: any) {
+    log(
+      `Auto-update (npm): npm install failed — ${installErr?.message ?? String(installErr)}`,
+    );
+    return "failed";
+  }
+
+  const npmPkgDir = join(
+    targetDir,
+    "node_modules",
+    "@origintrail-official",
+    "dkg",
+  );
+  const npmEntry = join(npmPkgDir, "dist", "cli.js");
+  if (!existsSync(npmEntry)) {
+    log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
+    return "failed";
+  }
+  let npmNodeUiPackageNames = NODE_UI_PACKAGE_NAME_FALLBACKS;
+  try {
+    npmNodeUiPackageNames = nodeUiPackageNamesFromCliPackageJson(
+      await readFile(join(npmPkgDir, "package.json"), "utf-8"),
+    );
+  } catch {
+    // Older packages or damaged installs may not expose readable metadata.
+  }
+  const npmNodeUiIndexes = nodeUiNpmStaticIndexPaths(targetDir, npmNodeUiPackageNames);
+  if (!npmNodeUiIndexes.some((indexFile) => existsSync(indexFile))) {
+    log(
+      `Auto-update (npm): Node UI static bundle missing after install ` +
+        `(${npmNodeUiIndexes.join(', ')}). Aborting swap.`,
+    );
+    return "failed";
+  }
+  let resolvedVersion = readCliPackageVersion(npmPkgDir);
+  if (!resolvedVersion) {
+    resolvedVersion = targetVersion;
+    log(
+      `Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`,
+    );
+  }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(
+      npmPkgDir,
+      "bin",
+      bundledMarkItDownAsset,
+    );
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(
+      npmPkgDir,
+    ) ?? { cliVersion: resolvedVersion };
+    if (
+      !(await hasVerifiedBundledMarkItDownBinary(
+        bundledMarkItDownPath,
+        expectedMetadata,
+      ))
+    ) {
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(
+            activeDir,
+            "node_modules",
+            "@origintrail-official",
+            "dkg",
+            "bin",
+            bundledMarkItDownAsset,
+          ),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: "Auto-update (npm)",
+        expectedMetadata,
+      });
+      if (!reused) {
+        log(
+          `Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`,
+        );
+      }
+    }
+  }
+
+  await writePendingUpdateState({
+    target: target as "a" | "b",
+    commit: "",
+    version: resolvedVersion,
+    ref: `npm:${resolvedVersion}`,
+    createdAt: new Date().toISOString(),
+  });
+
+  try {
+    log(`Auto-update (npm): swapping active slot to ${target}...`);
+    await swapSlot(target as "a" | "b");
+    await writeFileAtomic(versionFile, resolvedVersion);
+    await clearPendingUpdateState();
+    log(
+      `Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`,
+    );
+  } catch (swapErr: any) {
+    await clearPendingUpdateState();
+    log(`Auto-update (npm): symlink swap failed — ${swapErr.message}`);
+    return "failed";
+  }
+
+  return "updated";
+}
+
+// ─── Git-based auto-update helpers ──────────────────────────────────
+
+/**
+ * Check GitHub for a new commit on the configured branch.
+ * Returns the latest commit SHA if an update is available, null otherwise.
+ */
+export async function checkForNewCommit(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  refOverride?: string,
+): Promise<string | null> {
+  const result = await checkForNewCommitWithStatus(au, log, refOverride);
+  return result.status === "available" ? (result.commit ?? null) : null;
+}
+
+export async function checkForNewCommitWithStatus(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  refOverride?: string,
+): Promise<CommitCheckStatus> {
+  const { dkgDir, readFile, activeSlot, releasesDir, execSync } = _autoUpdateIo;
+  const commitFile = join(dkgDir(), ".current-commit");
+  let currentCommit = "";
+  try {
+    currentCommit = (await readFile(commitFile, "utf-8")).trim();
+  } catch {
+    const active = await activeSlot();
+    const activeDir = join(releasesDir(), active ?? "a");
+    try {
+      currentCommit = execSync("git rev-parse HEAD", {
+        encoding: "utf-8",
+        cwd: activeDir,
+        stdio: "pipe",
+      }).trim();
+    } catch {
+      currentCommit = "";
+    }
+  }
+
+  let ref = "";
+  try {
+    ref = resolveAutoUpdateGitRef(au, refOverride);
+  } catch (err: any) {
+    log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
+    return { status: "error" };
+  }
+  const gitEnv = gitCommandEnv(au);
+
+  try {
+    const latestCommit = await resolveRemoteCommitSha(
+      au.repo,
+      ref,
+      log,
+      gitEnv,
+    );
+    if (!latestCommit) return { status: "error" };
+    log(
+      `Auto-update (git): current commit ${shortCommit(currentCommit)}, remote commit ${shortCommit(latestCommit)} for ref "${ref}".`,
+    );
+    if (latestCommit === currentCommit) {
+      log("Auto-update (git): update skipped — remote commit matches current.");
+      return { status: "up-to-date", commit: latestCommit };
+    }
+    return { status: "available", commit: latestCommit };
+  } catch (err: any) {
+    log(
+      `Auto-update (git): failed to check for new commit (${err?.message ?? String(err)})`,
+    );
+    return { status: "error" };
+  }
+}
+
+let _updateInProgress = false;
+let _lockToken: string | null = null;
+export type UpdateStatus = "updated" | "up-to-date" | "failed";
+
+export async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
+  const { releasesDir, mkdir, openSync, closeSync, writeFileSync, readFileSync, unlinkSync } = _autoUpdateIo;
+  const lockPath = join(releasesDir(), ".update.lock");
+  try {
+    await mkdir(releasesDir(), { recursive: true });
+    const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    const fd = openSync(lockPath, "wx");
+    writeFileSync(fd, token);
+    closeSync(fd);
+    _lockToken = token;
+    return true;
+  } catch (err: any) {
+    if (err.code === "EEXIST") {
+      try {
+        const raw = String(readFileSync(lockPath, "utf-8")).trim();
+        const parts = raw.split(":");
+        const pidStr = parts[0] ?? raw;
+        const lockPid = parseInt(pidStr, 10);
+        const lockTime = parseInt(parts[1] ?? "0", 10);
+        const STALE_MS = 15 * 60 * 1000; // 15 minutes
+        if (lockTime && Date.now() - lockTime > STALE_MS) {
+          try {
+            unlinkSync(lockPath);
+          } catch {}
+          return acquireUpdateLock(log);
+        }
+        if (lockPid === process.pid) {
+          _lockToken = raw;
+          return true;
+        }
+        if (lockPid) {
+          try {
+            process.kill(lockPid, 0);
+            log("Auto-update: another update process holds the lock, skipping");
+            return false;
+          } catch {
+            // Lock holder is dead, remove stale lock
+            try {
+              unlinkSync(lockPath);
+            } catch {}
+            return acquireUpdateLock(log);
+          }
+        }
+      } catch {
+        /* can't read lock */
+      }
+    }
+    // Fail closed: do not proceed if lock semantics are uncertain.
+    log(
+      `Auto-update: could not acquire lock (${err.code ?? err.message}), skipping`,
+    );
+    return false;
+  }
+}
+
+export async function releaseUpdateLock(): Promise<void> {
+  const { releasesDir, readFileSync, unlinkSync } = _autoUpdateIo;
+  const lockPath = join(releasesDir(), ".update.lock");
+  try {
+    if (!_lockToken) return;
+    const raw = String(readFileSync(lockPath, "utf-8")).trim();
+    if (raw !== _lockToken) return;
+    unlinkSync(lockPath);
+  } catch {
+    /* ok */
+  }
+  _lockToken = null;
+}
+
+// ─── Build-step helpers ────────────────────────────────────────────────
+
+/** Default per-step build timeouts (milliseconds). Override via config. */
+export const DEFAULT_BUILD_TIMEOUTS = {
+  install: 180_000,
+  build: 180_000,
+  contracts: 300_000,
+  markitdown: 900_000,
+} as const;
+
+export function resolveBuildTimeouts(
+  au: Pick<ResolvedAutoUpdateConfig, 'buildTimeoutMs'>,
+): { install: number; build: number; contracts: number; markitdown: number } {
+  const t = au.buildTimeoutMs ?? {};
+  return {
+    install: positiveOr(t.install, DEFAULT_BUILD_TIMEOUTS.install),
+    build: positiveOr(t.build, DEFAULT_BUILD_TIMEOUTS.build),
+    contracts: positiveOr(t.contracts, DEFAULT_BUILD_TIMEOUTS.contracts),
+    markitdown: positiveOr(t.markitdown, DEFAULT_BUILD_TIMEOUTS.markitdown),
+  };
+}
+
+function positiveOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+/**
+ * Run a build command with a timeout, then best-effort sweep orphan build
+ * subprocesses on failure. Node's `exec` SIGTERMs the direct child on timeout
+ * but pnpm's grandchildren (notably `solcjs-runner`) survive and pin a CPU,
+ * which has caused subsequent update attempts on the same host to time out
+ * even faster ("doom loop" observed on dkg-v9-relay-02/04). The sweep targets
+ * narrow process-name patterns so we never kill unrelated workloads.
+ */
+export async function runBuildStep(
+  execAsync: (cmd: string, opts: any) => Promise<any>,
+  cmd: string,
+  opts: { cwd: string; timeoutMs: number; label: string; log: (m: string) => void; env?: NodeJS.ProcessEnv },
+): Promise<{ stdout: string; stderr: string }> {
+  const startedAt = Date.now();
+  try {
+    const result = await execAsync(cmd, {
+      cwd: opts.cwd,
+      encoding: 'utf-8',
+      timeout: opts.timeoutMs,
+      ...(opts.env ? { env: opts.env } : {}),
+    });
+    return { stdout: String(result?.stdout ?? ''), stderr: String(result?.stderr ?? '') };
+  } catch (err: any) {
+    const elapsedMs = Date.now() - startedAt;
+    const timedOut =
+      err?.killed === true ||
+      err?.signal === 'SIGTERM' ||
+      (typeof err?.message === 'string' && /timed? ?out/i.test(err.message));
+    opts.log(
+      `Auto-update: build step "${opts.label}" failed after ${elapsedMs}ms` +
+        `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${err?.message ?? String(err)}`,
+    );
+    if (timedOut) {
+      sweepOrphanBuildProcesses(opts.cwd, opts.log);
+    }
+    throw err;
+  }
+}
+
+/**
+ * After a build-step timeout, Node's `exec` SIGTERMs only the immediate child
+ * (pnpm); grandchildren like `solcjs-runner`/`hardhat compile`/`tsc` survive
+ * and pin a CPU, which has caused subsequent updates on the same host to time
+ * out even faster ("doom loop" observed on dkg-v9-relay-02/04).
+ *
+ * We deliberately do NOT pattern-match command lines here: a host-wide
+ * `pkill -f pnpm|hardhat|...` would also kill an operator's interactive
+ * `pnpm install` or any unrelated workload running under the same user.
+ * Instead we scope by:
+ *   1) only OUR EUID's processes (`pgrep -u "$EUID"`), and
+ *   2) only those whose `/proc/<pid>/cwd` resolves under the slot directory
+ *      we're rebuilding.
+ *
+ * Build subprocesses inherit cwd from pnpm (which we run in `cwd: targetDir`),
+ * so they all match. Anything outside the slot — interactive shells, other
+ * services, builds in unrelated repos — is untouched.
+ */
+function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): void {
+  const { execSync } = _autoUpdateIo;
+  if (!slotDir || !slotDir.startsWith('/')) return;
+  // EUID is a bash-only variable. Production hosts (Ubuntu/Debian) symlink
+  // /bin/sh -> dash, where `$EUID` is unset and `set -u` aborts the whole
+  // script before pgrep ever runs — silently disabling the sweep. Resolve
+  // the EUID in Node and pass it through env so the script works under any
+  // POSIX shell.
+  const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+  if (euid === null) return;
+  try {
+    const script =
+      'set -u; ' +
+      'for pid in $(pgrep -u "$DKG_AU_UID" 2>/dev/null); do ' +
+      '  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true); ' +
+      '  case "$cwd" in ' +
+      '    "$DKG_AU_SLOT"|"$DKG_AU_SLOT/"*) kill -KILL "$pid" 2>/dev/null || true ;; ' +
+      '  esac; ' +
+      'done';
+    execSync(script, {
+      stdio: 'ignore',
+      timeout: 5_000,
+      shell: '/bin/sh',
+      env: {
+        ...process.env,
+        DKG_AU_SLOT: slotDir.replace(/\/+$/, ''),
+        DKG_AU_UID: String(euid),
+      },
+    });
+    log(`Auto-update: swept orphan build subprocesses with cwd under ${slotDir} (best-effort).`);
+  } catch {
+    /* best effort, never throw */
+  }
+}
+
+/**
+ * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
+ * the slot before building. Called on the default (`forceClean: false`) path
+ * because most upstream packages build with bare `tsc`, which does not
+ * remove generated files when their source is deleted/renamed. Without this,
+ * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
+ * activate it on the next slot swap. The `forceClean: true` path runs
+ * `git clean -fdx` instead (which already covers dist/), so this helper is
+ * not called there. We deliberately do NOT touch:
+ *   - `node_modules/` (preserved → pnpm install stays incremental)
+ *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
+ *     cache; cold solc builds on ARM64 routinely exceed the build-step
+ *     timeout, so this cache is critical to keep)
+ *
+ * Implemented in pure Node (`readdir` + `rm`/`unlink`) so it has no
+ * dependency on POSIX `find`/`rm`. If even the Node implementation fails
+ * (e.g. EACCES on `packages/`), we fall back to `git clean -fdx` so we
+ * never proceed to build/swap with potentially stale `dist/*.js` from a
+ * previous commit. If the fallback also fails the caller throws — better
+ * to fail the update than to silently activate stale code.
+ */
+async function cleanGeneratedOutputs(
+  targetDir: string,
+  log: (m: string) => void,
+): Promise<void> {
+  const { execFile: execFileAsync, readdir, rm } = _autoUpdateIo;
+  try {
+    const packagesDir = join(targetDir, 'packages');
+    let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      pkgEntries = await readdir(packagesDir, { withFileTypes: true });
+    } catch (err: any) {
+      // No packages/ dir is unusual but not fatal — nothing to clean.
+      if (err?.code === 'ENOENT') {
+        log('Auto-update: no packages/ directory found; nothing to pre-clean.');
+        return;
+      }
+      throw err;
+    }
+    let removedDist = 0;
+    let removedTsBuildInfo = 0;
+    for (const entry of pkgEntries) {
+      if (!entry.isDirectory()) continue;
+      const distPath = join(packagesDir, entry.name, 'dist');
+      const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
+      // `rm({ recursive: true, force: true })` is a no-op on missing paths.
+      await rm(distPath, { recursive: true, force: true });
+      await rm(tsBuildInfoPath, { force: true });
+      removedDist += 1;
+      removedTsBuildInfo += 1;
+    }
+    // Also wipe packages/cli's generated repo-root copies. The cli build
+    // script (`packages/cli/package.json#build`) copies repo-root
+    // `network/*.json` into `packages/cli/network/` and `project.json` into
+    // `packages/cli/project.json`. Without this step, deleting or renaming a
+    // root network config (e.g. removing `network/devnet.json`) leaves the
+    // stale package-local copy in the inactive slot, and `candidateRoots()`
+    // picks it up after the swap (monorepo-root precedence saves us in dev,
+    // but published-NPM / detached layouts do not have a monorepo ancestor).
+    // Use `force: true` so missing paths are a no-op (e.g. fresh clone where
+    // these have never been generated).
+    const cliPkgDir = join(packagesDir, 'cli');
+    await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
+    await rm(join(cliPkgDir, 'project.json'), { force: true });
+    await rm(dirname(nodeUiStaticIndexPath(targetDir)), { recursive: true, force: true });
+    log(
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json + node-ui/dist-ui before build (incremental caches preserved).`,
+    );
+  } catch (primaryErr: any) {
+    log(
+      `Auto-update: Node-based pre-build clean failed (${primaryErr?.message ?? String(primaryErr)}); falling back to git clean -fdx.`,
+    );
+    // Fallback wipes more than we'd like (also nukes node_modules + Hardhat
+    // cache, so the next build is cold) but is correct: the alternative is
+    // proceeding with possibly-stale dist/*.js, which is exactly the bug
+    // we're trying to prevent. If even this fails, throw — abort the update
+    // rather than swap a dirty slot.
+    await execFileAsync('git', ['clean', '-fdx'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+    });
+    log('Auto-update: fallback git clean -fdx completed.');
+  }
+}
+
+/**
+ * Core blue-green update logic. Builds the new version in the inactive slot,
+ * then atomically swaps the `releases/current` symlink.
+ * Returns true if an update was applied (caller should SIGTERM to restart).
+ */
+export interface PerformUpdateOptions {
+  refOverride?: string;
+  /** Remote commit already resolved by the daemon poller; avoids a duplicate network check. */
+  expectedCommit?: string;
+  allowPrerelease?: boolean;
+  verifyTagSignature?: boolean;
+  /**
+   * If true, run `git clean -fdx` in the inactive slot before building.
+   * Default false: preserve `node_modules/` and the Hardhat compile cache so
+   * the build is incremental. Cold rebuilds on ARM64 historically exceeded
+   * the 5-minute build-step timeout. Operators who want a known-clean state
+   * should set this explicitly.
+   */
+  forceClean?: boolean;
+}
+
+export async function performUpdate(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: PerformUpdateOptions = {},
+): Promise<boolean> {
+  const status = await performUpdateWithStatus(au, log, opts);
+  return status === "updated";
+}
+
+export async function performUpdateWithStatus(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: PerformUpdateOptions = {},
+): Promise<UpdateStatus> {
+  if (_updateInProgress) {
+    log("Auto-update: another update is already in progress, skipping");
+    return "failed";
+  }
+  _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return "failed";
+  }
+  try {
+    return await _performUpdateInner(au, log, opts);
+  } finally {
+    await releaseUpdateLock();
+    _updateInProgress = false;
+  }
+}
+
+async function _performUpdateInner(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: PerformUpdateOptions,
+): Promise<UpdateStatus> {
+  const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
+  const rDir = releasesDir();
+  const activeDir = join(rDir, (await activeSlot()) ?? "a");
+  const target = await inactiveSlot();
+  const targetDir = join(rDir, target);
+
+  // Bail out if the active slot is missing; target slot can self-heal below.
+  if (!existsSync(activeDir)) {
+    log(
+      'Auto-update: skipping — blue-green slots not initialized (run "dkg start" first)',
+    );
+    return "failed";
+  }
+
+  const commitFile = join(dkgDir(), ".current-commit");
+  const versionFile = join(dkgDir(), ".current-version");
+
+  // Read the persisted current commit. Defensive length check: witnessed
+  // corruption on dkg-v9-relay-01 (Apr 28 2026) had the file containing the
+  // same 40-char SHA written twice end-to-end with no separator (80 chars),
+  // which made the auto-updater spin because the value never matched any
+  // real remote SHA. Anything longer than SHA-256 (64 chars) is by definition
+  // corrupt; treat as missing and re-derive from `git rev-parse HEAD`. This
+  // also self-heals pre-existing on-disk corruption on the next update cycle
+  // because the next write goes through `writeFileAtomic`.
+  let currentCommit = "";
+  try {
+    const raw = (await readFile(commitFile, "utf-8")).trim();
+    if (raw && raw.length <= 64) {
+      currentCommit = raw;
+    } else if (raw) {
+      log(
+        `Auto-update: ${commitFile} contains malformed value (len=${raw.length}); re-deriving from active slot HEAD.`,
+      );
+    }
+  } catch {
+    /* file missing — fall through to derive from HEAD */
+  }
+  if (!currentCommit) {
+    try {
+      const { stdout } = await execAsync("git rev-parse HEAD", {
+        encoding: "utf-8",
+        cwd: activeDir,
+      });
+      const derivedCommit = stdout.trim();
+      if (derivedCommit) {
+        currentCommit = derivedCommit;
+        await writeFileAtomic(commitFile, currentCommit);
+      } else {
+        log(
+          "Auto-update (git): active slot git commit is unknown; continuing bootstrap from configured repo/ref.",
+        );
+      }
+    } catch (err: any) {
+      log(
+        `Auto-update (git): active slot git commit is unknown (${err?.message ?? String(err)}); ` +
+          "continuing bootstrap from configured repo/ref.",
+      );
+    }
+  }
+
+  const pending = await readPendingUpdateState();
+  if (pending) {
+    const active = await activeSlot();
+    if (active === pending.target) {
+      if (pending.commit) await writeFileAtomic(commitFile, pending.commit);
+      if (pending.version) await writeFileAtomic(versionFile, pending.version);
+      await clearPendingUpdateState();
+      currentCommit = pending.commit || currentCommit;
+      log(
+        `Auto-update: recovered pending update state for slot ${pending.target}.`,
+      );
+    } else {
+      await clearPendingUpdateState();
+      log("Auto-update: cleared stale pending update state.");
+    }
+  }
+
+  let refPlan: AutoUpdateGitRefPlan;
+  try {
+    refPlan = resolveAutoUpdateGitRefPlan(au, {
+      refOverride: opts.refOverride,
+      ...(opts.verifyTagSignature !== undefined
+        ? { verifyTagSignature: opts.verifyTagSignature }
+        : {}),
+    });
+  } catch (err: any) {
+    log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
+    return "failed";
+  }
+  const ref = refPlan.ref;
+  const gitEnv = gitCommandEnv(au);
+
+  const latestCommit = opts.expectedCommit?.trim()
+    || await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
+  if (!latestCommit) return "failed";
+  log(
+    `Auto-update (git): current commit ${shortCommit(currentCommit)}, remote commit ${shortCommit(latestCommit)} for ref "${ref}".`,
+  );
+
+  if (latestCommit === currentCommit) {
+    log("Auto-update (git): update skipped — remote commit matches current.");
+    return "up-to-date";
+  }
+
+  log(
+    `Auto-update (git): update started — new commit ${latestCommit.slice(0, 8)} for "${ref}", building in slot ${target}...`,
+  );
+  let checkedOutCommit = latestCommit;
+  let fetchUrl = "";
+
+  try {
+    fetchUrl = repoToFetchUrl(au.repo);
+  } catch (repoErr: any) {
+    log(`Auto-update (git): ${repoErr?.message ?? "invalid autoUpdate.repo"}`);
+    return "failed";
+  }
+
+  if (!existsSync(join(targetDir, ".git"))) {
+    try {
+      log(
+        `Auto-update (git): slot ${target} missing git metadata; reinitializing slot repo.`,
+      );
+      await mkdir(targetDir, { recursive: true });
+      await execFileAsync("git", ["init"], {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 30_000,
+      });
+    } catch (initErr: any) {
+      log(
+        `Auto-update (git): failed to initialize slot ${target} repo — ${initErr?.message ?? String(initErr)}`,
+      );
+      return "failed";
+    }
+  }
+
+  try {
+    const fetchStartedAt = Date.now();
+    log(
+      `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
+    );
+    await execFileAsync(
+      "git",
+      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, refPlan.fetchRef],
+      {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 120_000,
+        env: gitEnv,
+      },
+    );
+    if (refPlan.shouldVerifyTagSignature && refPlan.tagName) {
+      await execFileAsync("git", ["verify-tag", "--", refPlan.tagName], {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 30_000,
+      });
+    }
+    await execFileAsync("git", ["checkout", "--force", "FETCH_HEAD"], {
+      cwd: targetDir,
+      encoding: "utf-8",
+      timeout: 60_000,
+    });
+    // Intentionally NOT running `git clean -fdx` by default here: untracked
+    // files in the slot are dominated by `node_modules/` and the Hardhat
+    // compile cache, which we want to PRESERVE so the subsequent build is
+    // incremental (cold rebuilds on ARM64 routinely exceed 5 minutes due to
+    // WASM solc and historically tripped the build-step timeout).
+    //
+    // BUT: a lot of packages here build with bare `tsc`, which doesn't
+    // delete files removed/renamed in the source tree. If we just left
+    // untracked files alone, an update could activate stale `dist/*.js`
+    // from an older commit. So we DO wipe generated outputs (`dist/` and
+    // `tsconfig.tsbuildinfo` per package) before each build — narrow enough
+    // to leave incremental caches intact, broad enough to prevent stale
+    // module activation. Operators wanting a fully cold rebuild can still
+    // pass `opts.forceClean: true` (manual rebuild path) to also wipe
+    // node_modules + caches.
+    if (opts.forceClean) {
+      log(
+        `Auto-update: forceClean=true; running git clean -fdx in slot ${target} (cold rebuild)...`,
+      );
+      await execFileAsync("git", ["clean", "-fdx"], {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 120_000,
+      });
+    }
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: targetDir,
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    const resolved = String(stdout).trim();
+    if (/^[0-9a-f]{7,40}$/i.test(resolved)) checkedOutCommit = resolved;
+    const fetchElapsedMs = Date.now() - fetchStartedAt;
+    log(
+      `Auto-update: fetch complete in slot ${target}, checked out ${checkedOutCommit.slice(0, 8)} ` +
+        `(in ${fetchElapsedMs}ms).`,
+    );
+  } catch (fetchErr: any) {
+    log(
+      `Auto-update (git): git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`,
+    );
+    return "failed";
+  }
+
+  // Stale-output cleanup is its own phase: failing here MUST abort the
+  // update, otherwise we'd swap a slot that may still hold `dist/*.js`
+  // from an older commit (the bug this whole helper exists to prevent).
+  if (!opts.forceClean) {
+    try {
+      await cleanGeneratedOutputs(targetDir, log);
+    } catch (cleanErr: any) {
+      log(
+        `Auto-update: pre-build clean failed in slot ${target} — ${cleanErr?.message ?? String(cleanErr)}. ` +
+          `Aborting update rather than swap a potentially dirty slot. Active slot untouched.`,
+      );
+      return "failed";
+    }
+  }
+
+  const timeouts = resolveBuildTimeouts(au);
+
+  try {
+    await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
+      cwd: targetDir,
+      timeoutMs: timeouts.install,
+      label: "pnpm install",
+      log,
+    });
+    let runtimeBuildCommand = FULL_BUILD_COMMAND;
+    try {
+      const rootPkgRaw = await readFile(
+        join(targetDir, "package.json"),
+        "utf-8",
+      );
+      runtimeBuildCommand = runtimeBuildCommandFromPackageJson(rootPkgRaw);
+    } catch {
+      runtimeBuildCommand = FULL_BUILD_COMMAND;
+    }
+
+    if (runtimeBuildCommand !== FULL_BUILD_COMMAND) {
+      await runBuildStep(execAsync, runtimeBuildCommand, {
+        cwd: targetDir,
+        timeoutMs: timeouts.build,
+        label: runtimeBuildCommand,
+        log,
+      });
+    } else {
+      log(
+        "Auto-update: target repo has no build:runtime script; falling back to pnpm build.",
+      );
+      await runBuildStep(execAsync, FULL_BUILD_COMMAND, {
+        cwd: targetDir,
+        timeoutMs: timeouts.build,
+        label: FULL_BUILD_COMMAND,
+        log,
+      });
+    }
+
+    // NOTE: the auto-updater intentionally never invokes `hardhat compile` on
+    // node hosts. The committed `packages/evm-module/abi/*.json` files are the
+    // runtime contract surface (consumed by `packages/chain` via require()),
+    // and a CI gate (`abi-freshness` job in ci.yml) runs `npx hardhat compile`
+    // (default config, the one that loads `hardhat-abi-exporter`) on every
+    // contract-touching PR and blocks merge if the regenerated `abi/` differs
+    // from what was committed. This removes the single most failure-prone
+    // step from the update flow — hardhat compile routinely OOMs / times out
+    // on resource-constrained nodes (cold solc on ARM64, in particular) and
+    // any failure here would abort the slot swap.
+
+    let nodeUiPackageNames = NODE_UI_PACKAGE_NAME_FALLBACKS;
+    try {
+      nodeUiPackageNames = [nodeUiPackageNameFromPackageJson(
+        await readFile(nodeUiPackageJsonPath(targetDir), 'utf-8'),
+      )];
+    } catch {
+      // Older/broken refs may still have a buildable UI; try known workspace names below.
+    }
+    if (existsSync(nodeUiStaticIndexPath(targetDir))) {
+      log("Auto-update: Node UI static bundle already produced by runtime build.");
+    } else {
+      for (let i = 0; i < nodeUiPackageNames.length; i++) {
+        const nodeUiPackageName = nodeUiPackageNames[i];
+        try {
+          await runBuildStep(execAsync, nodeUiStaticBuildCommand(nodeUiPackageName), {
+            cwd: targetDir,
+            timeoutMs: timeouts.build,
+            label: nodeUiStaticBuildLabel(nodeUiPackageName),
+            log,
+          });
+          break;
+        } catch (err) {
+          if (i === nodeUiPackageNames.length - 1) throw err;
+          log(
+            `Auto-update: ${nodeUiStaticBuildLabel(nodeUiPackageName)} failed; trying ${nodeUiStaticBuildLabel(nodeUiPackageNames[i + 1])}.`,
+          );
+        }
+      }
+    }
+
+    log("Auto-update: staging MarkItDown binary for the inactive slot...");
+    try {
+      await runBuildStep(
+        execAsync,
+        "node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort",
+        {
+          cwd: targetDir,
+          timeoutMs: timeouts.markitdown,
+          label: "bundle-markitdown",
+          log,
+        },
+      );
+    } catch (markItDownErr: any) {
+      log(
+        `Auto-update: MarkItDown staging failed in slot ${target} — ${markItDownErr.message}. Continuing without document conversion on this node.`,
+      );
+    }
+  } catch (err: any) {
+    log(
+      `Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`,
+    );
+    return "failed";
+  }
+
+  const entryFile = join(targetDir, "packages", "cli", "dist", "cli.js");
+  if (!existsSync(entryFile)) {
+    log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
+    return "failed";
+  }
+  const nodeUiIndexFile = nodeUiStaticIndexPath(targetDir);
+  if (!existsSync(nodeUiIndexFile)) {
+    log(
+      `Auto-update: Node UI static bundle missing (${nodeUiIndexFile}). Aborting swap.`,
+    );
+    return "failed";
+  }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(
+      targetDir,
+      "packages",
+      "cli",
+      "bin",
+      bundledMarkItDownAsset,
+    );
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(
+      join(targetDir, "packages", "cli"),
+    );
+    if (
+      !(await hasVerifiedBundledMarkItDownBinary(
+        bundledMarkItDownPath,
+        expectedMetadata,
+      ))
+    ) {
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(activeDir, "packages", "cli", "bin", bundledMarkItDownAsset),
+          join(
+            activeDir,
+            "node_modules",
+            "@origintrail-official",
+            "dkg",
+            "bin",
+            bundledMarkItDownAsset,
+          ),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: "Auto-update",
+        expectedMetadata,
+      });
+      if (!reused) {
+        log(
+          `Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`,
+        );
+      }
+    }
+  }
+
+  let nextVersion = "";
+  try {
+    const pkgRaw = await readFile(
+      join(targetDir, "packages", "cli", "package.json"),
+      "utf-8",
+    );
+    nextVersion = String(
+      (JSON.parse(pkgRaw) as { version?: string }).version ?? "",
+    ).trim();
+  } catch {
+    // Version is optional metadata for operators; commit SHA remains source of truth.
+  }
+  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? true;
+  if (
+    nextVersion &&
+    !allowPrerelease &&
+    /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)
+  ) {
+    log(
+      `Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`,
+    );
+    return "failed";
+  }
+
+  await writePendingUpdateState({
+    target,
+    commit: checkedOutCommit,
+    version: nextVersion || undefined,
+    ref,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    const swapStartedAt = Date.now();
+    log(`Auto-update (git): swapping active slot to ${target}...`);
+    await swapSlot(target);
+    await writeFileAtomic(commitFile, checkedOutCommit);
+    if (nextVersion) await writeFileAtomic(versionFile, nextVersion);
+    await clearPendingUpdateState();
+    const swapElapsedMs = Date.now() - swapStartedAt;
+    log(
+      `Auto-update (git): swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
+    );
+  } catch (swapErr: any) {
+    await clearPendingUpdateState();
+    log(`Auto-update (git): symlink swap failed — ${swapErr.message}`);
+    return "failed";
+  }
+  log(
+    `Auto-update (git): build succeeded in slot ${target}` +
+      `${nextVersion ? ` (version ${nextVersion})` : ""}. Swapped symlink. Restarting...`,
+  );
+  return "updated";
+}
+
+export async function performNpmUpdate(
+  targetVersion: string,
+  log: (msg: string) => void,
+): Promise<UpdateStatus> {
+  if (_updateInProgress) {
+    log("Auto-update (npm): another update is already in progress, skipping");
+    return "failed";
+  }
+  _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return "failed";
+  }
+  try {
+    return await _performNpmUpdateInner(targetVersion, log);
+  } finally {
+    await releaseUpdateLock();
+    _updateInProgress = false;
+  }
+}
+
+/**
+ * Edge npm-only update path (OT-RFC-41 §4.1 + §4.8, Bundle B1b).
+ *
+ * Unlike {@link performNpmUpdate} (Core), Edge nodes do not use
+ * blue-green slots. The update is a direct `npm install -g` against
+ * the user's npm-global install, after recording the current
+ * version to `~/.dkg/previous-version` so `dkg rollback` (Edge
+ * branch) has a target to reinstall.
+ *
+ * The npm mutation itself is not atomic, so completion is followed by an
+ * executable/version self-check. A failed check immediately reinstalls the
+ * recorded previous version before the daemon is allowed to restart.
+ *
+ * The function returns `'updated'` after the npm install and self-check
+ * complete; the caller is responsible for stopping the running daemon so
+ * the supervisor respawns from the new entry point (mirrors how the Core
+ * path's swap-slot+restart sequence works).
+ *
+ * Returns `'failed'` when the install or executable/version self-check
+ * fails, including after a rollback attempt. The previous-version write is
+ * best-effort and a write failure does NOT block the install (the operator
+ * can still rollback manually via
+ * `npm install -g @origintrail-official/dkg@<known-version>`).
+ */
+export async function performNpmUpdateEdge(
+  targetVersion: string,
+  currentVersion: string | null,
+  log: (msg: string) => void,
+): Promise<UpdateStatus> {
+  if (_updateInProgress) {
+    log("Auto-update (npm-edge): another update is already in progress, skipping");
+    return "failed";
+  }
+  _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return "failed";
+  }
+  try {
+    const verificationCommand = _autoUpdateIo.resolveDaemonNodeCommand('--version');
+    return await _performNpmUpdateInnerEdge(
+      targetVersion,
+      currentVersion,
+      log,
+      verificationCommand,
+    );
+  } finally {
+    await releaseUpdateLock();
+    _updateInProgress = false;
+  }
+}
+
+async function _performNpmUpdateInnerEdge(
+  targetVersion: string,
+  currentVersion: string | null,
+  log: (msg: string) => void,
+  verificationCommand: DaemonNodeCommand,
+): Promise<UpdateStatus> {
+  // Destructure from `_autoUpdateIo` so unit tests can stub each
+  // dependency — matches the existing `_performNpmUpdateInner`
+  // (Core) pattern.
+  const { writeFile, exec: execAsyncIo, execFile: execFileAsyncIo, dkgDir } = _autoUpdateIo;
+  const previousVersionPath = join(dkgDir(), "previous-version");
+  if (currentVersion && currentVersion.length > 0) {
+    try {
+      await writeFile(previousVersionPath, currentVersion);
+      log(
+        `Auto-update (npm-edge): recorded ${currentVersion} → ~/.dkg/previous-version (rollback target).`,
+      );
+    } catch (err: any) {
+      log(
+        `Auto-update (npm-edge): WARNING failed to record previous version — ${err?.message ?? err}. ` +
+          "Update will proceed; rollback may require an explicit version argument.",
+      );
+    }
+  } else {
+    log(
+      "Auto-update (npm-edge): WARNING current version unknown; skipping previous-version write. " +
+        "Rollback will require an explicit version argument.",
+    );
+  }
+
+  // 5-minute timeout covers slow network + npm registry round-trips on
+  // CI / homegrown runners. Any longer is almost certainly a hung process.
+  const installCmd = globalCliInstallCommand(targetVersion);
+  log(`Auto-update (npm-edge): running '${installCmd}'…`);
+  try {
+    const installStart = Date.now();
+    await installGlobalCliVersion(execAsyncIo, targetVersion);
+    const installMs = Date.now() - installStart;
+    log(`Auto-update (npm-edge): npm install completed in ${installMs}ms.`);
+  } catch (installErr: any) {
+    const msg = String(installErr?.message ?? installErr ?? "unknown error");
+    log(`Auto-update (npm-edge): npm install -g failed — ${msg}`);
+    if (msg.includes("EACCES") || msg.includes("permission")) {
+      log(
+        "  EACCES indicates a permission issue against your npm-global prefix. " +
+          "Common fixes: configure a user-writable prefix (`npm config set prefix ~/.npm-global`), " +
+          "use nvm/volta/fnm (npm-global path inside $HOME), or re-run with sudo (NOT recommended on macOS).",
+      );
+    }
+    return "failed";
+  }
+
+  const verificationOutcome = await verifyInstalledCliOrRollback({
+    execIo: execAsyncIo,
+    execFileIo: execFileAsyncIo,
+    targetVersion,
+    currentVersion,
+    verificationCommand,
+    log,
+  });
+  switch (verificationOutcome.kind) {
+    case 'targetVerified':
+      log(`Auto-update (npm-edge): self-check passed (${verificationOutcome.reported}).`);
+      log(
+        `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
+          "Stop the daemon to restart from the new entry point.",
+      );
+      return "updated";
+    case 'rollbackRestored':
+      log(`Auto-update (npm-edge): rollback restored ${verificationOutcome.reported}.`);
+      return 'failed';
+    case 'rollbackUnavailable':
+      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+      return 'failed';
+    case 'rollbackFailed':
+      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${verificationOutcome.error}.`);
+      return 'failed';
+  }
+}
+
+type EdgeExec = typeof _autoUpdateIo.exec;
+type EdgeExecFile = typeof _autoUpdateIo.execFile;
+
+type InstalledCliVerificationOutcome =
+  | { kind: 'targetVerified'; reported: string }
+  | { kind: 'rollbackRestored'; reported: string }
+  | { kind: 'rollbackUnavailable' }
+  | { kind: 'rollbackFailed'; error: string };
+
+function globalCliInstallCommand(version: string): string {
+  return `npm install -g ${CLI_NPM_PACKAGE}@${version}`;
+}
+
+async function installGlobalCliVersion(execIo: EdgeExec, version: string): Promise<void> {
+  await execIo(globalCliInstallCommand(version), {
+    encoding: 'utf-8',
+    timeout: 300_000,
+  });
+}
+
+function parseReportedDkgVersion(output: string): string | undefined {
+  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/)?.[1];
+}
+
+async function verifyGlobalDkgVersion(
+  execFileIo: EdgeExecFile,
+  verificationCommand: DaemonNodeCommand,
+  expectedVersion: string,
+  context: 'self-check' | 'rollback',
+): Promise<string> {
+  const { stdout, stderr } = await execFileIo(
+    verificationCommand.executable,
+    verificationCommand.args,
+    {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    },
+  );
+  const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+  const parsed = parseReportedDkgVersion(reported);
+  if (parsed !== expectedVersion) {
+    throw new Error(`${context} expected ${expectedVersion}, got ${parsed ?? (reported || 'empty version output')}`);
+  }
+  return reported;
+}
+
+async function verifyInstalledCliOrRollback(options: {
+  execIo: EdgeExec;
+  execFileIo: EdgeExecFile;
+  targetVersion: string;
+  currentVersion: string | null;
+  verificationCommand: DaemonNodeCommand;
+  log: (msg: string) => void;
+}): Promise<InstalledCliVerificationOutcome> {
+  const { execIo, execFileIo, targetVersion, currentVersion, verificationCommand, log } = options;
+  try {
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      targetVersion,
+      'self-check',
+    );
+    return { kind: 'targetVerified', reported };
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+  }
+
+  if (!currentVersion) {
+    return { kind: 'rollbackUnavailable' };
+  }
+
+  const rollbackCmd = globalCliInstallCommand(currentVersion);
+  log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+  try {
+    await installGlobalCliVersion(execIo, currentVersion);
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      currentVersion,
+      'rollback',
+    );
+    return { kind: 'rollbackRestored', reported };
+  } catch (rollbackErr: any) {
+    return {
+      kind: 'rollbackFailed',
+      error: String(rollbackErr?.message ?? rollbackErr ?? 'unknown error'),
+    };
+  }
+}
+
+export async function checkForUpdate(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  try {
+    const updated = await performUpdate(au, log);
+    return updated;
+  } catch (err: any) {
+    log(`Auto-update: error — ${err.message}`);
+    return false;
+  }
+}

@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-core
 
-Foundation package for DKG V9. Provides P2P networking, protocol messaging, cryptographic primitives, and shared utilities used by every other package in the stack.
+Foundation package for DKG V10. Provides P2P networking, protocol messaging, cryptographic primitives, and shared utilities used by every other package in the stack.
 
 ## Features
 
@@ -12,20 +12,16 @@ Foundation package for DKG V9. Provides P2P networking, protocol messaging, cryp
 - **Protobuf messages** — efficient serialization for all DKG protocol messages
 - **Event bus** — centralized internal event system (`DKGEvent`) for decoupled component communication
 - **Logger** — structured logging with operation context tracking
-- **Genesis ontology** — built-in DKG ontology quads and system paranet definitions
+- **Genesis ontology** — built-in DKG ontology quads and system contextGraph definitions
 - **Constants** — network IDs, protocol paths, topic naming conventions
 
 ## Usage
 
 ```typescript
-import { DKGNode, EventBus, Logger, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGNode, Logger } from '@origintrail-official/dkg-core';
 
 const node = new DKGNode(config);
 await node.start();
-
-EventBus.on('PEER_DISCOVERED', (peer) => {
-  console.log('Found peer:', peer.id);
-});
 ```
 
 ## Internal Dependencies

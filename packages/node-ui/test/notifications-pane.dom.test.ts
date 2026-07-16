@@ -1,0 +1,398 @@
+// @vitest-environment happy-dom
+//
+// DOM/interaction + a11y glue for the notifications pane (B3). Renders the
+// real components against a controllable mock feed (the pane is pure props;
+// the bell's hook is mocked) using the repo's established happy-dom +
+// createRoot pattern (no new deps). Pure-logic coverage lives in
+// notifications-feed.test.ts; this file owns the stateful interaction
+// behaviours QA flagged: two-tap Deny (+ Escape cancels the confirm),
+// approve/deny row-retained-on-failure, aria-live announcements, and
+// bell Escape-closes-and-restores-focus.
+
+import React, { act } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRoot, type Root } from 'react-dom/client';
+import { NotificationsPane } from '../src/ui/components/Notifications/NotificationsPane.js';
+import type {
+  UseNotificationsFeed,
+  JoinRequestItem,
+  ActivityItem,
+  ActionResult,
+} from '../src/ui/hooks/useNotificationsFeed.js';
+
+// Hoisted holder so the (hoisted) vi.mock factory and the tests share one
+// mutable feed reference for the bell-level render.
+const hoisted = vi.hoisted(() => ({ feed: null as UseNotificationsFeed | null }));
+
+// Mock the hook + stores so NotificationsBell renders deterministically
+// (the hook normally hits the daemon; the stores are zustand selectors).
+vi.mock('../src/ui/hooks/useNotificationsFeed.js', async (orig) => ({
+  ...(await orig<typeof import('../src/ui/hooks/useNotificationsFeed.js')>()),
+  useNotificationsFeed: () => hoisted.feed,
+}));
+vi.mock('../src/ui/stores/projects.js', () => ({
+  useProjectsStore: (sel: (s: any) => unknown) => sel({ setActiveProject: vi.fn() }),
+}));
+vi.mock('../src/ui/stores/tabs.js', () => ({
+  useTabsStore: () => ({ openTab: vi.fn() }),
+}));
+
+// Imported AFTER the mocks are declared (hoisting keeps the mocks first).
+import { NotificationsBell } from '../src/ui/components/Shell/NotificationsBell.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const joinItem = (over: Partial<JoinRequestItem> = {}): JoinRequestItem => ({
+  id: 1,
+  cgId: 'cg:a',
+  contextGraphName: 'Alpha',
+  agentAddress: '0xabc0000000000000000000000000000000000abc',
+  agentName: 'Dana',
+  ts: 1000,
+  read: false,
+  ...over,
+});
+
+function makeFeed(over: Partial<UseNotificationsFeed> = {}): UseNotificationsFeed {
+  return {
+    joinRequests: [],
+    activity: [],
+    unread: 0,
+    hasInformationalUnread: false,
+    status: 'ready',
+    refreshError: false,
+    partialActivityError: false,
+    approve: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    deny: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    markSeen: vi.fn(),
+    markAllInformationalSeen: vi.fn(),
+    retry: vi.fn(),
+    ...over,
+  };
+}
+
+describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+  });
+
+  const render = (feed: UseNotificationsFeed) =>
+    act(() => {
+      root.render(
+        React.createElement(NotificationsPane, { feed, onOpenContextGraph: vi.fn() }),
+      );
+    });
+
+  const buttonByText = (re: RegExp): HTMLButtonElement | undefined =>
+    [...container.querySelectorAll('button')].find((b) => re.test(b.textContent ?? '')) as
+      | HTMLButtonElement
+      | undefined;
+
+  it('Deny is a two-tap inline confirm (first tap reveals Deny? Yes/Cancel, no reject yet)', async () => {
+    const deny = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    render(makeFeed({ joinRequests: [joinItem()], deny }));
+
+    // First tap: the Deny button → reveals the confirm; reject NOT called.
+    const denyBtn = buttonByText(/^Deny$/)!;
+    expect(denyBtn).toBeTruthy();
+    act(() => denyBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(deny).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Deny?');
+
+    // Second tap: Yes → reject called once. Await so the async run() settles
+    // inside act (the row sets phase synchronously, then awaits the mutation).
+    const yesBtn = buttonByText(/^Yes$/)!;
+    await act(async () => {
+      yesBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deny).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape inside the Deny-confirm cancels the confirm (does not reject)', () => {
+    const deny = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    render(makeFeed({ joinRequests: [joinItem()], deny }));
+    act(() => buttonByText(/^Deny$/)!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(container.textContent).toContain('Deny?');
+
+    const confirm = container.querySelector('.v10-notif-deny-confirm')!;
+    act(() =>
+      confirm.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(container.textContent).not.toContain('Deny?');
+    expect(deny).not.toHaveBeenCalled();
+  });
+
+  it('Approve has NO confirm — single click invokes approve immediately', async () => {
+    const approve = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    render(makeFeed({ joinRequests: [joinItem()], approve }));
+    await act(async () => {
+      buttonByText(/^Approve$/)!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('on approve FAILURE the row is retained with an inline Retry (not removed)', async () => {
+    const approve = vi.fn(
+      async (): Promise<ActionResult> => ({ ok: false, error: 'HTTP 503', roleError: false }),
+    );
+    render(makeFeed({ joinRequests: [joinItem()], approve }));
+    await act(async () => {
+      buttonByText(/^Approve$/)!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // Row still present (join title visible) + a Retry affordance appeared.
+    expect(container.textContent).toContain('Join request');
+    expect(buttonByText(/Retry/)).toBeTruthy();
+  });
+
+  it('role-error failure surfaces the no-longer-curator copy', async () => {
+    const approve = vi.fn(
+      async (): Promise<ActionResult> => ({
+        ok: false,
+        error: 'Only the context graph creator can manage invitations',
+        roleError: true,
+      }),
+    );
+    render(makeFeed({ joinRequests: [joinItem()], approve }));
+    await act(async () => {
+      buttonByText(/^Approve$/)!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container.textContent).toContain('no longer the curator');
+  });
+
+  it('renders an aria-live region for action announcements', () => {
+    render(makeFeed({ joinRequests: [joinItem()] }));
+    expect(container.querySelector('[aria-live="polite"]')).toBeTruthy();
+  });
+
+  it('identity-pending shows "Verifying access…", never the all-caught-up copy', () => {
+    render(makeFeed({ status: 'identity-pending' }));
+    expect(container.textContent).toContain('Verifying access');
+    expect(container.textContent).not.toContain('all caught up');
+  });
+
+  it('empty ready state shows the scoped all-caught-up copy', () => {
+    render(makeFeed({ status: 'ready' }));
+    expect(container.textContent).toContain('all caught up');
+  });
+
+  it('Mark all read calls markAllInformationalSeen (informational only)', () => {
+    const markAllInformationalSeen = vi.fn();
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
+      event: 'promoted', count: 2, ts: 1, read: false,
+    };
+    render(makeFeed({ hasInformationalUnread: true, activity: [digest], markAllInformationalSeen }));
+    act(() => buttonByText(/Mark all read/)!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(markAllInformationalSeen).toHaveBeenCalledTimes(1);
+  });
+
+  it('I4: Mark all read SHOWS when only rejected confirmations are unread (badge=0)', () => {
+    // Rejections are excluded from badgeCount, so unread=0 here — but they are
+    // informational-unread and must be clearable. The button gates on
+    // hasInformationalUnread, NOT badgeCount.
+    const rejected: ActivityItem = {
+      kind: 'join_rejected', id: 7, cgId: 'cg:c', contextGraphName: 'Gamma', ts: 1, read: false,
+    };
+    render(makeFeed({ unread: 0, hasInformationalUnread: true, activity: [rejected] }));
+    expect(buttonByText(/Mark all read/)).toBeTruthy();
+  });
+
+  it('I4: Mark all read HIDDEN when nothing informational is unread', () => {
+    render(makeFeed({ unread: 0, hasInformationalUnread: false, joinRequests: [joinItem()] }));
+    // A pending join request is actionable, not informational — no Mark-all-read.
+    expect(buttonByText(/Mark all read/)).toBeUndefined();
+  });
+
+  // B8 (P2) — the CONFIRMED PCA discount row renders the derived discount + saved amount
+  // + the account; informational + non-actionable (no approve/deny).
+  it('B8 — renders the confirmed PCA discount row (−% + saved + PCA #N)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 12,
+      cgId: 'cg:d',
+      covered: {
+        accountId: '7', epoch: 1284,
+        baseCost: '1000000000000000000000', discountedCost: '700000000000000000000', // 1000 → 700 TRAC ⇒ 30%
+        drawnFromEpoch: '700000000000000000000', drawnFromTopUp: '0',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      contextGraphName: 'Delta',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Publishing discount applied');
+    expect(container.textContent).toContain('30%');
+    expect(container.textContent).toContain('PCA #7');
+    expect(container.textContent).toContain('300'); // saved 300 TRAC
+    expect(container.textContent).toContain('Delta'); // CG context surfaced when present
+    // Informational — no Approve/Deny actions on this row.
+    expect(buttonByText(/^Approve$/)).toBeUndefined();
+  });
+
+  // #9 — a genuine 0% draw (baseCost === discountedCost) still fired a CostCovered event
+  // (the PCA covered the publish), but there's NO discount: the row must say "covered"
+  // WITHOUT a "−0%"/"saved 0 TRAC" false claim.
+  it('B8 — a 0% draw renders "Publishing fee covered" with no −%/saved (#9)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 13,
+      cgId: 'cg:e',
+      covered: {
+        accountId: '9', epoch: 1300,
+        baseCost: '1000000000000000000000', discountedCost: '1000000000000000000000', // 0% effective
+        drawnFromEpoch: '0', drawnFromTopUp: '1000000000000000000000',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Publishing fee covered');
+    expect(container.textContent).toContain('PCA #9');
+    expect(container.textContent).not.toContain('%'); // no −0% (or any %) claim
+    expect(container.textContent).not.toContain('saved'); // no "saved 0 TRAC"
+  });
+
+  it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
+    const digest = (read: boolean): ActivityItem => ({
+      kind: 'digest', id: 'activity:cg:a:promoted:42', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'promoted', count: 2, ts: 1, read,
+    });
+    const rowUnread = () =>
+      !!container.querySelector('.v10-notif-row-activity.v10-notif-unread');
+
+    // Unread initially.
+    render(makeFeed({ unread: 1, activity: [digest(false)] }));
+    expect(rowUnread()).toBe(true);
+
+    // markSeen → the next load() returns the SAME digestKey read=1: no longer unread.
+    render(makeFeed({ unread: 0, activity: [digest(true)] }));
+    expect(rowUnread()).toBe(false);
+
+    // A new same-bucket event lands → load() REPLACES data with the digest
+    // re-surfaced as read=0 → it shows unread again (no stale-merge that would
+    // keep it read). This is the M9 frontend half.
+    render(makeFeed({ unread: 1, activity: [digest(false)] }));
+    expect(rowUnread()).toBe(true);
+  });
+
+  it('R2-5: a warm refresh failure surfaces the inline “Couldn’t refresh” banner (cached rows kept)', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
+      event: 'promoted', count: 2, ts: 1, read: true,
+    };
+    // status stays 'ready' (cached list preserved) but refreshError is set
+    // (Codex R2-5) — the inline retry banner must still render.
+    render(makeFeed({ status: 'ready', refreshError: true, activity: [digest] }));
+    expect(container.textContent).toContain('Couldn’t refresh notifications');
+    expect(container.querySelector('.v10-notif-section-activity')).toBeTruthy();
+  });
+
+  it('R2-5: no inline refresh banner when refreshError is false', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
+      event: 'promoted', count: 2, ts: 1, read: true,
+    };
+    render(makeFeed({ status: 'ready', refreshError: false, activity: [digest] }));
+    expect(container.textContent).not.toContain('Couldn’t refresh notifications');
+  });
+
+  it('own-agent activity renders a "You" digest with the by-self marker', () => {
+    const mine: ActivityItem = {
+      kind: 'digest', id: 'activity:cg:a:created:1', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'created', count: 3, ts: 1, read: false, bySelf: true,
+    };
+    render(makeFeed({ unread: 1, activity: [mine] }));
+    expect(container.textContent).toContain('You added 3 assertions');
+    expect(container.querySelector('.v10-notif-by-self')).toBeTruthy();
+  });
+});
+
+describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    hoisted.feed = makeFeed({ unread: 1, joinRequests: [joinItem()] });
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    hoisted.feed = null;
+    vi.restoreAllMocks();
+  });
+
+  const bellBtn = () =>
+    [...container.querySelectorAll('button')].find((b) =>
+      /Notifications/.test(b.getAttribute('aria-label') ?? ''),
+    ) as HTMLButtonElement;
+
+  const openPane = () => {
+    act(() => root.render(React.createElement(NotificationsBell)));
+    act(() => bellBtn().dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  };
+
+  it('renders the unread badge and is a disclosure (aria-haspopup/expanded)', () => {
+    act(() => root.render(React.createElement(NotificationsBell)));
+    const btn = bellBtn();
+    expect(btn.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.v10-header-notif-badge')?.textContent).toBe('1');
+  });
+
+  it('opens on click (pane mounts, aria-expanded → true)', () => {
+    openPane();
+    expect(bellBtn().getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('.v10-notif-pane')).toBeTruthy();
+  });
+
+  it('I5: on open, focus lands on the Approve button — not the row Open-{CG} link', () => {
+    openPane();
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('v10-notif-btn-approve')).toBe(true);
+    // Regression guard: it must NOT be the cg-link that precedes the actions.
+    expect(active?.classList.contains('v10-notif-cg-link')).toBe(false);
+  });
+
+  it('R2-4: with no join requests, focus lands on the first activity row, not “Mark all read”', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'activity:cg:a:promoted:1', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'promoted', count: 2, ts: 1, read: false,
+    };
+    // No actionable join requests, but informational-unread → "Mark all read"
+    // is visible. Focus must SKIP it and land on the first activity row.
+    hoisted.feed = makeFeed({
+      unread: 1, joinRequests: [], activity: [digest], hasInformationalUnread: true,
+    });
+    openPane();
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('v10-notif-pane-markread')).toBe(false);
+    expect(active?.classList.contains('v10-notif-row-activity')).toBe(true);
+  });
+
+  it('Escape closes the pane and restores focus to the bell', () => {
+    openPane();
+    expect(container.querySelector('.v10-notif-pane')).toBeTruthy();
+    act(() =>
+      container.querySelector('.v10-header-notif-wrap')!
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(container.querySelector('.v10-notif-pane')).toBeNull();
+    expect(bellBtn().getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(bellBtn());
+  });
+});

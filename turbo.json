@@ -1,9 +1,18 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["DKG_SKIP_EVM_BUILD"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
+    },
+    "build:ui": {
+      "dependsOn": ["build"],
+      "outputs": ["dist-ui/**"]
+    },
+    "build:full": {
+      "dependsOn": ["build", "build:ui"],
+      "outputs": ["dist/**", "dist-ui/**"]
     },
     "test": {
       "dependsOn": ["build"],

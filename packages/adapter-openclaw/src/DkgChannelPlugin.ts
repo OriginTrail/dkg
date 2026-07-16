@@ -17,6 +17,7 @@
  * full context continuity.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
@@ -25,16 +26,274 @@ import { fileURLToPath } from 'node:url';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
+  OpenClawChannelAdapter,
+  OpenClawGatewayLifecycleContext,
   OpenClawPluginApi,
 } from './types.js';
-import type { DkgDaemonClient } from './dkg-client.js';
+import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
+import type { ChatTurnWriter } from './ChatTurnWriter.js';
+import {
+  extractAdapterPluginConfigOverlay,
+  isPartialAdapterConfigOverlay,
+  isObjectRecord,
+  mergeAdapterPluginConfigs,
+  resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
+  scrubStaleWorkspaceAliases,
+} from './openclaw-config.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
+const STOP_DRAIN_TIMEOUT_MS = 1_500;
+const FINAL_MARKER_FLUSH_TIMEOUT_MS = 250;
+const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
+const AGENT_RESPONSE_TIMEOUT_ERROR = 'Agent response timeout';
+const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
+const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
+
+function isAgentResponseTimeoutError(err: any): boolean {
+  return err?.message === AGENT_RESPONSE_TIMEOUT_ERROR;
+}
+
+function buildAgentTimeoutResponseBody(): Record<string, unknown> {
+  return {
+    error: AGENT_RESPONSE_TIMEOUT_ERROR,
+    code: 'AGENT_TIMEOUT',
+    source: 'openclaw-agent',
+    details: 'OpenClaw agent runtime did not produce a response before its deadline',
+  };
+}
+
+function buildStreamErrorEvent(err: any): Record<string, unknown> {
+  return isAgentResponseTimeoutError(err)
+    ? { type: 'error', ...buildAgentTimeoutResponseBody() }
+    : { type: 'error', error: err?.message ?? String(err) };
+}
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function finalizeAgentReplyText(text: string): string {
+  if (text.trim().length === 0) {
+    throw new Error(NO_TEXT_RESPONSE_ERROR);
+  }
+  return text;
+}
+
+function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
+
+  const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof record.assertionName === 'string' && record.assertionName.trim()) {
+    normalized.assertionName = record.assertionName.trim();
+  }
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed') {
+    normalized.extractionStatus = record.extractionStatus;
+  } else if (record.extractionStatus !== undefined) {
+    return null;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) {
+    normalized.rootEntity = record.rootEntity.trim();
+  }
+  if (typeof record.mdIntermediateHash === 'string' && record.mdIntermediateHash.trim()) {
+    normalized.mdIntermediateHash = record.mdIntermediateHash.trim();
+  }
+  if (typeof record.markdownHash === 'string' && record.markdownHash.trim()) {
+    normalized.markdownHash = record.markdownHash.trim();
+  }
+  if (typeof record.markdownForm === 'string' && record.markdownForm.trim()) {
+    normalized.markdownForm = record.markdownForm.trim();
+  }
+  return normalized;
+}
+
+function normalizeAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const refs: OpenClawAttachmentRef[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeAttachmentRef(entry);
+    if (!normalized) return undefined;
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+function hasInboundChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+  contextEntries?: ChatContextEntry[] | undefined,
+): text is string {
+  return typeof text === 'string' && (
+    text.length > 0 ||
+    Boolean(attachmentRefs?.length) ||
+    Boolean(contextEntries?.length)
+  );
+}
+
+function normalizeInboundChatText(text: unknown): unknown {
+  return text === undefined ? '' : text;
+}
+
+function sanitizeAttachmentPromptField(raw: string | undefined, fallback: string): string {
+  const normalize = (value: string | undefined): string => (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return JSON.stringify(normalize(raw) || normalize(fallback));
+}
+
+function sanitizeAttachmentContextValue(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAttachmentRef {
+  const sanitized: OpenClawAttachmentRef = {
+    assertionUri: sanitizeAttachmentContextValue(ref.assertionUri),
+    fileHash: sanitizeAttachmentContextValue(ref.fileHash),
+    contextGraphId: sanitizeAttachmentContextValue(ref.contextGraphId),
+    fileName: sanitizeAttachmentContextValue(ref.fileName),
+  };
+  if (ref.assertionName) {
+    sanitized.assertionName = sanitizeAttachmentContextValue(ref.assertionName);
+  }
+  if (ref.detectedContentType) {
+    sanitized.detectedContentType = sanitizeAttachmentContextValue(ref.detectedContentType);
+  }
+  if (ref.extractionStatus) {
+    sanitized.extractionStatus = ref.extractionStatus;
+  }
+  if (ref.tripleCount != null) {
+    sanitized.tripleCount = ref.tripleCount;
+  }
+  if (ref.rootEntity) {
+    sanitized.rootEntity = sanitizeAttachmentContextValue(ref.rootEntity);
+  }
+  if (ref.mdIntermediateHash) {
+    sanitized.mdIntermediateHash = sanitizeAttachmentContextValue(ref.mdIntermediateHash);
+  }
+  if (ref.markdownHash) {
+    sanitized.markdownHash = sanitizeAttachmentContextValue(ref.markdownHash);
+  }
+  if (ref.markdownForm) {
+    sanitized.markdownForm = sanitizeAttachmentContextValue(ref.markdownForm);
+  }
+  return sanitized;
+}
+
+function sanitizeAttachmentRefsForContext(
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): OpenClawAttachmentRef[] | undefined {
+  return attachmentRefs?.map((ref) => sanitizeAttachmentRefForContext(ref));
+}
+
+function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): string {
+  const lines = attachmentRefs.map((ref) => {
+    const label = sanitizeAttachmentPromptField(ref.fileName, ref.assertionUri || 'attachment');
+    const graph = ref.contextGraphId ? ` in ${sanitizeAttachmentPromptField(ref.contextGraphId, 'unknown context graph')}` : '';
+    const details = [
+      ref.detectedContentType ? `contentType=${sanitizeAttachmentPromptField(ref.detectedContentType, 'unknown content type')}` : null,
+      ref.assertionName ? `assertionName=${sanitizeAttachmentPromptField(ref.assertionName, 'unknown assertion name')}` : null,
+      ref.fileHash ? `fileHash=${sanitizeAttachmentPromptField(ref.fileHash, 'unknown hash')}` : null,
+      ref.extractionStatus ? `status=${sanitizeAttachmentPromptField(ref.extractionStatus, 'unknown status')}` : null,
+      ref.tripleCount != null ? `tripleCount=${ref.tripleCount}` : null,
+      ref.rootEntity ? `rootEntity=${sanitizeAttachmentPromptField(ref.rootEntity, 'unknown root entity')}` : null,
+      ref.mdIntermediateHash ? `mdIntermediateHash=${sanitizeAttachmentPromptField(ref.mdIntermediateHash, 'unknown markdown intermediate hash')}` : null,
+      ref.markdownHash ? `markdownHash=${sanitizeAttachmentPromptField(ref.markdownHash, 'unknown markdown hash')}` : null,
+      ref.markdownForm ? `markdownForm=${sanitizeAttachmentPromptField(ref.markdownForm, 'unknown markdown form')}` : null,
+    ].filter((item): item is string => item != null);
+    const detailText = details.length ? ` [${details.join('; ')}]` : '';
+    return `- ${label}${graph}${detailText} -> ${sanitizeAttachmentPromptField(ref.assertionUri, 'unknown assertion')}`;
+  });
+  return [
+    'Attached Working Memory items:',
+    ...lines,
+    'For completed imported attachments, read Markdown with dkg_knowledge_asset_import_artifact_read_markdown when needed, inspect knowledge-asset quads with dkg_knowledge_asset_query when useful, and append model-derived triples to the imported asset with dkg_knowledge_asset_semantic_enrichment_write.',
+    'Use dkg_knowledge_asset_import_artifact_resolve only when you need to re-check artifact metadata. Do not share or publish enrichment output unless explicitly instructed.',
+  ].join('\n');
+}
+
+interface ChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function sanitizeChatContextEntry(entry: ChatContextEntry): ChatContextEntry {
+  return {
+    key: sanitizeAttachmentContextValue(entry.key),
+    label: sanitizeAttachmentContextValue(entry.label),
+    value: sanitizeAttachmentContextValue(entry.value),
+  };
+}
+
+function sanitizeChatContextEntries(entries: ChatContextEntry[] | undefined): ChatContextEntry[] | undefined {
+  return entries?.map((entry) => sanitizeChatContextEntry(entry));
+}
+
+function normalizePersistUserMessage(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function formatChatContext(entries: ChatContextEntry[]): string {
+  const lines = entries.map((entry) => `- ${sanitizeAttachmentPromptField(entry.label, entry.key)}: ${sanitizeAttachmentPromptField(entry.value, 'unknown')}`);
+  return [
+    'Context for this chat turn:',
+    'If "target_context_graph" is present below, its value is the canonical context graph id for this turn; use it exactly unless the user explicitly overrides it in the same message.',
+    'A paired "target_context_graph_uri" is the same target in did:dkg:context-graph:<id> form. "target_context_graph_name" is display-only.',
+    'If "current_agent_address" is present below, use it as the primary `agent_address` for `view: "working-memory"` reads.',
+    'Do not assume the peer ID is the right working-memory identity unless the tool result or graph naming proves it.',
+    ...lines,
+  ].join('\n');
+}
+
+function buildAgentBody(text: string, opts?: { attachmentRefs?: OpenClawAttachmentRef[]; contextEntries?: ChatContextEntry[] }): string {
+  const sections: string[] = [];
+  const trimmed = text.trim();
+  if (trimmed) {
+    sections.push(text);
+  }
+  if (opts?.contextEntries?.length) {
+    sections.push(formatChatContext(opts.contextEntries));
+  }
+  if (opts?.attachmentRefs?.length) {
+    sections.push(formatAttachmentContext(opts.attachmentRefs));
+  }
+  if (sections.length === 0) {
+    return 'User sent an empty chat turn.';
+  }
+  return sections.join('\n\n');
+}
+
+function buildMarkerUserAliases(...values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const aliases: string[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string' || value.length === 0 || seen.has(value)) continue;
+    seen.add(value);
+    aliases.push(value);
+  }
+  return aliases;
 }
 const moduleRequire = createRequire(import.meta.url);
 
@@ -42,6 +301,155 @@ interface PendingRequest {
   resolve: (reply: ChannelOutboundReply) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PersistTurnOptions {
+  persistenceState?: 'stored' | 'failed' | 'pending';
+  failureReason?: string | null;
+  attachmentRefs?: OpenClawAttachmentRef[];
+  sessionKey?: string;
+  turnId?: string;
+  markerUser?: string;
+  markerUserAliases?: string[];
+  persistUserMessage?: string;
+}
+
+interface ExternalTurnMarkerPersistOptions {
+  sessionKey?: string;
+  turnId: string;
+  user: string;
+  userAliases?: string[];
+  assistant: string;
+  correlationId: string;
+}
+
+type ChannelOutboundReplyWithMarkerAliases = ChannelOutboundReply & {
+  markerUserAliases?: string[];
+};
+
+interface InboundChatOptions {
+  attachmentRefs?: OpenClawAttachmentRef[];
+  contextEntries?: ChatContextEntry[];
+  /**
+   * UI-selected project context graph ID for this turn. The node UI stamps
+   * this onto the outbound `/api/openclaw-channel/send` payload; the
+   * adapter uses it to scope slot-backed memory recall and per-project
+   * memory imports to the user's current project. Optional — turns that
+   * arrive without it run in the documented degraded mode
+   * (single-graph agent-context only, or `needs_clarification` on write).
+   */
+  uiContextGraphId?: string;
+  persistUserMessage?: string;
+}
+
+/**
+ * Per-dispatch context propagated through Node's AsyncLocalStorage so that
+ * `DkgMemorySessionResolver.getSession(sessionKey)` — invoked by the
+ * memory-slot search manager from inside the dispatch call tree — can
+ * observe the UI-selected project context graph for the owning turn.
+ *
+ * Scoping via ALS rather than a shared `Map<sessionKey, state>` is
+ * load-bearing: OpenClaw can dispatch multiple overlapping turns on the
+ * same `sessionKey` (same user, same chat, same agent). A shared map
+ * keyed by `sessionKey` would let a later turn's stash clobber an
+ * earlier still-running turn's state, silently routing that turn's
+ * recall to the wrong project. ALS isolates each dispatch's store to
+ * its own async call tree regardless of sessionKey overlap.
+ *
+ * Codex Bug B6 — the TTL-based cache that preceded this ALS was scoped
+ * wrong.
+ */
+interface DkgDispatchContext {
+  /** UI-selected project context graph stamped on the turn envelope. */
+  uiContextGraphId?: string;
+  /** The OpenClaw-resolved sessionKey this dispatch is running on. */
+  sessionKey?: string;
+  /** Turn correlation id, for diagnostics. */
+  correlationId?: string;
+}
+
+function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === 'string' ? record.key.trim() : '';
+  const label = typeof record.label === 'string' ? record.label.trim() : '';
+  const value = typeof record.value === 'string' ? record.value.trim() : '';
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+/**
+ * Strip ASCII control characters (C0 + DEL) from a diagnostic-log field
+ * so a crafted envelope value cannot inject a forged log line via
+ * embedded `\n`, `\r`, or other control chars. Matches the same
+ * character range as `sanitizeChatContextEntries` (`[\u0000-\u001F\u007F]`)
+ * applied elsewhere in the dispatch path; this helper runs earlier,
+ * inside the diagnostic formatter, so the log integrity does not depend
+ * on upstream sanitization timing.
+ */
+function sanitizeDiagnosticField(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, ' ');
+}
+
+/**
+ * Format a one-line diagnostic describing the parsed envelope for an
+ * inbound chat turn. Used by `handleInboundHttp` and
+ * `handleInboundStreamHttp` to give operators runtime ground truth on
+ * whether the UI-selected project (`uiContextGraphId`) and the
+ * `contextEntries` the renderer sees are actually arriving at the
+ * adapter bridge. The log line is info-level because it is the only
+ * observable signal for the envelope-stamping chain between the UI
+ * dropdown and the agent body renderer; without it, operators have to
+ * guess whether a "can't see UI state" symptom is a UI React-state bug,
+ * a daemon-proxy dropout, or an agent-interpretation issue.
+ *
+ * Log-injection hardening: `normalizeChatContextEntry` only trims
+ * whitespace at parse time — it does NOT strip control characters.
+ * Full control-char sanitization (`sanitizeChatContextEntries`) happens
+ * later in `processInbound`/`processInboundStream`, AFTER this
+ * diagnostic log has already fired. So this formatter runs its own
+ * sanitization pass (`sanitizeDiagnosticField`) on every field it
+ * echoes — correlation id, `uiContextGraphId`, entry keys, entry
+ * values — to defeat a crafted envelope like
+ * `value: "foo\n[dkg-channel] FAKE LOG LINE: bar"` from injecting a
+ * forged log line. Bridge auth limits the reach of this attack to
+ * authorized callers anyway, but log integrity should not be
+ * load-bearing on authorization.
+ */
+export function formatInboundTurnDiagnostic(
+  correlationId: string,
+  uiContextGraphId: string | undefined,
+  contextEntries: ChatContextEntry[] | undefined,
+): string {
+  const safeCorrelationId = sanitizeDiagnosticField(correlationId);
+  const safeUiContextGraphId = uiContextGraphId === undefined
+    ? '∅'
+    : sanitizeDiagnosticField(uiContextGraphId);
+  const entryCount = contextEntries?.length ?? 0;
+  const entrySummary = entryCount > 0
+    ? ` [${contextEntries!
+        .map((entry) => `${sanitizeDiagnosticField(entry.key)}=${sanitizeDiagnosticField(entry.value)}`)
+        .join(', ')}]`
+    : '';
+  return (
+    '[dkg-channel] inbound turn: ' +
+    `correlationId=${safeCorrelationId}, ` +
+    `uiContextGraphId=${safeUiContextGraphId}, ` +
+    `contextEntries=${entryCount}${entrySummary}`
+  );
+}
+
+function normalizeChatContextEntries(raw: unknown): ChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: ChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
 }
 
 export class DkgChannelPlugin {
@@ -57,16 +465,127 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly pendingTurnPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+    inFlight: Promise<void> | null;
+  }>();
+  private readonly pendingMarkerPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+    opts: ExternalTurnMarkerPersistOptions;
+    inFlight: Promise<void> | null;
+  }>();
+  /**
+   * Per-dispatch AsyncLocalStorage holding the UI-selected project
+   * context graph for the currently-running turn. Populated by
+   * `runWithDispatchContext` at the start of each dispatch and read by
+   * `getSessionProjectContextGraphId` from inside the dispatch's async
+   * call tree. Automatically scoped to the dispatch — no explicit
+   * clear needed, concurrent turns on the same `sessionKey` cannot
+   * collide.
+   */
+  private readonly dispatchContext = new AsyncLocalStorage<DkgDispatchContext>();
   private readonly port: number;
   private useGatewayRoute = false;
+  private channelRegistered = false;
+  private gatewayRoutesRegistered = false;
   private inFlight = 0;
   private readonly maxInFlight = 3;
+  private stopping = false;
+  private readonly stopWaiters: Array<() => void> = [];
+  private stopDrainDeadlineAt: number | null = null;
+  private serverStop: Promise<void> | null = null;
+  private serverStopShouldUpdateGatewayStatus = false;
+  private gatewayLifecycleStop: (() => void) | null = null;
+  private gatewayLifecycleOwner: object | null = null;
+  private gatewayLifecyclePendingOwner: object | null = null;
+  private gatewayLifecycleStatusContext: OpenClawGatewayLifecycleContext | null = null;
+  private gatewayLifecycleStatusOwner: object | null = null;
+  private readonly gatewayLifecycleOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecyclePendingOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecycleOwnersByContext = new WeakMap<object, object>();
+  private readonly gatewayLifecycleOwnersBySignal = new WeakMap<AbortSignal, object>();
+  private chatTurnWriter: ChatTurnWriter | null = null;
+  /**
+   * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
+   * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
+   * once per `processInbound` / `processInboundStream` so the slot
+   * stays owned by this adapter even when another plugin's startup
+   * code overwrote `memoryPluginState.capability` after our
+   * registration ran. Mode-independent — fires for every UI dispatch
+   * regardless of `full` vs `setup-runtime`.
+   */
+  private preDispatchReAssert: (() => void) | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
-    private readonly client: DkgDaemonClient,
+    private client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  setClient(client: DkgDaemonClient): void {
+    this.client = client;
+  }
+
+  /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
+  setPreDispatchReAssert(cb: (() => void) | null): void {
+    this.preDispatchReAssert = cb;
+  }
+
+  setChatTurnWriter(writer: ChatTurnWriter | null): void {
+    this.chatTurnWriter = writer;
+  }
+
+  /**
+   * Read the UI-selected project context graph for the currently-running
+   * dispatch. Used by `DkgMemorySessionResolver` inside `DkgNodePlugin`
+   * to scope slot-backed memory recall to the user's current project.
+   *
+   * Implementation: reads from AsyncLocalStorage, so the value is only
+   * visible to code running inside the dispatch's async call tree. The
+   * `sessionKey` argument is used as a sanity check — if the dispatch
+   * stamped a different sessionKey than the caller is asking about, we
+   * return `undefined` rather than a mismatched CG. Tool calls made
+   * during the dispatch all share the same sessionKey, so the check
+   * costs nothing in practice.
+   *
+   * Returns `undefined` when:
+   * - the caller is not inside an active dispatch (no ALS store),
+   * - the dispatch carried no `uiContextGraphId` (non-UI turn, or user
+   *   deselected the project),
+   * - the caller's `sessionKey` does not match the dispatch's
+   *   `sessionKey` (defensive: indicates a misuse where the resolver
+   *   is being called from outside the owning dispatch's call tree).
+   */
+  getSessionProjectContextGraphId(sessionKey: string | undefined): string | undefined {
+    const store = this.dispatchContext.getStore();
+    if (!store) return undefined;
+    if (!store.uiContextGraphId) return undefined;
+    if (sessionKey && store.sessionKey && sessionKey !== store.sessionKey) {
+      return undefined;
+    }
+    return store.uiContextGraphId;
+  }
+
+  /**
+   * Run `fn` inside an AsyncLocalStorage-scoped dispatch context so that
+   * any `getSessionProjectContextGraphId` call issued from inside `fn`
+   * (directly or via async descendants) observes the per-turn UI context
+   * graph. Scope is automatically cleared when `fn` resolves, rejects,
+   * or throws — no manual cleanup required.
+   *
+   * Concurrent dispatches on the same `sessionKey` each get their own
+   * isolated store; one cannot clobber another.
+   */
+  private runWithDispatchContext<T>(
+    context: DkgDispatchContext,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return this.dispatchContext.run(context, fn);
   }
 
   // ---------------------------------------------------------------------------
@@ -74,13 +593,15 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   register(api: OpenClawPluginApi): void {
+    this.stopping = false;
+    this.stopDrainDeadlineAt = null;
     this.api = api;
     const log = api.logger;
 
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg = (api as any).cfg ?? (api as any).config ?? this.runtime?.cfg ?? this.runtime?.config;
+    this.cfg = resolveChannelDispatchConfig(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {
@@ -105,15 +626,16 @@ export class DkgChannelPlugin {
     }
 
     // --- Register as a first-class channel ---
-    if (typeof api.registerChannel === 'function') {
+    if (!this.channelRegistered && typeof api.registerChannel === 'function') {
       api.registerChannel({
         plugin: this.buildRegisteredChannelPlugin(),
       });
+      this.channelRegistered = true;
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
 
     // --- Register an HTTP route on the gateway ---
-    if (typeof api.registerHttpRoute === 'function') {
+    if (!this.gatewayRoutesRegistered && typeof api.registerHttpRoute === 'function') {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
@@ -133,14 +655,25 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
 
-    // Start the bridge server immediately so it's ready to receive
-    // inbound messages before any session exists.
-    this.start().catch((err) => {
-      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
+    // Always start the standalone bridge server. It's the transport the
+    // daemon's UI health probe and message dispatch trust (via the bridge
+    // auth token). The gateway-side `/api/dkg-channel/health` route we
+    // registered above is `auth: 'gateway'` and rejects the daemon's
+    // unauthenticated probe, so the bridge cannot be skipped.
+    //
+    // In OpenClaw versions where the gateway also binds the configured
+    // channel port (e.g. 2026.3.31 with channels.dkg-ui.port = 9201, see
+    // issue #272), our listen() throws EADDRINUSE on the configured port.
+    // start() handles that by falling back to an OS-allocated free port
+    // and the actual bound port surfaces via bridgePort + the daemon's
+    // transport.bridgeUrl, so the probe always finds the bridge.
+    this.start().catch((err: any) => {
+      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err?.message ?? err}`);
     });
   }
 
@@ -149,6 +682,10 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    if (this.serverStop) await this.serverStop;
+    this.stopping = false;
+    this.stopDrainDeadlineAt = null;
+
     if (this.server?.listening) return;
     if (this.serverStart) return this.serverStart;
 
@@ -162,45 +699,501 @@ export class DkgChannelPlugin {
 
     const server = this.server;
     this.serverStart = new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => {
-        server.off('error', onError);
-        this.serverStart = null;
-        this.server = null;
-        reject(err);
+      const tryListen = (port: number, isFallback: boolean) => {
+        const onError = (err: any) => {
+          server.off('error', onError);
+          const isAddrInUse = err?.code === 'EADDRINUSE'
+            || /EADDRINUSE/i.test(String(err?.message ?? ''));
+          if (isAddrInUse && !isFallback) {
+            // Configured port (default 9201) is taken — typically because
+            // the OpenClaw gateway itself binds channels.dkg-ui.port in
+            // versions like 2026.3.31 (issue #272). Fall back to an
+            // OS-allocated free port so the bridge still comes up; the
+            // actual bound port surfaces via bridgePort + the daemon's
+            // transport.bridgeUrl, which is what the UI health probe and
+            // message dispatch use.
+            this.api?.logger.info?.(`[dkg-channel] Configured bridge port ${port} is in use; falling back to an OS-allocated free port (issue #272)`);
+            tryListen(0, true);
+            return;
+          }
+          this.serverStart = null;
+          this.server = null;
+          reject(err);
+        };
+        server.once('error', onError);
+        server.listen(port, '127.0.0.1', () => {
+          server.off('error', onError);
+          this.serverStart = null;
+          const address = server.address();
+          const boundPort = typeof address === 'object' && address ? address.port : port;
+          this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
+          resolve();
+        });
       };
-
-      server.once('error', onError);
-      server.listen(this.port, '127.0.0.1', () => {
-        server.off('error', onError);
-        this.serverStart = null;
-        const address = server.address();
-        const boundPort = typeof address === 'object' && address ? address.port : this.port;
-        this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
-        resolve();
-      });
+      tryListen(this.port, false);
     });
 
     await this.serverStart;
   }
 
-  async stop(): Promise<void> {
-    // Reject all pending requests
-    for (const [id, pending] of this.pendingRequests) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Channel shutting down'));
-      this.pendingRequests.delete(id);
+  async stop(options: { updateGatewayStatus?: boolean } = {}): Promise<void> {
+    const updateGatewayStatus = options.updateGatewayStatus !== false;
+    if (this.serverStop) {
+      if (updateGatewayStatus) this.serverStopShouldUpdateGatewayStatus = true;
+      return this.serverStop;
+    }
+    this.serverStopShouldUpdateGatewayStatus = updateGatewayStatus;
+    const stopWork = Promise.resolve().then(async () => {
+      this.stopping = true;
+      this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
+
+      // Reject all pending requests
+      for (const [id, pending] of this.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Channel shutting down'));
+        this.pendingRequests.delete(id);
+      }
+
+      for (const [id, job] of this.pendingTurnPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingTurnPersistence(id);
+      }
+      for (const [id, job] of this.pendingMarkerPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingMarkerPersistence(id);
+      }
+
+      if (this.serverStart) {
+        await this.serverStart.catch(() => {});
+      }
+
+      if (this.server) {
+        await new Promise<void>((resolve) => {
+          this.server!.close(() => resolve());
+        });
+        this.server = null;
+      }
+
+      const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
+        );
+        await this.flushPendingPersistenceBeforeDrop();
+        this.clearPendingTurnPersistence();
+        this.clearPendingMarkerPersistence();
+      }
+      this.stopDrainDeadlineAt = null;
+      if (this.serverStopShouldUpdateGatewayStatus) {
+        this.reportGatewayLifecycleStopped(this.gatewayLifecycleStatusContext, this.gatewayLifecycleStatusOwner);
+      }
+      this.gatewayLifecycleStop?.();
+      this.gatewayLifecycleStop = null;
+    });
+
+    this.serverStop = stopWork;
+    try {
+      await stopWork;
+    } finally {
+      if (this.serverStop === stopWork) {
+        this.serverStop = null;
+        this.serverStopShouldUpdateGatewayStatus = false;
+      }
+    }
+  }
+
+  private reportGatewayLifecycleStopped(ctx: OpenClawGatewayLifecycleContext | null | undefined, lifecycleOwner?: object | null): void {
+    if (!ctx) return;
+    this.setGatewayLifecycleStatus(ctx, {
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastStopAt: Date.now(),
+    });
+    if (lifecycleOwner && this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+      this.gatewayLifecycleStatusContext = null;
+      this.gatewayLifecycleStatusOwner = null;
+    }
+  }
+
+  private getGatewayAccountId(ctx: any): string {
+    const accountId = typeof ctx?.accountId === 'string' ? ctx.accountId.trim() : '';
+    return accountId || DEFAULT_CHANNEL_ACCOUNT_ID;
+  }
+
+  private getGatewayLifecycleStatus(ctx: OpenClawGatewayLifecycleContext): Record<string, unknown> {
+    const status = ctx.getStatus?.();
+    return status && typeof status === 'object' ? status : {};
+  }
+
+  private setGatewayLifecycleStatus(
+    ctx: OpenClawGatewayLifecycleContext,
+    patch: Record<string, unknown>,
+  ): void {
+    ctx.setStatus?.({
+      ...this.getGatewayLifecycleStatus(ctx),
+      ...patch,
+      accountId: this.getGatewayAccountId(ctx),
+    });
+  }
+
+  private reportUnsupportedGatewayAccount(ctx: any, message: string): void {
+    ctx?.setStatus?.({
+      accountId: this.getGatewayAccountId(ctx),
+      enabled: false,
+      configured: false,
+      linked: false,
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastError: message,
+      lastStopAt: Date.now(),
+    });
+  }
+
+  private ensureSupportedGatewayAccount(ctx: any): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return;
+    const message = `DKG UI channel only supports the "${DEFAULT_CHANNEL_ACCOUNT_ID}" gateway account`;
+    this.reportUnsupportedGatewayAccount(ctx, message);
+    throw new Error(message);
+  }
+
+  private ignoreUnsupportedGatewayStop(ctx: any): boolean {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return false;
+    this.reportUnsupportedGatewayAccount(ctx, `DKG UI channel does not run gateway account "${accountId}"`);
+    return true;
+  }
+
+  private cancelPendingGatewayLifecycle(ctx: any, lifecycleOwner: object): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = null;
+    }
+    if (this.gatewayLifecycleOwner && this.gatewayLifecycleOwner !== lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = this.gatewayLifecycleOwner;
+    }
+    if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+    }
+    if (ctx && typeof ctx === 'object' && this.gatewayLifecycleOwnersByContext.get(ctx) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersByContext.delete(ctx);
+    }
+    if (signal && this.gatewayLifecycleOwnersBySignal.get(signal) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersBySignal.delete(signal);
+    }
+  }
+
+  private async stopAbortedGatewayLifecycle(ctx: any, lifecycleOwner?: object): Promise<void> {
+    await this.stop({ updateGatewayStatus: false });
+    this.reportGatewayLifecycleStopped(ctx, lifecycleOwner);
+  }
+
+  private async stopCurrentGatewayLifecycle(ctx: any): Promise<void> {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner =
+      (ctx && typeof ctx === 'object' ? this.gatewayLifecycleOwnersByContext.get(ctx) : undefined) ??
+      (signal ? this.gatewayLifecycleOwnersBySignal.get(signal) : undefined) ??
+      this.gatewayLifecycleOwnersByAccount.get(accountId) ??
+      this.gatewayLifecyclePendingOwnersByAccount.get(accountId);
+    const activeOwner = this.gatewayLifecycleOwner;
+    const pendingOwner = this.gatewayLifecyclePendingOwner;
+    if ((activeOwner || pendingOwner) && lifecycleOwner !== activeOwner && lifecycleOwner !== pendingOwner) {
+      return;
+    }
+    if (
+      lifecycleOwner === pendingOwner &&
+      activeOwner &&
+      activeOwner !== pendingOwner &&
+      this.server?.listening === true &&
+      !this.serverStop &&
+      !this.stopping
+    ) {
+      this.cancelPendingGatewayLifecycle(ctx, lifecycleOwner);
+      return;
+    }
+    await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+  }
+
+  private async runGatewayLifecycle(ctx: any): Promise<void> {
+    if (ctx?.abortSignal?.aborted) {
+      return;
     }
 
-    if (this.serverStart) {
-      await this.serverStart.catch(() => {});
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner = {};
+    this.gatewayLifecyclePendingOwner = lifecycleOwner;
+    this.gatewayLifecyclePendingOwnersByAccount.set(accountId, lifecycleOwner);
+    if (ctx && typeof ctx === 'object') {
+      this.gatewayLifecycleOwnersByContext.set(ctx, lifecycleOwner);
+    }
+    if (signal) {
+      this.gatewayLifecycleOwnersBySignal.set(signal, lifecycleOwner);
     }
 
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
+    try {
+      const hadStableBridgeBeforeStart =
+        this.server?.listening === true &&
+        !this.serverStop &&
+        !this.stopping;
+      await this.start();
+      if (this.gatewayLifecyclePendingOwner !== lifecycleOwner) {
+        return;
+      }
+      if (ctx?.abortSignal?.aborted) {
+        if (!hadStableBridgeBeforeStart) {
+          await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+        }
+        return;
+      }
+      if (this.serverStop || this.stopping || !this.server?.listening) {
+        if (this.serverStop) await this.serverStop;
+          return;
+      }
+
+      this.gatewayLifecycleOwner = lifecycleOwner;
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      this.gatewayLifecycleOwnersByAccount.set(accountId, lifecycleOwner);
+      this.gatewayLifecycleStatusContext = ctx;
+      this.gatewayLifecycleStatusOwner = lifecycleOwner;
+      this.setGatewayLifecycleStatus(ctx, {
+        enabled: this.config.enabled !== false,
+        configured: true,
+        linked: true,
+        running: true,
+        connected: true,
+        restartPending: false,
+        lastError: null,
+        lastStartAt: Date.now(),
+        mode: 'webhook',
+        port: this.bridgePort || this.port,
       });
-      this.server = null;
+
+      await this.waitForGatewayLifecycleStop(ctx?.abortSignal);
+    } finally {
+      const ownsActiveLifecycle =
+        this.gatewayLifecycleOwner === lifecycleOwner &&
+        this.gatewayLifecyclePendingOwner === lifecycleOwner;
+      if (ctx?.abortSignal?.aborted && ownsActiveLifecycle) {
+        await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+      }
+      if (this.gatewayLifecycleOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecycleOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwner = null;
+      }
+      if (this.gatewayLifecycleOwner === lifecycleOwner) {
+        this.gatewayLifecycleOwner = null;
+      }
+      if (this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+        this.gatewayLifecycleStatusContext = null;
+        this.gatewayLifecycleStatusOwner = null;
+      }
     }
+  }
+
+  private deletePendingTurnPersistence(correlationId: string): void {
+    const job = this.pendingTurnPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingTurnPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private reservePendingTurnPersistence(correlationId: string, allowDuringShutdown: boolean): void {
+    if (this.pendingTurnPersistence.has(correlationId)) return;
+    this.pendingTurnPersistence.set(correlationId, {
+      attempt: 0,
+      timer: null,
+      allowDuringShutdown,
+      inFlight: null,
+    });
+  }
+
+  private clearPendingTurnPersistence(): void {
+    for (const job of this.pendingTurnPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingTurnPersistence.clear();
+    this.notifyStopIdle();
+  }
+
+  private deletePendingMarkerPersistence(correlationId: string): void {
+    const job = this.pendingMarkerPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingMarkerPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private clearPendingMarkerPersistence(): void {
+    for (const job of this.pendingMarkerPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingMarkerPersistence.clear();
+    this.notifyStopIdle();
+  }
+
+  private async flushPendingPersistenceBeforeDrop(): Promise<void> {
+    if (this.pendingTurnPersistence.size === 0 && this.pendingMarkerPersistence.size === 0) return;
+    const deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS;
+    while (Date.now() < deadlineAt) {
+      const turnsSettled = await this.waitForPendingTurnPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      await this.flushPendingMarkerPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      const hasInFlightTurn = Array.from(this.pendingTurnPersistence.values()).some((job) => job.inFlight);
+      if (!hasInFlightTurn && this.pendingMarkerPersistence.size === 0) return;
+      if (!turnsSettled && hasInFlightTurn) break;
+    }
+
+    for (const [correlationId, job] of this.pendingTurnPersistence) {
+      if (!job.inFlight) continue;
+      this.api?.logger.warn?.(
+        `[dkg-channel] Final turn persistence did not settle during shutdown for ${correlationId}; dropping turn job.`,
+      );
+    }
+  }
+
+  private async waitForPendingTurnPersistenceBeforeDrop(deadlineAt: number): Promise<boolean> {
+    const inFlightTurns = Array.from(this.pendingTurnPersistence.entries())
+      .filter(([, job]) => job.inFlight)
+      .map(([correlationId, job]) => ({ correlationId, inFlight: job.inFlight! }));
+    if (inFlightTurns.length === 0) return true;
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    if (remainingMs === 0) return false;
+
+    for (const { inFlight } of inFlightTurns) {
+      void inFlight.catch(() => {});
+    }
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const settled = await Promise.race([
+        Promise.allSettled(inFlightTurns.map(({ inFlight }) => inFlight)).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), remainingMs);
+        }),
+      ]);
+      if (!settled) {
+        for (const { correlationId } of inFlightTurns) {
+          if (!this.pendingTurnPersistence.get(correlationId)?.inFlight) continue;
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final turn persistence wait timed out during shutdown for ${correlationId}; checking marker jobs before drop.`,
+          );
+        }
+      }
+      return settled;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async flushPendingMarkerPersistenceBeforeDrop(deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS): Promise<void> {
+    if (!this.chatTurnWriter || this.pendingMarkerPersistence.size === 0) return;
+    const jobs = Array.from(this.pendingMarkerPersistence.entries());
+    for (const [correlationId, job] of jobs) {
+      try {
+        if (job.timer) clearTimeout(job.timer);
+        const remainingMs = Math.max(0, deadlineAt - Date.now());
+        if (remainingMs === 0) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+          continue;
+        }
+        const markerWrite = job.inFlight ?? this.writeExternalTurnMarker(job.opts);
+        const flushed = await this.waitForExternalMarkerWrite(markerWrite, remainingMs);
+        if (!flushed) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+        }
+      } catch (err: any) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Final ChatTurnWriter marker flush failed during shutdown for ${correlationId}: ${err?.message ?? err}`,
+        );
+      } finally {
+        this.pendingMarkerPersistence.delete(correlationId);
+      }
+    }
+    this.notifyStopIdle();
+  }
+
+  private async waitForExternalMarkerWrite(
+    markerWrite: Promise<void>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    void markerWrite.catch(() => {});
+    try {
+      return await Promise.race([
+        markerWrite.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private notifyStopIdle(): void {
+    if (
+      !this.stopping
+      || this.inFlight > 0
+      || this.pendingTurnPersistence.size > 0
+      || this.pendingMarkerPersistence.size > 0
+    ) return;
+    while (this.stopWaiters.length > 0) {
+      this.stopWaiters.shift()?.();
+    }
+  }
+
+  private waitForStopDrain(timeoutMs: number): Promise<boolean> {
+    if (
+      this.inFlight === 0
+      && this.pendingTurnPersistence.size === 0
+      && this.pendingMarkerPersistence.size === 0
+    ) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const waiter = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = this.stopWaiters.indexOf(waiter);
+        if (index >= 0) this.stopWaiters.splice(index, 1);
+        resolve(false);
+      }, timeoutMs);
+      this.stopWaiters.push(waiter);
+      this.notifyStopIdle();
+    });
+  }
+
+  private canContinuePersistenceAttempt(allowDuringShutdown: boolean): boolean {
+    if (!this.stopping) return true;
+    if (!allowDuringShutdown) return false;
+    return (this.stopDrainDeadlineAt ?? 0) > Date.now();
   }
 
   // ---------------------------------------------------------------------------
@@ -257,7 +1250,7 @@ export class DkgChannelPlugin {
     return this.sdk;
   }
 
-  private buildRegisteredChannelPlugin() {
+  private buildRegisteredChannelPlugin(): OpenClawChannelAdapter {
     return {
       id: CHANNEL_NAME,
       name: CHANNEL_NAME,
@@ -265,7 +1258,7 @@ export class DkgChannelPlugin {
         id: CHANNEL_NAME,
         label: 'DKG UI',
         selectionLabel: 'DKG UI',
-        blurb: 'Local DKG Agent Hub bridge',
+        blurb: 'Local DKG UI bridge',
         displayName: 'DKG UI',
       },
       capabilities: {
@@ -287,10 +1280,40 @@ export class DkgChannelPlugin {
         disabledReason: () => 'disabled',
         unconfiguredReason: () => 'not configured',
       },
+      gateway: {
+        startAccount: async (ctx: any) => {
+          this.ensureSupportedGatewayAccount(ctx);
+          await this.runGatewayLifecycle(ctx);
+        },
+        stopAccount: async (ctx: any) => {
+          if (this.ignoreUnsupportedGatewayStop(ctx)) return;
+          await this.stopCurrentGatewayLifecycle(ctx);
+        },
+      },
       start: () => this.start(),
       stop: () => this.stop(),
       onOutbound: (reply: ChannelOutboundReply) => this.handleOutboundReply(reply),
     };
+  }
+
+  private waitForGatewayLifecycleStop(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.gatewayLifecycleStop?.();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', finish);
+        if (this.gatewayLifecycleStop === finish) {
+          this.gatewayLifecycleStop = null;
+        }
+        resolve();
+      };
+      this.gatewayLifecycleStop = finish;
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
+    });
   }
 
   private resolveRegisteredAccount(accountId?: string): Record<string, unknown> {
@@ -319,23 +1342,57 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
+    // Re-assert memory-slot ownership before this dispatch reaches the
+    // memory host. Cheap and runs in every registration mode, so the
+    // slot stays honest even when full-mode-only anchors don't fire.
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const runtime = this.runtime;
     const cfg = this.cfg;
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
+    const persistUserMessage = normalizePersistUserMessage(opts?.persistUserMessage);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
+    const markerUserMessage = buildAgentBody(text, {
+      attachmentRefs: contextAttachmentRefs,
+      contextEntries: sanitizedContextEntries,
+    });
+    const contextOnlyPersistUserMessage = persistUserMessage
+      ?? (!text.trim() && sanitizedContextEntries?.length ? markerUserMessage : undefined);
 
+    // Re-assert memory-slot capability before dispatch so our runtime
+    // handles recall even if memory-core's dreaming sidecar overwrote it.
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
+        const sessionKey = typeof reply.sessionKey === 'string' ? reply.sessionKey : undefined;
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
-          api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-        });
-        return reply;
+        this.queueTurnPersistence(text, reply.text, correlationId, identity, {
+          attachmentRefs,
+          sessionKey,
+          markerUser: markerUserMessage,
+          markerUserAliases: reply.markerUserAliases,
+          ...(contextOnlyPersistUserMessage ? { persistUserMessage: contextOnlyPersistUserMessage } : {}),
+        }, true);
+        const publicReply = { ...reply };
+        delete publicReply.markerUserAliases;
+        return publicReply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
         throw err;
@@ -346,17 +1403,50 @@ export class DkgChannelPlugin {
 
     if (typeof api.routeInboundMessage === 'function') {
       api.logger.info?.(`[dkg-channel] Dispatching via api.routeInboundMessage for: ${correlationId}`);
-      const reply = await api.routeInboundMessage({
-        channelName: CHANNEL_NAME,
-        senderId: identity || 'owner',
-        senderIsOwner: true,
-        text,
+      // B13: The plugin-sdk dispatch path (dispatchViaPluginSdk) runs the
+      // turn inside an ALS scope so slot-backed tool calls can observe the
+      // UI-selected `uiContextGraphId`. The `routeInboundMessage` fallback
+      // used when `runtime.channel` is unavailable must do the same, or
+      // tool calls fired during this dispatch will read an empty ALS store
+      // and silently degrade recall to `agent-context` only. We deliberately
+      // do not guess a sessionKey here: legacy routes may resolve a different
+      // OpenClaw session, and sending a synthetic key can split transcript
+      // state from the real route. Marker persistence uses only the key
+      // returned by routeInboundMessage.
+      const dispatchContext: DkgDispatchContext = {
+        uiContextGraphId,
         correlationId,
-      });
-      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
-        api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
-      return reply;
+      };
+      const reply = await this.runWithDispatchContext(dispatchContext, () =>
+        api.routeInboundMessage!({
+          channelName: CHANNEL_NAME,
+          senderId: identity || 'owner',
+          senderIsOwner: true,
+          text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
+          correlationId,
+        }),
+      );
+      const replySessionKey = reply.sessionKey;
+      const replyOpenClawSessionKey = reply.SessionKey;
+      const returnedSessionKey =
+        (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
+        || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '');
+      const normalizedReply = returnedSessionKey
+        ? { ...reply, sessionKey: returnedSessionKey }
+        : reply;
+      if (!returnedSessionKey && this.chatTurnWriter) {
+        api.logger.warn?.(
+          `[dkg-channel] routeInboundMessage reply for ${correlationId} did not include sessionKey; skipping ChatTurnWriter marker for this direct-channel turn.`,
+        );
+      }
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
+        attachmentRefs,
+        sessionKey: returnedSessionKey || undefined,
+        markerUser: markerUserMessage,
+        markerUserAliases: buildMarkerUserAliases(markerUserMessage, text),
+        ...(contextOnlyPersistUserMessage ? { persistUserMessage: contextOnlyPersistUserMessage } : {}),
+      }, true);
+      return normalizedReply;
     }
 
     throw new Error(
@@ -373,7 +1463,10 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
-  ): Promise<ChannelOutboundReply> {
+    attachmentRefs?: OpenClawAttachmentRef[],
+    contextEntries?: ChatContextEntry[],
+    uiContextGraphId?: string,
+  ): Promise<ChannelOutboundReplyWithMarkerAliases> {
     const log = this.api!.logger;
     const runtime = this.runtime;
     const cfg = this.cfg;
@@ -390,7 +1483,7 @@ export class DkgChannelPlugin {
       });
       // Clone to avoid mutating the runtime's cached route object
       route = { ...resolved };
-      // Give non-owner identities (e.g. game-autopilot) their own session
+      // Give non-owner identities (e.g. background workers) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
         route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -410,10 +1503,12 @@ export class DkgChannelPlugin {
       storePath,
       sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs, contextEntries });
+    const commandBody = contextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
       channel: 'DKG UI',
       from: identity || 'Owner',
-      body: text,
+      body: agentBody,
       timestamp: Date.now(),
       previousTimestamp,
       envelope: envelopeOpts,
@@ -422,10 +1517,13 @@ export class DkgChannelPlugin {
     // 4. Build FinalizedMsgContext (the context payload for the agent)
     const ctxPayload = {
       Body: formattedBody,
-      BodyForAgent: text,
-      RawBody: text,
-      CommandBody: text,
-      BodyForCommands: text,
+      BodyForAgent: agentBody,
+      RawBody: commandBody,
+      CommandBody: commandBody,
+      BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,
@@ -438,17 +1536,44 @@ export class DkgChannelPlugin {
       SenderName: identity || 'Owner',
       Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(attachmentRefs?.length ? {
+        AttachmentRefs: attachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(attachmentRefs),
+      } : {}),
+      ...(contextEntries?.length ? {
+        ContextEntries: contextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(contextEntries),
+      } : {}),
     };
 
-    // 5. Dispatch and collect reply
+    // 5. Dispatch and collect reply.
+    //
+    // Scope the entire dispatch call tree inside an AsyncLocalStorage
+    // context that carries the UI-selected project context graph for
+    // THIS turn. `DkgMemorySearchManager.search` (fired by the memory
+    // slot's tool calls during this dispatch) reads the CG via
+    // `getSessionProjectContextGraphId`, which reads from the ALS store.
+    // When this promise resolves/rejects the ALS scope is cleared
+    // automatically. Concurrent overlapping dispatches on the same
+    // sessionKey each get their own isolated store; one cannot clobber
+    // another. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     if (sdk?.dispatchInboundReplyWithBase) {
       log.info?.('[dkg-channel] Using plugin-sdk dispatchInboundReplyWithBase');
-      return this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId);
+      return this.runWithDispatchContext(dispatchContext, () =>
+        this.dispatchWithSdk(sdk, cfg, route, storePath, ctxPayload, correlationId),
+      );
     }
 
     // 6. Direct runtime dispatch fallback (no sdk)
     log.debug?.('[dkg-channel] Using direct runtime dispatch');
-    return this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId);
+    return this.runWithDispatchContext(dispatchContext, () =>
+      this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId),
+    );
   }
 
   private dispatchWithSdk(
@@ -458,14 +1583,14 @@ export class DkgChannelPlugin {
     storePath: string,
     ctxPayload: any,
     correlationId: string,
-  ): Promise<ChannelOutboundReply> {
+  ): Promise<ChannelOutboundReplyWithMarkerAliases> {
     const log = this.api!.logger;
     const runtime = this.runtime;
 
-    return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+    return new Promise<ChannelOutboundReplyWithMarkerAliases>((resolve, reject) => {
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        reject(new Error('Agent response timeout'));
+        reject(new Error(AGENT_RESPONSE_TIMEOUT_ERROR));
       }, TIMEOUT_MS);
 
       const replyChunks: string[] = [];
@@ -491,9 +1616,19 @@ export class DkgChannelPlugin {
         },
       }).then(() => {
         clearTimeout(timer);
-        const replyText = replyChunks.join('\n') || '(no response)';
+        const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-        resolve({ text: replyText, correlationId });
+        resolve({
+          text: replyText,
+          correlationId,
+          sessionKey: route.sessionKey,
+          markerUserAliases: buildMarkerUserAliases(
+            ctxPayload?.Body,
+            ctxPayload?.BodyForAgent,
+            ctxPayload?.CommandBody,
+            ctxPayload?.RawBody,
+          ),
+        });
       }).catch((err: any) => {
         clearTimeout(timer);
         log.warn?.(`[dkg-channel] dispatchInboundReplyWithBase failed: ${err.message}`);
@@ -509,13 +1644,13 @@ export class DkgChannelPlugin {
     storePath: string,
     ctxPayload: any,
     correlationId: string,
-  ): Promise<ChannelOutboundReply> {
+  ): Promise<ChannelOutboundReplyWithMarkerAliases> {
     const log = this.api!.logger;
 
-    return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+    return new Promise<ChannelOutboundReplyWithMarkerAliases>((resolve, reject) => {
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        reject(new Error('Agent response timeout'));
+        reject(new Error(AGENT_RESPONSE_TIMEOUT_ERROR));
       }, TIMEOUT_MS);
 
       const replyChunks: string[] = [];
@@ -540,9 +1675,19 @@ export class DkgChannelPlugin {
         ))
         .then(() => {
           clearTimeout(timer);
-          const replyText = replyChunks.join('\n') || '(no response)';
+          const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-          resolve({ text: replyText, correlationId });
+          resolve({
+            text: replyText,
+            correlationId,
+            sessionKey: route.sessionKey,
+            markerUserAliases: buildMarkerUserAliases(
+              ctxPayload?.Body,
+              ctxPayload?.BodyForAgent,
+              ctxPayload?.CommandBody,
+              ctxPayload?.RawBody,
+            ),
+          });
         })
         .catch((err: any) => {
           clearTimeout(timer);
@@ -564,15 +1709,31 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
+    // Mode-independent slot re-assert (mirrors `processInbound`).
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const log = this.api.logger;
     const runtime = this.runtime;
     const cfg = this.cfg;
-
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
+    const persistUserMessage = normalizePersistUserMessage(opts?.persistUserMessage);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
     if (!runtime?.channel || !cfg) {
-      const reply = await this.processInbound(text, correlationId, identity);
+      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId, persistUserMessage });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
       return;
     }
@@ -586,29 +1747,51 @@ export class DkgChannelPlugin {
     });
     // Clone to avoid mutating the runtime's cached route object
     const route = { ...resolved };
-    // Give non-owner identities (e.g. game-autopilot) their own session
+    // Give non-owner identities (e.g. background workers) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
     }
+    // ALS-scoped dispatch context for this streaming turn — see the
+    // matching comment in dispatchViaPluginSdk. Codex Bug B6.
+    const dispatchContext: DkgDispatchContext = {
+      uiContextGraphId,
+      sessionKey: route?.sessionKey,
+      correlationId,
+    };
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
       storePath, sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries });
+    const contextOnlyPersistUserMessage = persistUserMessage
+      ?? (!text.trim() && sanitizedContextEntries?.length ? agentBody : undefined);
+    const commandBody = sanitizedContextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
-      channel: 'DKG UI', from: identity || 'Owner', body: text,
+      channel: 'DKG UI', from: identity || 'Owner', body: agentBody,
       timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
     });
     const ctxPayload = {
-      Body: formattedBody, BodyForAgent: text, RawBody: text,
-      CommandBody: text, BodyForCommands: text,
+      Body: formattedBody, BodyForAgent: agentBody, RawBody: commandBody,
+      CommandBody: commandBody, BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
       CommandAuthorized: true, SenderId: identity || 'owner',
       SenderName: identity || 'Owner', Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(contextAttachmentRefs?.length ? {
+        AttachmentRefs: contextAttachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(contextAttachmentRefs),
+      } : {}),
+      ...(sanitizedContextEntries?.length ? {
+        ContextEntries: sanitizedContextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(sanitizedContextEntries),
+      } : {}),
     };
 
     // Push-based async queue: deliver() pushes, generator yields
@@ -622,10 +1805,12 @@ export class DkgChannelPlugin {
       if (resolve) { const r = resolve; resolve = null; r(); }
     };
 
-    const TIMEOUT_MS = 120_000;
-    const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
+    const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
+    const timer = setTimeout(() => push({ type: 'error', error: new Error(AGENT_RESPONSE_TIMEOUT_ERROR) }), TIMEOUT_MS);
 
     let replyText = '';
+    let dispatchTerminal: 'done' | 'error' | null = null;
+    let dispatchFailureMessage: string | null = null;
     const deliver = async (payload: any) => {
       const t = payload?.text;
       if (t) {
@@ -659,11 +1844,95 @@ export class DkgChannelPlugin {
           ),
         );
 
-    dispatchFn()
-      .then(() => push({ type: 'done' }))
-      .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
+    // Run the dispatch inside the ALS scope so tool calls fired by the
+    // slot during streaming observe the UI-selected CG for this turn.
+    const dispatchCompletion = this.runWithDispatchContext(dispatchContext, dispatchFn)
+      .then(() => {
+        dispatchTerminal = 'done';
+        push({ type: 'done' });
+      })
+      .catch((err: any) => {
+        dispatchTerminal = 'error';
+        const dispatchFailure = err instanceof Error ? err : new Error(String(err));
+        dispatchFailureMessage = dispatchFailure.message;
+        push({ type: 'error', error: dispatchFailure });
+      });
+
+    const persistResolvedTerminalState = (): void => {
+      let resolvedTerminalState = terminalState;
+      let resolvedFinalText = finalText;
+      let resolvedFailureReason = failureReason;
+
+      if (resolvedTerminalState === 'cancelled') {
+        const queuedTerminal = [...queue].reverse().find(
+          (item): item is { type: 'done' } | { type: 'error'; error: Error } =>
+            item.type === 'done' || item.type === 'error',
+        );
+        if (queuedTerminal?.type === 'done' || dispatchTerminal === 'done') {
+          try {
+            resolvedFinalText = finalizeAgentReplyText(replyText);
+            resolvedTerminalState = 'completed';
+          } catch (err) {
+            resolvedTerminalState = 'failed';
+            resolvedFailureReason = getErrorMessage(err);
+          }
+        } else if (queuedTerminal?.type === 'error' || dispatchTerminal === 'error') {
+          const queuedTerminalError: Error | null =
+            queuedTerminal && queuedTerminal.type === 'error' ? queuedTerminal.error : null;
+          resolvedTerminalState = 'failed';
+          resolvedFailureReason = queuedTerminalError?.message ?? dispatchFailureMessage ?? resolvedFailureReason;
+        }
+      }
+
+      if (resolvedTerminalState === 'completed' && resolvedFinalText) {
+        this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
+          attachmentRefs,
+          sessionKey: route.sessionKey,
+          markerUser: agentBody,
+          markerUserAliases: buildMarkerUserAliases(formattedBody, agentBody, commandBody, text),
+          ...(contextOnlyPersistUserMessage ? { persistUserMessage: contextOnlyPersistUserMessage } : {}),
+        }, true);
+      } else if (resolvedTerminalState === 'failed') {
+        this.queueTurnPersistence(
+          text,
+          this.buildFailedAssistantReply(resolvedFailureReason),
+          correlationId,
+          identity,
+          {
+            persistenceState: 'failed',
+            failureReason: resolvedFailureReason,
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+            markerUserAliases: buildMarkerUserAliases(formattedBody, agentBody, commandBody, text),
+            ...(contextOnlyPersistUserMessage ? { persistUserMessage: contextOnlyPersistUserMessage } : {}),
+          },
+          true,
+        );
+      } else {
+        this.queueTurnPersistence(
+          text,
+          CANCELLED_TURN_MESSAGE,
+          correlationId,
+          identity,
+          {
+            persistenceState: 'failed',
+            failureReason: 'cancelled',
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+            markerUserAliases: buildMarkerUserAliases(formattedBody, agentBody, commandBody, text),
+            ...(contextOnlyPersistUserMessage ? { persistUserMessage: contextOnlyPersistUserMessage } : {}),
+          },
+          true,
+        );
+      }
+    };
 
     // Yield events as they arrive
+    let terminalState: 'cancelled' | 'completed' | 'failed' = 'cancelled';
+    let finalText: string | null = null;
+    let failureReason: string | null = null;
     let completed = false;
     try {
       while (true) {
@@ -672,9 +1941,19 @@ export class DkgChannelPlugin {
         if (item.type === 'text_delta') {
           yield item;
         } else if (item.type === 'done') {
+          try {
+            finalText = finalizeAgentReplyText(replyText);
+            terminalState = 'completed';
+          } catch (err) {
+            terminalState = 'failed';
+            failureReason = getErrorMessage(err);
+            throw err;
+          }
           completed = true;
           break;
         } else if (item.type === 'error') {
+          terminalState = 'failed';
+          failureReason = item.error.message;
           clearTimeout(timer);
           throw item.error;
         }
@@ -683,16 +1962,19 @@ export class DkgChannelPlugin {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
-      // Persist turn even if the consumer cancelled early — use accumulated text
-      const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
-        log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      if (terminalState === 'cancelled' && dispatchTerminal == null) {
+        this.reservePendingTurnPersistence(correlationId, true);
+        void dispatchCompletion.finally(() => {
+          persistResolvedTerminalState();
+        });
+        return;
+      }
+
+      persistResolvedTerminalState();
     }
 
     // Only yield final if the stream completed normally (not cancelled)
-    if (completed) {
-      const finalText = replyText || '(no response)';
+    if (completed && finalText) {
       yield { type: 'final', text: finalText, correlationId };
     }
   }
@@ -818,27 +2100,215 @@ export class DkgChannelPlugin {
   }
 
   /**
-   * Persist a chat turn to the DKG agent-memory graph.
-   * Fire-and-forget — errors are logged but don't affect the reply.
+   * Persist a chat turn into the `'chat-turns'` Working Memory assertion of
+   * the `'agent-context'` context graph via the daemon's
+   * `/api/openclaw-channel/persist-turn` route. Fire-and-forget — errors
+   * are logged but don't affect the reply.
    */
   private async persistTurn(
     userMessage: string,
     assistantReply: string,
     correlationId: string,
     identity: string,
+    opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
   ): Promise<void> {
-    // Non-owner identities (e.g. game-autopilot) get their own session
+    // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
+    const persistedUserMessage = opts?.persistUserMessage ?? userMessage;
     await this.client.storeChatTurn(
       sessionId,
-      userMessage,
+      persistedUserMessage,
       assistantReply,
-      { turnId: correlationId },
+      {
+        turnId: correlationId,
+        ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
+        ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
+        ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
+      },
     );
+    if (this.stopping && !this.pendingTurnPersistence.has(correlationId)) {
+      this.api?.logger.warn?.(
+        `[dkg-channel] Turn persistence for ${correlationId} completed after shutdown marker drain; skipping late ChatTurnWriter marker job.`,
+      );
+      return;
+    }
+    await this.markExternalTurnPersistedAfterStore({
+      sessionKey: opts?.sessionKey,
+      turnId: opts?.turnId ?? correlationId,
+      user: opts?.markerUser ?? persistedUserMessage,
+      userAliases: opts?.markerUserAliases,
+      assistant: assistantReply,
+      correlationId,
+    }, allowDuringShutdown);
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private async markExternalTurnPersistedAfterStore(
+    opts: ExternalTurnMarkerPersistOptions,
+    allowDuringShutdown: boolean,
+  ): Promise<void> {
+    if (!this.chatTurnWriter) return;
+    if (!opts.sessionKey) return;
+    const markerWrite = this.writeExternalTurnMarker(opts);
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt: 1,
+      timer: null,
+      allowDuringShutdown,
+      opts,
+      inFlight: markerWrite,
+    });
+    try {
+      await markerWrite;
+      this.deletePendingMarkerPersistence(opts.correlationId);
+    } catch (err: any) {
+      this.scheduleExternalTurnMarkerRetry(opts, 1, allowDuringShutdown, err);
+    }
+  }
+
+  private async writeExternalTurnMarker(opts: ExternalTurnMarkerPersistOptions): Promise<void> {
+    await this.chatTurnWriter?.markExternalTurnPersistedDurable({
+      sessionKey: opts.sessionKey,
+      turnId: opts.turnId,
+      user: opts.user,
+      ...(opts.userAliases?.length ? { userAliases: opts.userAliases } : {}),
+      assistant: opts.assistant,
+    });
+  }
+
+  private scheduleExternalTurnMarkerRetry(
+    opts: ExternalTurnMarkerPersistOptions,
+    attempt: number,
+    allowDuringShutdown: boolean,
+    err: any,
+  ): void {
+    if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      return;
+    }
+    const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+    if (retryDelayMs == null) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      this.api?.logger.warn?.(
+        `[dkg-channel] ChatTurnWriter marker failed permanently after ${attempt} retry attempt(s) for ${opts.correlationId}: ${err?.message ?? err}`,
+      );
+      return;
+    }
+    this.api?.logger.warn?.(
+      `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}; retrying marker in ${retryDelayMs}ms: ${err?.message ?? err}`,
+    );
+    const existing = this.pendingMarkerPersistence.get(opts.correlationId);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+        this.deletePendingMarkerPersistence(opts.correlationId);
+        return;
+      }
+      const markerWrite = this.writeExternalTurnMarker(opts);
+      this.pendingMarkerPersistence.set(opts.correlationId, {
+        attempt: attempt + 1,
+        timer: null,
+        allowDuringShutdown,
+        opts,
+        inFlight: markerWrite,
+      });
+      void markerWrite
+        .then(() => {
+          this.deletePendingMarkerPersistence(opts.correlationId);
+        })
+        .catch((nextErr: any) => {
+          this.scheduleExternalTurnMarkerRetry(opts, attempt + 1, allowDuringShutdown, nextErr);
+        });
+    }, retryDelayMs);
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt,
+      timer,
+      allowDuringShutdown,
+      opts,
+      inFlight: null,
+    });
+    this.notifyStopIdle();
+  }
+
+  private queueTurnPersistence(
+    userMessage: string,
+    assistantReply: string,
+    correlationId: string,
+    identity: string,
+    opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
+  ): void {
+    const existing = this.pendingTurnPersistence.get(correlationId);
+    if (
+      !this.canContinuePersistenceAttempt(allowDuringShutdown)
+      || (existing && existing.attempt > 0)
+    ) return;
+
+    const attemptPersist = (attempt: number): void => {
+      if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
+      const persistWrite = this.persistTurn(userMessage, assistantReply, correlationId, identity, opts, allowDuringShutdown);
+      this.pendingTurnPersistence.set(correlationId, {
+        attempt,
+        timer: null,
+        allowDuringShutdown,
+        inFlight: persistWrite,
+      });
+      void persistWrite
+        .then(() => {
+          this.deletePendingTurnPersistence(correlationId);
+        })
+        .catch((err: any) => {
+          const currentJob = this.pendingTurnPersistence.get(correlationId);
+          if (!currentJob) {
+            return;
+          }
+          if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+            this.deletePendingTurnPersistence(correlationId);
+            return;
+          }
+
+          const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+          if (retryDelayMs == null) {
+            this.deletePendingTurnPersistence(correlationId);
+            this.api?.logger.warn?.(
+              `[dkg-channel] Turn persistence failed permanently after ${attempt} attempt(s): ${err.message}`,
+            );
+            return;
+          }
+
+          this.api?.logger.warn?.(
+            `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
+          );
+          const timer = setTimeout(() => {
+            if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+              this.deletePendingTurnPersistence(correlationId);
+              return;
+            }
+            const job = this.pendingTurnPersistence.get(correlationId);
+            if (!job) return;
+            attemptPersist(attempt + 1);
+          }, retryDelayMs);
+          this.pendingTurnPersistence.set(correlationId, {
+            attempt,
+            timer,
+            allowDuringShutdown,
+            inFlight: null,
+          });
+        });
+    };
+
+    attemptPersist(1);
+  }
+
+  private buildFailedAssistantReply(reason?: string | null): string {
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason || normalizedReason === 'cancelled') {
+      return CANCELLED_TURN_MESSAGE;
+    }
+    return `${FAILED_TURN_MESSAGE_PREFIX}: ${normalizedReason}]`;
   }
 
   // ---------------------------------------------------------------------------
@@ -884,7 +2354,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: unknown; correlationId?: string; identity?: string; persistUserMessage?: unknown; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -899,25 +2369,49 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       try {
-        const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+        const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+        const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+        if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+          return;
+        }
+        if (parsed.contextEntries != null && contextEntries === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+          return;
+        }
+        if (parsed.persistUserMessage != null && typeof parsed.persistUserMessage !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "persistUserMessage"' }));
+          return;
+        }
+        const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+          ? parsed.uiContextGraphId.trim()
+          : undefined;
+        const persistUserMessage = normalizePersistUserMessage(parsed.persistUserMessage);
+        const text = normalizeInboundChatText(parsed.text);
+        const { correlationId, identity } = parsed;
+        if (!hasInboundChatTurnContent(text, attachmentRefs, contextEntries) || typeof correlationId !== 'string' || correlationId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+          return;
+        }
+        this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId, persistUserMessage });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
       } catch (err: any) {
-        const status = err.message === 'Agent response timeout' ? 504 : 500;
+        const isAgentTimeout = isAgentResponseTimeoutError(err);
+        const status = isAgentTimeout ? 504 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
+        res.end(JSON.stringify(isAgentTimeout ? buildAgentTimeoutResponseBody() : { error: err.message }));
       }
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundHttp completed in ${durationMs}ms`);
     }
@@ -935,7 +2429,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: unknown; correlationId?: string; identity?: string; persistUserMessage?: unknown; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -950,12 +2444,35 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
+      const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+      if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (parsed.contextEntries != null && contextEntries === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
+      if (parsed.persistUserMessage != null && typeof parsed.persistUserMessage !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "persistUserMessage"' }));
+        return;
+      }
+      const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+        ? parsed.uiContextGraphId.trim()
+        : undefined;
+      const persistUserMessage = normalizePersistUserMessage(parsed.persistUserMessage);
+      const text = normalizeInboundChatText(parsed.text);
+      const { correlationId, identity } = parsed;
+      if (!hasInboundChatTurnContent(text, attachmentRefs, contextEntries) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
       // Write SSE headers
       res.writeHead(200, {
@@ -969,19 +2486,20 @@ export class DkgChannelPlugin {
       res.on('error', () => { clientDisconnected = true; });
 
       try {
-        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner')) {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId, persistUserMessage })) {
           if (clientDisconnected) break;
           const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
           if (!ok) await new Promise<void>((r) => res.once('drain', r));
         }
       } catch (err: any) {
         if (!clientDisconnected) {
-          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+          res.write(`data: ${JSON.stringify(buildStreamErrorEvent(err))}\n\n`);
         }
       }
       if (!res.writableEnded) res.end();
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundStreamHttp completed in ${durationMs}ms`);
     }
@@ -991,20 +2509,44 @@ export class DkgChannelPlugin {
   private async handleGatewayRoute(req: any, res: any): Promise<void> {
     try {
       const body = typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req));
-      const { text, correlationId, identity } = body;
-      if (!text || !correlationId) {
+      const attachmentRefs = normalizeAttachmentRefs(body.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(body.contextEntries);
+      if (body.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (body.contextEntries != null && contextEntries === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
+      if (body.persistUserMessage != null && typeof body.persistUserMessage !== 'string') {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "persistUserMessage"' }));
+        return;
+      }
+      const uiContextGraphId = typeof body.uiContextGraphId === 'string' && body.uiContextGraphId.trim()
+        ? body.uiContextGraphId.trim()
+        : undefined;
+      const persistUserMessage = normalizePersistUserMessage(body.persistUserMessage);
+      const text = normalizeInboundChatText(body.text);
+      const { correlationId, identity } = body;
+      if (!hasInboundChatTurnContent(text, attachmentRefs, contextEntries) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId, persistUserMessage });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {
-      const status = err.message === 'Agent response timeout' ? 504 : 500;
+      const isAgentTimeout = isAgentResponseTimeoutError(err);
+      const status = isAgentTimeout ? 504 : 500;
       res.writeHead?.(status, { 'Content-Type': 'application/json' });
-      res.end?.(JSON.stringify({ error: err.message }));
+      res.end?.(JSON.stringify(isAgentTimeout ? buildAgentTimeoutResponseBody() : { error: err.message }));
     }
   }
 
@@ -1033,7 +2575,19 @@ export class DkgChannelPlugin {
 
   get bridgePort(): number {
     const address = this.server?.address();
-    return typeof address === 'object' && address ? address.port : this.port;
+    if (typeof address === 'object' && address) {
+      return address.port;
+    }
+    // No standalone server is bound (either start() hasn't been called,
+    // it failed, or it was intentionally skipped because the gateway took
+    // ownership of the channel routes — see issue #272). Return 0 so
+    // callers like DkgNodePlugin.buildOpenClawTransport know not to
+    // publish a stale bridgeUrl pointing at a port nobody is listening on.
+    return 0;
+  }
+
+  get isListening(): boolean {
+    return this.server?.listening === true;
   }
 
   get isUsingGatewayRoute(): boolean {
@@ -1071,4 +2625,207 @@ function formatError(err: unknown): string {
     return err.stack ?? err.message;
   }
   return String(err);
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return String(err);
+}
+
+function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  const sources = [
+    directAdapterConfigFrom(anyApi?.cfg),
+    directAdapterConfigFrom(anyApi?.config),
+    directAdapterConfigFrom(anyApi?.pluginConfig),
+    directAdapterConfigFrom(runtime?.cfg),
+    directAdapterConfigFrom(runtime?.config),
+    directAdapterConfigFrom(runtime?.pluginConfig),
+  ].filter(isObjectRecord);
+  // T364 — Capture all partial overlays (state-metadata-only AND module
+  // partials like `{ channel: { port: 9801 } }`) in priority order so a
+  // higher-priority partial doesn't mask a lower-priority full adapter
+  // config it should layer over. Pre-fix the loop only captured
+  // state-metadata-only overlays and returned the first non-metadata
+  // source verbatim, so a partial channel overlay at api.cfg blocked
+  // the full config in runtime.config from contributing
+  // daemonUrl/memory/etc to the dispatch — breaking route resolution
+  // on gateways that emit incremental direct config updates.
+  // `isPartialAdapterConfigOverlay` is a superset of
+  // `isStateMetadataOnlyAdapterConfig`, so a single check covers both.
+  const overlays: Record<string, unknown>[] = [];
+  for (const source of sources) {
+    if (isPartialAdapterConfigOverlay(source)) {
+      overlays.push(source);
+      continue;
+    }
+    // Found a full config. Merge captured overlays over it. `overlays`
+    // is in highest-first priority order; reverse so the highest
+    // priority is applied last (and wins via mergeAdapterPluginConfigs's
+    // later-arg-wins semantic for top-level keys plus deep-merge for
+    // memory/channel modules).
+    return overlays.length > 0
+      ? mergeAdapterPluginConfigs(source, ...overlays.slice().reverse())
+      : source;
+  }
+  // T364 — When every discovered source is a partial overlay (no full
+  // config exists), merge ALL collected overlays in priority order.
+  // Pre-fix this path returned `overlays[0]` and dropped the rest, so a
+  // metadata-only api.cfg + partial pluginConfig + partial runtime.* still
+  // produced an incomplete cfg even when the missing daemon/channel/memory
+  // fields were available on lower-priority overlays. Reverse so the
+  // highest-priority overlay is applied last and wins on conflicts; module
+  // deep-merge preserves lower-priority defaults for fields the higher
+  // overlay omits.
+  return overlays.length > 0
+    ? mergeAdapterPluginConfigs(...overlays.slice().reverse())
+    : undefined;
+}
+
+function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const mergedConfig = resolveOpenClawMergedConfig(api);
+  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
+  const directConfig = resolveDirectAdapterConfigFallback(api);
+  if (mergedConfig) {
+    // T364 — Layer the fresher direct adapter config over the merged
+    // workspace config's nested `plugins.entries['adapter-openclaw'].config`.
+    // Pre-fix this branch returned the merged config as-is even when
+    // `api.pluginConfig` carried newer daemonUrl / channel / memory
+    // updates, so the channel dispatched against stale settings on
+    // multi-phase gateways that update direct config before the merged
+    // snapshot catches up.
+    const mergedWithDirect = directConfig
+      ? mergeDirectAdapterConfigIntoMergedConfig(mergedConfig, directConfig)
+      : mergedConfig;
+    return routeConfig
+      ? mergeRouteMetadataWithMergedConfig(mergedWithDirect, routeConfig)
+      : mergedWithDirect;
+  }
+
+  if (routeConfig && directConfig) {
+    return mergeRouteConfigWithAdapterConfig(routeConfig, directConfig);
+  }
+
+  return directConfig ?? routeConfig;
+}
+
+function mergeDirectAdapterConfigIntoMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  directConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(mergedConfig.plugins)
+    ? (mergedConfig.plugins as Record<string, unknown>)
+    : {};
+  const entries = isObjectRecord(plugins.entries)
+    ? (plugins.entries as Record<string, unknown>)
+    : {};
+  const adapterEntry = isObjectRecord(entries['adapter-openclaw'])
+    ? (entries['adapter-openclaw'] as Record<string, unknown>)
+    : {};
+  const adapterEntryConfig = isObjectRecord(adapterEntry.config)
+    ? (adapterEntry.config as Record<string, unknown>)
+    : {};
+  const mergedAdapterConfig = mergeAdapterPluginConfigs(adapterEntryConfig, directConfig);
+  return {
+    ...mergedConfig,
+    plugins: {
+      ...plugins,
+      entries: {
+        ...entries,
+        'adapter-openclaw': {
+          ...adapterEntry,
+          config: mergedAdapterConfig,
+        },
+      },
+    },
+  };
+}
+
+function mergeRouteMetadataWithMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  routeConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const priorAgents = isObjectRecord(mergedConfig.agents) ? mergedConfig.agents : undefined;
+  const nextAgents = isObjectRecord(routeConfig.agents) ? routeConfig.agents : undefined;
+  const priorSession = isObjectRecord(mergedConfig.session) ? mergedConfig.session : undefined;
+  const nextSession = isObjectRecord(routeConfig.session) ? routeConfig.session : undefined;
+  const result: Record<string, unknown> = {
+    ...mergedConfig,
+    ...routeConfig,
+    plugins: mergedConfig.plugins,
+  };
+  // T364 round 8 — drop stale workspace aliases that the merged
+  // snapshot inherited from older route metadata when the current
+  // routeConfig asserts a newer workspace signal. Pre-fix the
+  // `...mergedConfig, ...routeConfig` spread kept any older
+  // `workspace` / `agents.defaults.workspace` from the merged
+  // snapshot alongside the newer-only `workspaceDir`, and the
+  // documented `agents.defaults.workspace -> workspace -> workspaceDir`
+  // resolver chain would pick the stale alias. Scrubbing here
+  // keeps the dispatch-side and resolve-side merges consistent
+  // with `mergeRouteMetadataConfigs` in `openclaw-config.ts`.
+  scrubStaleWorkspaceAliases(result, routeConfig);
+  if (priorAgents || nextAgents) {
+    result.agents = { ...(priorAgents ?? {}), ...(nextAgents ?? {}) };
+    const priorDefaults = isObjectRecord(priorAgents?.defaults) ? priorAgents.defaults : undefined;
+    const nextDefaults = isObjectRecord(nextAgents?.defaults) ? nextAgents.defaults : undefined;
+    if (priorDefaults || nextDefaults) {
+      (result.agents as Record<string, unknown>).defaults = {
+        ...(priorDefaults ?? {}),
+        ...(nextDefaults ?? {}),
+      };
+    }
+    // The agents.defaults assignment above re-introduces the prior
+    // `agents.defaults.workspace` that was scrubbed by
+    // `scrubStaleWorkspaceAliases`. Re-scrub so the rule (newer
+    // workspace signal wins consistently) holds for the nested alias.
+    scrubStaleWorkspaceAliases(result, routeConfig);
+  }
+  if (priorSession || nextSession) {
+    result.session = { ...(priorSession ?? {}), ...(nextSession ?? {}) };
+  }
+  return result;
+}
+
+function directAdapterConfigFrom(candidate: unknown): Record<string, unknown> | undefined {
+  // T364 round 6 — extract just the adapter-config keys from
+  // candidates that may be mixed gateway payloads (route metadata +
+  // adapter overlay), e.g. `{ workspaceDir, channel: { port: 9801 } }`.
+  // Pre-fix `looksLikeAdapterPluginConfig` returned false for such
+  // payloads, so the legitimate channel/memory overlay was dropped on
+  // the floor and bootstrap/dispatch kept stale settings. The
+  // extraction helper splits route-metadata keys (handled separately
+  // by `resolveOpenClawRouteMetadataConfig`) from adapter-config keys.
+  return extractAdapterPluginConfigOverlay(candidate);
+}
+
+function mergeRouteConfigWithAdapterConfig(
+  routeConfig: Record<string, unknown>,
+  adapterConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(routeConfig.plugins) ? routeConfig.plugins : undefined;
+  const entries = isObjectRecord(plugins?.entries) ? plugins.entries : undefined;
+  const existingEntry = isObjectRecord(entries?.['adapter-openclaw'])
+    ? entries['adapter-openclaw'] as Record<string, unknown>
+    : undefined;
+  const existingAdapterConfig = isObjectRecord(existingEntry?.config)
+    ? existingEntry.config as Record<string, unknown>
+    : undefined;
+
+  return {
+    ...routeConfig,
+    plugins: {
+      ...(plugins ?? {}),
+      entries: {
+        ...(entries ?? {}),
+        'adapter-openclaw': {
+          ...(existingEntry ?? {}),
+          config: mergeAdapterPluginConfigs(existingAdapterConfig, adapterConfig),
+        },
+      },
+    },
+  };
 }

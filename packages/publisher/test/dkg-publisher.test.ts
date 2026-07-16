@@ -1,31 +1,134 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { DKGPublisher } from '../src/dkg-publisher.js';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  TRUST_LEVEL_PREDICATE,
+  TrustLevel,
+  TypedEventBus,
+  generateEd25519Keypair,
+} from '@origintrail-official/dkg-core';
+import { DKGPublisher, RESERVED_SUBJECT_PREFIXES } from '../src/dkg-publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { buildSeal, buildUpdateSeal, wrapPublisherForTest } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
+import type { V10ACKProvider } from '../src/publisher.js';
 
-const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+let CONTEXT_GRAPH: string;
+let GRAPH: string;
+let _kav10Address: string;
+let _dkaAddress: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+// RC11 / PR1: in-memory 3-of-N ACK provider for Hardhat publishes. Threaded
+// into the publishWS/updateWS helpers below since this test file builds
+// its publisher directly (no wrapPublisherForTest).
+let _ackProvider: V10ACKProvider | undefined;
+function getAckProvider(): V10ACKProvider {
+  if (!_ackProvider) {
+    if (!_kav10Address) {
+      throw new Error('getAckProvider() called before _kav10Address was initialized');
+    }
+    _ackProvider = makeHardhatReceiverACKProvider(
+      getSharedContext(),
+      _kav10Address,
+      [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+    );
+  }
+  return _ackProvider;
+}
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const ENTITY2 = 'did:dkg:agent:QmTextBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
-const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
+const TEST_PUBLISHER_ADDRESS = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
+// rc.17 uniform per-KA layout: a confirmed publish writes the KA's public
+// quads + SelfAttested trust stamp into a PER-KA verifiable-memory named graph
+// `did:dkg:context-graph:{cg}/_verifiable_memory/{author}/{number}`, where
+// author+number are unpacked from the on-chain kaId — NOT the monolithic root
+// data graph. Compute that graph from a publish result's kaId so tests can
+// assert against the graph the data actually lives in.
+function verifiableMemoryGraph(kaId: bigint): string {
+  const number = kaId & ((1n << 96n) - 1n);
+  const author = '0x' + (kaId >> 96n).toString(16).padStart(40, '0');
+  return `did:dkg:context-graph:${CONTEXT_GRAPH}/_verifiable_memory/${author}/${number}`;
+}
+
 describe('DKGPublisher', () => {
   let publisher: DKGPublisher;
   let store: OxigraphStore;
-  let chain: MockChainAdapter;
+  let chain: EVMChainAdapter;
   let eventBus: TypedEventBus;
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    _provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    // PR #1072: these tests publish PLAINTEXT to exercise lifecycle/mint/update/
+    // event/UAL/reserved-namespace/share mechanics (no ciphertext commitment),
+    // so use a PUBLIC CG (accessPolicy 0) — a curated CG would now revert with
+    // CuratedCGRequiresCiphertextCommitment.
+    const cgId = await createTestContextGraph(chain, undefined, 0);
+    CONTEXT_GRAPH = String(cgId);
+    GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+    _dkaAddress = (await chain.getDKGKnowledgeAssetsAddress!()).toLowerCase();
+  });
+
+  // Phase C made the publisher a pure transport — every on-chain test
+  // mints a self-signed seal here so the publisher actually broadcasts.
+  // `publisher` is captured by closure (reassigned in beforeEach), so
+  // these wrappers reflect whichever publisher instance the current
+  // test set up.
+  async function publishWS(args: Parameters<DKGPublisher['publish']>[0]) {
+    const seal = await buildSeal({
+      quads: args.quads,
+      privateQuads: args.privateQuads,
+      author: _author,
+      contextGraphId: args.contextGraphId,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+    return publisher.publish({
+      ...args,
+      precomputedAttestation: seal,
+      v10ACKProvider: args.v10ACKProvider ?? getAckProvider(),
+    });
+  }
+  async function updateWS(kaId: bigint, args: Parameters<DKGPublisher['update']>[1]) {
+    const seal = await buildUpdateSeal({
+      kaId: kaId,
+      quads: args.quads,
+      privateQuads: args.privateQuads,
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+    return publisher.update(kaId, {
+      ...args,
+      precomputedUpdateAttestation: seal,
+      v10ACKProvider: args.v10ACKProvider ?? getAckProvider(),
+    });
+  }
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
@@ -33,14 +136,29 @@ describe('DKGPublisher', () => {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      // OT-RFC-43 Option-1: real EVM adapter requires a packed reservedKaId per mint.
+      kaAllocator: makeTestKaAllocator(),
     });
+    // RC11 / PR3: wrap so any direct `publisher.publishFromSharedMemory`
+    // call (e.g. the Round 12 Bug 34 internal-promote test) also gets a
+    // v10ACKProvider injected — the publish/update paths already mint
+    // their own ACK provider via `publishWS`/`updateWS`, but
+    // publishFromSharedMemory only flows through the wrapper.
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
+    });
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('publishes a single KA', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://schema.org/description', '"Analyzes images"'),
@@ -52,33 +170,58 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
     expect(result.status).toBe('confirmed');
 
-    const count = await store.countQuads(GRAPH);
-    expect(count).toBe(2);
+    // rc.17 per-KA layout: the 2 published data quads + the 1 SelfAttested
+    // trust stamp now live in the per-KA verifiable-memory graph, not the root
+    // data graph. Assert the same 3-quad count against that graph.
+    const vmGraph = verifiableMemoryGraph(result.kaId);
+    const count = await store.countQuads(vmGraph);
+    expect(count).toBe(3);
+    const trust = await store.query(
+      `SELECT ?level WHERE {
+        GRAPH <${vmGraph}> {
+          <${ENTITY}> <${TRUST_LEVEL_PREDICATE}> ?level .
+        }
+      }`,
+    );
+    expect(trust.type).toBe('bindings');
+    expect(trust.type === 'bindings' ? trust.bindings.map((row) => row.level) : []).toEqual([
+      `"${TrustLevel.SelfAttested}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    ]);
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const metaCount = await store.countQuads(metaGraph);
     expect(metaCount).toBeGreaterThan(0);
   });
 
-  it('publishes multiple KAs in one KC', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+  it('publishes multiple entities in one KC as a SINGLE Knowledge Asset (OT-RFC-44 / Design B)', async () => {
+    // OT-RFC-44: one file = one Knowledge Asset, however many entities it
+    // contains. Publishing two root entities (ENTITY + ENTITY2) in a single
+    // call now SUCCEEDS as ONE KA whose member entities are both — superseding
+    // the pre-Design-B greenfield guard (PR #815) that rejected it as
+    // "exactly one Knowledge Asset per transaction".
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY2, 'http://schema.org/name', '"TextBot"'),
       ],
     });
 
-    expect(result.kaManifest).toHaveLength(2);
-    expect(result.kaManifest.map((m) => m.rootEntity).sort()).toEqual(
-      [ENTITY, ENTITY2].sort(),
-    );
     expect(result.status).toBe('confirmed');
+    // Both entities are members of the publish...
+    const roots = new Set(result.kaManifest.map((m: any) => m.rootEntity));
+    expect(roots.has(ENTITY)).toBe(true);
+    expect(roots.has(ENTITY2)).toBe(true);
+    // ...and they mint ONE on-chain KA, while keeping per-root compatibility
+    // token IDs for `${ual}/${tokenId}` response/meta consumers.
+    const tokenIds = new Set(result.kaManifest.map((m: any) => String(m.tokenId)));
+    expect(tokenIds).toEqual(new Set(['1', '2']));
+    expect(result.kaId).toBeDefined();
   });
 
   it('publishes with blank nodes (auto-skolemized)', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://ex.org/offers', '_:o1'),
@@ -89,8 +232,11 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest).toHaveLength(1);
     expect(result.status).toBe('confirmed');
 
+    // rc.17 per-KA layout: published quads (skolemized blank nodes included)
+    // land in the per-KA verifiable-memory graph, not the root data graph.
+    const vmGraph = verifiableMemoryGraph(result.kaId);
     const queryResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`,
+      `SELECT ?s WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     );
     if (queryResult.type === 'bindings') {
       const subjects = queryResult.bindings.map((b) => b['s']);
@@ -101,9 +247,9 @@ describe('DKGPublisher', () => {
     }
   });
 
-  it('publishes with private triples', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+  it('publishes with private triples using folded-private ACKs', async () => {
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
       publisherPeerId: '12D3KooWTestPublisher',
@@ -116,35 +262,40 @@ describe('DKGPublisher', () => {
   });
 
   it('rejects duplicate entity (exclusivity)', async () => {
-    await publisher.publish({
-      paranetId: PARANET,
+    await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
     await expect(
-      publisher.publish({
-        paranetId: PARANET,
+      publishWS({
+        contextGraphId: CONTEXT_GRAPH,
         quads: [q(ENTITY, 'http://schema.org/name', '"Duplicate"')],
       }),
     ).rejects.toThrow('Validation failed');
   });
 
   it('updates an existing KC', async () => {
-    const initial = await publisher.publish({
-      paranetId: PARANET,
+    const initial = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"OldName"')],
     });
 
-    const updated = await publisher.update(initial.kcId, {
-      paranetId: PARANET,
+    const updated = await updateWS(initial.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"NewName"')],
     });
 
     expect(updated.merkleRoot).not.toEqual(initial.merkleRoot);
     expect(updated.status).toBe('confirmed');
 
+    // rc.17 per-KA layout: a KA update DELETE+REWRITEs the per-KA
+    // verifiable-memory graph (computed from the update's batchId, which equals
+    // the original publish's kaId), not the monolithic root data graph. Assert
+    // the post-update name against that per-KA graph.
+    const vmGraph = verifiableMemoryGraph(initial.kaId);
     const result = await store.query(
-      `SELECT ?name WHERE { GRAPH <${GRAPH}> { <${ENTITY}> <http://schema.org/name> ?name } }`,
+      `SELECT ?name WHERE { GRAPH <${vmGraph}> { <${ENTITY}> <http://schema.org/name> ?name } }`,
     );
     if (result.type === 'bindings') {
       expect(result.bindings).toHaveLength(1);
@@ -153,22 +304,25 @@ describe('DKGPublisher', () => {
   });
 
   it('emits KC_PUBLISHED event', async () => {
-    let emitted = false;
-    eventBus.on('kc:published', () => {
-      emitted = true;
+    let emitted: any;
+    eventBus.on('kc:published', (event) => {
+      emitted = event;
     });
 
-    await publisher.publish({
-      paranetId: PARANET,
+    await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"Bot"')],
     });
 
-    expect(emitted).toBe(true);
+    expect(emitted).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH,
+      tripleCount: 1,
+    });
   });
 
   it('publishes with confirmed status and onChainResult', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
@@ -183,30 +337,57 @@ describe('DKGPublisher', () => {
     expect(result.onChainResult!.endKAId).toBeDefined();
   });
 
+  it('does NOT call chain.verify after a confirmed V10 SWM publish (#1575)', async () => {
+    const quad = q(ENTITY, 'http://schema.org/name', '"ImageBot"');
+    await publisher.share(CONTEXT_GRAPH, [quad], {
+      publisherPeerId: 'peer-no-legacy-verify',
+      localOnly: true,
+    });
+    await seedContextGraphRegistration(store, CONTEXT_GRAPH);
+
+    const verifySpy = vi.spyOn(chain, 'verify');
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: CONTEXT_GRAPH,
+      precomputedAttestation: await buildSeal({
+        quads: [{ ...quad, graph: GRAPH }],
+        author: _author,
+        contextGraphId: CONTEXT_GRAPH,
+        ctx: { provider: _provider, kav10Address: _kav10Address },
+      }),
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(verifySpy).not.toHaveBeenCalled();
+  });
+
   it('generates address-based UAL format', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    // RFC ka-metadata-trim: KC rows no longer carry `rdf:type
+    // dkg:KnowledgeCollection` — resolve the UAL by its `dkg:status` row.
     const metaResult = await store.query(
-      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeCollection> } }`,
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
 
     expect(metaResult.type).toBe('bindings');
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings).toHaveLength(1);
       const ual = metaResult.bindings[0]['ual'];
-      // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{startKAId}
-      expect(ual).toMatch(/^did:dkg:mock:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
-      expect(ual).toContain(result.onChainResult!.publisherAddress);
+      // Greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId}
+      expect(ual).toMatch(/^did:dkg:evm:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
+      expect(ual.toLowerCase()).toContain(_dkaAddress);
+      expect(ual).toContain(String(result.onChainResult!.startKAId));
     }
   });
 
   it('derives publisherAddress from private key', async () => {
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const result = await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
@@ -216,12 +397,12 @@ describe('DKGPublisher', () => {
   });
 
   it('stores only confirmed status in meta graph on successful publish', async () => {
-    await publisher.publish({
-      paranetId: PARANET,
+    await publishWS({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const statusResult = await store.query(
       `SELECT ?status WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
@@ -234,5 +415,514 @@ describe('DKGPublisher', () => {
       expect(statuses.some((s) => s.includes('confirmed'))).toBe(true);
       expect(statuses.some((s) => s.includes('tentative'))).toBe(false);
     }
+  });
+
+  // ── Round 9 Bug 25: reserved-namespace guard at write-boundary ──
+  //
+  // `urn:dkg:file:keccak256:*` and `urn:dkg:extraction:*` are
+  // protocol-reserved for daemon-generated file descriptors and
+  // extraction provenance (per 19_MARKDOWN_CONTENT_TYPE.md §10.2).
+  // User-authored writes that would collide with that namespace are
+  // rejected at the write boundary — `assertionWrite`, `share`, and
+  // `publish` — with a `ReservedNamespaceError`. The daemon's own
+  // import-file handler bypasses `assertion.write` via direct
+  // `store.insert` (documented in daemon.ts) so its legitimate
+  // bookkeeping writes are unaffected.
+  describe('Bug 25: reserved-namespace guard', () => {
+    it('rejects a user-authored assertionWrite with `urn:dkg:file:keccak256:*` subject', async () => {
+      await expect(
+        publisher.assertionWrite(CONTEXT_GRAPH, 'user-guard-file', TEST_PUBLISHER_ADDRESS, [
+          { subject: 'urn:dkg:file:keccak256:abc', predicate: 'http://schema.org/name', object: '"leaked"' },
+        ]),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('rejects a user-authored assertionWrite with `urn:dkg:extraction:*` subject', async () => {
+      await expect(
+        publisher.assertionWrite(CONTEXT_GRAPH, 'user-guard-extr', TEST_PUBLISHER_ADDRESS, [
+          { subject: 'urn:dkg:extraction:11111111-2222-3333-4444-555555555555', predicate: 'http://schema.org/name', object: '"leaked"' },
+        ]),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('allows a user-authored assertionWrite with a non-reserved subject', async () => {
+      await publisher.assertionCreate(
+        CONTEXT_GRAPH,
+        'user-allowed',
+        TEST_PUBLISHER_ADDRESS,
+      );
+      await expect(
+        publisher.assertionWrite(CONTEXT_GRAPH, 'user-allowed', TEST_PUBLISHER_ADDRESS, [
+          { subject: 'urn:note:my-doc', predicate: 'http://schema.org/name', object: '"allowed"' },
+        ]),
+      ).resolves.toBeUndefined();
+    });
+
+    it('rejects a user-authored publish with `urn:dkg:file:keccak256:*` subject in public quads', async () => {
+      await expect(
+        publishWS({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [
+            q('urn:dkg:file:keccak256:deadbeef', 'http://schema.org/name', '"should be rejected"'),
+          ],
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('rejects a user-authored publish with `urn:dkg:extraction:*` subject in privateQuads', async () => {
+      await expect(
+        publishWS({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q(ENTITY, 'http://schema.org/name', '"ok"')],
+          privateQuads: [
+            q('urn:dkg:extraction:deadbeef-uuid', 'http://schema.org/secret', '"private leak"'),
+          ],
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('rejects a user-authored share with a reserved subject', async () => {
+      await expect(
+        publisher.share(CONTEXT_GRAPH, [
+          { subject: 'urn:dkg:file:keccak256:cafebabe', predicate: 'http://schema.org/name', object: '"share leak"', graph: '' },
+        ], { publisherPeerId: 'peer-test' }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('Round 12 Bug 34: external publish with `fromSharedMemory: true` and a reserved-prefix quad is REJECTED (public flag no longer bypasses the guard)', async () => {
+      // Round 9 Bug 25 gated the guard on the public `fromSharedMemory`
+      // flag, which meant any external caller could set the flag to
+      // bypass the namespace check. Codex Bug 34 flagged this. Round 12
+      // replaced the discriminator with a module-private `Symbol`-keyed
+      // token (`INTERNAL_ORIGIN_TOKEN`) that only in-file code can
+      // mint, so external callers cannot forge it. The public flag
+      // keeps its V10 ACK-path semantic but no longer controls the
+      // guard decision. Verify the bypass is closed: a reserved-prefix
+      // quad passed to `publish()` with `fromSharedMemory: true` from
+      // an external caller is still rejected with a ReservedNamespaceError.
+      await expect(
+        publishWS({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q('urn:dkg:file:keccak256:bypass', 'http://schema.org/name', '"external bypass attempt"')],
+          fromSharedMemory: true,
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('Round 12 Bug 34: external publish with a non-reserved quad and `fromSharedMemory: true` still succeeds (V10 ACK-path semantic preserved)', async () => {
+      // Scope guard: the Round 12 change must not break legitimate
+      // external uses of `fromSharedMemory: true` that carry only
+      // non-reserved quads. The flag's V10 ACK-path optimization
+      // meaning (`core nodes verify against local SWM copy, no inline
+      // staging quads`) is independent of the guard decision — it
+      // continues to work as before.
+      //
+      // Previously this test only asserted `.resolves.toBeDefined()` —
+      // which would pass even if the publisher returned a failed/empty
+      // result. Tighten to check the actual PublishResult shape: status
+      // must be one of the valid terminal values, UAL must exist, and
+      // at least one KA manifest entry must be present for the single
+      // root entity in the input.
+      const result = await publishWS({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q(ENTITY, 'http://schema.org/name', '"fromSharedMemory-with-legit-quads"')],
+        fromSharedMemory: true,
+      });
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.ual).toMatch(/^did:dkg:/);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
+    });
+
+    it('Round 12 Bug 34: internal promote→publish path (via publishFromSharedMemory) still bypasses the guard', async () => {
+      // The critical internal-callers-still-work test. Seed the
+      // context graph with a reserved-prefix quad directly in SWM
+      // (mimicking what the daemon's import-file handler writes via
+      // its direct store.insert bypass), then call
+      // publishFromSharedMemory which reads from SWM and calls
+      // publish() internally with the INTERNAL_ORIGIN_TOKEN.
+      //
+      // Under Round 9's flag-based discriminator, this worked
+      // because publishFromSharedMemory set fromSharedMemory: true.
+      // Under Round 12's Symbol-based discriminator, it works
+      // because publishFromSharedMemory now mints the token
+      // internally. The test proves the internal path still has
+      // the bypass without requiring a public flag.
+      //
+      // We exercise this indirectly: publishFromSharedMemory first
+      // requires some non-empty SWM content, so we share a
+      // legitimate quad first, then publish it. The share is the
+      // user-facing write path (guarded correctly for user quads),
+      // and the publishFromSharedMemory is the internal read-back
+      // path (bypass correctly triggered via the token).
+      await publisher.share(
+        CONTEXT_GRAPH,
+        [q(ENTITY, 'http://schema.org/name', '"internal-path-test"')],
+        { publisherPeerId: 'peer-internal', localOnly: true },
+      );
+      await seedContextGraphRegistration(store, CONTEXT_GRAPH);
+      // RC11 / PR2: on-chain publishes via publishFromSharedMemory
+      // need a precomputedAttestation over the exact public-data-graph
+      // quads the publisher will select. Mint one matching the share()
+      // above.
+      const selectedQuads = [{
+        subject: ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"internal-path-test"',
+        graph: GRAPH,
+      }];
+      const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+        precomputedAttestation: await buildSeal({
+          quads: selectedQuads,
+          author: _author,
+          contextGraphId: CONTEXT_GRAPH,
+          ctx: { provider: _provider, kav10Address: _kav10Address },
+        }),
+      });
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest.some(ka => ka.rootEntity === ENTITY)).toBe(true);
+    });
+
+    it('Round 12 Bug 34: update() rejects reserved-prefix quads (Bucket A hole closed)', async () => {
+      // Codex Bug 34 second hole: `update()` accepted `PublishOptions`
+      // (the same type as `publish()`) but had no reserved-namespace
+      // guard at all. An external caller could write any reserved-
+      // prefix quads via update() regardless of what publish() did.
+      // Round 12 added the same guard to update() using the same
+      // internal-token discriminator.
+      //
+      // We can't actually reach the on-chain part of update() in a
+      // unit test (it expects an existing kaId to update), but the
+      // guard fires at the very top of the method BEFORE any chain
+      // interaction — so the reserved-namespace rejection surfaces
+      // independently of whether the kaId exists.
+      await expect(
+        updateWS(0n, {
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q('urn:dkg:file:keccak256:update-leak', 'http://schema.org/name', '"update bypass"')],
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('Round 12 Bug 34: update() rejects reserved-prefix privateQuads (parallel to publish)', async () => {
+      await expect(
+        updateWS(0n, {
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q(ENTITY, 'http://schema.org/name', '"ok"')],
+          privateQuads: [
+            q('urn:dkg:extraction:update-leak-uuid', 'http://schema.org/secret', '"private update leak"'),
+          ],
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('Round 12 Bug 34: external update with `fromSharedMemory: true` and a reserved quad is ALSO rejected (bypass closure is symmetric)', async () => {
+      // Same bypass closure as publish — external callers cannot use
+      // the public flag to bypass update()'s guard either.
+      await expect(
+        updateWS(0n, {
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q('urn:dkg:file:keccak256:upd-bypass', 'http://schema.org/name', '"external bypass"')],
+          fromSharedMemory: true,
+        }),
+      ).rejects.toThrow(/reserved namespace/i);
+    });
+
+    it('Round 12 Bug 35: assertionPromote filter is built from RESERVED_SUBJECT_PREFIXES (single source of truth)', async () => {
+      // Round 4 Bug 8 filter historically hardcoded the two prefix
+      // literals inline, creating a duplication with the
+      // `RESERVED_SUBJECT_PREFIXES` constant at the top of the file.
+      // Round 12 Bug 35 replaced the hardcoded literals with a
+      // `.some(prefix => q.subject.startsWith(prefix))` loop over
+      // the constant. This test locks in the SSOT property: every
+      // prefix currently in the constant is correctly stripped
+      // from the promoted quad set, so extending the constant with
+      // a new prefix would automatically propagate to the filter.
+      //
+      // We construct a data-graph with one quad per reserved prefix
+      // (plus one non-reserved quad), promote, and assert only the
+      // non-reserved quad survives.
+      //
+      // NOTE: this test asserts filter BEHAVIOUR, not the exact
+      // source text — if someone replaces the filter with a
+      // functionally-equivalent but differently-shaped check
+      // (e.g., a Set lookup or a regex), this test still passes
+      // as long as the behaviour is correct.
+      const dataGraph = await publisher.assertionCreate(
+        CONTEXT_GRAPH,
+        'bug35-ssot',
+        TEST_PUBLISHER_ADDRESS,
+      );
+      const reservedQuads: Quad[] = RESERVED_SUBJECT_PREFIXES.map((prefix, i) => ({
+        subject: `${prefix}synthetic-${i}`,
+        predicate: 'http://schema.org/name',
+        object: `"reserved-${i}"`,
+        graph: dataGraph,
+      }));
+      const legitQuad: Quad = {
+        subject: ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"legit"',
+        graph: dataGraph,
+      };
+      // Insert directly into the store bypassing the write guard
+      // (the daemon-equivalent bypass path).
+      await store.insert([...reservedQuads, legitQuad]);
+      // Ensure an assertion graph exists by calling assertion.create
+      // through the publisher API (idempotent). A bare empty catch here
+      // was swallowing ANY failure mode of assertionWrite — including
+      // real regressions (schema validation, permission check, store
+      // error). Narrow to the specific "already-exists / duplicate"
+      // class that this setup step is allowed to absorb.
+      try {
+        await publisher.assertionWrite(
+          CONTEXT_GRAPH,
+          'bug35-ssot',
+          TEST_PUBLISHER_ADDRESS,
+          [legitQuad],
+        );
+      } catch (err) {
+        const msg = String((err as Error)?.message ?? err);
+        if (!/already|exist|duplicate|idempotent|no[- ]op/i.test(msg)) {
+          throw err;
+        }
+      }
+      const finalized = await finalizeRootlessAssertionForTest({
+        publisher,
+        store,
+        contextGraphId: CONTEXT_GRAPH,
+        name: 'bug35-ssot',
+        agentAddress: TEST_PUBLISHER_ADDRESS,
+      });
+      const result = await publisher.assertionPromote(
+        CONTEXT_GRAPH,
+        'bug35-ssot',
+        TEST_PUBLISHER_ADDRESS,
+      );
+      // The promote call doesn't return the promoted quad set
+      // directly, but we can query the SWM graph post-promote and
+      // assert that none of the reserved subjects landed there.
+      expect(result.promotedCount).toBeGreaterThan(0);
+      const swmGraph = finalized.graphUri.replace('/_working_memory/', '/_shared_memory/');
+      const swmCheck = await store.query(
+        `ASK { GRAPH <${swmGraph}> { ?s ?p ?o . FILTER(${RESERVED_SUBJECT_PREFIXES.map(p => `STRSTARTS(STR(?s), "${p}")`).join(' || ')}) } }`,
+      );
+      expect(swmCheck.type).toBe('boolean');
+      if (swmCheck.type === 'boolean') {
+        expect(swmCheck.value).toBe(false);
+      }
+    });
+
+    // ── Round 14 Bug 41: case-insensitive URN comparison ──
+    //
+    // Per RFC 8141 §3.1, the URN scheme (`urn:`) and NID (`dkg`) are
+    // case-insensitive for equivalence. `URN:dkg:file:abc`,
+    // `urn:DKG:file:abc`, and `urn:dkg:file:abc` are the same resource.
+    // The reserved prefixes `urn:dkg:file:` and `urn:dkg:extraction:`
+    // live entirely in the scheme+NID range, so case-insensitive
+    // comparison on the whole subject is the correct check.
+    //
+    // Round 9 Bug 25 and Round 12 Bug 35 both used byte-level
+    // `startsWith`, so mixed-case variants bypassed both the write-
+    // time guard AND the promote-time filter. Round 14 introduced
+    // the `isReservedSubject` helper that lowercases before matching,
+    // and both enforcement sites now route through it.
+    describe('Round 14 Bug 41: case-insensitive URN comparison', () => {
+      it('write-time: publish rejects `URN:dkg:file:keccak256:*` (scheme uppercase)', async () => {
+        await expect(
+          publishWS({
+            contextGraphId: CONTEXT_GRAPH,
+            quads: [q('URN:dkg:file:keccak256:mixedcase', 'http://schema.org/name', '"bypass attempt"')],
+          }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: publish rejects `urn:DKG:file:keccak256:*` (NID uppercase)', async () => {
+        await expect(
+          publishWS({
+            contextGraphId: CONTEXT_GRAPH,
+            quads: [q('urn:DKG:file:keccak256:nidcase', 'http://schema.org/name', '"bypass attempt"')],
+          }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: publish rejects `Urn:Dkg:File:keccak256:*` (mixed case across scheme+NID+NSS)', async () => {
+        await expect(
+          publishWS({
+            contextGraphId: CONTEXT_GRAPH,
+            quads: [q('Urn:Dkg:File:keccak256:allcase', 'http://schema.org/name', '"bypass attempt"')],
+          }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: publish rejects `URN:dkg:extraction:*` (parallel for the extraction namespace)', async () => {
+        await expect(
+          publishWS({
+            contextGraphId: CONTEXT_GRAPH,
+            quads: [q('URN:dkg:extraction:11111111-2222-3333-4444-555555555555', 'http://schema.org/name', '"bypass attempt"')],
+          }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: assertionWrite rejects mixed-case reserved prefix (Bucket A guard covers assertionWrite too)', async () => {
+        await expect(
+          publisher.assertionWrite(CONTEXT_GRAPH, 'bug41-assertion', TEST_PUBLISHER_ADDRESS, [
+            { subject: 'URN:DKG:file:keccak256:assertion', predicate: 'http://schema.org/name', object: '"bypass"' },
+          ]),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: share rejects mixed-case reserved prefix (Bucket A guard covers share too)', async () => {
+        await expect(
+          publisher.share(CONTEXT_GRAPH, [
+            { subject: 'URN:dkg:file:keccak256:share', predicate: 'http://schema.org/name', object: '"bypass"', graph: '' },
+          ], { publisherPeerId: 'peer-test' }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('write-time: update rejects mixed-case reserved prefix (Bucket A coverage from Round 12 Bug 34)', async () => {
+        await expect(
+          updateWS(0n, {
+            contextGraphId: CONTEXT_GRAPH,
+            quads: [q('URN:dkg:extraction:update-bypass', 'http://schema.org/name', '"bypass"')],
+          }),
+        ).rejects.toThrow(/reserved namespace/i);
+      });
+
+      it('promote-time: assertionPromote filter strips `URN:dkg:file:*` subjects (case-insensitive)', async () => {
+        // Insert quads with uppercase-scheme reserved subjects
+        // directly into the store (bypassing the write guard, as
+        // the daemon's import-file handler does). Then promote and
+        // verify the uppercase variants are filtered out along with
+        // the lowercase canonical form.
+        const dataGraph = await publisher.assertionCreate(
+          CONTEXT_GRAPH,
+          'bug41-promote',
+          TEST_PUBLISHER_ADDRESS,
+        );
+        const mixedCaseReserved: Quad[] = [
+          { subject: 'URN:dkg:file:keccak256:upper', predicate: 'http://schema.org/name', object: '"upper-reserved"', graph: dataGraph },
+          { subject: 'urn:DKG:extraction:caseNID', predicate: 'http://schema.org/name', object: '"nid-reserved"', graph: dataGraph },
+        ];
+        const legit: Quad = { subject: ENTITY, predicate: 'http://schema.org/name', object: '"legit"', graph: dataGraph };
+        await store.insert([...mixedCaseReserved, legit]);
+        // Same reasoning as Bug 35 test — assertionWrite may reject
+        // with an "already-exists" / idempotent error because the data
+        // graph was populated by the direct `store.insert` above. Any
+        // OTHER error class (schema, permission, store failure) is a
+        // real regression and must re-throw instead of being absorbed.
+        try {
+          await publisher.assertionWrite(CONTEXT_GRAPH, 'bug41-promote', TEST_PUBLISHER_ADDRESS, [legit]);
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err);
+          if (!/already|exist|duplicate|idempotent|no[- ]op/i.test(msg)) {
+            throw err;
+          }
+        }
+
+        const finalized = await finalizeRootlessAssertionForTest({
+          publisher,
+          store,
+          contextGraphId: CONTEXT_GRAPH,
+          name: 'bug41-promote',
+          agentAddress: TEST_PUBLISHER_ADDRESS,
+        });
+
+        const result = await publisher.assertionPromote(
+          CONTEXT_GRAPH,
+          'bug41-promote',
+          TEST_PUBLISHER_ADDRESS,
+        );
+        expect(result.promotedCount).toBeGreaterThan(0);
+
+        const swmGraph = finalized.graphUri.replace('/_working_memory/', '/_shared_memory/');
+        // Use a SPARQL ASK that matches ANY case of the reserved
+        // prefixes (LCASE both sides of the comparison).
+        const swmCheck = await store.query(
+          `ASK { GRAPH <${swmGraph}> { ?s ?p ?o . FILTER(STRSTARTS(LCASE(STR(?s)), "urn:dkg:file:") || STRSTARTS(LCASE(STR(?s)), "urn:dkg:extraction:")) } }`,
+        );
+        expect(swmCheck.type).toBe('boolean');
+        if (swmCheck.type === 'boolean') {
+          expect(swmCheck.value).toBe(false);
+        }
+      });
+
+      it('scope guard: non-reserved subjects (including `urn:dkg:filesystem:`) are NOT over-matched', async () => {
+        // The trailing colon in `urn:dkg:file:` forces an exact
+        // match on `file:`, so `urn:dkg:filesystem:foo` must NOT
+        // match even as a byte sequence. Verify with a concrete
+        // near-miss subject that shares a prefix substring.
+        //
+        // `.resolves.toBeDefined()` alone is too weak: it is also
+        // satisfied by `publish()` returning a junk default object
+        // or a `status: 'failed'` result. Pin BOTH invariants:
+        //   1. The promise resolves (the scope guard did NOT throw).
+        //   2. The result shape is a real `PublishResult` with a
+        //      non-empty UAL — i.e. the quad was accepted and a KC
+        //      was created, not silently dropped.
+        const result = await publishWS({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q('urn:dkg:filesystem:foo', 'http://schema.org/name', '"near-miss"')],
+        });
+        expect(result.ual).toMatch(/^did:dkg:/);
+        expect(result.kaId).toBeGreaterThan(0n);
+        expect(result.status === 'confirmed' || result.status === 'tentative').toBe(true);
+      });
+
+      it('scope guard: plain `http://` subjects are NOT rejected by the case-insensitive helper', async () => {
+        // Make sure lowercasing the subject doesn't accidentally
+        // match a non-reserved scheme. Regression guard against a
+        // future edit that might over-broaden the check.
+        //
+        // Same shape-assertion tightening as the `filesystem:` case
+        // above — `toBeDefined()` alone could hide a regression that
+        // returns a skeleton failed-result shape while still being
+        // "defined".
+        const result = await publishWS({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [q('http://example.com/bug41-notreserved', 'http://schema.org/name', '"legit"')],
+        });
+        expect(result.ual).toMatch(/^did:dkg:/);
+        expect(result.kaId).toBeGreaterThan(0n);
+        expect(result.status === 'confirmed' || result.status === 'tentative').toBe(true);
+      });
+    });
+  });
+
+  describe('sub-graph registration validation on share()', () => {
+    it('rejects SWM write to unregistered sub-graph', async () => {
+      await publishWS({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
+      });
+
+      await expect(
+        publisher.share(CONTEXT_GRAPH, [
+          q(ENTITY, 'http://schema.org/name', '"Updated"'),
+        ], {
+          subGraphName: 'never-registered',
+          publisherPeerId: 'QmTestPeer',
+        }),
+      ).rejects.toThrow('has not been registered');
+    });
+
+    it('allows SWM write without sub-graph (root CG)', async () => {
+      // `share()` returns a `ShareResult` with `{ shareOperationId,
+      // message }`. `toBeDefined()` alone would accept `{}` or a
+      // skeleton object; pin both fields so a regression that
+      // silently swallows the write (and returns a dummy shape) is
+      // caught.
+      const result = await publisher.share(CONTEXT_GRAPH, [
+        q('urn:test:new-entity', 'http://schema.org/name', '"Fresh Write"'),
+      ], {
+        publisherPeerId: 'QmTestPeer',
+      });
+      expect(result.shareOperationId).toMatch(/.+/);
+      expect(result.message).toBeInstanceOf(Uint8Array);
+      expect(result.message.length).toBeGreaterThan(0);
+    });
   });
 });

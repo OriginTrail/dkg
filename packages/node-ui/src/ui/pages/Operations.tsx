@@ -8,31 +8,18 @@ import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
   fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
+  fetchReplicationSummary, fetchReplicationPerCg, fetchReplicationTimeline,
+  fetchReplicationCursors, fetchReplicationEvents,
+  type ReplicationPerCgRow,
 } from '../api.js';
-
-const PHASE_COLORS: Record<string, string> = {
-  prepare: '#3b82f6',
-  'prepare:ensureParanet': '#60a5fa',
-  'prepare:partition': '#2563eb',
-  'prepare:manifest': '#93c5fd',
-  'prepare:validate': '#1d4ed8',
-  'prepare:merkle': '#7dd3fc',
-  store: '#8b5cf6',
-  chain: '#f59e0b',
-  'chain:sign': '#fbbf24',
-  'chain:submit': '#d97706',
-  'chain:metadata': '#f97316',
-  broadcast: '#22c55e',
-  decode: '#14b8a6',
-  validate: '#2dd4bf',
-  'read-workspace': '#06b6d4',
-  parse: '#3b82f6',
-  execute: '#8b5cf6',
-  transfer: '#60a5fa',
-  verify: '#22c55e',
-};
-
-const PHASE_FALLBACK_COLOR = '#a78bfa';
+// P-1 review: shared phase palette — single source of truth for
+// phase → colour AND the Operations legend. Previously Dashboard
+// and Operations kept two independent maps that drifted.
+import {
+  PHASE_COLORS,
+  PHASE_FALLBACK_COLOR,
+  PHASE_LEGEND_ENTRIES,
+} from '../phase-colors.js';
 
 const STATUS_COLORS: Record<string, string> = {
   success: '#22c55e',
@@ -44,6 +31,12 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
   store: 'Inserting triples into the local triple store and data graph.',
   chain: 'Submitting on-chain tx and waiting for confirmation.',
+  // Codex PR #241 review (iter-2): the legend renders one row per
+  // entry in `PHASE_LEGEND_ENTRIES`, including the sub-phase
+  // `chain:writeahead`. Without a matching description here the
+  // hover tooltip came back empty. Describe the boundary explicitly
+  // so operators can see what recovery state the WAL entry covers.
+  'chain:writeahead': 'Publish/update tx about to hit the wire — recovery window for "broadcast without receipt" crashes.',
   broadcast: 'Broadcasting to network peers via GossipSub.',
   parse: 'Validating and parsing the SPARQL query syntax.',
   execute: 'Running the SPARQL query against the local triple store.',
@@ -52,41 +45,40 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const OP_TYPE_COLORS: Record<string, string> = {
-  publish: '#3b82f6',
-  update: '#14b8a6',
-  query: '#8b5cf6',
-  workspace: '#f59e0b',
-  enshrine: '#22c55e',
-  connect: '#06b6d4',
-  sync: '#ec4899',
-  gossip: '#f97316',
-  system: '#6b7280',
+  publish:        '#22c55e',
+  publishFromSWM: '#16a34a',
+  update:         '#14b8a6',
+  'ka-update':    '#0d9488',
+  query:          '#8b5cf6',
+  resolve:        '#a78bfa',
+  workspace:      '#f59e0b',
+  connect:        '#06b6d4',
+  sync:           '#ec4899',
+  share:          '#f472b6',
+  gossip:         '#f97316',
+  reconstruct:    '#fb923c',
+  verify:         '#84cc16',
+  init:           '#94a3b8',
+  system:         '#6b7280',
 };
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish: 'Create a new Knowledge Asset on the DKG',
-  update: 'Update an existing Knowledge Asset',
-  query: 'Run a SPARQL query against the knowledge graph',
-  workspace: 'Manage a local workspace for staging changes',
-  enshrine: 'Anchor a Knowledge Collection on-chain to a paranet',
-  connect: 'Establish a connection with a network peer',
-  sync: 'Synchronize knowledge data with remote peers',
-  gossip: 'Propagate updates across the peer-to-peer network',
-  system: 'Internal system maintenance operation',
+  publish:        'Publish a Knowledge Asset on-chain to a context graph',
+  publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
+  update:         'Update an existing Knowledge Asset on-chain',
+  'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
+  query:          'Run a SPARQL query against the knowledge graph',
+  resolve:        'Resolve a Knowledge Asset from the network',
+  workspace:      'Manage shared memory for staging changes',
+  connect:        'Establish a connection with a network peer',
+  sync:           'Synchronize knowledge data with remote peers',
+  share:          'Share a SWM delta with subscribed peers',
+  gossip:         'Propagate updates across the peer-to-peer network via GossipSub',
+  reconstruct:    'Reconstruct a Knowledge Asset from distributed shares',
+  verify:         'Verify Merkle proofs and assert data integrity',
+  init:           'Node or component initialisation sequence',
+  system:         'Internal system maintenance operation',
 };
-
-const PHASE_LEGEND_ENTRIES = [
-  { phase: 'prepare', label: 'Prepare', color: '#3b82f6' },
-  { phase: 'store', label: 'Store', color: '#8b5cf6' },
-  { phase: 'chain', label: 'Chain', color: '#f59e0b' },
-  { phase: 'broadcast', label: 'Broadcast', color: '#22c55e' },
-  { phase: 'parse', label: 'Parse', color: '#3b82f6' },
-  { phase: 'execute', label: 'Execute', color: '#8b5cf6' },
-  { phase: 'transfer', label: 'Transfer', color: '#60a5fa' },
-  { phase: 'verify', label: 'Verify', color: '#22c55e' },
-  { phase: 'decode', label: 'Decode', color: '#14b8a6' },
-  { phase: 'validate', label: 'Validate', color: '#2dd4bf' },
-];
 
 const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text)' };
 
@@ -164,17 +156,206 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 }
 
 export function ObservabilitySection() {
-  const [tab, setTab] = useState<'operations' | 'general' | 'logs' | 'errors'>('operations');
+  const [tab, setTab] = useState<'operations' | 'replication' | 'hardware' | 'logs' | 'errors'>('operations');
 
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
         <button className={`tab-item ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
-        <button className={`tab-item ${tab === 'general' ? 'active' : ''}`} onClick={() => setTab('general')}>Performance</button>
+        <button className={`tab-item ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button className={`tab-item ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
         <button className={`tab-item ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
         <button className={`tab-item ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
       </div>
-      {tab === 'operations' ? <OperationsTab /> : tab === 'general' ? <StatsTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
+      {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
+    </div>
+  );
+}
+
+/* ================================================================
+   Replication Tab (chain-driven VM reconciliation) — Phase F
+   ================================================================ */
+
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
+}
+
+function ReplicationTab() {
+  const [period, setPeriod] = useState('24h');
+  const [selectedCg, setSelectedCg] = useState<string | null>(null);
+  const periodMs = periodToMs(period);
+
+  const { data: summary } = useFetch(() => fetchReplicationSummary(periodMs), [periodMs], 5_000);
+  const { data: perCgData } = useFetch(() => fetchReplicationPerCg(periodMs), [periodMs], 5_000);
+  const { data: cursorsData } = useFetch(() => fetchReplicationCursors(), [], 5_000);
+  const { data: timelineData } = useFetch(
+    () => fetchReplicationTimeline({ periodMs, bucketMs: Math.max(60_000, Math.floor(periodMs / 48)), cg: selectedCg ?? undefined }),
+    [periodMs, selectedCg],
+    5_000,
+  );
+  const { data: eventsData } = useFetch(
+    () => (selectedCg ? fetchReplicationEvents(selectedCg, 100) : Promise.resolve(null)),
+    [selectedCg],
+    5_000,
+  );
+
+  const perCg: ReplicationPerCgRow[] = perCgData?.rows ?? [];
+  const cursors = cursorsData?.cursors ?? [];
+  const buckets = (timelineData?.buckets ?? []).map((b) => ({ ...b, t: formatTime(b.bucket) }));
+  const events = eventsData?.events ?? [];
+
+  const successPct = summary?.successRate != null ? `${(summary.successRate * 100).toFixed(0)}%` : '—';
+
+  return (
+    <div>
+      <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+        <PeriodSelect value={period} onChange={setPeriod} />
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          Chain-anchored publishes reconciled into Verifiable Memory. Auto-refreshes every 5s.
+        </span>
+      </div>
+
+      {/* KPI cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="card-title">Promotions</div>
+          <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>landed in VM this period</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="card-title">Success rate</div>
+          <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>promote / (promote + defer)</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="card-title">Promotion latency</div>
+          <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
+        </div>
+        <div className="card" style={{ padding: 16 }}>
+          <div className="card-title">Active fetches</div>
+          <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>core-first catch-up pulls</div>
+        </div>
+      </div>
+
+      {/* Timeline */}
+      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>
+          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
+        </div>
+        {buckets.length === 0 ? (
+          <div className="empty-state empty-state--compact">
+            <div className="empty-state-title">No reconciliation activity</div>
+            <div className="empty-state-desc">No chain-driven VM promotions recorded in this period.</div>
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={buckets}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="t" tick={{ fontSize: 11 }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <Tooltip />
+              <Legend />
+              <Area type="monotone" dataKey="promotes" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.5} name="promotes" />
+              <Area type="monotone" dataKey="fetches" stackId="1" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.4} name="fetches" />
+              <Area type="monotone" dataKey="defers" stackId="1" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.4} name="defers" />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Cursor inspector */}
+      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+          Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
+        </p>
+        {cursors.length === 0 ? (
+          <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
+        ) : (
+          <table className="data-table">
+            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
+            <tbody>
+              {cursors.map((c) => {
+                const wm = c.last_reconciled_ordinal ?? 0;
+                const head = c.last_head ?? null;
+                const lag = head != null ? Math.max(0, head - wm) : null;
+                return (
+                  <tr key={c.context_graph_id}>
+                    <td className="mono">{c.context_graph_id}</td>
+                    <td className="mono">{c.on_chain_id ?? '—'}</td>
+                    <td>{c.core_hosted ? <span className="badge badge-info" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">host</span> : <span className="badge">member</span>}</td>
+                    <td>{wm}</td>
+                    <td>{head ?? '—'}</td>
+                    <td>{lag == null ? '—' : <span className={`badge ${lag === 0 ? 'badge-success' : 'badge-error'}`}>{lag}</span>}</td>
+                    <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Per-CG activity */}
+      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
+        {perCg.length === 0 ? (
+          <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
+        ) : (
+          <table className="data-table">
+            <thead><tr><th>Context graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
+            <tbody>
+              {perCg.map((r) => (
+                <tr
+                  key={r.context_graph_id}
+                  onClick={() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id)}
+                  style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover, rgba(255,255,255,0.04))' : undefined }}
+                >
+                  <td className="mono">{r.context_graph_id}</td>
+                  <td>{r.promotes}</td>
+                  <td>{r.fetches}</td>
+                  <td>{r.defers}</td>
+                  <td>{r.cursor_advances}</td>
+                  <td>{r.last_watermark ?? '—'}</td>
+                  <td>{r.last_event_ts ? formatTime(r.last_event_ts) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Event stream drawer */}
+      {selectedCg && (
+        <div className="card" style={{ padding: 16 }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
+          {events.length === 0 ? (
+            <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
+          ) : (
+            <table className="data-table">
+              <thead><tr><th>Time</th><th>Action</th><th>Ordinal</th><th>Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
+              <tbody>
+                {events.map((e, i) => (
+                  <tr key={i}>
+                    <td>{formatTime(e.ts)}</td>
+                    <td><span className={`badge ${e.action === 'promote' ? 'badge-success' : e.action === 'defer' ? 'badge-error' : ''}`}>{e.action}</span></td>
+                    <td>{e.ordinal ?? '—'}</td>
+                    <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
+                    <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
+                    <td className="mono">{e.detail ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -351,9 +532,17 @@ const GRANULARITY_OPTIONS = [
   { value: String(86_400_000), label: '1 day' },
 ];
 
-function StatsTab() {
+function OperationsTabWithStats() {
+  return (
+    <div>
+      <OperationStatsSection />
+      <OperationsTab />
+    </div>
+  );
+}
+
+function OperationStatsSection() {
   const [period, setPeriod] = useState('3h');
-  const [subTab, setSubTab] = useState<'operations' | 'hardware'>('operations');
   const [granularity, setGranularity] = useState('0');
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
 
@@ -361,10 +550,6 @@ function StatsTab() {
   const bucketMs = granularity === '0' ? undefined : parseInt(granularity, 10);
   const { data: ratesData } = useFetch(() => fetchSuccessRates(pMs), [pMs], 15_000);
   const { data: perType } = useFetch(() => fetchPerTypeStats(pMs, bucketMs), [pMs, bucketMs], 15_000);
-  const { data: hwData } = useFetch(
-    () => fetchMetricsHistory(Date.now() - pMs, Date.now(), 200),
-    [pMs], 30_000,
-  );
   const rates = ratesData?.rates ?? [];
 
   const timeFmt = useMemo((): Intl.DateTimeFormatOptions => {
@@ -390,16 +575,6 @@ function StatsTab() {
     });
   }, [perType]);
 
-  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: any) => ({
-    time: new Date(s.ts).toLocaleString(undefined, timeFmt),
-    cpu: s.cpu_percent ?? 0,
-    memGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(2) : 0,
-    heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(1) : 0,
-    diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : 0,
-    peers: s.peer_count ?? 0,
-    rpcMs: s.rpc_latency_ms ?? 0,
-  })), [hwData]);
-
   const types = perType?.types ?? [];
   const hasCharts = perTypeChartData.length > 1;
 
@@ -419,7 +594,7 @@ function StatsTab() {
   }, [hiddenSeries]);
 
   return (
-    <div>
+    <div style={{ marginBottom: 16 }}>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -428,25 +603,8 @@ function StatsTab() {
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
         </div>
-        <div style={{ display: 'flex', gap: 0, marginLeft: 8, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)' }}>
-          {(['operations', 'hardware'] as const).map(t => (
-            <button
-              key={t}
-              onClick={() => setSubTab(t)}
-              style={{
-                padding: '5px 14px', fontSize: 11, fontWeight: 600, cursor: 'pointer', border: 'none',
-                background: subTab === t ? 'var(--green-dim)' : 'var(--surface)',
-                color: subTab === t ? 'var(--green)' : 'var(--text-muted)',
-                textTransform: 'capitalize',
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
       </div>
 
-      {subTab === 'operations' ? (
         <>
           {/* Per-operation-type cards */}
           {rates.length > 0 && (
@@ -565,79 +723,155 @@ function StatsTab() {
             </div>
           )}
         </>
+    </div>
+  );
+}
+
+function HardwareTab() {
+  const [period, setPeriod] = useState('3h');
+  const pMs = periodToMs(period);
+  const timeFmt = useMemo((): Intl.DateTimeFormatOptions => {
+    if (pMs <= 86_400_000) return { hour: '2-digit', minute: '2-digit' };
+    return { month: 'short', day: 'numeric', hour: '2-digit' };
+  }, [pMs]);
+
+  const { data: hwData } = useFetch(
+    () => fetchMetricsHistory(Date.now() - pMs, Date.now(), 200),
+    [pMs], 10_000,
+  );
+
+  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: any) => ({
+    time: new Date(s.ts).toLocaleString(undefined, timeFmt),
+    cpu: s.cpu_percent ?? 0,
+    memGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(2) : 0,
+    heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(1) : 0,
+    diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : 0,
+    peers: s.peer_count ?? 0,
+    rpcMs: s.rpc_latency_ms ?? 0,
+  })), [hwData, timeFmt]);
+
+  const hw = useMemo(() => {
+    const snaps = hwData?.snapshots ?? [];
+    if (!snaps.length) return null;
+    const s = snaps[snaps.length - 1];
+    return {
+      cpu: s.cpu_percent ?? 0,
+      memUsedGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(1) : 0,
+      memTotalGB: s.mem_total_bytes ? +(s.mem_total_bytes / (1024 ** 3)).toFixed(1) : 0,
+      memPct: s.mem_total_bytes ? Math.round((s.mem_used_bytes / s.mem_total_bytes) * 100) : 0,
+      heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(0) : 0,
+      diskUsedGB: s.disk_used_bytes ? +(s.disk_used_bytes / (1024 ** 3)).toFixed(1) : null,
+      diskTotalGB: s.disk_total_bytes ? +(s.disk_total_bytes / (1024 ** 3)).toFixed(1) : null,
+      diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : null,
+      peers: s.peer_count ?? 0,
+      rpcMs: s.rpc_latency_ms ?? null,
+    };
+  }, [hwData]);
+
+  const loading = !hw;
+  const statCards = [
+    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, color: hw ? (hw.cpu > 80 ? '#ef4444' : hw.cpu > 60 ? '#f59e0b' : '#3b82f6') : '#374151' },
+    { label: 'RAM', value: hw ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : '—', sub: hw ? `${hw.memPct}% used` : 'waiting…', pct: hw ? hw.memPct : null, color: hw ? (hw.memPct > 85 ? '#ef4444' : hw.memPct > 70 ? '#f59e0b' : '#8b5cf6') : '#374151' },
+    { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, color: hw ? '#06b6d4' : '#374151' },
+    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, color: hw ? (hw.diskPct !== null ? (hw.diskPct > 85 ? '#ef4444' : '#f59e0b') : '#6b7280') : '#374151' },
+  ];
+
+  return (
+    <div>
+      <div className="filters" style={{ marginBottom: 16 }}>
+        <PeriodSelect value={period} onChange={setPeriod} />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
+        {statCards.map(stat => (
+          <div key={stat.label} className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: stat.color, lineHeight: 1, marginBottom: 3 }}>{stat.value}</div>
+            {stat.pct !== null ? (
+              <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, margin: '5px 0 3px' }}>
+                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: stat.color, borderRadius: 2, transition: 'width .4s ease' }} />
+              </div>
+            ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
+            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{stat.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
+        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? '#22c55e' : '#374151', lineHeight: 1 }}>{hw ? hw.peers : '—'}</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
+        </div>
+        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? (hw.rpcMs !== null && hw.rpcMs > 500 ? '#ef4444' : '#22c55e') : '#374151', lineHeight: 1 }}>
+            {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
+        </div>
+      </div>
+
+      {hwChartData.length > 1 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div className="card" style={{ padding: '12px 14px' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>CPU Usage (%)</div>
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={hwChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Area type="monotone" dataKey="cpu" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="CPU %" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card" style={{ padding: '12px 14px' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Memory & Heap</div>
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={hwChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
+                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 9 }} />
+                <Area type="monotone" dataKey="memGB" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Sys RAM (GB)" />
+                <Area type="monotone" dataKey="heapMB" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Heap (MB)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card" style={{ padding: '12px 14px' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Disk Usage (%)</div>
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={hwChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Area type="monotone" dataKey="diskPct" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="Disk %" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card" style={{ padding: '12px 14px' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Network & RPC</div>
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={hwChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
+                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="left" />
+                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="right" orientation="right" />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 9 }} />
+                <Area type="monotone" dataKey="peers" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Peers" yAxisId="left" />
+                <Area type="monotone" dataKey="rpcMs" stroke="#ef4444" fill="#ef4444" fillOpacity={0.08} strokeWidth={1.5} dot={false} name="RPC (ms)" yAxisId="right" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       ) : (
-        <>
-          {hwChartData.length > 1 ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>CPU Usage (%)</div>
-                <ResponsiveContainer width="100%" height={150}>
-                  <AreaChart data={hwChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Area type="monotone" dataKey="cpu" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="CPU %" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Memory & Heap</div>
-                <ResponsiveContainer width="100%" height={150}>
-                  <AreaChart data={hwChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    <Area type="monotone" dataKey="memGB" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Sys RAM (GB)" />
-                    <Area type="monotone" dataKey="heapMB" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Heap (MB)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Disk Usage (%)</div>
-                <ResponsiveContainer width="100%" height={150}>
-                  <AreaChart data={hwChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Area type="monotone" dataKey="diskPct" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="Disk %" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Network & RPC</div>
-                <ResponsiveContainer width="100%" height={150}>
-                  <AreaChart data={hwChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="left" />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="right" orientation="right" />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    <Area type="monotone" dataKey="peers" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Peers" yAxisId="left" />
-                    <Area type="monotone" dataKey="rpcMs" stroke="#ef4444" fill="#ef4444" fillOpacity={0.08} strokeWidth={1.5} dot={false} name="RPC (ms)" yAxisId="right" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          ) : (
-            <div className="card">
-              <div className="empty-state empty-state--compact">
-                <div className="empty-state-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
-                </div>
-                <div className="empty-state-title">Collecting hardware metrics</div>
-                <div className="empty-state-desc">Data is sampled every 30 seconds. Charts will appear shortly.</div>
-              </div>
-            </div>
-          )}
-        </>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'center', padding: '8px 0' }}>
+          History charts appear after a second snapshot (~30 s)
+        </div>
       )}
     </div>
   );
@@ -650,13 +884,33 @@ function StatsTab() {
 function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
   const [hover, setHover] = useState<number | null>(null);
 
-  if (!phases?.length || totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
+  if (!phases?.length) return <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic' }}>event-based</span>;
+  if (totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
   const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
   return (
-    <div style={{ position: 'relative', minWidth: 80, maxWidth: 180 }}>
-      <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+    <div style={{ position: 'relative', minWidth: 120, maxWidth: 260 }}>
+      {/* Phase label pills */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
         {phases.map((p: any, i: number) => {
-          const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 2);
+          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+          return (
+            <span key={`label-${p.phase}-${i}`} style={{
+              fontSize: 9, fontWeight: 600, color, letterSpacing: '.02em',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
+              {p.phase}
+              <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>
+                {formatDuration(p.duration_ms)}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+      {/* Gantt bar */}
+      <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+        {phases.map((p: any, i: number) => {
+          const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
           const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           const isHovered = hover === i;
           return (
@@ -665,7 +919,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               onMouseEnter={() => setHover(i)}
               onMouseLeave={() => setHover(null)}
               style={{
-                width: `${pct}%`, background: color, minWidth: 2,
+                width: `${pct}%`, background: color, minWidth: 3,
                 opacity: isHovered ? 1 : 0.65,
                 transition: 'opacity .15s, width .2s',
                 cursor: 'default',
@@ -677,7 +931,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       {hover !== null && phases[hover] && (() => {
         const hoveredPhase = phases[hover].phase;
         const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
-        const desc = PHASE_DESCRIPTIONS[topLevel];
+        const desc = PHASE_DESCRIPTIONS[hoveredPhase] ?? PHASE_DESCRIPTIONS[topLevel];
         return (
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
@@ -817,7 +1071,7 @@ function OperationsTab() {
                   onClick={() => setSelectedOp(op.operation_id)}
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
-                  <td>{formatTime(op.started_at)}</td>
+                  <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
                   <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
@@ -1036,7 +1290,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
           <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.paranet_id && <span><b style={{ color: 'var(--text-muted)' }}>Paranet</b> {op.paranet_id}</span>}
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
@@ -1071,15 +1325,23 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 const topLevel = p.phase.includes(':') ? p.phase.split(':')[0] : p.phase;
-                const desc = PHASE_DESCRIPTIONS[topLevel];
+                // Codex PR #241 iter-6: exact-match first, then fall back
+                // to the top-level phase. Same rationale as the bar-hover
+                // lookup above — sub-phases like `chain:writeahead` need
+                // to surface their own description instead of reducing
+                // to the umbrella `chain` entry.
+                const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? 'var(--red)' : color}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
                     {desc && <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
-                    <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}>
-                      {p.started_at ? new Date(p.started_at).toLocaleTimeString() : ''}
+                    <span
+                      style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
+                    >
+                      {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
                     {p.status === 'error' && p.details && (
                       <span style={{ fontSize: 10, color: 'var(--red)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>

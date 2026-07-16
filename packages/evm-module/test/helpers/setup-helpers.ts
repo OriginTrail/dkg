@@ -20,7 +20,7 @@ export function getDefaultReceivingNodes(
   }));
 }
 
-export function getDefaultKCCreator(accounts: SignerWithAddress[]) {
+export function getDefaultKACreator(accounts: SignerWithAddress[]) {
   return accounts[9];
 }
 

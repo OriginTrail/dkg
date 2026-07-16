@@ -1,22 +1,32 @@
 import { describe, it, expect } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   skolemize,
   isBlankNode,
   isSkolemizedUri,
   rootEntityFromSkolemized,
   autoPartition,
-  computeTripleHash,
-  computePublicRoot,
-  computePrivateRoot,
-  computeKARoot,
-  computeKCRoot,
+  computeTripleHashV10 as computeTripleHash,
+  computePublicRootV10 as computePublicRoot,
+  computePrivateRootV10 as computePrivateRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  prepareGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
+  replaceGeneratedPrivateCatalogFloor,
+  catalogTripleKey,
   validatePublishRequest,
+  assertTrustedCatalogTriplesAreGeneratedFloor,
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';
+import type { PrepareGeneratedPrivateCatalogFloorOptions } from '../src/index.js';
 
-const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const CONTEXT_GRAPH = 'agent-registry';
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
@@ -135,11 +145,106 @@ describe('merkle', () => {
   });
 });
 
+describe('generated private catalog preparation', () => {
+  it('rejects unsafe generated subjects and non-empty graph IRIs', () => {
+    expect(() => generatedPrivateCatalogFloorQuads(
+      'bad> <urn:p> <urn:o> . <urn:x',
+    )).toThrow(/Unsafe or empty IRI/);
+    expect(() => appendMissingGeneratedPrivateCatalogFloor(
+      'safe-cg',
+      [],
+      'urn:unsafe> <urn:p>',
+    )).toThrow(/Unsafe or empty IRI/);
+  });
+
+  it('preserves the public preparation API for default append and explicit replacement', () => {
+    const contextGraphId = 'private-catalog-api-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const content = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+    const defaultOptions: PrepareGeneratedPrivateCatalogFloorOptions = {};
+    const replaceOptions: PrepareGeneratedPrivateCatalogFloorOptions = {
+      graph: cgDid,
+      mode: 'replace-generated',
+    };
+
+    const appended = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, staleFloor[0]],
+      defaultOptions,
+    );
+    const replaced = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, ...staleFloor],
+      replaceOptions,
+    );
+
+    expect(appended.quads[0]).toBe(content);
+    expect(appended.quads[1]).toBe(staleFloor[0]);
+    expect(replaced.quads).toEqual([
+      content,
+      ...generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    ]);
+  });
+
+  it('fills a partial legacy floor without duplicating existing triples', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const floor = generatedPrivateCatalogFloorQuads(contextGraphId);
+    const legacyFloorQuad = { ...floor[0], graph: 'urn:legacy:catalog' };
+    const content = q('urn:test:shipment:1', 'http://schema.org/name', '"Shipment 1"');
+
+    const prepared = appendMissingGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, legacyFloorQuad],
+    );
+
+    expect(prepared.quads[0]).toBe(content);
+    expect(prepared.quads[1]).toBe(legacyFloorQuad);
+    for (const key of generatedPrivateCatalogTripleKeys(contextGraphId)) {
+      expect(prepared.quads.filter((quad) => catalogTripleKey(quad) === key)).toHaveLength(1);
+    }
+    expect(prepared.trustedNonManifestCatalogTriples)
+      .toEqual(generatedPrivateCatalogTripleKeys(contextGraphId));
+  });
+
+  it('replaces the complete catalog partition and preserves private CG-DID data', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const privateCgDidQuad = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const recommendedCatalogQuad = q(
+      cgDid,
+      DKG_ONTOLOGY.DCT_PUBLISHER,
+      'urn:test:publisher',
+      'urn:stale',
+    );
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+
+    const prepared = replaceCatalogPartitionWithGeneratedPrivateFloor(
+      contextGraphId,
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
+      cgDid,
+    );
+    const deprecatedAlias = replaceGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
+      cgDid,
+    );
+
+    expect(prepared.quads[0]).toBe(privateCgDidQuad);
+    expect(prepared.quads.slice(1)).toEqual(
+      generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    );
+    expect(prepared.quads).not.toContainEqual(recommendedCatalogQuad);
+    expect(prepared.quads.filter((quad) => quad.graph === 'urn:stale')).toHaveLength(0);
+    expect(deprecatedAlias).toEqual(prepared);
+  });
+});
+
 describe('validatePublishRequest', () => {
   it('passes for a valid request', () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Bot"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
     expect(result.errors).toEqual([]);
   });
@@ -147,7 +252,7 @@ describe('validatePublishRequest', () => {
   it('fails Rule 1: wrong graph', () => {
     const quads = [q(ENTITY, 'http://ex.org/p', '"v"', 'wrong:graph')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 1');
   });
@@ -155,16 +260,85 @@ describe('validatePublishRequest', () => {
   it('fails Rule 2: unknown subject', () => {
     const quads = [q('unknown:entity', 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 2');
+  });
+
+  it('Rule 2 allows only exact generated private-CG catalog floor triples outside the manifest', () => {
+    const privateCg = 'private-catalog-cg';
+    const contentRoot = 'urn:test:shipment:1';
+    const contentQuad = q(
+      contentRoot,
+      'http://schema.org/name',
+      '"Shipment 1"',
+      `did:dkg:context-graph:${privateCg}`,
+    );
+    const catalog = generatedPrivateCatalogFloorQuads(privateCg);
+    const manifest = [{ tokenId: 1n, rootEntity: contentRoot }];
+
+    const accepted = validatePublishRequest(
+      [contentQuad, ...catalog],
+      manifest,
+      privateCg,
+      new Set(),
+      { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(privateCg) },
+    );
+    expect(accepted.valid).toBe(true);
+
+    const forged = [
+      contentQuad,
+      ...catalog,
+      {
+        subject: `did:dkg:context-graph:${privateCg}`,
+        predicate: 'urn:test:not-generated',
+        object: '"hidden"',
+        graph: '',
+      },
+    ];
+    const rejected = validatePublishRequest(
+      forged,
+      manifest,
+      privateCg,
+      new Set(),
+      { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(privateCg) },
+    );
+    expect(rejected.valid).toBe(false);
+    expect(rejected.errors.some((e) => e.includes('Rule 2'))).toBe(true);
+  });
+
+  it('refuses partial generated catalog trust sets', () => {
+    const privateCg = 'private-catalog-cg';
+    const partial = new Set([
+      catalogTripleKey(generatedPrivateCatalogFloorQuads(privateCg)[0]),
+    ]);
+
+    expect(() =>
+      assertTrustedCatalogTriplesAreGeneratedFloor(privateCg, partial),
+    ).toThrow(/must exactly match/);
+  });
+
+  it('fails Rule 3: manifest root with no public triples and not fully private', () => {
+    const root = 'urn:entity:orphan';
+    const quads = [q('urn:other', 'http://ex.org/p', '"o"')];
+    const manifest = [{ tokenId: 1n, rootEntity: root }];
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('Rule 3'))).toBe(true);
+  });
+
+  it('Rule 3: allows fully private KA with no public triples', () => {
+    const root = 'urn:entity:private';
+    const manifest = [{ tokenId: 1n, rootEntity: root, privateTripleCount: 3 }];
+    const result = validatePublishRequest([], manifest, CONTEXT_GRAPH, new Set());
+    expect(result.valid).toBe(true);
   });
 
   it('fails Rule 4: entity exclusivity', () => {
     const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
-    const result = validatePublishRequest(quads, manifest, PARANET, existing);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -174,7 +348,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ENTITY]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(true);
   });
 
@@ -183,7 +357,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set() };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -193,7 +367,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: false, upsertableEntities: new Set([ENTITY]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -214,7 +388,7 @@ describe('validatePublishRequest', () => {
     ];
     const existing = new Set([ownedEntity, foreignEntity]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ownedEntity]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors.length).toBe(1);
     expect(result.errors[0]).toContain('foreign');
@@ -223,7 +397,7 @@ describe('validatePublishRequest', () => {
   it('fails Rule 5: blank node subject', () => {
     const quads = [q('_:bn1', 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: '_:bn1' }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes('Rule 5'))).toBe(true);
   });
@@ -233,7 +407,7 @@ describe('validatePublishRequest', () => {
     const manifest = [
       { tokenId: 1n, rootEntity: ENTITY, privateTripleCount: 5 },
     ];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
   });
 
@@ -244,7 +418,7 @@ describe('validatePublishRequest', () => {
       q(skolemUri, 'http://ex.org/type', '"Analysis"'),
     ];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
   });
 });

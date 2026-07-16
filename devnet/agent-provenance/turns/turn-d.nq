@@ -1,0 +1,2 @@
+<urn:experiment:agent-provenance:turn-d> <https://schema.org/name> "Mode (d): unattributed self-publishing edge" <urn:dkg:context-graph:test/_meta> .
+<urn:experiment:agent-provenance:turn-d> <https://schema.org/text> "publisherNodeIdentityId == 0; no core gets attribution; CSS receives full fee." <urn:dkg:context-graph:test/_meta> .

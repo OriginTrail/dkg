@@ -1,3 +1,15 @@
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
@@ -5,7 +17,7 @@ const { Type, Field } = protobuf;
 export const DiscoverRequestSchema = new Type('DiscoverRequest')
   .add(new Field('type', 1, 'string'))
   .add(new Field('query', 2, 'string'))
-  .add(new Field('paranetId', 3, 'string'))
+  .add(new Field('contextGraphId', 3, 'string'))
   .add(new Field('limit', 4, 'uint32'));
 
 export const DiscoverResponseSchema = new Type('DiscoverResponse')
@@ -16,7 +28,7 @@ export const DiscoverResponseSchema = new Type('DiscoverResponse')
 export interface DiscoverRequestMsg {
   type: string;
   query: string;
-  paranetId: string;
+  contextGraphId: string;
   limit: number;
 }
 
@@ -33,7 +45,20 @@ export function encodeDiscoverRequest(msg: DiscoverRequestMsg): Uint8Array {
 }
 
 export function decodeDiscoverRequest(buf: Uint8Array): DiscoverRequestMsg {
-  return DiscoverRequestSchema.decode(buf) as unknown as DiscoverRequestMsg;
+  const decoded = DiscoverRequestSchema.decode(buf) as unknown as DiscoverRequestMsg;
+  if (
+    typeof decoded.type !== 'string' ||
+    decoded.type.length === 0 ||
+    typeof decoded.query !== 'string' ||
+    decoded.query.length === 0 ||
+    typeof decoded.contextGraphId !== 'string' ||
+    decoded.contextGraphId.length === 0 ||
+    typeof decoded.limit !== 'number' ||
+    decoded.limit <= 0
+  ) {
+    throw new Error('Invalid DiscoverRequest payload');
+  }
+  return decoded;
 }
 
 export function encodeDiscoverResponse(msg: DiscoverResponseMsg): Uint8Array {

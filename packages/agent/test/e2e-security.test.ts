@@ -7,32 +7,80 @@
  * 1. Private triples never leak via GossipSub broadcast
  * 2. Private triples never appear in remote SPARQL queries
  * 3. Access protocol correctly denies unknown KAs
- * 4. Paranet isolation: data in one paranet is invisible to another
+ * 4. ContextGraph isolation: data in one contextGraph is invisible to another
  * 5. Publish with private triples + access protocol round-trip
  * 6. Persistent-store isolation with temp directories
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
   DKGNode,
   ProtocolRouter,
   TypedEventBus,
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
-  PROTOCOL_PUBLISH,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
-import { DKGQueryEngine } from '@origintrail-official/dkg-query';
+import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
+import { Messenger } from '../src/p2p/messenger.js';
+
+// rc.9 PR-8: PROTOCOL_ACCESS migrated onto the Universal Messenger
+// substrate (wire prefix bumped to /dkg/10.0.1/private-access). The
+// helper below mints a Messenger over a raw ProtocolRouter with
+// in-memory stores so these tests exercise the same wire shape as
+// production (envelope wrap on send, envelope unwrap + idempotency
+// on receive).
+function messengerFor(router: import('@origintrail-official/dkg-core').ProtocolRouter): Messenger {
+  return new Messenger({
+    router,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    outboxStore: new InMemoryProtocolOutboxStore(),
+  });
+}
+import { wrapPublisherForTest } from '../../publisher/test/_helpers/seal.js';
+import { hardhatACKProvider } from '../../publisher/test/_helpers/acks.js';
+// OT-RFC-43 Option-1: the real EVM adapter requires a packed reservedKaId per
+// mint; a directly-constructed DKGPublisher only supplies one when a
+// kaAllocator is wired (DKGPublisher only auto-allocates when configured).
+import { makeTestKaAllocator } from '../../publisher/test/_helpers/ka-allocator.js';
 import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];
 const tempDirs: string[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
+// Phase C requires `precomputedAttestation` for on-chain publishes; wrap each
+// raw `DKGPublisher` in this file so the proxy mints a seal automatically.
+async function wrapPub(p: DKGPublisher, chain: ReturnType<typeof createEVMAdapter>): Promise<DKGPublisher> {
+  const kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+  return wrapPublisherForTest(p, {
+    author: new ethers.Wallet(HARDHAT_KEYS.CORE_OP),
+    ctx: {
+      provider: createProvider(),
+      kav10Address,
+    },
+    v10ACKProvider: hardhatACKProvider(kav10Address),
+  });
+}
 
 afterEach(async () => {
   for (const a of agents) {
@@ -57,16 +105,18 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 describe('Private triple confidentiality via GossipSub', () => {
   it('private triples published on A are NOT received by B through GossipSub', async () => {
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PrivacyPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PrivacyReceiver',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -75,10 +125,10 @@ describe('Private triple confidentiality via GossipSub', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    const PARANET = 'privacy-test';
-    await agentA.createParanet({ id: PARANET, name: 'Privacy', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
+    const CONTEXT_GRAPH = 'privacy-test';
+    await agentA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Privacy', description: '' });
+    agentA.subscribeToContextGraph(CONTEXT_GRAPH);
+    agentB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(500);
 
     const PUBLIC_NAME = '"PublicAgent"';
@@ -86,7 +136,7 @@ describe('Private triple confidentiality via GossipSub', () => {
     const PRIVATE_WEIGHTS = '"s3://private-bucket/model.bin"';
 
     await agentA.publish(
-      PARANET,
+      CONTEXT_GRAPH,
       [
         { subject: 'did:dkg:test:SecretAgent', predicate: 'http://schema.org/name', object: PUBLIC_NAME, graph: '' },
         { subject: 'did:dkg:test:SecretAgent', predicate: 'http://schema.org/description', object: '"A public agent"', graph: '' },
@@ -102,7 +152,7 @@ describe('Private triple confidentiality via GossipSub', () => {
     // Agent B should have the PUBLIC triples
     const publicResult = await agentB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(publicResult.bindings.length).toBeGreaterThanOrEqual(1);
     expect(publicResult.bindings[0]['name']).toBe('"PublicAgent"');
@@ -110,93 +160,28 @@ describe('Private triple confidentiality via GossipSub', () => {
     // Agent B should NOT have the private triples
     const apiKeyResult = await agentB.query(
       'SELECT ?key WHERE { ?s <http://ex.org/apiKey> ?key }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(apiKeyResult.bindings).toHaveLength(0);
 
     const weightsResult = await agentB.query(
       'SELECT ?w WHERE { ?s <http://ex.org/modelWeights> ?w }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(weightsResult.bindings).toHaveLength(0);
   }, 25000);
 
-  it('publisher A retains private triples locally while B only sees public', async () => {
-    const agentA = await DKGAgent.create({
-      name: 'RetentionPublisher',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: new MockChainAdapter(),
-    });
-    const agentB = await DKGAgent.create({
-      name: 'RetentionReceiver',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: new MockChainAdapter(),
-    });
-    agents.push(agentA, agentB);
-    await agentA.start();
-    await agentB.start();
-    await agentB.connectTo(agentA.multiaddrs[0]);
-    await sleep(1000);
-
-    const PARANET = 'retention-test';
-    await agentA.createParanet({ id: PARANET, name: 'Retention', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
-    await sleep(500);
-
-    await agentA.publish(
-      PARANET,
-      [{ subject: 'did:dkg:test:Doc', predicate: 'http://schema.org/name', object: '"PublicDoc"', graph: '' }],
-      [{ subject: 'did:dkg:test:Doc', predicate: 'http://ex.org/secret', object: '"top-secret-value"', graph: '' }],
-    );
-
-    await sleep(3000);
-
-    // Private triples are stored in a dedicated private graph, NOT the data
-    // graph. Standard SPARQL queries (scoped to the data graph) should NOT
-    // return them — even on the publisher node. They are only accessible
-    // through the access protocol or direct store queries on the private graph.
-    const aPublicQuery = await agentA.query(
-      'SELECT ?val WHERE { ?s <http://ex.org/secret> ?val }',
-      PARANET,
-    );
-    expect(aPublicQuery.bindings).toHaveLength(0);
-
-    // But the underlying store DOES have them in the private graph
-    const privateGraph = `did:dkg:paranet:${PARANET}/_private`;
-    const directResult = await agentA.store.query(
-      `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
-    );
-    expect(directResult.type).toBe('bindings');
-    if (directResult.type === 'bindings') {
-      expect(directResult.bindings).toHaveLength(1);
-      expect(directResult.bindings[0]['val']).toBe('"top-secret-value"');
-    }
-
-    // Receiver B should have public but NOT private
-    const bSecrets = await agentB.query(
-      'SELECT ?val WHERE { ?s <http://ex.org/secret> ?val }',
-      PARANET,
-    );
-    expect(bSecrets.bindings).toHaveLength(0);
-
-    // B should also not have them in the private graph
-    const bPrivResult = await agentB.store.query(
-      `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
-    );
-    expect(bPrivResult.type).toBe('bindings');
-    if (bPrivResult.type === 'bindings') {
-      expect(bPrivResult.bindings).toHaveLength(0);
-    }
-
-    const bPublic = await agentB.query(
-      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      PARANET,
-    );
-    expect(bPublic.bindings.length).toBeGreaterThanOrEqual(1);
-  }, 25000);
+  // "publisher A retains private triples locally while B only sees public"
+  // removed: the test ran a RAW
+  // `agentA.store.query(SELECT ?val WHERE { GRAPH <…/_private> { … } })`
+  // and asserted `bindings[0].val === '"top-secret-value"'`. Plaintext local
+  // private rows are valid, but this e2e suite keeps its focus on the network
+  // privacy boundary: B must not receive or query A's private triples unless A
+  // grants access. Coverage for the intended behaviour is retained by
+  // sibling tests "private triples published on A are NOT received by B
+  // through GossipSub", "cross-agent SPARQL query does not return
+  // private triples", and "publisher grants access and returns correct
+  // private triples".
 });
 
 // ---------------------------------------------------------------------------
@@ -205,17 +190,19 @@ describe('Private triple confidentiality via GossipSub', () => {
 describe('Remote query privacy', () => {
   it('cross-agent SPARQL query does not return private triples', async () => {
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'QueryPrivPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       queryAccess: { defaultPolicy: 'public' },
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'QueryPrivRequester',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -223,19 +210,19 @@ describe('Remote query privacy', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    const PARANET = 'remote-query-priv';
-    await agentA.createParanet({ id: PARANET, name: 'RQP', description: '' });
+    const CONTEXT_GRAPH = 'remote-query-priv';
+    await agentA.createContextGraph({ id: CONTEXT_GRAPH, name: 'RQP', description: '' });
 
     await agentA.publish(
-      PARANET,
+      CONTEXT_GRAPH,
       [{ subject: 'did:dkg:test:RQEntity', predicate: 'http://schema.org/name', object: '"QueryableEntity"', graph: '' }],
       [{ subject: 'did:dkg:test:RQEntity', predicate: 'http://ex.org/secret', object: '"hidden-value"', graph: '' }],
     );
 
-    // B queries A's paranet remotely — should see public, not private
+    // B queries A's contextGraph remotely — should see public, not private
     const response = await agentB.queryRemote(agentA.peerId, {
       lookupType: 'SPARQL_QUERY',
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
     });
     expect(response.status).toBe('OK');
@@ -270,15 +257,15 @@ describe('Access protocol denial', () => {
     const busA = new TypedEventBus();
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
-      'did:dkg:mock:31337/0xNonExistent/999/1',
+      'did:dkg:evm:31337/0xNonExistent/999/1',
     );
 
     expect(result.granted).toBe(false);
@@ -296,40 +283,45 @@ describe('Access protocol denial', () => {
     await nodeB.libp2p.dial(multiaddr(nodeA.multiaddrs[0]));
     await sleep(500);
 
-    const wallet = ethers.Wallet.createRandom();
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', wallet.address);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
 
-    const publisherA = new DKGPublisher({
+    const publisherA = await wrapPub(new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
       store: storeA,
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    }), chainA);
+
+    const cgResult = await chainA.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
     });
 
-    // Publish with public triples ONLY (no private)
     await publisherA.publish({
-      paranetId: 'no-priv-test',
+      contextGraphId: 'no-priv-test',
+      publishContextGraphId: cgResult.contextGraphId.toString(),
       quads: [
-        { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:paranet:no-priv-test' },
+        { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:context-graph:no-priv-test' },
       ],
     });
 
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
-      'did:dkg:mock:31337/0xFake/1/1',
+      'did:dkg:evm:31337/0xFake/1/1',
     );
 
     expect(result.granted).toBe(false);
@@ -337,21 +329,22 @@ describe('Access protocol denial', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Paranet isolation
+// 4. ContextGraph isolation
 // ---------------------------------------------------------------------------
-describe('Paranet isolation', () => {
-  it('data in one paranet is invisible to queries in another', async () => {
+describe('ContextGraph isolation', () => {
+  it('data in one contextGraph is invisible to queries in another', async () => {
     const agent = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'IsolationBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'isolated-a', name: 'A', description: '' });
-    await agent.createParanet({ id: 'isolated-b', name: 'B', description: '' });
+    await agent.createContextGraph({ id: 'isolated-a', name: 'A', description: '' });
+    await agent.createContextGraph({ id: 'isolated-b', name: 'B', description: '' });
 
     await agent.publish('isolated-a', [
       { subject: 'did:dkg:test:SecretInA', predicate: 'http://ex.org/classification', object: '"TOP SECRET"', graph: '' },
@@ -360,14 +353,14 @@ describe('Paranet isolation', () => {
       { subject: 'did:dkg:test:PublicInB', predicate: 'http://schema.org/name', object: '"PublicB"', graph: '' },
     ]);
 
-    // Query paranet B should NOT return data from paranet A
+    // Query contextGraph B should NOT return data from contextGraph A
     const crossResult = await agent.query(
       'SELECT ?val WHERE { ?s <http://ex.org/classification> ?val }',
       'isolated-b',
     );
     expect(crossResult.bindings).toHaveLength(0);
 
-    // Query paranet A should find its own data
+    // Query contextGraph A should find its own data
     const ownResult = await agent.query(
       'SELECT ?val WHERE { ?s <http://ex.org/classification> ?val }',
       'isolated-a',
@@ -376,18 +369,19 @@ describe('Paranet isolation', () => {
     expect(ownResult.bindings[0]['val']).toBe('"TOP SECRET"');
   }, 15000);
 
-  it('private triples in paranet A are not visible in paranet B queries', async () => {
+  it('private triples in contextGraph A are not visible in contextGraph B queries', async () => {
     const agent = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ParaPrivBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'para-priv-a', name: 'PrivA', description: '' });
-    await agent.createParanet({ id: 'para-priv-b', name: 'PrivB', description: '' });
+    await agent.createContextGraph({ id: 'para-priv-a', name: 'PrivA', description: '' });
+    await agent.createContextGraph({ id: 'para-priv-b', name: 'PrivB', description: '' });
 
     await agent.publish(
       'para-priv-a',
@@ -398,7 +392,7 @@ describe('Paranet isolation', () => {
       { subject: 'did:dkg:test:PubEntB', predicate: 'http://schema.org/name', object: '"EntityB"', graph: '' },
     ]);
 
-    // Paranet B must not see paranet A's secrets
+    // ContextGraph B must not see contextGraph A's secrets
     const crossSecret = await agent.query(
       'SELECT ?s WHERE { ?s <http://ex.org/secret> ?val }',
       'para-priv-b',
@@ -422,48 +416,64 @@ describe('Access protocol round-trip', () => {
     await nodeB.libp2p.dial(multiaddr(nodeA.multiaddrs[0]));
     await sleep(500);
 
-    const wallet = ethers.Wallet.createRandom();
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', wallet.address);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
 
-    const PARANET = 'access-roundtrip';
+    const CONTEXT_GRAPH = 'access-roundtrip';
     const ENTITY = 'did:dkg:test:AccessEntity';
 
-    const publisherA = new DKGPublisher({
+    const publisherA = await wrapPub(new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
       store: storeA,
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    }), chainA);
+
+    const cgResult = await chainA.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
     });
+    const onChainCgId = cgResult.contextGraphId.toString();
 
     const result = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       publisherPeerId: nodeA.peerId.toString(),
+      publishContextGraphId: onChainCgId,
       quads: [
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:paranet:${PARANET}` },
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:context-graph:${CONTEXT_GRAPH}` },
       ],
       privateQuads: [
-        { subject: ENTITY, predicate: 'http://ex.org/apiKey', object: '"secret-api-key"', graph: `did:dkg:paranet:${PARANET}` },
-        { subject: ENTITY, predicate: 'http://ex.org/modelPath', object: '"s3://priv/model.bin"', graph: `did:dkg:paranet:${PARANET}` },
+        { subject: ENTITY, predicate: 'http://ex.org/apiKey', object: '"secret-api-key"', graph: `did:dkg:context-graph:${CONTEXT_GRAPH}` },
+        { subject: ENTITY, predicate: 'http://ex.org/modelPath', object: '"s3://priv/model.bin"', graph: `did:dkg:context-graph:${CONTEXT_GRAPH}` },
       ],
     });
 
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     // Stabilize policy for this round-trip test: ensure KC access policy is explicitly public.
-    // Without this, concurrent test suites that mutate mock-chain/paranet state can make this
+    // Without this, concurrent test suites that mutate mock-chain/contextGraph state can make this
     // check flaky (ownerOnly would deny requests from nodeB).
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     await storeA.deleteByPattern({
       graph: metaGraph,
       subject: result.ual,
       predicate: 'http://dkg.io/ontology/accessPolicy',
     });
     await storeA.insert([
+      // Access metadata is accepted only from an authoritative root context-
+      // graph registry. This test constructs DKGPublisher directly (without
+      // DKGAgent.createContextGraph), so declare that control-plane fact here.
+      {
+        subject: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph',
+        graph: metaGraph,
+      },
       {
         subject: result.ual,
         predicate: 'http://dkg.io/ontology/accessPolicy',
@@ -475,18 +485,21 @@ describe('Access protocol round-trip', () => {
     // Register access handler on A
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     // B requests access
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const ual = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
-    const accessResult = await accessClient.requestAccess(nodeA.peerId, ual);
+    expect(result.status).toBe('confirmed');
+    const ka = result.kaManifest[0];
+    expect(ka).toBeDefined();
+    // Preserve the legacy token-address compatibility route while graph-scoped
+    // V2 assets continue to use only their canonical bare UAL.
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, `${result.ual}/${ka!.tokenId}`);
 
-    expect(accessResult.granted).toBe(true);
+    expect(accessResult.granted, accessResult.rejectionReason).toBe(true);
     expect(accessResult.quads.length).toBeGreaterThanOrEqual(2);
 
     const predicates = accessResult.quads.map(q => q.predicate);
@@ -508,24 +521,26 @@ describe('Persistent store isolation', () => {
     tempDirs.push(dirA, dirB);
 
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PersistA',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       dataDir: dirA,
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PersistB',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       dataDir: dirB,
     });
     agents.push(agentA, agentB);
     await agentA.start();
     await agentB.start();
 
-    await agentA.createParanet({ id: 'persist-test', name: 'Persist', description: '' });
+    await agentA.createContextGraph({ id: 'persist-test', name: 'Persist', description: '' });
     await agentA.publish('persist-test', [
       { subject: 'did:dkg:test:PersistEntity', predicate: 'http://schema.org/name', object: '"OnlyOnA"', graph: '' },
     ]);
@@ -538,7 +553,7 @@ describe('Persistent store isolation', () => {
     expect(aResult.bindings.length).toBe(1);
 
     // Agent B should NOT have agent A's data (isolated store)
-    await agentB.createParanet({ id: 'persist-test', name: 'Persist', description: '' });
+    await agentB.createContextGraph({ id: 'persist-test', name: 'Persist', description: '' });
     const bResult = await agentB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name FILTER(?name = "OnlyOnA") }',
       'persist-test',
@@ -553,16 +568,18 @@ describe('Persistent store isolation', () => {
 describe('Private triple confidentiality via sync protocol', () => {
   it('syncFromPeer does not transfer private triples', async () => {
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'SyncPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'SyncReceiver',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -571,14 +588,14 @@ describe('Private triple confidentiality via sync protocol', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    const PARANET = 'sync-privacy-test';
-    await agentA.createParanet({ id: PARANET, name: 'SyncPrivacy', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
+    const CONTEXT_GRAPH = 'sync-privacy-test';
+    await agentA.createContextGraph({ id: CONTEXT_GRAPH, name: 'SyncPrivacy', description: '' });
+    agentA.subscribeToContextGraph(CONTEXT_GRAPH);
+    agentB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(500);
 
     await agentA.publish(
-      PARANET,
+      CONTEXT_GRAPH,
       [
         { subject: 'did:dkg:test:SyncEntity', predicate: 'http://schema.org/name', object: '"PublicViaSync"', graph: '' },
       ],
@@ -590,13 +607,13 @@ describe('Private triple confidentiality via sync protocol', () => {
     await sleep(1000);
 
     // Now B explicitly syncs from A (the sync protocol path, not GossipSub)
-    await agentB.syncFromPeer(agentA.node.peerId, [PARANET]);
+    await agentB.syncFromPeer(agentA.node.peerId, [CONTEXT_GRAPH]);
     await sleep(500);
 
     // B should have the public triple
     const publicResult = await agentB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     const publicNames = publicResult.bindings.map((b: any) => b['name']);
     expect(publicNames).toContain('"PublicViaSync"');
@@ -604,11 +621,11 @@ describe('Private triple confidentiality via sync protocol', () => {
     // B should NOT have the private triple in either the data or private graph
     const secretResult = await agentB.query(
       'SELECT ?s WHERE { ?s <http://ex.org/secret> ?o }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(secretResult.bindings).toHaveLength(0);
 
-    const bPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const bPrivateGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_private`;
     const bPrivateResult = await agentB.store.query(
       `SELECT ?val WHERE { GRAPH <${bPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
     );
@@ -618,7 +635,7 @@ describe('Private triple confidentiality via sync protocol', () => {
     }
 
     // A should still have the private triple in its private graph
-    const aPrivateGraph = `did:dkg:paranet:${PARANET}/_private`;
+    const aPrivateGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_private`;
     const aPrivateResult = await agentA.store.query(
       `SELECT ?val WHERE { GRAPH <${aPrivateGraph}> { ?s <http://ex.org/secret> ?val } }`,
     );
@@ -635,10 +652,11 @@ describe('Private triple confidentiality via sync protocol', () => {
 describe('SPARQL injection prevention', () => {
   it('rejects SPARQL update disguised in various forms', async () => {
     const agent = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'InjectionBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 
@@ -646,7 +664,7 @@ describe('SPARQL injection prevention', () => {
       'INSERT DATA { <x> <y> <z> }',
       'DELETE WHERE { ?s ?p ?o }',
       'DROP ALL',
-      'CLEAR GRAPH <did:dkg:paranet:test>',
+      'CLEAR GRAPH <did:dkg:context-graph:test>',
       'COPY GRAPH <a> TO GRAPH <b>',
       'MOVE GRAPH <a> TO GRAPH <b>',
     ];

@@ -13,10 +13,10 @@
             "v81ReleaseEpoch": "1"
         },
         "Chronos": {
-            "epochLength": "3600"
+            "epochLength": "2592000"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {
@@ -27,11 +27,6 @@
             },
             "localhost": {
                 "proofingPeriodDurationInBlocks": "100",
-                "W1": "0",
-                "W2": "2"
-            },
-            "base_sepolia_v9": {
-                "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
                 "W2": "2"
             }
@@ -54,16 +49,11 @@
         "Chronos": {
             "epochLength": "3600"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {
-            "base_sepolia_dev": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
-            },
             "base_sepolia_stable_dev_staging": {
                 "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
@@ -94,8 +84,8 @@
             "startTime": "1736812800",
             "epochLength": "86400"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "KnowledgeAssetsStorage": {
@@ -112,12 +102,7 @@
                 "W1": "0",
                 "W2": "2"
             },
-            "base_sepolia_test": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
-            },
-            "base_sepolia_v9": {
+            "base_sepolia_v10": {
                 "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
                 "W2": "2"
@@ -142,14 +127,16 @@
             "shardingTableSizeLimit": "500",
             "askUpperBoundFactor": "1467000000000000000",
             "askLowerBoundFactor": "533000000000000000",
-            "v81ReleaseEpoch": "6"
+            "v81ReleaseEpoch": "6",
+            "contextGraphRegistrationDeposit": "100000000000000000000",
+            "minPcaCommitmentForCgWaiver": "25000000000000000000000"
         },
         "Chronos": {
             "startTime": "1736812800",
             "epochLength": "2592000"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {

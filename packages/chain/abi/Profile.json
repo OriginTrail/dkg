@@ -11,6 +11,11 @@
     "type": "constructor"
   },
   {
+    "inputs": [],
+    "name": "AdminEqualsOperational",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",
@@ -34,6 +39,11 @@
   {
     "inputs": [],
     "name": "EmptyNodeName",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EmptyOperationalWallets",
     "type": "error"
   },
   {
@@ -66,6 +76,27 @@
       }
     ],
     "name": "NodeIdAlreadyExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bytes",
+        "name": "expected",
+        "type": "bytes"
+      },
+      {
+        "internalType": "bytes",
+        "name": "provided",
+        "type": "bytes"
+      }
+    ],
+    "name": "NodeIdShardingMismatch",
     "type": "error"
   },
   {
@@ -113,6 +144,22 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "OperationalAddressZero",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "key",
+        "type": "bytes32"
+      }
+    ],
+    "name": "OperationalKeyTaken",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint16",
@@ -121,6 +168,28 @@
       }
     ],
     "name": "OperatorFeeOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileAlreadyExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileDoesntExist",
     "type": "error"
   },
   {
@@ -161,6 +230,24 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address[]",
+        "name": "operationalWallets",
+        "type": "address[]"
+      }
+    ],
+    "name": "addOperationalWallets",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "askContract",
     "outputs": [
@@ -179,6 +266,19 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
         "name": "",
         "type": "address"
       }
@@ -217,19 +317,6 @@
     "name": "createProfile",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
-      {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -320,6 +407,29 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "operationalWallet",
+        "type": "address"
+      },
+      {
+        "internalType": "string",
+        "name": "nodeName",
+        "type": "string"
+      },
+      {
+        "internalType": "bytes",
+        "name": "nodeId",
+        "type": "bytes"
+      }
+    ],
+    "name": "recreateProfile",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "_status",
         "type": "bool"
@@ -328,6 +438,19 @@
     "name": "setStatus",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "shardingTableStorage",
+    "outputs": [
+      {
+        "internalType": "contract ShardingTableStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -375,6 +498,24 @@
       }
     ],
     "name": "updateOperatorFee",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bool",
+        "name": "relayCapable",
+        "type": "bool"
+      }
+    ],
+    "name": "updateRelayCapable",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

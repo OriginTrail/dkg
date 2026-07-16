@@ -1,0 +1,141 @@
+# zizmor configuration — workflow audit policy for this repo.
+#
+# We run zizmor in `auditor` persona at `--min-severity low` so the bar is
+# deliberately strict. Anything we cannot fix at the moment must be either
+# (a) listed here with a tracking note + remediation owner, OR (b) fixed.
+# Don't silently bypass findings.
+#
+# Format: https://docs.zizmor.sh/configuration/
+
+rules:
+  # `forbidden-uses` is opt-in. We use it as a permanent denylist for the
+  # known-compromised actions involved in real-world supply-chain attacks.
+  # Even if a future PR (or a future maintainer who isn't familiar with the
+  # TeamPCP / Reviewdog incidents) tries to add one of these, the audit
+  # gate will block it before merge.
+  #
+  # Don't remove entries from this list without a security review. Adding
+  # entries is encouraged — every public attribution should be reflected
+  # here. The cost is zero (the audit runs in milliseconds); the upside is
+  # a hard merge gate against known-bad artifacts.
+  forbidden-uses:
+    config:
+      deny:
+        # TeamPCP campaign — March 2026, CVE-2026-33634. Tag-poisoned to
+        # exfiltrate credentials.
+        - aquasecurity/trivy-action
+        - aquasecurity/setup-trivy
+        - Checkmarx/kics-github-action
+        - Checkmarx/ast-github-action
+        # Reviewdog ecosystem compromise — January 2026.
+        - reviewdog/action-setup
+        - reviewdog/action-shellcheck
+        - reviewdog/action-actionlint
+        # tj-actions/changed-files — March 2025 supply-chain attack.
+        - tj-actions/changed-files
+        - tj-actions/branch-names
+        - tj-actions/glob
+        - tj-actions/verify-changed-files
+        - tj-actions/changed-files-action
+
+  # `dangerous-triggers` — scoped exception for the Dependabot advisory
+  # gate.
+  #
+  # The advisory-gate workflow legitimately requires
+  # `pull_request_target` so it can label, comment, request-changes,
+  # and close a Dependabot PR — write operations are not available
+  # under the plain `pull_request` event when the PR was authored by
+  # `dependabot[bot]` (GitHub downgrades the `GITHUB_TOKEN` to
+  # read-only for Dependabot-authored runs). The common
+  # `pull_request_target` exploit class (privileged token executing
+  # PR-controlled code) does not apply to this workflow because:
+  #
+  #   1. There is NO `actions/checkout` step — the PR's code is
+  #      never fetched onto the runner.
+  #   2. The only PR-side input read is the Dependabot commit-message
+  #      metadata via `dependabot/fetch-metadata@<sha>` (SHA-pinned);
+  #      that metadata is signed by GitHub's Dependabot integration,
+  #      not by an arbitrary PR author.
+  #   3. The job is fenced behind a three-clause check on the PR
+  #      author identity (login + numeric id + user type), all read
+  #      from the immutable PR object — so a non-Dependabot actor
+  #      cannot reach the privileged steps in the first place.
+  #   4. Every `${{ ... }}` value that flows into a `run:` block is
+  #      routed via `env:` to close the template-injection class.
+  #
+  # Any future workflow that wants `pull_request_target` for a
+  # different reason must add its own scoped exception here with an
+  # equivalent justification — never widen this rule to a blanket
+  # skip.
+  dangerous-triggers:
+    ignore:
+      - dependabot-advisory.yml
+
+  # `cache-poisoning` — scoped exceptions for non-publishing workflows on
+  # `release/*` push.
+  #
+  # When `release/rc.12` is listed under `on: push: branches: […]`,
+  # zizmor's `cache-poisoning` audit fires on `actions/setup-node@…
+  # with: cache: pnpm` and `actions/cache@…` steps. The rule's general
+  # shape is: "push trigger on a release-like ref (tags or `release/*`
+  # branches) + a runtime cache = cache contents could influence bytes
+  # later shipped by a release publish job."
+  #
+  # The workflows ignored here are release-branch gates, not publishing
+  # surfaces:
+  #
+  #   * `ci.yml` runs tests/lints/static analysis. It uploads a
+  #     short-lived `build-outputs` artifact only for sibling test jobs
+  #     in the same workflow, plus SARIF to Code Scanning; neither is a
+  #     package, Docker image, GitHub release asset, or input to a
+  #     publishing workflow.
+  #   * `evm-integration.yml` runs Hardhat-backed integration tests
+  #     under read-only `contents` permissions and does not upload
+  #     artifacts.
+  #   * `supply-chain-scan.yml` runs scanners/audits. It may upload
+  #     scanner SARIF/job summaries, but it does not ship package or
+  #     release artifacts.
+  #
+  # Cache contents can affect gate speed and possibly gate results, but
+  # they are not promoted into user-consumed release bytes by these
+  # workflows.
+  #
+  # The actual publish surfaces — `npm-publish.yml`, `release.yml` —
+  # remain under the strict default rule (no `ignore:` here covers them).
+  # If a future maintainer wires publishing, release-asset creation, or
+  # cross-workflow artifact promotion into any ignored workflow, this
+  # exception MUST be re-evaluated before that PR lands.
+  #
+  # Defense-in-depth: the `Guard zizmor cache-poisoning exception scope`
+  # step in `supply-chain-scan.yml` greps the ignored workflows for known
+  # publishing-action markers (`gh release create`, `npm publish`,
+  # `docker push`, etc.) on every audit run and fails the gate if any are
+  # found — so the moment one of these workflows gains a publish step,
+  # this exception is forced back through review instead of silently
+  # going stale.
+  cache-poisoning:
+    ignore:
+      - ci.yml
+      - evm-integration.yml
+      - supply-chain-scan.yml
+
+  # `artipacked` (deliberate non-suppression — historical note).
+  #
+  # Earlier revisions of this PR carried a global `artipacked: ignore:`
+  # block because the repo had six orphan submodule gitlinks in
+  # `experiments/agenthub-vs-dkg/` without a corresponding `.gitmodules`
+  # file. With `persist-credentials: false`, `actions/checkout`'s
+  # auth-cleanup ran in the MAIN action step and invoked
+  # `git submodule foreach --recursive`, which then failed with
+  #   fatal: No url found for submodule path '…/agenthub' in .gitmodules
+  # That fatal turned into a `##[error]` and killed every job on the
+  # run — so the workaround was to drop `persist-credentials: false`
+  # and silence the `artipacked` finding to keep the audit gate honest
+  # about what was actually enforced.
+  #
+  # This is now fixed at the source: the six orphan gitlinks were
+  # removed from the index in the same commit as this comment, and
+  # `persist-credentials: false` is restored on every `actions/checkout`
+  # call site. There is no longer any suppression of `artipacked` — if
+  # a future PR adds a checkout without that flag, zizmor will block it
+  # at the gate.

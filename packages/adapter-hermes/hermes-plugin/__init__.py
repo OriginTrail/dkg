@@ -1,0 +1,3067 @@
+"""DKG memory plugin — MemoryProvider interface.
+
+Uses DKG V10 Working Memory assertions as the PRIMARY persistent store
+for all agent knowledge (facts, user profile, decisions, findings).
+SQLite conversation history is kept as a non-graph backup.
+
+When the daemon is unreachable, falls back to a local cache file
+($HERMES_HOME/dkg_cache.json) and queues writes for sync on reconnect.
+
+Config via $HERMES_HOME/dkg.json:
+  daemon_url     — DKG daemon URL (default: http://127.0.0.1:9200)
+  context_graph  — Context Graph name (default: agent-context)
+  agent_name     — Agent identity (default: from hermes config)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import hashlib
+import re
+import secrets
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
+
+from agent.memory_provider import MemoryProvider
+from tools.registry import tool_error
+
+logger = logging.getLogger(__name__)
+
+# Entry delimiter matching built-in memory format
+_ENTRY_SEP = "\n\xA7\n"  # §
+
+# Daemon cap on publishEpochs (knowledge-assets.ts MAX_PUBLISH_EPOCHS = 0xffffffff).
+_MAX_PUBLISH_EPOCHS = 0xFFFFFFFF
+
+
+# Existing-target context graph wording is intentionally shared across Hermes
+# tool schemas so agents see the same rule as MCP/OpenClaw.
+EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION = (
+    "Use the injected target context graph id/URI when present; otherwise use "
+    "an exact existing context graph id from dkg_list_context_graphs, or its "
+    "full did:dkg:context-graph:<id> URI. Locally-created context graphs "
+    "may have ids like 'local-notes'; joined/curated context graphs use "
+    "<curatorAddress>/<slug> ids like '0x.../team-notes'. Do not guess, "
+    "shorten, or pass only the suffix slug for curator-scoped graphs."
+)
+TARGET_CONTEXT_GRAPH_DESCRIPTION = (
+    "Target context graph. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION
+)
+AGENT_CONTEXT_GRAPH_ID = "agent-context"
+AGENT_CONTEXT_GRAPH_NAME = "Agent Context"
+AGENT_CONTEXT_GRAPH_DESCRIPTION = "Chat-turn working memory for local agent integrations."
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def _load_config() -> dict:
+    """Load config from $HERMES_HOME/dkg.json with env var overrides."""
+    from hermes_constants import get_hermes_home
+
+    config = {
+        "daemon_url": "http://127.0.0.1:9200",
+        "context_graph": "agent-context",
+        "memory_assertion": "memory",
+        "agent_name": "",
+        "publish_tool": "direct",
+        "allow_direct_publish": True,
+        "allow_context_graph_admin_tools": True,
+        "import_roots": [],
+    }
+
+    config_path = get_hermes_home() / "dkg.json"
+    if config_path.exists():
+        try:
+            file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            config.update({k: v for k, v in file_cfg.items()
+                           if v is not None and v != ""})
+            publish_guard = file_cfg.get("publish_guard")
+            if isinstance(publish_guard, dict):
+                exposure = publish_guard.get("defaultToolExposure") or publish_guard.get("default_tool_exposure")
+                if exposure is not None:
+                    config["publish_tool"] = exposure
+                if publish_guard.get("allowDirectPublish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allowDirectPublish")
+                elif publish_guard.get("allow_direct_publish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allow_direct_publish")
+            if file_cfg.get("allowContextGraphAdminTools") is not None:
+                config["allow_context_graph_admin_tools"] = file_cfg.get("allowContextGraphAdminTools")
+            elif file_cfg.get("allow_context_graph_admin_tools") is not None:
+                config["allow_context_graph_admin_tools"] = file_cfg.get("allow_context_graph_admin_tools")
+        except Exception:
+            pass
+
+    for env_name, config_key in (
+        ("DKG_DAEMON_URL", "daemon_url"),
+        ("DKG_CONTEXT_GRAPH", "context_graph"),
+        ("DKG_MEMORY_ASSERTION", "memory_assertion"),
+        ("DKG_AGENT_NAME", "agent_name"),
+        ("DKG_PUBLISH_TOOL", "publish_tool"),
+    ):
+        env_value = os.environ.get(env_name)
+        if env_value is not None and env_value != "":
+            config[config_key] = env_value
+
+    direct_publish_env = os.environ.get("DKG_ALLOW_DIRECT_PUBLISH")
+    if direct_publish_env is not None and direct_publish_env != "":
+        config["allow_direct_publish"] = direct_publish_env.lower() in ("1", "true", "yes")
+    admin_tools_env = os.environ.get("DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS")
+    if admin_tools_env is not None and admin_tools_env != "":
+        config["allow_context_graph_admin_tools"] = admin_tools_env.lower() in ("1", "true", "yes")
+    import_roots_env = (
+        os.environ.get("DKG_HERMES_IMPORT_ROOTS")
+        or os.environ.get("HERMES_DKG_IMPORT_ROOTS")
+        or os.environ.get("DKG_IMPORT_ROOTS")
+    )
+    if import_roots_env is not None and import_roots_env != "":
+        config["import_roots"] = [root for root in import_roots_env.split(os.pathsep) if root.strip()]
+    elif isinstance(config.get("import_roots"), str):
+        config["import_roots"] = [root for root in config["import_roots"].split(os.pathsep) if root.strip()]
+    elif not isinstance(config.get("import_roots"), list):
+        config["import_roots"] = []
+
+    return config
+
+
+def _looks_missing_context_graph(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return False
+    code = str(result.get("code") or "")
+    error = str(result.get("error") or result.get("message") or "").lower()
+    return code == "CONTEXT_GRAPH_NOT_FOUND" or "unknown contextgraphid" in error
+
+
+def _looks_already_exists(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    error = str(result.get("error") or result.get("message") or "").lower()
+    return "already exists" in error or "already exist" in error
+
+
+def _cache_path(agent_name: str = "") -> Path:
+    from hermes_constants import get_hermes_home
+    suffix = f"_{agent_name}" if agent_name else ""
+    return get_hermes_home() / f"dkg_cache{suffix}.json"
+
+
+def _load_cache(agent_name: str = "") -> dict:
+    """Load offline cache scoped to agent."""
+    cp = _cache_path(agent_name)
+    if cp.exists():
+        try:
+            return json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"memory": [], "user": [], "queued_writes": []}
+
+
+def _save_cache(cache: dict, agent_name: str = "") -> None:
+    """Write offline cache atomically, scoped to agent."""
+    cp = _cache_path(agent_name)
+    tmp = cp.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+        tmp.replace(cp)
+    except Exception as e:
+        logger.warning(f"[dkg] Failed to save cache: {e}")
+
+
+def _stable_scope_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _session_segment(value: str, max_length: int = 48) -> str:
+    cleaned = []
+    for char in value.strip():
+        cleaned.append(char.lower() if char.isalnum() or char in "._-" else "-")
+    segment = "-".join(part for part in "".join(cleaned).split("-") if part)
+    if not segment:
+        return _stable_scope_hash(value)
+    if len(segment) <= max_length:
+        return segment
+    suffix = _stable_scope_hash(value)
+    prefix = segment[: max(1, max_length - len(suffix) - 1)].rstrip("._-")
+    return f"{prefix}-{suffix}"
+
+
+def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> str:
+    """Scope Hermes session IDs by profile/home before DKG persistence."""
+    session_id = str(raw_session_id or "default")
+    if session_id.startswith("hermes:dkg:") or session_id.startswith("hermes:dkg-ui:"):
+        return session_id
+    if len(session_id) > 48:
+        session_id = _session_segment(session_id, 48)
+
+    from hermes_constants import get_hermes_home
+
+    hermes_home = str(get_hermes_home())
+    profile_name = ""
+    if config:
+        profile_name = str(config.get("profile_name") or "").strip()
+    if not profile_name:
+        profile_name = Path(hermes_home).name or "default"
+
+    scope = f"profile-{_session_segment(profile_name, 32)}:home-{_stable_scope_hash(hermes_home)}"
+    return f"hermes:dkg:{scope}:{session_id}"
+
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
+
+DKG_MEMORY_SCHEMA = {
+    "name": "dkg_memory",
+    "description": (
+        "Store persistent facts in your DKG knowledge graph. These persist "
+        "across sessions and can be shared with other agents.\n\n"
+        "Actions: add (new fact), replace (update existing), remove (delete).\n"
+        "Targets: memory (agent notes) or user (user profile)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["add", "replace", "remove"],
+                "description": "What to do.",
+            },
+            "target": {
+                "type": "string",
+                "enum": ["memory", "user"],
+                "description": "Which store (default: memory).",
+            },
+            "content": {
+                "type": "string",
+                "description": "The fact to store (add/replace) or identify (remove).",
+            },
+            "old_text": {
+                "type": "string",
+                "description": "For replace/remove: substring identifying the entry to change.",
+            },
+        },
+        "required": ["action", "content"],
+    },
+}
+
+DKG_QUERY_SCHEMA = {
+    "name": "dkg_query",
+    "description": (
+        "Query the DKG knowledge graph using SPARQL. Pass view to select "
+        "Working Memory, Shared Working Memory, or Verifiable Memory."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "sparql": {
+                "type": "string",
+                "description": "SPARQL query string.",
+            },
+            "context_graph_id": {
+                "type": "string",
+                "description": (
+                    "CG scope. Use the injected target id when present, an exact existing "
+                    "id from dkg_list_context_graphs, or the full did:dkg:context-graph:<id> "
+                    "URI. Required when view is set."
+                ),
+            },
+            "view": {
+                "type": "string",
+                "description": (
+                    "Optional layer: working-memory, shared-working-memory, or verifiable-memory. "
+                    "When supplied, context_graph_id is required."
+                ),
+            },
+            "agent_address": {
+                "type": "string",
+                "description": "Optional Working Memory owner address. Defaults to this node when view is working-memory.",
+            },
+            "assertion_name": {
+                "type": "string",
+                "description": "Optional assertion name scope.",
+            },
+        },
+        "required": ["sparql"],
+    },
+}
+
+DKG_STATUS_SCHEMA = {
+    "name": "dkg_status",
+    "description": "Check DKG node health, connected peers, and Context Graph status.",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+DKG_WALLET_SCHEMA = {
+    "name": "dkg_wallet_balances",
+    "description": (
+        "Check TRAC and ETH balances for the node's operational wallets. "
+        "Call this BEFORE using dkg_knowledge_asset_publish to verify you have enough TRAC "
+        "to cover publishing costs. Returns per-wallet balances and chain info."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+DKG_FIND_AGENTS_SCHEMA = {
+    "name": "dkg_find_agents",
+    "description": (
+        "Discover other DKG agents on the network. Returns agent names, peer IDs, "
+        "frameworks, and available skills. Use this to find collaborators, check "
+        "who's online, or locate agents with specific capabilities before sending "
+        "messages or invoking skills."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "framework": {
+                "type": "string",
+                "description": "Filter by framework (e.g. 'OpenClaw', 'hermes-agent', 'ElizaOS').",
+            },
+            "skill_type": {
+                "type": "string",
+                "description": "Filter by skill URI to find agents offering a specific capability.",
+            },
+        },
+        "required": [],
+    },
+}
+
+DKG_SEND_MESSAGE_SCHEMA = {
+    "name": "dkg_send_message",
+    "description": (
+        "Send an encrypted P2P message to another DKG agent by peer ID or name. "
+        "Both agents must be online. Use dkg_find_agents first to discover peer IDs. "
+        "Messages are end-to-end encrypted and routed through the DKG network."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer_id": {
+                "type": "string",
+                "description": "Recipient peer ID (starts with 12D3KooW...) or agent name.",
+            },
+            "text": {
+                "type": "string",
+                "description": "Message text to send.",
+            },
+        },
+        "required": ["peer_id", "text"],
+    },
+}
+
+DKG_READ_MESSAGES_SCHEMA = {
+    "name": "dkg_read_messages",
+    "description": (
+        "Read P2P messages from other DKG agents. Returns both sent and received "
+        "messages. Filter by peer to see conversation with a specific agent."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer": {
+                "type": "string",
+                "description": "Filter by peer ID or agent name (optional).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max messages to return (default: 50).",
+            },
+            "since": {
+                "type": "string",
+                "description": "Only messages after this Unix-ms timestamp.",
+            },
+        },
+        "required": [],
+    },
+}
+
+DKG_INVOKE_SKILL_SCHEMA = {
+    "name": "dkg_invoke_skill",
+    "description": (
+        "Invoke a skill on a remote DKG agent. The remote agent executes the "
+        "skill and returns the result. Use dkg_find_agents with skill_type first "
+        "to discover which agents offer the skill you need."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer_id": {
+                "type": "string",
+                "description": "Target agent peer ID or name.",
+            },
+            "skill_uri": {
+                "type": "string",
+                "description": "Skill URI to invoke (e.g. 'ImageAnalysis').",
+            },
+            "input": {
+                "type": "string",
+                "description": "Input data for the skill as text.",
+            },
+        },
+        "required": ["peer_id", "skill_uri", "input"],
+    },
+}
+
+DKG_SUBSCRIBE_SCHEMA = {
+    "name": "dkg_subscribe",
+    "description": (
+        "Subscribe to a Context Graph to receive its data and updates from the "
+        "network. After subscribing, the node syncs data from peers in the "
+        "background. Use dkg_status to check sync progress."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {
+                "type": "string",
+                "description": "Context graph to subscribe to. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION,
+            },
+            "include_shared_memory": {
+                "type": "boolean",
+                "description": "When true, request a best-effort Shared Working Memory catch-up during subscription.",
+            },
+        },
+        "required": ["context_graph_id"],
+    },
+}
+
+DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
+    "name": "dkg_context_graph_create",
+    "description": (
+        "Create a new Context Graph — a bounded knowledge space for a project "
+        "or team. Context Graphs organize knowledge into Working Memory, "
+        "Shared Memory, and Verifiable Memory layers. Use dkg_status first to "
+        "check if the Context Graph already exists. "
+        "Defaults to a curated/private context graph — the creator is "
+        "auto-included in the allowlist and can immediately write to working "
+        "and shared memory. Pass `public: true` for an open/discoverable "
+        "context graph, or `allowed_agents` to invite collaborators "
+        "atomically with creation. For later writes, use the exact returned "
+        "id or full did:dkg:context-graph:<id> URI."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-readable name (e.g. 'Pharma Drug Interactions').",
+            },
+            "description": {
+                "type": "string",
+                "description": "What this Context Graph is for.",
+            },
+            "id": {
+                "type": "string",
+                "description": (
+                    "Optional create-only context graph id slug. Auto-generated "
+                    "from name when omitted. For later writes, use the exact "
+                    "returned id or full did:dkg:context-graph:<id> URI."
+                ),
+            },
+            "public": {
+                "type": "boolean",
+                "description": (
+                    "If true, creates an open/discoverable context graph "
+                    "(anyone can subscribe and read). Default is false — the "
+                    "context graph is curated/private and restricted to "
+                    "allowed_agents (the creator is always auto-included)."
+                ),
+            },
+            "allowed_agents": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional agent addresses (0x...) to add to the curation "
+                    "allowlist at creation time. The creator's own address is "
+                    "auto-added regardless. Ignored when public is true."
+                ),
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+DKG_LIST_CONTEXT_GRAPHS_SCHEMA = {
+    "name": "dkg_list_context_graphs",
+    "description": (
+        "List context graphs known to this node. Defaults to this caller's "
+        "created/joined context graphs to avoid noisy discovered graphs; pass "
+        "scope='all' to inspect every known graph. Use this only when no target "
+        "context graph is injected or configured and the agent needs to choose one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["mine", "all"],
+                "description": (
+                    "Defaults to 'mine' (created/joined context graphs for this caller). "
+                    "Use 'all' for every known graph."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+QUAD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string", "description": "Subject URI."},
+        "predicate": {"type": "string", "description": "Predicate URI."},
+        "object": {"type": "string", "description": "Object URI or literal text."},
+    },
+    # No per-quad `graph` field: the write wire shape is {subject,predicate,object}
+    # and the daemon pins every triple to the per-KA WM graph itself, overriding
+    # any client-supplied graph (CONTRACT §0 invariant 2). Matches OpenClaw + MCP.
+    "required": ["subject", "predicate", "object"],
+}
+
+SEMANTIC_TRIPLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string", "description": "Subject URI."},
+        "predicate": {"type": "string", "description": "Predicate URI."},
+        "object": {"type": "string", "description": "Object URI or literal text."},
+    },
+    "required": ["subject", "predicate", "object"],
+}
+
+DKG_ASSERTION_CREATE_SCHEMA = {
+    "name": "dkg_knowledge_asset_create",
+    "description": (
+        "Step 1 of the canonical flow. Create a Working Memory knowledge asset draft in a "
+        "context graph. Optionally pass quads to WRITE them into the new draft and SEAL it in "
+        "the same call (a one-shot create+write+finalize); add also_share_swm=true to also SHARE "
+        "the sealed asset to Shared Working Memory (publish-ready). With no quads it creates an "
+        "empty editable draft -- use dkg_knowledge_asset_write / _finalize / _share for the "
+        "step-by-step flow."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {
+                "type": "string",
+                "description": (
+                    "Knowledge asset name. Must not contain '/', whitespace, or IRI-unsafe "
+                    "characters (<>\"{}|^`\\), must be at most 256 characters, and must not be a "
+                    "reserved B3 KA identifier."
+                ),
+            },
+            "quads": {
+                "type": "array",
+                "items": QUAD_SCHEMA,
+                "description": (
+                    "Optional RDF triples to write into the new draft. When supplied, the draft "
+                    "is written and SEALED (finalized) in this one call. Omit to create an empty "
+                    "editable draft."
+                ),
+            },
+            "also_share_swm": {
+                "type": "boolean",
+                "description": (
+                    "When true and quads are supplied, additionally SHARE the sealed asset to "
+                    "Shared Working Memory (team-visible, publish-ready) in this same call. "
+                    "Default false. Ignored when there are no quads."
+                ),
+            },
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_WRITE_SCHEMA = {
+    "name": "dkg_knowledge_asset_write",
+    "description": "Append quads to an existing Working Memory knowledge asset draft.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Assertion name."},
+            "quads": {"type": "array", "items": QUAD_SCHEMA, "description": "RDF triples/quads to write."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name", "quads"],
+    },
+}
+
+DKG_ASSERTION_FINALIZE_SCHEMA = {
+    "name": "dkg_knowledge_asset_finalize",
+    "description": (
+        "Step 3 of the canonical flow. Seal a knowledge asset's Working Memory draft -- computes "
+        "the merkle root and signs the EIP-712 AuthorAttestation node-side. Finalize seals the "
+        "complete WM draft. The share step also seals automatically; call finalize explicitly for "
+        "custom authorship options or after editing. Sealing works before on-chain registration. "
+        "Existing root-scoped SWM assets are read-only. Author signing is node-side via "
+        "author_agent_address; external-signer (pre-signed) attestation is a tracked follow-up, "
+        "not exposed by the agent tools."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to finalize."},
+            "author_agent_address": {
+                "type": "string",
+                "description": (
+                    "Optional 0x author address to attest as. Omit to let the daemon default the "
+                    "author to the request token's agent (node-side signing)."
+                ),
+            },
+            "scheme_version": {"type": "integer", "minimum": 1, "description": "Optional attestation scheme version."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write time)."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_PULL_FROM_SCHEMA = {
+    "name": "dkg_knowledge_asset_pull_from",
+    "description": (
+        "Seed a fresh Working Memory draft for a knowledge asset from its current Shared Working "
+        "Memory (swm) or Verifiable Memory (vm) state -- the edit-loop primitive (like git "
+        "checkout). Use this to re-open an already-shared or published asset for editing. Fails "
+        "409 (WM_DRAFT_CONFLICT) if an open draft already exists; pass on_conflict=\"replace\" to "
+        "overwrite it or discard the draft first."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to seed a draft for."},
+            "layer": {
+                "type": "string",
+                "enum": ["swm", "vm"],
+                "description": "Which layer to seed the draft from: \"swm\" (Shared Working Memory) or \"vm\" (Verifiable Memory).",
+            },
+            "on_conflict": {
+                "type": "string",
+                "enum": ["reject", "replace"],
+                "description": "What to do if an open WM draft already exists. Defaults to \"reject\".",
+            },
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
+        },
+        "required": ["context_graph_id", "name", "layer"],
+    },
+}
+
+DKG_ASSERTION_SHARE_SCHEMA = {
+    "name": "dkg_knowledge_asset_share",
+    "description": (
+        "Step 4 of the canonical flow (create -> write -> finalize -> share -> publish). "
+        "Atomically seal and share the complete Knowledge Asset triple set from Working Memory "
+        "into Shared Working Memory. Root-entity subsets and unsealed shares are unsupported. "
+        "A successful share is publish-ready; follow with dkg_knowledge_asset_publish. If sealing "
+        "or complete transfer fails, the operation fails CLOSED (Working Memory "
+        "preserved) and returns a recovery hint. For CUSTOM finalize options "
+        "such as author_agent_address / scheme_version, call dkg_knowledge_asset_finalize "
+        "EXPLICITLY first (the default seal cannot carry them)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to share."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_PUBLISH_SCHEMA = {
+    "name": "dkg_knowledge_asset_publish",
+    "description": (
+        "Step 5 of the canonical flow. Publish ONE finalized + shared knowledge asset (by name) "
+        "from Shared Working Memory to Verifiable Memory on-chain, minting or updating it. "
+        "Chain-anchored, permanent, costs TRAC. Returns the asset's UAL (Universal Asset Locator, "
+        "did:dkg:<chainId>/<knowledgeAssetsContractAddress>/<id> -- the middle segment is the "
+        "KnowledgeAssets (KAV10) contract address, NOT the author) plus kaId, txHash, and status. "
+        "The separate authorAddress response field is the seal author (a different value). The seal "
+        "already selects the author and the whole asset -- do not pass author or selection overrides. "
+        "Multi-root safe. This is the canonical publish for a single named asset. "
+        "Fails 409 if the asset is not yet finalized + shared (run dkg_knowledge_asset_finalize / "
+        "dkg_knowledge_asset_share first). vm/publish AUTO-registers an unregistered context graph "
+        "on-chain at gas/TRAC cost regardless of register_if_needed (no explicit register step is "
+        "needed); register_if_needed=true only lets you choose the registration's access_policy first. "
+        "Call dkg_wallet_balances first to verify TRAC."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to publish (must be finalized + shared)."},
+            "publish_epochs": {"type": "integer", "minimum": 1, "description": "Optional number of epochs to publish for (positive integer)."},
+            "publisher_node_identity_id_override": {"type": "string", "pattern": "^[0-9]+$", "description": "Optional publisher node identity id override (non-negative integer as a decimal string; preserved verbatim to avoid bigint precision loss)."},
+            "register_if_needed": {
+                "type": "boolean",
+                "description": (
+                    "Run an EXPLICIT on-chain registration before publishing, which lets you set "
+                    "access_policy on that registration. NOTE: this does NOT gate whether "
+                    "registration happens -- vm/publish AUTO-registers an unregistered context graph "
+                    "at gas/TRAC cost regardless of this flag. Set it only to choose the "
+                    "registration's access_policy (the implicit auto-register on publish otherwise "
+                    "defaults the policy). CAVEAT: this explicit register route registers with the "
+                    "daemon's DEFAULT publishPolicy (derived from access_policy) and does NOT "
+                    "preserve a context graph's stored custom publishPolicy / contribution "
+                    "governance. For a CG created with a non-default publishPolicy/PCA, register it "
+                    "explicitly with the desired policy first rather than relying on "
+                    "register_if_needed. (Read access is unaffected; daemon-side rehydration tracked "
+                    "in OriginTrail/dkg#1085.)"
+                ),
+            },
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see register_if_needed; OriginTrail/dkg#1085)."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_DISCARD_SCHEMA = {
+    "name": "dkg_knowledge_asset_discard",
+    "description": "Discard a Working Memory knowledge asset draft without sharing it.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Assertion name."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
+    "name": "dkg_knowledge_asset_import_file",
+    "description": "Upload a local document from an operator-approved import root into a Working Memory knowledge asset draft and run daemon extraction.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Assertion name."},
+            "file_path": {"type": "string", "description": "Local file path to upload. Must be under DKG_HERMES_IMPORT_ROOTS or adapter import_roots."},
+            "content_type": {"type": "string", "description": "Optional MIME type override."},
+            "ontology_ref": {"type": "string", "description": "Optional ontology reference."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name", "file_path"],
+    },
+}
+
+DKG_ASSERTION_QUERY_SCHEMA = {
+    "name": "dkg_knowledge_asset_query",
+    "description": (
+        "Dump every quad from one knowledge asset's WORKING MEMORY DRAFT. Reads the WM draft "
+        "ONLY: an atomic dkg_knowledge_asset_share empties "
+        "the WM draft, so a query AFTER sharing returns 0 quads. Query the draft BEFORE sharing "
+        "(e.g. to inspect deterministic import quads before semantic enrichment); to inspect "
+        "shared content after a share, use dkg_query with view \"shared-working-memory\". "
+        "Not a SPARQL endpoint — use dkg_query for SPARQL."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Assertion name."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA = {
+    "name": "dkg_knowledge_asset_import_artifact_resolve",
+    "description": "Optional validation/debug helper. Resolve a completed imported attachment/assertion into deterministic artifact metadata. Skipped imports are rejected.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+            "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "assertion_uri"],
+    },
+}
+
+DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA = {
+    "name": "dkg_knowledge_asset_import_artifact_read_markdown",
+    "description": "Read Markdown for a completed imported attachment through daemon content-addressed storage, never arbitrary filesystem paths.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+            "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+            "max_bytes": {"type": "integer", "description": "Optional positive integer byte cap; daemon maximum is 5 MiB."},
+        },
+        "required": ["context_graph_id", "assertion_uri"],
+    },
+}
+
+DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA = {
+    "name": "dkg_knowledge_asset_semantic_enrichment_write",
+    "description": "Append model-derived triples to a completed imported assertion with daemon-stamped provenance. Does not promote, finalize, or publish.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+            "assertion_uri": {"type": "string", "description": "Source imported assertion URI from the attachment ref."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "semantic_quads": {"type": "array", "items": SEMANTIC_TRIPLE_SCHEMA, "description": "Model-derived triples appended to the source imported assertion graph; provenance is added by the daemon."},
+            "generation_method": {"type": "string", "description": "Extraction/generation method label."},
+            "agent_identity": {"type": "string", "description": "Agent identity URI or label for provenance; only URIs are emitted as prov:wasAttributedTo resources."},
+            "generated_at": {"type": "string", "description": "ISO timestamp; defaults to daemon time."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "assertion_uri", "semantic_quads"],
+    },
+}
+
+DKG_ASSERTION_HISTORY_SCHEMA = {
+    "name": "dkg_knowledge_asset_history",
+    "description": "Read a knowledge asset lifecycle descriptor.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Assertion name."},
+            "agent_address": {"type": "string", "description": "Optional agent address for WM owner."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_SUB_GRAPH_CREATE_SCHEMA = {
+    "name": "dkg_sub_graph_create",
+    "description": "Create a named sub-graph inside a context graph.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "sub_graph_name": {"type": "string", "description": "Sub-graph name."},
+        },
+        "required": ["context_graph_id", "sub_graph_name"],
+    },
+}
+
+DKG_SUB_GRAPH_LIST_SCHEMA = {
+    "name": "dkg_sub_graph_list",
+    "description": "List sub-graphs in a context graph.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+        },
+        "required": ["context_graph_id"],
+    },
+}
+
+MEMORY_SEARCH_SCHEMA = {
+    "name": "memory_search",
+    "description": (
+        "Search DKG-backed memory by free text across Working Memory, Shared Working Memory, "
+        "and Verifiable Memory. Prefer this over dkg_query for recall."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Free-text search query."},
+            "limit": {"type": "integer", "description": "Max results, default 20, capped at 100."},
+            "context_graph_id": {"type": "string", "description": "Optional context graph override. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+        },
+        "required": ["query"],
+    },
+}
+
+DKG_CONTEXT_GRAPH_INVITE_SCHEMA = {
+    "name": "dkg_context_graph_invite",
+    "description": "Invite a peer ID to a context graph.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "peer_id": {"type": "string", "description": "Peer ID to invite."},
+        },
+        "required": ["context_graph_id", "peer_id"],
+    },
+}
+
+DKG_PARTICIPANT_ADD_SCHEMA = {
+    "name": "dkg_participant_add",
+    "description": "Add an agent address to a context graph allowlist.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "agent_address": {"type": "string", "description": "Agent address to add."},
+        },
+        "required": ["context_graph_id", "agent_address"],
+    },
+}
+
+DKG_PARTICIPANT_REMOVE_SCHEMA = {
+    "name": "dkg_participant_remove",
+    "description": "Remove an agent address from a context graph allowlist.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "agent_address": {"type": "string", "description": "Agent address to remove."},
+        },
+        "required": ["context_graph_id", "agent_address"],
+    },
+}
+
+DKG_PARTICIPANT_LIST_SCHEMA = {
+    "name": "dkg_participant_list",
+    "description": "List allowed agent addresses for a context graph.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+        },
+        "required": ["context_graph_id"],
+    },
+}
+
+DKG_JOIN_REQUEST_LIST_SCHEMA = {
+    "name": "dkg_join_request_list",
+    "description": "List pending join requests for a context graph.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+        },
+        "required": ["context_graph_id"],
+    },
+}
+
+DKG_JOIN_REQUEST_APPROVE_SCHEMA = {
+    "name": "dkg_join_request_approve",
+    "description": "Approve a pending context graph join request.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "agent_address": {"type": "string", "description": "Agent address to approve."},
+        },
+        "required": ["context_graph_id", "agent_address"],
+    },
+}
+
+DKG_JOIN_REQUEST_REJECT_SCHEMA = {
+    "name": "dkg_join_request_reject",
+    "description": "Reject a pending context graph join request.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "agent_address": {"type": "string", "description": "Agent address to reject."},
+        },
+        "required": ["context_graph_id", "agent_address"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Provider
+# ---------------------------------------------------------------------------
+
+class DKGMemoryProvider(MemoryProvider):
+    """DKG V10 memory provider — DKG Working Memory as primary store."""
+
+    @property
+    def name(self) -> str:
+        return "dkg"
+
+    def __init__(self):
+        self._client = None
+        self._config: dict = {}
+        self._cache: dict = {}
+        self._context_graph: str = ""
+        self._assertion_id: str = ""
+        self._session_id: str = ""
+        self._agent_name: str = ""
+        self._offline: bool = False
+        self._lock = threading.Lock()
+        self._turn_count: int = 0
+
+    # -- Core lifecycle --------------------------------------------------------
+
+    def is_available(self) -> bool:
+        try:
+            cfg = _load_config()
+            return bool(cfg.get("daemon_url"))
+        except Exception:
+            return False
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        self._config = _load_config()
+        self._session_id = _scoped_session_id(session_id, self._config)
+        self._agent_name = (
+            self._config.get("agent_name")
+            or kwargs.get("agent_identity", "")
+            or "hermes"
+        )
+        self._cache = _load_cache(self._agent_name)
+        self._context_graph = self._config.get("context_graph", "agent-context")
+        memory_assertion = self._config.get("memory_assertion") or "memory"
+
+        # Create HTTP client
+        from .client import DKGClient
+        self._client = DKGClient(
+            base_url=self._config.get("daemon_url", "http://127.0.0.1:9200"),
+            import_roots=self._config.get("import_roots") or None,
+            dkg_home=self._config.get("dkg_home") or None,
+        )
+
+        # Check daemon health
+        if not self._client.health_check():
+            logger.warning("[dkg] Daemon unreachable — starting in offline mode")
+            self._offline = True
+            return
+
+        # Create or resolve assertion for this agent's Working Memory
+        result = self._client.create_assertion(
+            self._context_graph, memory_assertion,
+        )
+        if self._context_graph == AGENT_CONTEXT_GRAPH_ID and _looks_missing_context_graph(result):
+            create_result = self._client.create_context_graph(
+                AGENT_CONTEXT_GRAPH_NAME,
+                AGENT_CONTEXT_GRAPH_DESCRIPTION,
+                AGENT_CONTEXT_GRAPH_ID,
+                access_policy=1,
+            )
+            if (
+                isinstance(create_result, dict)
+                and (create_result.get("success") is not False or _looks_already_exists(create_result))
+            ):
+                result = self._client.create_assertion(
+                    self._context_graph, memory_assertion,
+                )
+            else:
+                logger.warning(
+                    "[dkg] Agent context graph creation failed: "
+                    f"{create_result.get('error') if isinstance(create_result, dict) else create_result}"
+                )
+        assertion_uri = result.get("assertionUri")
+        if assertion_uri or result.get("alreadyExists") is True:
+            self._assertion_id = memory_assertion
+            if assertion_uri:
+                logger.info(f"[dkg] Assertion ready: {assertion_uri}")
+            else:
+                logger.info(f"[dkg] Assertion ready: existing {self._assertion_id}")
+        elif result.get("success") is False:
+            logger.warning(f"[dkg] Assertion creation failed: {result.get('error')} — using direct query")
+
+        # Flush any queued writes from previous offline session
+        self._flush_queued_writes()
+
+        # Backlog import: if DKG assertion is empty and local MEMORY.md/USER.md
+        # exist, import them so the agent doesn't start with blank memory.
+        self._backlog_import_if_needed(kwargs.get("hermes_home", ""))
+
+    def system_prompt_block(self) -> str:
+        """Recall facts from DKG assertion for system prompt injection."""
+        facts = self._recall_facts()
+        if not facts:
+            return (
+                "DKG memory is connected but empty. Use dkg_memory to store facts, "
+                "memory_search or dkg_query to search, and the dkg_knowledge_asset_* "
+                "lifecycle (create -> write -> finalize -> share) to share named knowledge "
+                "assets with the team. Verifiable Memory publish and context-graph "
+                "collaboration tools are available."
+            )
+
+        memory_facts = [f for f in facts if f.get("target") == "memory"]
+        user_facts = [f for f in facts if f.get("target") == "user"]
+
+        blocks = []
+        if memory_facts:
+            entries = _ENTRY_SEP.join(f["content"] for f in memory_facts)
+            blocks.append(
+                f"{'=' * 50}\n"
+                f"MEMORY [DKG Working Memory]\n"
+                f"{'=' * 50}\n"
+                f"{entries}"
+            )
+        if user_facts:
+            entries = _ENTRY_SEP.join(f["content"] for f in user_facts)
+            blocks.append(
+                f"{'=' * 50}\n"
+                f"USER PROFILE [DKG Working Memory]\n"
+                f"{'=' * 50}\n"
+                f"{entries}"
+            )
+
+        publish_guidance = (
+            "  dkg_knowledge_asset_publish — Publish a finalized + shared knowledge asset to Verifiable Memory (chain, TRAC cost)\n"
+            if self._direct_publish_allowed()
+            else "  Verifiable Memory publish tools are disabled by operator policy; ask before chain publish\n"
+        )
+        # dkg_knowledge_asset_publish is only registered when direct publish is
+        # allowed (get_tool_schemas gates it). Gate its mention here behind the
+        # SAME condition so the agent is never told to call an unregistered tool.
+        ka_lifecycle_line = (
+            "  dkg_knowledge_asset_create/write/finalize/share/publish — Canonical knowledge asset lifecycle (create -> write -> finalize -> share -> publish)\n"
+            if self._direct_publish_allowed()
+            else "  dkg_knowledge_asset_create/write/finalize/share — Knowledge asset lifecycle up to Shared Working Memory (chain publish is disabled by operator policy)\n"
+        )
+        admin_guidance = (
+            "  dkg_context_graph_invite / dkg_participant_* / dkg_join_request_* — Manage project access\n"
+            if self._context_graph_admin_tools_allowed()
+            else "  dkg_participant_list / dkg_join_request_list — Review project access state\n"
+        )
+
+        blocks.append(
+            "DKG TOOLS — Your node is connected to a Decentralized Knowledge Graph.\n"
+            "\n"
+            "MEMORY WORKFLOW:\n"
+            "  dkg_memory — Store/update/remove persistent facts (your primary memory)\n"
+            "  memory_search — Free-text recall across DKG memory layers\n"
+            "  dkg_query — Search knowledge via SPARQL (fast, local)\n"
+            f"{ka_lifecycle_line}"
+            "  dkg_knowledge_asset_pull_from/query/history/discard/import_file — Reseed a draft, inspect quads, read lifecycle state, discard, or import a document\n"
+            "\n"
+            "  dkg_knowledge_asset_import_artifact_read_markdown + dkg_knowledge_asset_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
+            "  dkg_knowledge_asset_import_artifact_resolve - Optional metadata re-check for imported attachments\n"
+            "\n"
+            "COLLABORATION WORKFLOW:\n"
+            "  dkg_knowledge_asset_share — Atomically seal and share a complete named Knowledge Asset to Shared Working Memory (team-visible, free)\n"
+            f"{publish_guidance}"
+            "  dkg_wallet_balances — Check TRAC balance BEFORE publishing\n"
+            "\n"
+            "NETWORK & DISCOVERY:\n"
+            "  dkg_find_agents — Discover other agents on the network\n"
+            "  dkg_send_message — Send encrypted P2P message to another agent\n"
+            "  dkg_read_messages — Read messages from other agents\n"
+            "  dkg_invoke_skill — Call a remote agent's skill\n"
+            "\n"
+            "PROJECT MANAGEMENT:\n"
+            "  dkg_list_context_graphs — List caller-created/joined projects by default; pass scope='all' for every known graph\n"
+            "  dkg_context_graph_create — Create a new project/knowledge space\n"
+            "  dkg_subscribe — Join an existing project on the network\n"
+            "  dkg_sub_graph_create/list — Manage project sub-graphs\n"
+            f"{admin_guidance}"
+            "  dkg_status — Node health, peers, context graphs\n"
+            "\n"
+            "TRUST FLOW: Working Memory (local, free) → SHARE → Shared Memory "
+            "(team, free) → PUBLISH → Verifiable Memory (chain, TRAC cost, permanent).\n"
+            "Knowledge gains trust as it moves through layers. Only publish when "
+            "findings are verified and ready for permanent record.\n"
+            "\n"
+            "PRIVACY MODEL: Context graphs created via dkg_context_graph_create "
+            "default to curated/private — only listed agents receive Shared "
+            "Memory gossip. The creator is auto-included; invite collaborators "
+            "with dkg_participant_add or pass allowed_agents at creation. Use "
+            "public:true to opt into a discoverable/open context graph. Working "
+            "Memory is per-agent regardless of visibility. Verifiable Memory "
+            "anchors are public on-chain; the underlying private quads stay "
+            "local on the publishing node."
+        )
+
+        return "\n\n".join(blocks)
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        schemas = [
+            DKG_MEMORY_SCHEMA,
+            MEMORY_SEARCH_SCHEMA,
+            DKG_QUERY_SCHEMA,
+            DKG_STATUS_SCHEMA,
+            DKG_WALLET_SCHEMA,
+            DKG_LIST_CONTEXT_GRAPHS_SCHEMA,
+            DKG_FIND_AGENTS_SCHEMA,
+            DKG_SEND_MESSAGE_SCHEMA,
+            DKG_READ_MESSAGES_SCHEMA,
+            DKG_INVOKE_SKILL_SCHEMA,
+            DKG_SUBSCRIBE_SCHEMA,
+            DKG_CREATE_CONTEXT_GRAPH_SCHEMA,
+            DKG_PARTICIPANT_LIST_SCHEMA,
+            DKG_JOIN_REQUEST_LIST_SCHEMA,
+            DKG_ASSERTION_CREATE_SCHEMA,
+            DKG_ASSERTION_WRITE_SCHEMA,
+            DKG_ASSERTION_FINALIZE_SCHEMA,
+            DKG_ASSERTION_SHARE_SCHEMA,
+            DKG_ASSERTION_PULL_FROM_SCHEMA,
+            DKG_ASSERTION_DISCARD_SCHEMA,
+            DKG_ASSERTION_IMPORT_FILE_SCHEMA,
+            DKG_ASSERTION_QUERY_SCHEMA,
+            DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA,
+            DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA,
+            DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA,
+            DKG_ASSERTION_HISTORY_SCHEMA,
+            DKG_SUB_GRAPH_CREATE_SCHEMA,
+            DKG_SUB_GRAPH_LIST_SCHEMA,
+        ]
+        if self._direct_publish_allowed():
+            publish_index = schemas.index(DKG_STATUS_SCHEMA)
+            schemas[publish_index:publish_index] = [
+                DKG_ASSERTION_PUBLISH_SCHEMA,
+            ]
+        if self._context_graph_admin_tools_allowed():
+            admin_index = schemas.index(DKG_PARTICIPANT_LIST_SCHEMA)
+            schemas[admin_index:admin_index] = [
+                DKG_CONTEXT_GRAPH_INVITE_SCHEMA,
+                DKG_PARTICIPANT_ADD_SCHEMA,
+                DKG_PARTICIPANT_REMOVE_SCHEMA,
+                DKG_JOIN_REQUEST_APPROVE_SCHEMA,
+                DKG_JOIN_REQUEST_REJECT_SCHEMA,
+            ]
+        return schemas
+
+    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        handlers = {
+            "dkg_memory": self._handle_memory,
+            "memory_search": self._handle_memory_search,
+            "dkg_query": self._handle_query,
+            "dkg_status": self._handle_status,
+            "dkg_wallet_balances": self._handle_wallet,
+            "dkg_list_context_graphs": self._handle_list_context_graphs,
+            "dkg_find_agents": self._handle_find_agents,
+            "dkg_send_message": self._handle_send_message,
+            "dkg_read_messages": self._handle_read_messages,
+            "dkg_invoke_skill": self._handle_invoke_skill,
+            "dkg_subscribe": self._handle_subscribe,
+            "dkg_context_graph_create": self._handle_create_cg,
+            "dkg_context_graph_invite": self._handle_context_graph_invite,
+            "dkg_participant_add": self._handle_participant_add,
+            "dkg_participant_remove": self._handle_participant_remove,
+            "dkg_participant_list": self._handle_participant_list,
+            "dkg_join_request_list": self._handle_join_request_list,
+            "dkg_join_request_approve": self._handle_join_request_approve,
+            "dkg_join_request_reject": self._handle_join_request_reject,
+            "dkg_knowledge_asset_create": self._handle_assertion_create,
+            "dkg_knowledge_asset_write": self._handle_assertion_write,
+            "dkg_knowledge_asset_finalize": self._handle_assertion_finalize,
+            "dkg_knowledge_asset_share": self._handle_assertion_share,
+            "dkg_knowledge_asset_publish": self._handle_assertion_publish,
+            "dkg_knowledge_asset_pull_from": self._handle_assertion_pull_from,
+            "dkg_knowledge_asset_discard": self._handle_assertion_discard,
+            "dkg_knowledge_asset_import_file": self._handle_assertion_import_file,
+            "dkg_knowledge_asset_query": self._handle_assertion_query,
+            "dkg_knowledge_asset_import_artifact_resolve": self._handle_import_artifact_resolve,
+            "dkg_knowledge_asset_import_artifact_read_markdown": self._handle_import_artifact_read_markdown,
+            "dkg_knowledge_asset_semantic_enrichment_write": self._handle_semantic_enrichment_write,
+            "dkg_knowledge_asset_history": self._handle_assertion_history,
+            "dkg_sub_graph_create": self._handle_sub_graph_create,
+            "dkg_sub_graph_list": self._handle_sub_graph_list,
+        }
+        handler = handlers.get(tool_name)
+        if handler:
+            return handler(args)
+        return tool_error(f"Unknown DKG tool: {tool_name}")
+
+    # -- Prefetch --------------------------------------------------------------
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Recall relevant context from DKG before each turn."""
+        if self._offline or not self._client:
+            return ""
+
+        try:
+            # Search within this agent's assertion only — prevents cross-agent contamination
+            sparql = (
+                f"SELECT ?s ?p ?o WHERE {{ "
+                f"?s ?p ?o . "
+                f"FILTER(ISLITERAL(?o) && CONTAINS(LCASE(STR(?o)), LCASE(\"{_escape_sparql(query)}\")))"
+                f"}} LIMIT 10"
+            )
+            if self._assertion_id:
+                result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
+            else:
+                result = self._client.query(sparql, self._context_graph)
+            bindings = _extract_query_bindings(result)
+            lines = []
+            for b in bindings[:10]:
+                s = b.get("s", {}).get("value", "?")
+                p = b.get("p", {}).get("value", "?")
+                o = b.get("o", {}).get("value", "?")
+                lines.append(f"  {_short(s)} — {_short(p)} — {o}")
+
+            if not lines:
+                needle = query.lower().strip()
+                for quad in _extract_quads(result):
+                    if _quad_predicate(quad) != "urn:hermes:content":
+                        continue
+                    content = _quad_object(quad)
+                    if needle and needle not in content.lower():
+                        continue
+                    lines.append(f"  {_short(_quad_subject(quad))} - {_short(_quad_predicate(quad))} - {content}")
+                    if len(lines) >= 10:
+                        break
+            if not lines:
+                return ""
+
+            return f"<dkg-context>\nRelevant knowledge from DKG:\n" + "\n".join(lines) + "\n</dkg-context>"
+        except Exception as e:
+            logger.debug(f"[dkg] Prefetch failed: {e}")
+            return ""
+
+    # -- Sync ------------------------------------------------------------------
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        """Send turn to daemon for entity extraction + persistence."""
+        effective_session_id = _scoped_session_id(session_id or self._session_id, self._config)
+        turn_sequence = self._next_turn_sequence(effective_session_id)
+        turn_id = self._build_turn_id(effective_session_id, turn_sequence, user_content, assistant_content)
+        idempotency_key = f"hermes:{turn_id}"
+        if self._offline or not self._client:
+            # Queue for later sync
+            self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
+            return
+
+        # Fire-and-forget in background thread
+        agent_name = self._agent_name
+        def _sync():
+            try:
+                result = self._client.store_turn(
+                    effective_session_id,
+                    user_content[:2000],
+                    assistant_content[:2000],
+                    agent_name=agent_name,
+                    turn_id=turn_id,
+                    idempotency_key=idempotency_key,
+                )
+                if _client_result_failed(result):
+                    self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
+            except Exception as e:
+                logger.debug(f"[dkg] sync_turn failed: {e}")
+                self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
+
+        threading.Thread(target=_sync, daemon=True).start()
+
+    # -- Lifecycle hooks -------------------------------------------------------
+
+    def on_memory_write(self, action: str, target: str, content: str) -> None:
+        """Mirror built-in memory writes to DKG assertion."""
+        # When user uses the built-in memory tool, mirror the write to DKG
+        # so DKG stays as source of truth
+        self._handle_memory({
+            "action": action,
+            "target": target,
+            "content": content,
+            "old_text": content if action == "remove" else "",
+        })
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Finalize session: flush state to DKG and update local cache."""
+        # Snapshot current facts to local cache for offline fallback
+        facts = self._recall_facts()
+        if facts:
+            with self._lock:
+                self._cache["memory"] = [f for f in facts if f.get("target") == "memory"]
+                self._cache["user"] = [f for f in facts if f.get("target") == "user"]
+                _save_cache(self._cache, self._agent_name)
+
+    def shutdown(self) -> None:
+        """Close HTTP client."""
+        if self._client:
+            self._client.close()
+            self._client = None
+
+    # -- Config ----------------------------------------------------------------
+
+    def get_config_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "daemon_url",
+                "label": "DKG Daemon URL",
+                "type": "string",
+                "default": "http://127.0.0.1:9200",
+                "help": "URL of your running DKG V10 node.",
+            },
+            {
+                "key": "context_graph",
+                "label": "Context Graph",
+                "type": "string",
+                "default": "agent-context",
+                "help": "Name of the Context Graph for agent memory.",
+            },
+            {
+                "key": "agent_name",
+                "label": "Agent Name",
+                "type": "string",
+                "default": "",
+                "help": "Agent identity (leave empty to use Hermes profile name).",
+            },
+        ]
+
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        config_path = Path(hermes_home) / "dkg.json"
+        owned_values = dict(values)
+        owned_values.setdefault("managedBy", "@origintrail-official/dkg-adapter-hermes")
+        config_path.write_text(json.dumps(owned_values, indent=2) + "\n", encoding="utf-8")
+
+    # -- Internal: memory operations -------------------------------------------
+
+    def _handle_memory(self, args: Dict[str, Any]) -> str:
+        action = args.get("action", "add")
+        target = args.get("target", "memory")
+        content = args.get("content", "")
+        old_text = args.get("old_text", "")
+
+        if not content:
+            return tool_error("Content is required.")
+
+        with self._lock:
+            entries = list(self._cache.get(target, []))
+
+            if action == "add":
+                entries.append({"target": target, "content": content})
+            elif action == "replace":
+                found = False
+                for i, e in enumerate(entries):
+                    if old_text and old_text in e.get("content", ""):
+                        entries[i] = {"target": target, "content": content}
+                        found = True
+                        break
+                if not found:
+                    entries.append({"target": target, "content": content})
+            elif action == "remove":
+                entries = [e for e in entries if content not in e.get("content", "")]
+
+            self._cache[target] = entries
+            _save_cache(self._cache, self._agent_name)
+
+        write_queued = False
+        if not self._write_memory_target_to_assertion(target):
+            write_queued = True
+            self._cache.setdefault("queued_writes", []).append({
+                "type": "memory",
+                "action": action,
+                "target": target,
+                "content": content,
+                "old_text": old_text,
+            })
+            _save_cache(self._cache, self._agent_name)
+
+        count = len(entries)
+        return json.dumps({
+            "success": True,
+            "action": action,
+            "target": target,
+            "entries": count,
+            "store": "dkg" if not self._offline and not write_queued else "local_cache",
+            "queued": write_queued,
+        })
+
+    def _handle_query(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot run SPARQL queries.")
+        sparql = args.get("sparql", "")
+        if not sparql:
+            return tool_error("SPARQL query is required.")
+        if args.get("contextGraph_id") is not None or args.get("contextGraphId") is not None:
+            return tool_error('"contextGraph_id" is not a supported parameter. Use "context_graph_id".')
+        if args.get("include_shared_memory") is not None or args.get("includeSharedMemory") is not None:
+            return tool_error(
+                '"include_shared_memory" is no longer supported on dkg_query. '
+                'Omit "view" for the legacy data-graph path, or use '
+                '"view: shared-working-memory" for SWM-only reads.'
+            )
+        if args.get("context_graph") is not None:
+            return tool_error('"context_graph" is not a supported parameter on dkg_query. Use "context_graph_id".')
+        cg = _first_text(args, "context_graph_id") or self._context_graph
+        view = _first_text(args, "view")
+        if view and view not in ("working-memory", "shared-working-memory", "verifiable-memory"):
+            return tool_error('"view" must be one of: working-memory, shared-working-memory, verifiable-memory.')
+        if view and not _first_text(args, "context_graph_id"):
+            return tool_error(f'"view: {view}" requires "context_graph_id".')
+        if view and _first_text(args, "sub_graph_name"):
+            return tool_error('"sub_graph_name" cannot be combined with view-based dkg_query routing.')
+        if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
+            return tool_error('"agent_address" must be a string.')
+        if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():
+            return tool_error('"agent_address" must be a non-empty string.')
+        agent_address = _first_text(args, "agent_address")
+        if view == "working-memory" and not agent_address:
+            agent_address = self._client._resolve_agent_address()
+            if not agent_address:
+                return tool_error('"view: working-memory" requires agent_address; retry after identity is available.')
+        if view == "working-memory" and agent_address:
+            agent_address = _normalize_wm_agent_address(agent_address)
+        result = self._client.query(
+            sparql,
+            cg,
+            view=view,
+            assertion_name=_first_text(args, "assertion_name"),
+            agent_address=agent_address,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            verified_graph=_first_text(args, "verified_graph"),
+            graph_suffix=_first_text(args, "graph_suffix"),
+            min_trust=args.get("min_trust") if "min_trust" in args else None,
+        )
+        return json.dumps(result)
+
+    def _handle_memory_search(self, args: Dict[str, Any]) -> str:
+        query = _first_text(args, "query")
+        if len(query) < 2:
+            return tool_error("query must be at least 2 characters.")
+        limit = _coerce_limit(args.get("limit"), default=20, maximum=100)
+        if self._offline or not self._client:
+            return json.dumps(_cache_memory_search(query, self._cache, limit))
+
+        keywords = [k for k in query.lower().split() if len(k) >= 2]
+        if not keywords:
+            return json.dumps({"query": query, "count": 0, "scope": None, "hits": []})
+
+        sparql = _build_memory_search_sparql(keywords, limit)
+        agent_address = self._client._resolve_agent_address()
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
+        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
+        context_graphs: List[str] = []
+        for cg in ("agent-context", project_context_graph):
+            if cg and cg not in context_graphs:
+                context_graphs.append(cg)
+
+        hits: List[Dict[str, Any]] = []
+        successful_queries = 0
+        for cg in context_graphs:
+            for view, weight in (
+                ("working-memory", 1.0),
+                ("shared-working-memory", 1.15),
+                ("verifiable-memory", 1.3),
+            ):
+                if view == "working-memory" and not agent_address:
+                    continue
+                result = self._client.query(
+                    sparql,
+                    cg,
+                    view=view,
+                    agent_address=agent_address if view == "working-memory" else None,
+                )
+                if _client_result_failed(result):
+                    continue
+                successful_queries += 1
+                for binding in _extract_query_bindings(result):
+                    text = _binding_value(binding.get("text") or binding.get("o"))
+                    uri = _binding_value(binding.get("uri") or binding.get("s"))
+                    pred = _binding_value(binding.get("pred") or binding.get("p"))
+                    if not text:
+                        continue
+                    score = _keyword_overlap(text, keywords)
+                    layer = _memory_search_layer(cg, view)
+                    source = "sessions" if cg == "agent-context" else "memory"
+                    hits.append({
+                        "snippet": text[:500],
+                        "layer": layer,
+                        "source": source,
+                        "score": round(score, 4),
+                        "_rank": score * weight,
+                        "path": f"dkg://{cg}/{layer}/{_stable_scope_hash(uri or text)}",
+                        "predicate": pred,
+                    })
+
+        if not hits and successful_queries == 0:
+            fallback = _cache_memory_search(query, self._cache, limit)
+            fallback["scope"] = project_context_graph if project_context_graph != "agent-context" else None
+            return json.dumps(fallback)
+        if not hits:
+            return json.dumps({
+                "query": query,
+                "count": 0,
+                "scope": project_context_graph if project_context_graph != "agent-context" else None,
+                "hits": [],
+            })
+
+        trust_order = {
+            "agent-context-vm": 3,
+            "project-vm": 3,
+            "agent-context-swm": 2,
+            "project-swm": 2,
+            "agent-context-wm": 1,
+            "project-wm": 1,
+        }
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for hit in hits:
+            key = f"{hit.get('source')}::{hit.get('path')}"
+            existing = deduped.get(key)
+            if not existing:
+                deduped[key] = hit
+                continue
+            hit_layer = str(hit.get("layer") or "project-wm")
+            existing_layer = str(existing.get("layer") or "project-wm")
+            if (
+                trust_order.get(hit_layer, 1) > trust_order.get(existing_layer, 1)
+                or (
+                    trust_order.get(hit_layer, 1) == trust_order.get(existing_layer, 1)
+                    and float(hit.get("score", 0)) > float(existing.get("score", 0))
+                )
+            ):
+                deduped[key] = hit
+        ranked = sorted(deduped.values(), key=lambda h: float(h.get("_rank", 0)), reverse=True)[:limit]
+        public_hits = [{k: v for k, v in hit.items() if k != "_rank"} for hit in ranked]
+        return json.dumps({
+            "query": query,
+            "count": len(public_hits),
+            "scope": project_context_graph if project_context_graph != "agent-context" else None,
+            "hits": public_hits,
+        })
+
+    def _handle_status(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return json.dumps({
+                "status": "offline",
+                "daemon_url": self._config.get("daemon_url"),
+                "cached_memory_entries": len(self._cache.get("memory", [])),
+                "cached_user_entries": len(self._cache.get("user", [])),
+                "queued_writes": len(self._cache.get("queued_writes", [])),
+            })
+
+        status = self._client.status()
+        cg_list = self._client.list_context_graphs()
+        return json.dumps({
+            "status": "connected",
+            "daemon_url": self._config.get("daemon_url"),
+            "node": status,
+            "context_graphs": cg_list,
+            "assertion_id": self._assertion_id,
+            "agent_name": self._agent_name,
+            "session_id": self._session_id,
+            "turn_count": self._turn_count,
+        })
+
+    # -- Handlers: network & discovery -----------------------------------------
+
+    def _handle_wallet(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        return json.dumps(self._client._get("/api/wallets/balances"))
+
+    def _handle_list_context_graphs(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        scope = _first_text(args, "scope") or "mine"
+        if scope not in ("mine", "all"):
+            return tool_error("scope must be 'mine' or 'all'.")
+        result = self._client.list_context_graphs()
+        graphs = result.get("contextGraphs", []) if isinstance(result, dict) else []
+        filtered = _filter_context_graphs_for_scope(graphs, scope)
+        if isinstance(result, dict):
+            return json.dumps({**result, "contextGraphs": filtered, "count": len(filtered), "scope": scope})
+        return json.dumps({"contextGraphs": filtered, "count": len(filtered), "scope": scope})
+
+    def _handle_find_agents(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot discover agents.")
+        params = {}
+        if args.get("framework"):
+            params["framework"] = args["framework"]
+        if args.get("skill_type"):
+            params["skill_type"] = args["skill_type"]
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        path = f"/api/agents?{qs}" if qs else "/api/agents"
+        return json.dumps(self._client._get(path))
+
+    def _handle_send_message(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot send messages.")
+        peer_id = args.get("peer_id", "")
+        text = args.get("text", "")
+        if not peer_id or not text:
+            return tool_error("Both peer_id and text are required.")
+        return json.dumps(self._client._post("/api/chat", {
+            "to": peer_id,
+            "peerId": peer_id,
+            "text": text,
+        }))
+
+    def _handle_read_messages(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot read messages.")
+        params = {}
+        if args.get("peer"):
+            params["peer"] = args["peer"]
+        if args.get("limit"):
+            params["limit"] = str(args["limit"])
+        if args.get("since"):
+            params["since"] = str(args["since"])
+        qs = urlencode(params)
+        path = f"/api/messages?{qs}" if qs else "/api/messages"
+        return json.dumps(self._client._get(path))
+
+    def _handle_invoke_skill(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot invoke remote skills.")
+        peer_id = args.get("peer_id", "")
+        skill_uri = args.get("skill_uri", "")
+        input_data = args.get("input", "")
+        if not peer_id or not skill_uri:
+            return tool_error("peer_id and skill_uri are required.")
+        return json.dumps(self._client._post("/api/invoke-skill", {
+            "peerId": peer_id,
+            "skillUri": skill_uri,
+            "input": input_data,
+        }))
+
+    def _handle_subscribe(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot subscribe.")
+        cg_id = args.get("context_graph_id", "")
+        if not cg_id:
+            return tool_error("context_graph_id is required.")
+        include_shared = args.get("include_shared_memory")
+        if include_shared is not None and not isinstance(include_shared, bool):
+            return tool_error("include_shared_memory must be a boolean.")
+        return json.dumps(self._client.subscribe(cg_id, include_shared))
+
+    def _handle_create_cg(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot create Context Graph.")
+        name = args.get("name", "").strip()
+        if not name:
+            return tool_error("name is required.")
+        description = args.get("description", "")
+        # Privacy-by-default: when `public` is omitted or false, the context
+        # graph is curated (`accessPolicy: 1`). The agent's createContextGraph
+        # flow auto-includes the creator's address in the allowlist (see
+        # `packages/agent/src/dkg-agent.ts:3962-3973`), so the creator can
+        # immediately read/write the curated CG without a self-invite step.
+        #
+        # Round 2 — strict type validation: an LLM that emits
+        # `public: "yes"` (string) or any non-boolean value should get a
+        # clear tool error rather than silently defaulting to false (which
+        # would produce the opposite of the agent's intent). Only `True`,
+        # `False`, or omitted are accepted.
+        raw_public = args.get("public")
+        if raw_public is not None and not isinstance(raw_public, bool):
+            return tool_error(
+                f"\"public\" must be a boolean (true or false). Got: {type(raw_public).__name__}."
+            )
+        is_public = raw_public is True
+        access_policy: Optional[int] = None if is_public else 1
+        raw_allowed = args.get("allowed_agents")
+        allowed_agents: Optional[list] = None
+        if not is_public and raw_allowed is not None:
+            # Round 2 — strict validation: every entry must be a non-empty
+            # trimmed string that matches the Ethereum address regex.
+            # Previously we silently dropped non-string/blank entries,
+            # which hides LLM-generated mistakes (e.g. `["0xAlice...", 42]`
+            # would create a curated graph without entry 42's owner ever
+            # knowing they were excluded). Fail fast instead.
+            if not isinstance(raw_allowed, list):
+                return tool_error(
+                    f"\"allowed_agents\" must be an array of strings. Got: {type(raw_allowed).__name__}."
+                )
+            eth_addr_re = re.compile(r"^0x[0-9a-fA-F]{40}$")
+            cleaned: list = []
+            for index, entry in enumerate(raw_allowed):
+                if not isinstance(entry, str):
+                    return tool_error(
+                        f"\"allowed_agents[{index}]\" must be a string. Got: {type(entry).__name__}."
+                    )
+                trimmed = entry.strip()
+                if not trimmed:
+                    return tool_error(
+                        f"\"allowed_agents[{index}]\" is empty or whitespace-only. "
+                        "Each entry must be a 0x-prefixed 40-hex-char Ethereum address."
+                    )
+                if not eth_addr_re.match(trimmed):
+                    return tool_error(
+                        f"Invalid Ethereum address in \"allowed_agents[{index}]\": \"{entry}\". "
+                        "Each entry must be a 0x-prefixed 40-hex-char string "
+                        "(e.g. \"0x1234567890abcdef1234567890abcdef12345678\")."
+                    )
+                cleaned.append(trimmed)
+            if cleaned:
+                allowed_agents = cleaned
+        result = self._client.create_context_graph(
+            name,
+            description,
+            cg_id=_first_text(args, "id"),
+            access_policy=access_policy,
+            allowed_agents=allowed_agents,
+        )
+        return json.dumps(result)
+
+    def _handle_context_graph_invite(self, args: Dict[str, Any]) -> str:
+        if not self._context_graph_admin_tools_allowed():
+            return tool_error(
+                "Context graph admin tools are disabled by the adapter guard. "
+                "Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+            )
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        peer_id = _first_text(args, "peer_id")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not peer_id:
+            return tool_error("peer_id is required.")
+        result = self._client.invite_to_context_graph(cg, peer_id)
+        if not isinstance(result, dict):
+            result = {"result": result}
+        status: Dict[str, Any] = {}
+        try:
+            status_result = self._client.status()
+            if isinstance(status_result, dict):
+                status = status_result
+        except Exception:
+            status = {}
+        multiaddrs = [value for value in status.get("multiaddrs", []) if isinstance(value, str)]
+        curator_multiaddr = _pick_shareable_multiaddr(multiaddrs)
+        enriched = {
+            **result,
+            "peerId": peer_id,
+            "curatorMultiaddr": curator_multiaddr,
+            "inviteCode": f"{cg}\n{curator_multiaddr}" if curator_multiaddr else cg,
+        }
+        return json.dumps(enriched)
+
+    def _handle_participant_add(self, args: Dict[str, Any]) -> str:
+        return self._participant_tool(args, "add")
+
+    def _handle_participant_remove(self, args: Dict[str, Any]) -> str:
+        return self._participant_tool(args, "remove")
+
+    def _handle_participant_list(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        return json.dumps(self._client.list_participants(cg))
+
+    def _participant_tool(self, args: Dict[str, Any], action: str) -> str:
+        if not self._context_graph_admin_tools_allowed():
+            return tool_error(
+                "Context graph admin tools are disabled by the adapter guard. "
+                "Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+            )
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        agent_address = _first_text(args, "agent_address")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not agent_address:
+            return tool_error("agent_address is required.")
+        if action == "add":
+            return json.dumps(self._client.add_participant(cg, agent_address))
+        return json.dumps(self._client.remove_participant(cg, agent_address))
+
+    def _handle_join_request_list(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        return json.dumps(self._client.list_join_requests(cg))
+
+    def _handle_join_request_approve(self, args: Dict[str, Any]) -> str:
+        return self._join_request_tool(args, "approve")
+
+    def _handle_join_request_reject(self, args: Dict[str, Any]) -> str:
+        return self._join_request_tool(args, "reject")
+
+    def _join_request_tool(self, args: Dict[str, Any], action: str) -> str:
+        if not self._context_graph_admin_tools_allowed():
+            return tool_error(
+                "Context graph admin tools are disabled by the adapter guard. "
+                "Enable DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS explicitly."
+            )
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        agent_address = _first_text(args, "agent_address")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not agent_address:
+            return tool_error("agent_address is required.")
+        if action == "approve":
+            return json.dumps(self._client.approve_join_request(cg, agent_address))
+        return json.dumps(self._client.reject_join_request(cg, agent_address))
+
+    def _handle_assertion_create(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        # [D3] Optional one-call create+write(+share). `quads` (when present) are
+        # written into the new draft and SEALED by the daemon; `also_share_swm`
+        # (default FALSE, explicit) additionally shares the sealed asset to SWM.
+        quads = None
+        if args.get("quads") is not None:
+            quads = _normalize_quads(args.get("quads"))
+            if not quads:
+                return tool_error("quads must contain at least one item with subject, predicate, and object.")
+        also_share_swm = args.get("also_share_swm")
+        if also_share_swm is not None and not isinstance(also_share_swm, bool):
+            return tool_error("also_share_swm must be a boolean.")
+        # also_share_swm shares a SEALED asset, so it is only meaningful with quads.
+        # When there are no quads it is IGNORED (parity with MCP + OpenClaw and the
+        # plan §2.6 contract) — the client never emits it without quads, so a bare
+        # create stays a plain WM draft. (A stray also_share_swm:true with no quads
+        # would also be a daemon 400, but it never reaches the wire.)
+        result = self._client.create_assertion(
+            cg, name, _first_text(args, "sub_graph_name"),
+            quads=quads, also_share_swm=bool(also_share_swm))
+        # The daemon returns 207 + errors:[{phase:"swm-share"}] when create+seal lands but
+        # the opt-in SWM share fails; the client treats 207 as success. Judge from the
+        # OUTCOME, not the requested flag (parity with MCP + OpenClaw), so agents don't
+        # publish an asset that never reached SWM.
+        share_failure = _create_swm_share_error(result, bool(also_share_swm))
+        if share_failure is not None:
+            return tool_error(
+                "Created and sealed knowledge asset '" + name + "' in '" + cg
+                + "', but " + share_failure)
+        return json.dumps(result)
+
+    def _handle_assertion_write(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        quads = _normalize_quads(args.get("quads"))
+        if not quads:
+            return tool_error("quads must contain at least one item with subject, predicate, and object.")
+        return json.dumps(self._client.write_assertion(name, cg, quads, _first_text(args, "sub_graph_name")))
+
+    def _handle_assertion_share(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        entities = args.get("entities")
+        if isinstance(entities, list):
+            return tool_error("Knowledge Assets are shared atomically; root-entity selection is not supported.")
+        if entities is not None and entities != "all":
+            return tool_error("entities is retired; omit it to share the complete Knowledge Asset.")
+        skip_seal = args.get("skip_seal")
+        if skip_seal is True:
+            return tool_error("Knowledge Assets are always sealed before sharing.")
+        if skip_seal is not None and skip_seal is not False:
+            return tool_error("skip_seal must be a boolean when supplied.")
+        result = self._client.promote_assertion(
+            name, cg, None, _first_text(args, "sub_graph_name"), skip_seal=None)
+        return json.dumps(_annotate_share_seal(result, None))
+
+    def _handle_assertion_finalize(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        scheme_version, error = _validate_int_arg(args.get("scheme_version"), "scheme_version", minimum=1)
+        if error:
+            return tool_error(error)
+        author = _first_text(args, "author_agent_address")
+        author = _normalize_wm_agent_address(author) if author else None
+        layer_raw = args.get("layer")
+        if layer_raw == "swm":
+            return tool_error("Legacy root-scoped Knowledge Assets are read-only.")
+        if layer_raw is not None and layer_raw != "wm":
+            return tool_error("Only Working Memory finalization is supported.")
+        return json.dumps(self._client.finalize_assertion(
+            name,
+            cg,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            author_agent_address=author,
+            scheme_version=scheme_version,
+            layer="wm" if layer_raw == "wm" else None,
+        ))
+
+    def _handle_assertion_publish(self, args: Dict[str, Any]) -> str:
+        if not self._direct_publish_allowed():
+            return tool_error(
+                "Direct DKG publish is disabled by the adapter publish guard. "
+                "Use an operator-reviewed publish request or enable DKG_ALLOW_DIRECT_PUBLISH explicitly."
+            )
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot publish to chain.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        options: Dict[str, Any] = {}
+        publish_epochs, error = _validate_int_arg(
+            args.get("publish_epochs"), "publish_epochs", minimum=1, maximum=_MAX_PUBLISH_EPOCHS)
+        if error:
+            return tool_error(error)
+        if publish_epochs is not None:
+            options["publishEpochs"] = publish_epochs
+        override, error = _validate_decimal_string_arg(
+            args.get("publisher_node_identity_id_override"),
+            "publisher_node_identity_id_override")
+        if error:
+            return tool_error(error)
+        if override is not None:
+            # Preserved as a decimal string end-to-end (daemon regex /^\d+$/) —
+            # no int() round-trip, so a bigint node id above 2**53 keeps its
+            # precision (Codex #1079:750).
+            options["publisherNodeIdentityIdOverride"] = override
+        # No clear_after / clear_shared_memory_after on the per-asset publish:
+        # on vm/publish that flag is GRAPH-WIDE destructive (wipes every other
+        # agent's/asset's unpublished SWM in the CG), and this asset's own SWM is
+        # cleared unconditionally regardless (CONTRACT §D). There is no longer a
+        # CG-wide clear path exposed by the agent tools.
+        #
+        # register_if_needed (CONTRACT §G): vm/publish AUTO-registers an
+        # unregistered CG transparently (#1116) regardless of this flag. When true,
+        # run an EXPLICIT register first (idempotent — short-circuits if already
+        # registered) BEFORE publishing so the caller can choose the registration's
+        # access_policy.
+        registration = None
+        if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
+            return tool_error("register_if_needed must be a boolean.")
+        access_policy_dep_error = _access_policy_requires_register_error(args)
+        if access_policy_dep_error:
+            return tool_error(access_policy_dep_error)
+        if args.get("register_if_needed") is True:
+            access_policy = args.get("access_policy")
+            access_policy_error = _validate_access_policy(access_policy)
+            if access_policy_error:
+                return tool_error(access_policy_error)
+            registration = self._client.register_context_graph(cg, access_policy)
+            if _client_result_failed(registration):
+                error = str(registration.get("error") or registration.get("message") or "").lower()
+                # "already registered"/"already exists" is success — continue to
+                # publish. Any other registration failure is fatal: surface it and
+                # do NOT publish.
+                if "already registered" not in error and "already exists" not in error:
+                    return json.dumps(registration)
+                # Normalize the already-registered short-circuit to a success
+                # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
+                # result["registration"] makes a clean publish look partly failed.
+                registration = {"alreadyRegistered": True}
+        result = self._client.publish_finalized_assertion(
+            name,
+            cg,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            options=options or None,
+        )
+        if registration is not None and isinstance(result, dict):
+            result["registration"] = registration
+        return json.dumps(_annotate_vm_publish_partial(result))
+
+    def _handle_assertion_pull_from(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        layer = _first_text(args, "layer")
+        if layer not in ("swm", "vm"):
+            return tool_error('layer must be "swm" or "vm".')
+        on_conflict = _first_text(args, "on_conflict")
+        if on_conflict and on_conflict not in ("reject", "replace"):
+            return tool_error('on_conflict must be "reject" or "replace".')
+        return json.dumps(self._client.pull_from(
+            name,
+            cg,
+            layer,
+            on_conflict=on_conflict or None,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_assertion_discard(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        return json.dumps(self._client.discard_assertion(name, cg, _first_text(args, "sub_graph_name")))
+
+    def _handle_assertion_import_file(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        file_path = _first_text(args, "file_path")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        if not file_path:
+            return tool_error("file_path is required.")
+        return json.dumps(self._client.import_assertion_file(
+            name,
+            cg,
+            file_path,
+            content_type=_first_text(args, "content_type"),
+            ontology_ref=_first_text(args, "ontology_ref"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_assertion_query(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        return json.dumps(self._client.query_assertion(name, cg, sub_graph_name=_first_text(args, "sub_graph_name")))
+
+    def _handle_import_artifact_resolve(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        return json.dumps(self._client.resolve_import_artifact(
+            cg,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_import_artifact_read_markdown(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        max_bytes = args.get("max_bytes")
+        if max_bytes is not None:
+            if isinstance(max_bytes, bool):
+                return tool_error("max_bytes must be a positive integer.")
+            if isinstance(max_bytes, str):
+                stripped_max_bytes = max_bytes.strip()
+                if not stripped_max_bytes:
+                    return tool_error("max_bytes must be a positive integer.")
+                try:
+                    max_bytes = int(stripped_max_bytes)
+                except Exception:
+                    return tool_error("max_bytes must be a positive integer.")
+            elif not isinstance(max_bytes, int):
+                return tool_error("max_bytes must be a positive integer.")
+            if max_bytes <= 0:
+                return tool_error("max_bytes must be a positive integer.")
+        return json.dumps(self._client.read_import_artifact_markdown(
+            cg,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            max_bytes=max_bytes,
+        ))
+
+    def _handle_semantic_enrichment_write(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        if "name" in args or "semanticAssertionName" in args or "semantic_assertion_name" in args:
+            return tool_error("Semantic enrichment is written into the source import assertion; target assertion names are not supported.")
+        quads, quad_error = _normalize_semantic_quads(args.get("semantic_quads"))
+        if quad_error:
+            return tool_error(quad_error)
+        return json.dumps(self._client.write_semantic_enrichment(
+            cg,
+            quads,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            generation_method=_first_text(args, "generation_method"),
+            agent_identity=_first_text(args, "agent_identity"),
+            generated_at=_first_text(args, "generated_at"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_assertion_history(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        return json.dumps(self._client.assertion_history(
+            name,
+            cg,
+            agent_address=_first_text(args, "agent_address"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_sub_graph_create(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        sub_graph = _first_text(args, "sub_graph_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not sub_graph:
+            return tool_error("sub_graph_name is required.")
+        return json.dumps(self._client.create_sub_graph(cg, sub_graph))
+
+    def _handle_sub_graph_list(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        return json.dumps(self._client.list_sub_graphs(cg))
+
+    # -- Internal: backlog import ----------------------------------------------
+
+    def _backlog_import_if_needed(self, hermes_home: str) -> None:
+        """On first activation, import existing MEMORY.md + USER.md into DKG."""
+        if self._offline or not self._client:
+            return
+
+        # Check if assertion already has content (not first activation)
+        existing = self._recall_facts()
+        if existing:
+            return
+
+        # Look for existing memory files to import
+        if not hermes_home:
+            return
+
+        memories_dir = Path(hermes_home) / "memories"
+        imported = 0
+
+        for filename in ["MEMORY.md", "USER.md"]:
+            filepath = memories_dir / filename
+            if not filepath.exists():
+                continue
+            try:
+                content = filepath.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+
+                target = "user" if filename == "USER.md" else "memory"
+                # Split by § delimiter (same as built-in memory format)
+                entries = [e.strip() for e in content.split("\n\xA7\n") if e.strip()]
+
+                for entry in entries:
+                    self._handle_memory({
+                        "action": "add",
+                        "target": target,
+                        "content": entry,
+                    })
+                    imported += 1
+
+                logger.info(f"[dkg] Backlog import: {len(entries)} entries from {filename}")
+            except Exception as e:
+                logger.warning(f"[dkg] Backlog import failed for {filename}: {e}")
+
+        if imported > 0:
+            logger.info(f"[dkg] Backlog import complete: {imported} entries imported from existing memory files")
+
+    # -- Internal: recall facts from DKG or cache ------------------------------
+
+    def _recall_facts(self) -> List[Dict[str, Any]]:
+        """Get all persistent facts from DKG assertion or cache."""
+        if self._offline or not self._client:
+            return self._cache.get("memory", []) + self._cache.get("user", [])
+
+        if not self._assertion_id:
+            return self._cache.get("memory", []) + self._cache.get("user", [])
+
+        try:
+            result = self._client.query_assertion(self._assertion_id, self._context_graph)
+            quads = [
+                quad for quad in _extract_quads(result)
+                if _quad_predicate(quad) == "urn:hermes:content"
+            ]
+            if quads:
+                facts = []
+                for quad in quads:
+                    content = _quad_object(quad)
+                    if content.startswith("[user]"):
+                        facts.append({"target": "user", "content": content[6:].strip()})
+                    elif content.startswith("[memory]"):
+                        facts.append({"target": "memory", "content": content[8:].strip()})
+                    else:
+                        facts.append({"target": "memory", "content": content})
+                return facts
+        except Exception as e:
+            logger.debug(f"[dkg] Recall from assertion failed: {e}")
+
+        return self._cache.get("memory", []) + self._cache.get("user", [])
+
+    def _flush_queued_writes(self) -> None:
+        """Flush any writes queued during offline period. Only removes items that succeeded."""
+        queued = list(self._cache.get("queued_writes", []))
+        if not queued or self._offline:
+            return
+
+        logger.info(f"[dkg] Flushing {len(queued)} queued writes from offline period")
+        failed: list = []
+        for item in queued:
+            try:
+                if item.get("type") == "turn":
+                    result = self._client.store_turn(
+                        item["session_id"],
+                        item.get("user", ""),
+                        item.get("assistant", ""),
+                        agent_name=self._agent_name,
+                        turn_id=item.get("turn_id", ""),
+                        idempotency_key=item.get("idempotency_key", ""),
+                    )
+                    if _client_result_failed(result):
+                        failed.append(item)
+                elif item.get("type") == "memory":
+                    target = item.get("target", "memory")
+                    if not self._write_memory_target_to_assertion(target):
+                        failed.append(item)
+            except Exception as e:
+                logger.debug(f"[dkg] Failed to flush queued write: {e}")
+                failed.append(item)
+
+        with self._lock:
+            self._cache["queued_writes"] = failed
+            _save_cache(self._cache, self._agent_name)
+
+    def _write_memory_target_to_assertion(self, target: str) -> bool:
+        if not (self._client and not self._offline and self._assertion_id):
+            return False
+
+        entries = list(self._cache.get(target, []))
+        quads = []
+        subject = f"urn:hermes:{_uri_segment(self._agent_name, 'agent')}:{_uri_segment(target, 'memory')}"
+        for e in entries:
+            quads.append({
+                "subject": subject,
+                "predicate": "urn:hermes:content",
+                "object": _quote_literal(f"[{e.get('target', target)}]\n{e['content']}"),
+            })
+        try:
+            result = self._client.write_assertion(
+                self._assertion_id,
+                self._context_graph,
+                quads,
+            )
+            if _client_result_failed(result):
+                raise RuntimeError(result.get("error", "DKG assertion write failed"))
+            return True
+        except Exception as e:
+            logger.debug(f"[dkg] Assertion write failed: {e}")
+            return False
+
+    def _direct_publish_allowed(self) -> bool:
+        exposure = str(self._config.get("publish_tool", "direct")).lower()
+        allow = self._config.get("allow_direct_publish", True)
+        if exposure == "disabled" or allow is False or str(allow).lower() in ("0", "false", "no"):
+            return False
+        return (
+            allow is True
+            or str(allow).lower() in ("1", "true", "yes")
+            or exposure == "direct"
+        )
+
+    def _context_graph_admin_tools_allowed(self) -> bool:
+        allow = self._config.get("allow_context_graph_admin_tools", True)
+        if allow is False or str(allow).lower() in ("0", "false", "no"):
+            return False
+        return allow is True or str(allow).lower() in ("1", "true", "yes")
+
+    def _next_turn_sequence(self, session_id: str) -> int:
+        with self._lock:
+            raw_sequences = self._cache.setdefault("turn_sequences", {})
+            if not isinstance(raw_sequences, dict):
+                raw_sequences = {}
+                self._cache["turn_sequences"] = raw_sequences
+            try:
+                current = int(raw_sequences.get(session_id, 0))
+            except Exception:
+                current = 0
+            next_sequence = current + 1
+            raw_sequences[session_id] = next_sequence
+            self._turn_count = max(self._turn_count, next_sequence)
+            _save_cache(self._cache, self._agent_name)
+            return next_sequence
+
+    def _build_turn_id(self, session_id: str, turn_sequence: int, user_content: str, assistant_content: str) -> str:
+        digest = hashlib.sha256()
+        digest.update(session_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(turn_sequence).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(user_content[:2000].encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(assistant_content[:2000].encode("utf-8", errors="ignore"))
+        return f"{session_id}:{turn_sequence}:{digest.hexdigest()[:16]}"
+
+    def _queue_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+        idempotency_key: str,
+        user_content: str,
+        assistant_content: str,
+    ) -> None:
+        queued = {
+            "type": "turn",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "idempotency_key": idempotency_key,
+            "user": user_content[:2000],
+            "assistant": assistant_content[:2000],
+        }
+        with self._lock:
+            existing = self._cache.setdefault("queued_writes", [])
+            if not any(item.get("type") == "turn" and item.get("idempotency_key") == idempotency_key for item in existing):
+                existing.append(queued)
+            _save_cache(self._cache, self._agent_name)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_IRI_SCHEME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$')
+
+
+def _is_safe_iri(value: str) -> bool:
+    """Mirror the daemon/core safe-IRI contract for SPARQL-interpolated terms."""
+    return bool(value) and bool(_IRI_SCHEME_RE.match(value))
+
+
+def _is_uri(value: str) -> bool:
+    """Check if a value looks like a URI for legacy generic quad writes."""
+    return bool(value) and any(value.startswith(prefix) for prefix in ("http://", "https://", "urn:", "did:"))
+
+
+# #1265 cross-adapter create/write one-shot quad-object contract. Shares the
+# URI/blank-node/literal CLASSIFICATION and angle-bracket stripping with MCP's
+# normalizeRdfObject/isRdfTerm (mcp-dkg assertions.ts) and core's
+# normalizeDkgPublisherObject/isDkgRdfTerm (publisher-extension.ts) — keep that
+# classification in sync. NOTE: literal escaping is Hermes-local (_quote_literal
+# also UCHAR-escapes ASCII control bytes; MCP/core escape only the ECHAR set), so
+# this is not a byte-for-byte parity guarantee for control-byte literals.
+_RDF_URI_SCHEME_RE = re.compile(r"^(?:https?://|urn:|did:)", re.IGNORECASE)
+
+
+def _strip_angle_brackets(term: str) -> str:
+    """`<urn:foo>` -> `urn:foo`. Mirrors the MCP/OpenClaw bracket strip applied to
+    subject/predicate/object before classification, so a bracketed URI stays a URI."""
+    return term[1:-1] if len(term) >= 2 and term.startswith("<") and term.endswith(">") else term
+
+
+def _is_rdf_term(value: str) -> bool:
+    """Object-term predicate for the create/write one-shot (parity with MCP isRdfTerm /
+    core isDkgRdfTerm): a CASE-INSENSITIVE http(s)/urn/did URI, a blank node (`_:`), or an
+    already-quoted literal (`"`). Anything else is a bare literal to quote + ECHAR-escape."""
+    return bool(_RDF_URI_SCHEME_RE.match(value)) or value.startswith("_:") or value.startswith('"')
+
+
+def _escape_sparql(text: str) -> str:
+    """Escape text for use in SPARQL string literal."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _short(uri: str) -> str:
+    """Shorten a URI for display."""
+    if "#" in uri:
+        return uri.split("#")[-1]
+    if "/" in uri:
+        return uri.split("/")[-1]
+    return uri
+
+
+def _client_result_failed(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
+def _first_text(args: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _context_graph_belongs_to_caller(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if row.get("isSystem") is True:
+        return False
+    if row.get("callerInvolved") is True:
+        return True
+    if row.get("callerInvolved") is False:
+        return False
+    role = row.get("role")
+    if isinstance(role, str) and role.strip().lower() in {
+        "curator",
+        "creator",
+        "owner",
+        "participant",
+        "member",
+    }:
+        return True
+    # Older daemons did not include callerInvolved. Preserve compatibility by
+    # leaving those unscoped rows visible instead of hiding everything.
+    return True
+
+
+def _filter_context_graphs_for_scope(graphs: Any, scope: str) -> List[Any]:
+    if not isinstance(graphs, list):
+        return []
+    if scope == "all":
+        return graphs
+    return [graph for graph in graphs if _context_graph_belongs_to_caller(graph)]
+
+
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _normalize_wm_agent_address(agent_address: str) -> str:
+    value = agent_address.strip()
+    if value.startswith("did:dkg:agent:"):
+        value = value[len("did:dkg:agent:"):]
+    if _ETH_ADDRESS_RE.match(value):
+        try:
+            from eth_utils import to_checksum_address
+            return to_checksum_address(value)
+        except Exception:
+            return value
+    return value
+
+
+def _required_cg_and_name(args: Dict[str, Any]) -> tuple[str, str]:
+    return _first_text(args, "context_graph_id"), _first_text(args, "name")
+
+
+_ECHAR_REPLACEMENTS = {
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _quote_literal(value: str) -> str:
+    """
+    Wrap a free-text string as an N-Triples literal.
+
+    Escapes the full set the daemon's storage parser requires:
+    * the two structural ECHARs (`\\` and `"`) first, so subsequent
+      escape introducers don't get themselves doubled;
+    * the five common ECHAR control bytes (`\\b`, `\\t`, `\\n`, `\\f`, `\\r`);
+    * every remaining ASCII control byte (0x00-0x1F and 0x7F) as a
+      `\\uXXXX` UCHAR escape — without this, inputs containing NUL,
+      VT, DEL, etc. produce an invalid literal that the parser rejects.
+
+    Mirrors the OpenClaw side of the parity hardening (PR #413, defensive
+    post-pass over `escapeDkgRdfLiteral`). The TypeScript canonical helper
+    has the same gap upstream — see issue #416.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    out: List[str] = []
+    for ch in escaped:
+        code = ord(ch)
+        if ch in _ECHAR_REPLACEMENTS:
+            out.append(_ECHAR_REPLACEMENTS[ch])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _uri_segment(value: Any, fallback: str) -> str:
+    segment = re.sub(r"[^A-Za-z0-9._:-]+", "-", str(value or "").strip()).strip("-")
+    return segment or fallback
+
+
+def _normalize_quads(raw_quads: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw_quads, list):
+        return []
+    quads: List[Dict[str, str]] = []
+    for raw in raw_quads:
+        if not isinstance(raw, dict):
+            return []
+        # Strip surrounding <…> on all three terms (parity with MCP/OpenClaw) so a
+        # bracketed URI stays a URI rather than being quoted as a literal. Do NOT trim
+        # whitespace: MCP/OpenClaw pass strings through (only bracket-stripping), so
+        # `.strip()` here would silently rewrite a padded literal ("  x  " -> "x") and
+        # diverge from the cross-adapter contract.
+        subject = _strip_angle_brackets(str(raw.get("subject", "")))
+        predicate = _strip_angle_brackets(str(raw.get("predicate", "")))
+        object_value = _strip_angle_brackets(str(raw.get("object", "")))
+        if not subject or not predicate or not object_value:
+            return []
+        # Emit {subject,predicate,object} only — no per-quad `graph`. The daemon
+        # pins every triple to the per-KA WM graph itself and overrides any
+        # client-supplied graph (CONTRACT §0 invariant 2). A `graph` key on the
+        # input is silently dropped here, matching OpenClaw + MCP.
+        quad = {
+            "subject": subject,
+            "predicate": predicate,
+            # Object auto-typing identical to MCP/core: RDF term passes through, else
+            # quote + ECHAR-escape as an N-Triples literal.
+            "object": object_value if _is_rdf_term(object_value) else _quote_literal(object_value),
+        }
+        quads.append(quad)
+    return quads
+
+
+def _normalize_semantic_quads(raw_quads: Any) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    if not isinstance(raw_quads, list) or not raw_quads:
+        return [], "semantic_quads must contain at least one item with subject, predicate, and object."
+    quads: List[Dict[str, str]] = []
+    for index, raw in enumerate(raw_quads):
+        if not isinstance(raw, dict):
+            return [], f"semantic_quads[{index}] must be an object."
+        if raw.get("graph") is not None:
+            return [], f"semantic_quads[{index}].graph is not supported; semantic triples are written to the source imported assertion graph."
+        subject = str(raw.get("subject", "")).strip()
+        predicate = str(raw.get("predicate", "")).strip()
+        object_value = str(raw.get("object", "")).strip()
+        if not subject or not predicate or not object_value:
+            return [], f"semantic_quads[{index}] must include non-empty subject, predicate, and object."
+        quads.append({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_value if _is_safe_iri(object_value) or object_value.startswith('"') else _quote_literal(object_value),
+        })
+    return quads, None
+
+
+def _coerce_limit(value: Any, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(1, min(maximum, parsed))
+
+
+def _validate_int_arg(
+    value: Any,
+    label: str,
+    *,
+    minimum: int,
+    maximum: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[str]]:
+    """Validate an optional integer arg: absent -> omit, present-but-invalid -> error.
+
+    Returns ``(int, None)`` for a valid value, ``(None, None)`` only when the arg
+    is truly ABSENT (``None``) — the caller omits the wire key and lets the
+    daemon default — and ``(None, message)`` when the arg is PRESENT but invalid,
+    which the caller must surface as a tool error rather than silently dropping
+    it (CONTRACT §C). A present blank/whitespace-only string (``""`` / ``"   "``)
+    is present-but-INVALID, NOT absent (Codex #2805). Accepts ``int``,
+    integral-``float`` (e.g. ``2.0``), and numeric-string forms; rejects ``bool``
+    (an ``int`` subclass), non-INTEGRAL numerics (``1.9`` / ``"1.9"`` — never
+    silently truncate via ``int()``), non-numeric, and out-of-range. Mirrors the
+    daemon's integer predicates.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{label} must be an integer."
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        # Reject a float with a fractional part rather than truncating it; an
+        # integral float (2.0) is accepted as its integer value.
+        if not value.is_integer():
+            return None, f"{label} must be an integer."
+        parsed = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            # Present but blank/whitespace: invalid, not omitted (Codex #2805).
+            return None, f"{label} must be an integer."
+        try:
+            # int() on a string rejects "1.9" with ValueError (no truncation),
+            # which is exactly the integral-only contract we want.
+            parsed = int(text)
+        except ValueError:
+            return None, f"{label} must be an integer."
+    else:
+        return None, f"{label} must be an integer."
+    if parsed < minimum:
+        bound = "non-negative" if minimum == 0 else f">= {minimum}"
+        return None, f"{label} must be {bound}."
+    if maximum is not None and parsed > maximum:
+        return None, f"{label} must be <= {maximum}."
+    return parsed, None
+
+
+_DIGIT_STRING_RE = re.compile(r"^\d+$")
+
+
+def _validate_decimal_string_arg(value: Any, label: str) -> Tuple[Optional[str], Optional[str]]:
+    """Validate an optional non-negative-integer arg PRESERVED as a decimal STRING.
+
+    Some ids (e.g. publisherNodeIdentityIdOverride) are uint/bigint on the daemon
+    and arrive as a decimal string matching ``/^\\d+$/``. Modeling them as a
+    JSON ``integer`` loses precision above JS's safe-integer range (2**53) BEFORE
+    serialization — the wrong node identity could be attributed (Codex #1079:750).
+    So accept a digit string and pass it through VERBATIM (no int() round-trip).
+
+    Returns ``(str, None)`` for a valid digit string, ``(None, None)`` when truly
+    absent (``None``), and ``(None, message)`` when present-but-invalid. A
+    non-negative ``int`` is also accepted (normalized to its decimal string) for
+    convenience; ``bool``, floats, blank/whitespace strings, negative/non-digit
+    values are rejected.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{label} must be a non-negative integer (decimal string)."
+    if isinstance(value, int):
+        if value < 0:
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        return str(value), None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            # Present but blank/whitespace: invalid, not omitted (Codex #2805).
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        if not _DIGIT_STRING_RE.match(text):
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        return text, None  # preserved verbatim — no precision loss
+    return None, f"{label} must be a non-negative integer (decimal string)."
+
+
+# Defensive mixed-version warning for a non-ready atomic share. Kept
+# byte-identical across the MCP, OpenClaw, and Hermes adapters
+# (cross-adapter parity invariant).
+SHARE_NOT_PUBLISH_READY_WARNING = (
+    "The atomic SWM share did not become publish-ready (sealed:false). Keep the "
+    "Working Memory draft and retry the complete Knowledge Asset share; do not publish it."
+)
+
+# Defensive mixed-version classification for a legacy partial-share outcome.
+# Byte-identical across all three
+# adapters (cross-adapter parity invariant).
+SHARE_SUBSET_NOT_PUBLISH_READY_WARNING = (
+    "A legacy partial-share outcome was reported. Root-scoped subsets are read-only "
+    "and not publishable; model the intended data as its own Knowledge Asset and share it atomically."
+)
+
+# A sealed atomic share can still report incomplete delivery; retry from WM.
+# Byte-identical across all three adapters (cross-adapter
+# parity invariant).
+SHARE_INCOMPLETE_PROMOTE_WARNING = (
+    "The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; "
+    "keep the Working Memory draft and retry the atomic share."
+)
+
+ATOMIC_SHARE_SIGNING_RECOVERY = (
+    "Resolve the local signing capability, then retry the complete atomic "
+    "Knowledge Asset share from Working Memory."
+)
+
+
+def _create_swm_share_error(result: Any, also_share_swm: bool) -> Optional[str]:
+    """Return the share-failure tail when a create one-shot's opt-in SWM share failed.
+
+    The daemon returns 207 + ``errors:[{phase:"swm-share"}]`` when create+seal lands but
+    the opt-in ``also_share_swm`` tail fails; the client treats 207 as success. So judge
+    from the OUTCOME (parity with the MCP + OpenClaw adapters), not the requested flag.
+    Returns ``None`` when the share succeeded or was not requested.
+    """
+    if not also_share_swm or not isinstance(result, dict):
+        return None
+    errors = result.get("errors")
+    share_error = next(
+        (e for e in errors if isinstance(e, dict) and e.get("phase") == "swm-share"),
+        None,
+    ) if isinstance(errors, list) else None
+    if share_error is None and result.get("publishReady") is not False:
+        return None
+    detail = ""
+    if isinstance(share_error, dict) and share_error.get("error"):
+        detail = ": " + str(share_error["error"])
+    return (
+        "the opt-in Shared Working Memory share FAILED" + detail + ". The asset did NOT "
+        "reach Shared Working Memory and is NOT publish-ready -- do not publish yet; retry "
+        "the share with dkg_knowledge_asset_share, then publish."
+    )
+
+
+def _annotate_share_seal(result: Any, entities: Any = None) -> Any:
+    """Surface the #1116 seal outcome of a knowledge-asset share.
+
+    On a default (sealing) share the daemon returns
+    ``{ swmShared, promotedCount, sealed, publishReady }``. When ``publishReady``
+    is false, add a parity warning that branches on the ACTUAL outcome: an
+    incomplete sealed atomic delivery, a defensive legacy-subset response, or
+    an unsealed atomic response. None of these is repaired by mutating SWM;
+    callers retry the complete share from Working Memory.
+
+    A default share that CANNOT seal fails CLOSED: the daemon returns 409
+    ``UNSEALED_SHARE_BLOCKED`` with a ``recovery`` hint and Working Memory
+    preserved; older daemons may recommend retired skip-seal/SWM-write modes,
+    so replace that hint with the supported atomic recovery. Anything else
+    passes through untouched.
+    """
+    if not isinstance(result, dict):
+        return result
+    if result.get("code") == "UNSEALED_SHARE_BLOCKED":
+        return {"error": ATOMIC_SHARE_SIGNING_RECOVERY}
+    if result.get("publishReady") is False:
+        if result.get("sealed") is True:
+            warning = SHARE_INCOMPLETE_PROMOTE_WARNING
+        elif isinstance(entities, list) and len(entities) > 0:
+            warning = SHARE_SUBSET_NOT_PUBLISH_READY_WARNING
+        else:
+            warning = SHARE_NOT_PUBLISH_READY_WARNING
+        return {**result, "warning": warning}
+    return result
+
+
+def _annotate_vm_publish_partial(result: Any) -> Any:
+    """Flag a vm/publish 207 partial result (KA minted, CG-binding failed).
+
+    The daemon's per-KA ``/vm/publish`` route returns HTTP 207 when the asset was
+    minted on-chain (UAL/kaId valid) but the context-graph binding step FAILED —
+    the signal is a non-empty ``contextGraphError`` in the body (``classifyVmPublish``,
+    knowledge-assets.ts:291-300). Python ``requests`` does not raise on 207, so the
+    body flows through as plain success. This is NOT a hard failure (the asset IS
+    published), but it must NOT be reported as full success: add ``partial: true``
+    + a ``warning`` while the UAL stays visible. A 200 with no ``contextGraphError``
+    is left untouched (clean success).
+
+    The warning MUST NOT tell the agent to retry the publish (Codex #1076:3663):
+    the mint already succeeded and a confirmed publish clears SWM, so re-running
+    ``dkg_knowledge_asset_publish`` would 409 the VM precondition (SWM already
+    cleared) — and it does not re-bind the CG (there is no client-side re-bind
+    route). The CG-binding failure is a node-side / operator concern. Parity with
+    OpenClaw 54998c9c7 / MCP f8c364e5a.
+    """
+    if not isinstance(result, dict):
+        return result
+    context_graph_error = result.get("contextGraphError")
+    if isinstance(context_graph_error, str) and context_graph_error:
+        return {
+            **result,
+            "partial": True,
+            "warning": (
+                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid) "
+                f"and IS published, but the context-graph binding failed ({context_graph_error}). "
+                "Do NOT re-run publish — dkg_knowledge_asset_publish would fail the VM precondition "
+                "(a confirmed publish clears Shared Working Memory), and it does not re-bind the "
+                "context graph. Surface this binding failure to the node operator."
+            ),
+        }
+    return result
+
+
+def _validate_access_policy(value: Any) -> Optional[str]:
+    """Validate an optional registration access_policy (0 open | 1 private).
+
+    Returns an error message for a present-but-invalid value, or ``None`` when
+    absent or valid. ``bool`` is REJECTED explicitly: it is an ``int`` subclass
+    in Python, so ``True``/``False`` would pass a bare ``not in (0, 1)`` check
+    (``True == 1``, ``False == 0``) and serialize as JSON ``true``/``false`` —
+    which the daemon's ``typeof === 'number'`` guard drops, silently resolving to
+    its default. Use ``type(...) is int`` so only true ints 0/1 are accepted.
+    """
+    if value is None:
+        return None
+    if type(value) is not int or value not in (0, 1):
+        return "access_policy must be 0 (open) or 1 (private)."
+    return None
+
+
+def _access_policy_requires_register_error(args: Dict[str, Any]) -> Optional[str]:
+    """Reject access_policy supplied without register_if_needed (Codex #1084:1792).
+
+    access_policy is only honored inside the register_if_needed branch (it is the
+    privacy of the on-chain registration). A caller that sends access_policy
+    WITHOUT register_if_needed=true would silently lose the setting, so return a
+    tool error instead of dropping it. Returns ``None`` when there is nothing to
+    reject.
+    """
+    if args.get("access_policy") is not None and args.get("register_if_needed") is not True:
+        return (
+            "access_policy requires register_if_needed: true — it only applies when "
+            "registering the context graph on-chain."
+        )
+    return None
+
+
+def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
+    filters = " || ".join(
+        f'CONTAINS(LCASE(STR(?text)), "{_escape_sparql(keyword)}")'
+        for keyword in keywords
+    )
+    return (
+        "SELECT ?uri ?pred ?text WHERE { "
+        "?uri ?pred ?text . "
+        "FILTER(isLiteral(?text)) "
+        "FILTER(STRLEN(STR(?text)) >= 2) "
+        f"FILTER({filters}) "
+        f"}} LIMIT {limit}"
+    )
+
+
+def _binding_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("id") or value.get("term") or ""
+    text = str(value or "")
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').replace("\\n", "\n")
+
+
+def _keyword_overlap(text: str, keywords: List[str]) -> float:
+    lower = text.lower()
+    if not keywords:
+        return 0.0
+    return len([keyword for keyword in keywords if keyword in lower]) / len(keywords)
+
+
+def _memory_search_layer(context_graph_id: str, view: str) -> str:
+    suffix = {
+        "working-memory": "wm",
+        "shared-working-memory": "swm",
+        "verifiable-memory": "vm",
+    }.get(view, "wm")
+    prefix = "agent-context" if context_graph_id == "agent-context" else "project"
+    return f"{prefix}-{suffix}"
+
+
+def _cache_memory_search(query: str, cache: Dict[str, Any], limit: int) -> Dict[str, Any]:
+    keywords = [k for k in query.lower().split() if len(k) >= 2]
+    hits: List[Dict[str, Any]] = []
+    for target in ("memory", "user"):
+        entries = cache.get(target, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            content = str(entry.get("content", ""))
+            score = _keyword_overlap(content, keywords)
+            if score <= 0:
+                continue
+            hits.append({
+                "snippet": content[:500],
+                "layer": "local-cache",
+                "source": target,
+                "score": round(score, 4),
+                "path": f"local-cache://{target}/{_stable_scope_hash(content)}",
+            })
+    ranked = sorted(hits, key=lambda h: float(h.get("score", 0)), reverse=True)[:limit]
+    return {"query": query, "count": len(ranked), "scope": None, "hits": ranked, "offline": True}
+
+
+def _pick_shareable_multiaddr(addrs: List[str]) -> Optional[str]:
+    if not addrs:
+        return None
+    return sorted(addrs, key=_score_multiaddr, reverse=True)[0]
+
+
+def _score_multiaddr(addr: str) -> int:
+    if "/p2p-circuit/" in addr:
+        return 100
+    parts = addr.split("/")
+    ipv4 = ""
+    for index, part in enumerate(parts):
+        if part == "ip4" and index + 1 < len(parts):
+            ipv4 = parts[index + 1]
+            break
+    if not ipv4:
+        return 50
+    if ipv4.startswith("127."):
+        return 0
+    if _is_private_ipv4(ipv4):
+        return 10
+    return 80
+
+
+def _is_private_ipv4(ip: str) -> bool:
+    if ip.startswith("10.") or ip.startswith("192.168.") or ip.startswith("169.254."):
+        return True
+    parts = ip.split(".")
+    if len(parts) >= 2 and parts[0] == "172":
+        try:
+            second = int(parts[1])
+        except ValueError:
+            return False
+        return 16 <= second <= 31
+    return False
+
+
+def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    query_result = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    quads = result.get("quads", []) or query_result.get("quads", [])
+    return [quad for quad in quads if isinstance(quad, dict)]
+
+
+def _extract_query_bindings(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    if isinstance(result.get("result"), dict):
+        bindings = result["result"].get("bindings", [])
+    elif isinstance(result.get("results"), dict):
+        bindings = result["results"].get("bindings", [])
+    else:
+        bindings = result.get("bindings", [])
+    return [binding for binding in bindings if isinstance(binding, dict)]
+
+
+def _quad_subject(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("subject") or quad.get("s"))
+
+
+def _quad_predicate(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("predicate") or quad.get("p"))
+
+
+def _quad_object(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("object") or quad.get("o"))
+
+
+def _term_value(term: Any) -> str:
+    if isinstance(term, dict):
+        value = term.get("value") or term.get("id") or term.get("term") or ""
+    else:
+        value = term
+    text = str(value or "")
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').replace("\\n", "\n")
+
+
+# ---------------------------------------------------------------------------
+# Plugin registration
+# ---------------------------------------------------------------------------
+
+def register(ctx) -> None:
+    """Register DKG as a memory provider plugin."""
+    ctx.register_memory_provider(DKGMemoryProvider())

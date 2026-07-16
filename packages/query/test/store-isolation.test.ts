@@ -13,8 +13,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
-const PARANET = 'test-paranet';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const CONTEXT_GRAPH = 'test-contextGraph';
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
 function q(s: string, p: string, o: string): Quad {
   return { subject: s, predicate: p, object: o, graph: GRAPH };
@@ -56,13 +56,13 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
 
       const resA = await engineA.query(
         'SELECT ?s WHERE { ?s <http://dkg.io/ontology/apiKey> ?key }',
-        { paranetId: PARANET },
+        { contextGraphId: CONTEXT_GRAPH },
       );
       expect(resA.bindings).toHaveLength(1);
 
       const resB = await engineB.query(
         'SELECT ?s WHERE { ?s <http://dkg.io/ontology/apiKey> ?key }',
-        { paranetId: PARANET },
+        { contextGraphId: CONTEXT_GRAPH },
       );
       expect(resB.bindings).toHaveLength(0);
     });
@@ -75,7 +75,7 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
 
       expect(engine).toHaveProperty('query');
       expect(engine).toHaveProperty('resolveKA');
-      expect(engine).toHaveProperty('queryAllParanets');
+      expect(engine).toHaveProperty('queryAllContextGraphs');
 
       expect(engine).not.toHaveProperty('remoteQuery');
       expect(engine).not.toHaveProperty('federatedQuery');
@@ -83,19 +83,31 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
       expect(engine).not.toHaveProperty('proxyQuery');
     });
 
-    it('QueryOptions does not accept a federated flag', async () => {
+    it('QueryOptions does not accept a federated flag and query returns a valid local result type', async () => {
       const store = new OxigraphStore();
       const engine = new DKGQueryEngine(store);
 
-      const options = { paranetId: PARANET };
+      const options = { contextGraphId: CONTEXT_GRAPH };
       expect(options).not.toHaveProperty('federated');
 
-      await expect(
-        engine.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }', options),
-      ).resolves.toBeDefined();
+      // Previously this only asserted `.resolves.toBeDefined()` — a check
+      // that would "pass" even if the engine quietly returned `null` or
+      // `{}` on an unsupported option. Since the contract for
+      // DKGQueryEngine.query is to return `{ bindings: Array<...>, quads?: ... }`
+      // for a local SELECT, assert that shape explicitly. A regression
+      // where QueryOptions accidentally accepts `federated` (or silently
+      // drops the query, returning `undefined`) would fail here instead
+      // of silently passing.
+      const result = await engine.query(
+        'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+        options,
+      );
+      expect(result).toBeDefined();
+      expect(Array.isArray(result.bindings), 'SELECT on empty store must return bindings array (possibly empty)').toBe(true);
+      expect(result.bindings.length, 'empty store should yield zero bindings').toBe(0);
     });
 
-    it('queryAllParanets only queries local store', async () => {
+    it('queryAllContextGraphs only queries local store', async () => {
       const storeA = new OxigraphStore();
       const storeB = new OxigraphStore();
       const engineA = new DKGQueryEngine(storeA);
@@ -104,10 +116,10 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
         q('did:dkg:agent:LocalBot', 'http://schema.org/name', '"LocalBot"'),
       ]);
       await storeB.insert([
-        { subject: 'did:dkg:agent:RemoteBot', predicate: 'http://schema.org/name', object: '"RemoteBot"', graph: 'did:dkg:paranet:other' },
+        { subject: 'did:dkg:agent:RemoteBot', predicate: 'http://schema.org/name', object: '"RemoteBot"', graph: 'did:dkg:context-graph:other' },
       ]);
 
-      const result = await engineA.queryAllParanets(
+      const result = await engineA.queryAllContextGraphs(
         'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
       );
 
@@ -122,7 +134,7 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
       const store = new OxigraphStore();
       const gm = new GraphManager(store);
 
-      await gm.ensureParanet(PARANET);
+      await gm.ensureContextGraph(CONTEXT_GRAPH);
 
       await store.insert([
         q('did:dkg:agent:Bot1', 'http://schema.org/name', '"Bot1"'),

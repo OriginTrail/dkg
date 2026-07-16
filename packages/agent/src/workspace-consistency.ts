@@ -69,23 +69,23 @@ export function monotonicTransition(
  * the caller last observed it.
  *
  * @param agent         The DKG agent instance
- * @param paranetId     Target paranet
+ * @param contextGraphId Target context graph
  * @param subject       The entity whose version is tracked
  * @param currentVersion Expected current version, or `null` if the version triple
  *                       must not yet exist (first write). Passing `0` expects a
  *                       stored `"0"^^xsd:integer` — it does NOT mean "first write".
  * @param quads         Application quads to write
  * @param opts          Optional: `{ localOnly?: boolean }`
- * @returns The new version number and workspace operation ID
+ * @returns The new version number and shared memory operation ID
  */
 export async function versionedWrite(
   agent: DKGAgent,
-  paranetId: string,
+  contextGraphId: string,
   subject: string,
   currentVersion: number | null,
   quads: Quad[],
   opts?: { localOnly?: boolean },
-): Promise<{ newVersion: number; workspaceOperationId: string }> {
+): Promise<{ newVersion: number; shareOperationId: string }> {
   const newVersion = currentVersion === null ? 1 : currentVersion + 1;
 
   const expectedValue = currentVersion === null
@@ -105,12 +105,12 @@ export async function versionedWrite(
 
   const allQuads = [...quads, ...versionQuads];
 
-  const { workspaceOperationId } = await agent.writeConditionalToWorkspace(
-    paranetId,
+  const { shareOperationId } = await agent.conditionalShare(
+    contextGraphId,
     allQuads,
     conditions,
     opts,
   );
 
-  return { newVersion, workspaceOperationId };
+  return { newVersion, shareOperationId };
 }

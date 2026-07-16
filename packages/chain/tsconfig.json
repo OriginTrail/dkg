@@ -6,5 +6,6 @@
     "composite": true
   },
   "include": ["src"],
+  "exclude": ["src/archive"],
   "references": [{ "path": "../core" }]
 }

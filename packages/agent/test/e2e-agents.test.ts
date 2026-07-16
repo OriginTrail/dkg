@@ -1,10 +1,32 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  // A-12: agent profile DIDs are now derived from the wallet address. Tests that
+  // expect to discover *two* distinct agents (via findAgents) must give each
+  // agent its own EVM key, otherwise both publish profiles under the same DID
+  // subject and findAgents collapses the result down to one entry. Mint to all
+  // keys we use below so create-on-chain operations can pay fees.
+  for (const key of [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.REC1_OP]) {
+    const w = new ethers.Wallet(key);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, w.address, ethers.parseEther('50000000'));
+  }
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -30,6 +52,7 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 describe('Two-Agent E2E', () => {
   it('agents connect, publish profiles, discover each other via GossipSub', async () => {
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'AlphaBot',
       framework: 'OpenClaw',
       listenPort: 0,
@@ -38,12 +61,13 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
     await agentA.start();
 
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'BetaBot',
       framework: 'ElizaOS',
       listenPort: 0,
@@ -52,7 +76,8 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(),
+      // A-12: distinct EVM key so agentB's profile DID differs from agentA's.
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentB);
     await agentB.start();
@@ -86,12 +111,14 @@ describe('Two-Agent E2E', () => {
 
   it('agents exchange chat messages', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ChatA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'ChatA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
     const agentB = await DKGAgent.create({
-      name: 'ChatB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'ChatB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 
@@ -121,7 +148,8 @@ describe('Two-Agent E2E', () => {
 
   it('chat to unknown peer fails gracefully', async () => {
     const agent = await DKGAgent.create({
-      name: 'LonelyBot', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'LonelyBot', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -131,30 +159,31 @@ describe('Two-Agent E2E', () => {
     expect(result.error).toBeDefined();
   }, 10000);
 
-  it('agents publish and query knowledge in a custom paranet', async () => {
+  it('agents publish and query knowledge in a custom contextGraph', async () => {
     const agentA = await DKGAgent.create({
-      name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
     await agentA.start();
 
-    await agentA.createParanet({
-      id: 'test-paranet',
-      name: 'Test Paranet',
-      description: 'E2E test paranet',
+    await agentA.createContextGraph({
+      id: 'test-contextGraph',
+      name: 'Test ContextGraph',
+      description: 'E2E test contextGraph',
     });
 
-    const result = await agentA.publish('test-paranet', [
+    const result = await agentA.publish('test-contextGraph', [
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/name', object: '"TestEntity"', graph: '' },
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/type', object: '"Thing"', graph: '' },
     ]);
 
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
     expect(result.kaManifest.length).toBe(1);
 
     const qr = await agentA.query(
       'SELECT ?name WHERE { <did:dkg:entity:1> <http://schema.org/name> ?name }',
-      'test-paranet',
+      'test-contextGraph',
     );
     expect(qr.bindings.length).toBe(1);
     expect(qr.bindings[0]['name']).toBe('"TestEntity"');
@@ -175,20 +204,22 @@ describe('Relay E2E', () => {
     expect(relayAddr).toBeDefined();
 
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'RelayAgentA',
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'RelayAgentB',
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 
@@ -232,22 +263,24 @@ describe('Relay E2E', () => {
     // when dialProtocol triggers a peerStore.merge (on 0.0.0.0 the address
     // resolution includes multi-homed IPs that the CM doesn't auto-dial).
     const agentA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'RelayAgentA',
       listenPort: 0,
       listenHost: '127.0.0.1',
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
     const agentB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'RelayAgentB',
       listenPort: 0,
       listenHost: '127.0.0.1',
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 

@@ -63,8 +63,8 @@ describe('@unit IdentityStorage contract', function () {
     expect(await IdentityStorage.name()).to.equal('IdentityStorage');
   });
 
-  it('The contract is version "1.0.0"', async () => {
-    expect(await IdentityStorage.version()).to.equal('1.0.0');
+  it('The contract is version "10.0.2"', async () => {
+    expect(await IdentityStorage.version()).to.equal('10.0.2');
   });
 
   it('Get the identity id for operational key, expect to pass', async () => {

@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readDaemonSources } from './helpers/read-cli-daemon';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
@@ -9,7 +10,29 @@ function readUiFile(rel: string): string {
   return readFileSync(resolve(UI_DIR, rel), 'utf-8');
 }
 
+function readUiTree(rel: string): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => {
+      const child = `${rel}/${entry.name}`;
+      return entry.isDirectory() ? readUiTree(child) : readUiFile(child);
+    })
+    .join('\n');
+}
+
+function readPanelRightSources(): string {
+  return [
+    readUiFile('components/Shell/PanelRight.tsx'),
+    readUiTree('components/Shell/PanelRight'),
+  ].join('\n');
+}
+
+// Sub-module sources (daemon.ts was split into daemon/*.ts + daemon/routes/*.ts in PR #258/#259).
+// `readCliFile('daemon.ts')` callers below go through `readDaemonSources()` to preserve the
+// pre-split "does this pattern exist in the daemon?" semantics without coupling to the layout.
 function readCliFile(rel: string): string {
+  if (rel === 'daemon.ts') return readDaemonSources();
   return readFileSync(resolve(CLI_DIR, rel), 'utf-8');
 }
 
@@ -50,28 +73,59 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toMatch(/\/api\/openclaw-channel\/health/);
   });
 
+  it('exports Hermes local channel helpers', () => {
+    expect(apiSrc).toContain('sendHermesLocalChat');
+    expect(apiSrc).toContain('streamHermesLocalChat');
+    expect(apiSrc).toContain('fetchHermesLocalHealth');
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/send/);
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/stream/);
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/health/);
+  });
+
   it('exports fetchOpenClawLocalHistory', () => {
     expect(apiSrc).toContain('fetchOpenClawLocalHistory');
-    expect(apiSrc).toContain('openclaw:dkg-ui');
-    expect(apiSrc).toContain('ORDER BY DESC(?ts)');
+    expect(apiSrc).toContain('getDefaultLocalAgentSessionId');
+    expect(apiSrc).toContain('fetchMemorySession(sessionId, {');
+    expect(apiSrc).toContain("order: 'desc'");
+  });
+
+  it('exports the future-friendly local agent integration contract', () => {
+    expect(apiSrc).toContain('interface LocalAgentIntegration');
+    expect(apiSrc).toContain('fetchLocalAgentIntegrations');
+    expect(apiSrc).toContain('connectLocalAgentIntegration');
+    expect(apiSrc).toContain('fetchLocalAgentHistory');
+    expect(apiSrc).toContain('streamLocalAgentChat');
+    expect(apiSrc).toContain('refreshLocalAgentIntegration');
+    expect(apiSrc).toMatch(/\/api\/local-agent-integrations\/\$\{encodeURIComponent\(normalizedId\)\}\/refresh/);
+  });
+
+  it('keeps the local-agent contract attachment-aware', () => {
+    expect(apiSrc).toContain('LocalAgentChatAttachmentRef');
+    expect(apiSrc).toContain('chatAttachments?: boolean');
+    expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
+    expect(apiSrc).toContain('attachmentRefs');
+    expect(apiSrc).toContain("extractionStatus?: 'completed';");
+    expect(readPanelRightSources()).toContain("if (draft.status !== 'completed' || !draft.result) return null;");
+    expect(readPanelRightSources()).toContain("extractionStatus: 'completed'");
   });
 });
 
 describe('OpenClaw daemon endpoints', () => {
   const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
 
   it('registers GET /api/openclaw-agents endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/openclaw-agents'");
-    expect(daemonSrc).toContain("req.method === 'GET'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']GET["']\s*&&\s*path\s*===\s*["']\/api\/openclaw-agents["']/);
   });
 
   it('filters agents by OpenClaw framework', () => {
-    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*'OpenClaw'\s*\}/);
+    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*["']OpenClaw["']\s*\}\s*\)/);
   });
 
   it('registers POST /api/chat-openclaw endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/chat-openclaw'");
-    expect(daemonSrc).toContain("req.method === 'POST'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']POST["']\s*&&\s*path\s*===\s*["']\/api\/chat-openclaw["']/);
   });
 
   it('chat-openclaw endpoint requires peerId and text', () => {
@@ -84,116 +138,307 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/timedOut/);
   });
 
-  it('chat-openclaw persists outbound messages', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
+  it('keeps chatAttachments daemon-owned and Hermes-enabled without changing OpenClaw defaults', () => {
+    const openClawDefinitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf("openclaw: {"),
+      daemonSrc.indexOf('hermes: {'),
     );
+    const hermesDefinitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf('hermes: {'),
+      daemonSrc.indexOf('};', daemonSrc.indexOf('hermes: {')),
+    );
+    const registerAdapterBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/register-adapter"),
+      daemonSrc.indexOf('// GET /api/settings', daemonSrc.indexOf("// POST /api/register-adapter")),
+    );
+    expect(openClawDefinitionsBlock).not.toContain('chatAttachments: true');
+    expect(hermesDefinitionsBlock).toContain('chatAttachments: true');
+    expect(registerAdapterBlock).not.toContain('chatAttachments: true');
+    expect(registerAdapterBlock).toContain("adapterId !== 'openclaw'");
+    expect(registerAdapterBlock).not.toContain("'hermes'");
+  });
+
+  it('discarding an imported assertion evicts its cached extraction status', () => {
+    // KA migration: the legacy `// POST /api/assertion/:name/discard` handler
+    // (routes/assertion.ts, deleted) evicted the daemon's in-memory
+    // extraction-status cache. The unified KA route handles discard via the
+    // `verb === "discard"` dispatch in routes/knowledge-assets.ts. Slice that
+    // block (between the discard and pull-from verb branches) and assert the
+    // same eviction guarantee is carried through.
+    const discardStart = daemonSrc.indexOf('verb === "discard"');
+    const discardBlock = daemonSrc.slice(
+      discardStart,
+      daemonSrc.indexOf('verb === "pull-from"', discardStart),
+    );
+    // The eviction must be keyed by the assertion's content-addressed URI
+    // (so a same-name re-import re-extracts). The unified KA handler inlines
+    // it as `extractionStatus.delete(contextGraphAssertionUri(...))` rather
+    // than the legacy two-statement form — assert the guarantee, not the
+    // exact variable shape.
+    expect(discardBlock).toContain('extractionStatus.delete(');
+    expect(discardBlock).toContain('contextGraphAssertionUri(');
+  });
+
+  it('chat-openclaw persists outbound messages', () => {
     expect(chatOclawBlock).toContain('insertChatMessage');
-    expect(chatOclawBlock).toContain("direction: 'out'");
+    expect(chatOclawBlock).toMatch(/direction:\s*["']out["']/);
   });
 
   it('chat-openclaw resolves peer names', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     expect(chatOclawBlock).toContain('resolveNameToPeerId');
   });
 });
 
-describe('Agent Hub UI — OpenClaw tab', () => {
-  const agentHub = readUiFile('pages/AgentHub.tsx');
+describe('PanelRight UI - connected agent flow', () => {
+  const panelRight = readPanelRightSources();
 
-  it('imports local channel API functions', () => {
-    expect(agentHub).toContain('streamOpenClawLocalChat');
-    expect(agentHub).toContain('fetchOpenClawLocalHealth');
-    expect(agentHub).toContain('fetchOpenClawLocalHistory');
+  it('imports local-agent wrapper functions', () => {
+    expect(panelRight).toContain('fetchLocalAgentIntegrations');
+    expect(panelRight).toContain('connectLocalAgentIntegration');
+    expect(panelRight).toContain('fetchLocalAgentHistory');
+    expect(panelRight).toContain('streamLocalAgentChat');
   });
 
-  it('defines OpenClawChatView component', () => {
-    expect(agentHub).toContain('function OpenClawChatView');
+  it('defines the connected agents tab in PanelRight', () => {
+    expect(panelRight).toContain('function ConnectedAgentsTab');
+    expect(panelRight).toContain("useState<'agents' | 'network' | 'sessions'>('agents')");
+    expect(panelRight).toContain('const ADD_AGENT_TAB_ID =');
   });
 
-  it('mode state includes openclaw option', () => {
-    expect(agentHub).toMatch(/'agent'\s*\|\s*'peers'\s*\|\s*'openclaw'/);
+  it('removes the built-in assistant path and splits the right rail into three agent-first tabs', () => {
+    expect(panelRight).not.toContain('Ask the built-in DKG assistant');
+    expect(panelRight).not.toContain('streamChatMessage');
+    expect(panelRight).toContain('Network');
+    expect(panelRight).toContain('Sessions');
+    expect(panelRight).toContain('function NetworkTab');
+    expect(panelRight).toContain('function SessionsTab');
   });
 
-  it('renders OpenClaw tab label', () => {
-    expect(agentHub).toMatch(/OpenClaw/);
+  it('keeps the Agents tab as the persistent OpenClaw chat surface with sub-tabs and add-agent flow', () => {
+    expect(panelRight).toContain('Connect OpenClaw');
+    expect(panelRight).toContain('Connect Another Agent');
+    expect(panelRight).toContain('Disconnect');
+    expect(panelRight).toContain('Session history');
+    expect(panelRight).toContain('OpenClaw');
+    expect(panelRight).toContain('v10-agent-subtabs');
+    expect(panelRight).toContain('v10-agent-tab-menu-trigger');
+    expect(panelRight).not.toContain('Messages stay anchored in your private DKG memory graph');
   });
 
-  it('renders OpenClawChatView when mode is openclaw', () => {
-    expect(agentHub).toContain('<OpenClawChatView');
-    expect(agentHub).toMatch(/mode\s*===\s*'openclaw'/);
+  it('keeps the + add-agent tab selected during background refreshes', () => {
+    expect(panelRight).toContain('const preserveSelected = shouldPreserveSelectedLocalAgentTab({');
+    expect(panelRight).toContain("preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID");
   });
 
-  it('OpenClawChatView shows agent status header', () => {
-    expect(agentHub).toContain('OpenClaw Agent');
+  it('keeps local agent state keyed by session so non-default threads do not collapse to the default conversation', () => {
+    expect(panelRight).toContain('selectedSessionId');
+    expect(panelRight).toContain('localMessagesByConversation');
+    expect(panelRight).toContain('getLocalAgentConversationStateKey');
+    expect(panelRight).toContain('sessionId: conversation.sessionId ?? undefined');
+    expect(panelRight).toContain('selectedIntegrationHasAnyConversation');
+    expect(panelRight).toContain('resolveConnectedAgentsTabState');
+    expect(panelRight).toContain('shouldPreserveSelectedLocalAgentTab');
+    expect(panelRight).not.toContain('localHistoryLoadedByIntegration[integrationId] === true');
   });
 
-  it('OpenClawChatView shows status text', () => {
-    expect(agentHub).toContain('Online');
-    expect(agentHub).toContain('Offline');
+  it('preserves the selected session when reselecting, disconnecting, or reopening a specific local-agent thread', () => {
+    expect(panelRight).toContain('shouldPreserveSessionForIntegrationSelection');
+    expect(panelRight).toContain('onClick={() => onSelectIntegration(integration.id, {');
+    expect(panelRight).toContain('setSelectedIntegration(integrationId, { preserveSession: selectedIntegrationId === integrationId })');
+    expect(panelRight).toContain('setSelectedIntegration(session.integrationId, { sessionId: session.sessionId })');
+    expect(panelRight).toContain('shouldPreserveSessionOnReconnect');
   });
 
-  it('OpenClawChatView checks agent health on mount', () => {
-    expect(agentHub).toContain('fetchOpenClawLocalHealth');
-    expect(agentHub).toContain('agentOnline');
+  it('keeps the interface future-friendly for Hermes', () => {
+    expect(panelRight).toContain('Hermes');
+    expect(panelRight).toContain('Connect Hermes');
   });
 
-  it('OpenClawChatView loads chat history from DKG graph', () => {
-    expect(agentHub).toContain('fetchOpenClawLocalHistory');
-    expect(agentHub).toContain('historyLoaded');
+  it('shows the inline attachment tray and project picker in the chat composer', () => {
+    // PR2 (post iteration 1): composer shell is a vertical stack —
+    // textarea on top, a single .v10-composer-controls row below holding
+    // the attach button + project picker (left) and send button (right).
+    // Assert on the rendered className / aria-label / user-visible copy
+    // — the observable contract — and leave behavioral checks to the
+    // focused render-time tests (composer-autosize.test.ts,
+    // attachment-chip.test.ts, etc.). Asserting internal source
+    // expressions was brittle to harmless refactors without catching
+    // real regressions.
+    expect(panelRight).toContain('aria-label="Attach files"');
+    expect(panelRight).toContain('v10-composer-attach');
+    expect(panelRight).toContain('v10-composer-controls');
+    expect(panelRight).toContain('Choose a context graph');
+    expect(panelRight).toContain('Stored only');
   });
 
-  it('OpenClawChatView merges reloaded history with in-flight local messages instead of replacing state', () => {
-    expect(agentHub).toContain('function mergeOcMessages');
-    expect(agentHub).toContain('setMessages(prev => mergeOcMessages(prev, loaded))');
+  it('imports local-agent attachments on send instead of on selection', () => {
+    const addAttachmentsBlock = panelRight.slice(
+      panelRight.indexOf('const addAttachmentsForConversation'),
+      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+    );
+    const sendLocalMessageBlock = panelRight.slice(
+      panelRight.indexOf('const sendLocalMessage'),
+      panelRight.indexOf('const connectIntegration'),
+    );
+
+    expect(addAttachmentsBlock).not.toContain('await importFile(');
+    // PR3 Codex round-2: processedDrafts is now hoisted above the try block
+    // (assigned, not declared with `const`, so the catch path can read it
+    // to restore drafts after a failed send). Assert the assignment shape
+    // without coupling to the lexical `const`.
+    expect(sendLocalMessageBlock).toContain('processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain('if (!text && attachments.length === 0 && importContext.results.length === 0) {');
+    expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
-  it('OpenClawChatView has graph toggle', () => {
-    expect(agentHub).toContain('Knowledge Graph');
-    expect(agentHub).toContain('showGraph');
+  it('dedupes selected files per target project instead of globally per conversation', () => {
+    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
+    expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
   });
 
-  it('OpenClawChatView includes durable imported memory roots alongside the local session graph', () => {
-    expect(agentHub).toContain('?memory a <http://dkg.io/ontology/ImportedMemory>');
-    expect(agentHub).toContain('?batch a <http://dkg.io/ontology/MemoryImport>');
-    expect(agentHub).toContain('?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch');
+  it('only enables attachment-only sends when at least one draft is sendable', () => {
+    expect(panelRight).toContain("draft.status === 'queued' || draft.status === 'completed' || draft.status === 'skipped'");
+    expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
+    expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
+    // PR2 polish iter 1: the redundant "choose a project" hint copy was
+    // retired — the project picker now lives INSIDE the composer-controls
+    // row right next to the attach button, so the affordance is self-evident.
+    // The attach-button title still mentions the gating ("Choose a project
+    // to attach files"); after round-8 (CFfZ3) the title chain reuses the
+    // shared `dropDisabledReason` state so it stays in lockstep with the
+    // drop overlay's recovery copy instead of repeating the ternary inline.
+    expect(panelRight).toContain("'Choose a context graph to attach files'");
   });
 
-  it('OpenClawChatView sends via local channel bridge', () => {
-    expect(agentHub).toContain('streamOpenClawLocalChat');
+  it('turns skipped document-import results into server-verified sendable import results', () => {
+    expect(panelRight).toContain('function buildAttachmentImportResultRefs');
+    expect(panelRight).toContain('function formatAttachmentImportContextValue');
+    expect(panelRight).toContain('function normalizeAttachmentFileName');
+    expect(panelRight).toContain("if (draft.status !== 'skipped' || !draft.result) return [];");
+    expect(panelRight).toContain('fileName: normalizeAttachmentFileName(draft.file)');
+    expect(panelRight).toContain('rootEntity: draft.result.rootEntity');
+    expect(panelRight).toContain("extractionStatus: 'skipped'");
+    expect(panelRight).toContain('pipelineUsed: extraction.pipelineUsed ?? null');
+    expect(panelRight).toContain('mdIntermediateHash: extraction.mdIntermediateHash');
+    expect(panelRight).toContain('attachmentImportResults: importContext.results');
+    expect(panelRight).toContain('...importContext.deliveredDraftIds');
+  });
+
+  it('normalizes browser filenames before sending completed or skipped chat attachments', () => {
+    expect(panelRight).toContain('fileName: normalizeAttachmentFileName(draft.file)');
+    expect(panelRight).not.toContain('fileName: draft.file.name');
+  });
+
+  it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
+    expect(panelRight).toContain('buildAttachmentSummary(message.attachmentRefs ?? [])');
+    expect(panelRight).toContain('const hasAgentText = Boolean(message.text);');
+    expect(panelRight).toContain("let messageText = '';");
+    expect(panelRight).toContain('messageText = text');
+    expect(panelRight).toContain(': buildAttachmentTurnSummary(attachments, importContext.results);');
+    expect(panelRight).toContain("const outboundText = text ? textWithImportSummary : '';");
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, outboundText, {');
+  });
+
+  it('persists verified attachment refs separately from assistant tool calls', () => {
+    const persistTurnBlock = readCliFile('daemon.ts');
+    expect(persistTurnBlock).toContain('await memoryManager.storeChatExchange(');
+    expect(persistTurnBlock).toContain('normalizedToolCalls,');
+    expect(persistTurnBlock).not.toContain('mergePersistedToolCalls(');
+    expect(persistTurnBlock).not.toContain('buildOpenClawAttachmentToolCalls(');
+    expect(persistTurnBlock).toContain('sourceFileName');
+  });
+
+  it('merges reloaded local history with live messages', () => {
+    expect(panelRight).toContain('function mergeLocalAgentMessages');
+    expect(panelRight).toContain('mergeLocalAgentMessages(prev, loaded)');
+  });
+
+  it('sends connected-agent chat through the local bridge from PanelRight', () => {
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, outboundText');
+  });
+
+  it('does not clear attached agents on a transient integrations refresh failure', () => {
+    expect(panelRight).toContain('do not collapse an attached agent chat surface');
+    expect(panelRight).not.toContain('setIntegrations([])');
   });
 });
 
+describe('Agent hub shell surfaces', () => {
+  const panelLeft = readUiFile('components/Shell/PanelLeft.tsx');
+  const panelCenter = readUiFile('components/Shell/PanelCenter.tsx');
+  const agentHub = readUiFile('pages/AgentHub.tsx');
+
+  it('keeps Integrations visible while hiding the duplicate Agent Hub shell entry', () => {
+    expect(panelLeft).not.toContain('Agent Hub');
+    expect(panelLeft).toContain('Integrations');
+  });
+
+  it('keeps the center-panel agent-hub route alive under the hood', () => {
+    expect(panelCenter).toContain("activeTabId === 'agent-hub'");
+    expect(panelCenter).toContain("Loading agent hub...");
+    expect(panelCenter).toContain('AgentHubPage');
+  });
+
+  it('restores Agent Hub without reviving the old My Agent product path', () => {
+    expect(agentHub).toContain('Agent Hub');
+    expect(agentHub).toContain('Bring your own agent into the node');
+    expect(agentHub).not.toContain('My Agent');
+  });
+});
+
+interface FetchCall { url: string; opts?: RequestInit }
+
+function createTrackingFetch(responses: Array<{ ok: boolean; json: () => Promise<unknown>; headers?: { get: (k: string) => string | null }; body?: any }>): { fetch: typeof globalThis.fetch; calls: FetchCall[] } {
+  const calls: FetchCall[] = [];
+  let idx = 0;
+  const fn = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), opts: init });
+    const resp = responses[Math.min(idx++, responses.length - 1)];
+    return {
+      ok: resp.ok,
+      status: resp.ok ? 200 : 500,
+      json: resp.json,
+      headers: resp.headers ?? { get: () => null },
+      body: resp.body ?? null,
+    } as unknown as Response;
+  };
+  return { fetch: fn as typeof globalThis.fetch, calls };
+}
 
 describe('OpenClaw bridge behavioral tests', () => {
+  const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
+
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };
-    vi.resetModules();
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
   });
+
   afterEach(() => {
     delete (globalThis as any).window;
+    delete (globalThis as any).localStorage;
   });
 
   it('fetchOpenClawAgents calls GET /api/openclaw-agents', async () => {
     const mockAgents = [
       { peerId: '12D3abc', name: 'TestClaw', framework: 'OpenClaw', connected: true, lastSeen: Date.now(), latencyMs: 42 },
     ];
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ agents: mockAgents }),
-    });
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => ({ agents: mockAgents }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchOpenClawAgents } = await import('../src/ui/api.js');
       const result = await fetchOpenClawAgents();
-      expect(fakeFetch).toHaveBeenCalledTimes(1);
-      const calledUrl = fakeFetch.mock.calls[0][0] as string;
-      expect(calledUrl).toContain('/api/openclaw-agents');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/api/openclaw-agents');
       expect(result.agents).toEqual(mockAgents);
     } finally {
       globalThis.fetch = original;
@@ -202,20 +447,18 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles delivered + reply', async () => {
     const fakeResponse = { delivered: true, reply: 'Hello from OpenClaw!', timedOut: false, waitMs: 120 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
-      expect(fakeFetch).toHaveBeenCalledTimes(1);
-      const [url, opts] = fakeFetch.mock.calls[0];
-      expect(url).toContain('/api/chat-openclaw');
-      expect(opts.method).toBe('POST');
-      expect(JSON.parse(opts.body)).toEqual({ peerId: '12D3abc', text: 'hello' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/api/chat-openclaw');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({ peerId: '12D3abc', text: 'hello' });
       expect(result.delivered).toBe(true);
       expect(result.reply).toBe('Hello from OpenClaw!');
       expect(result.timedOut).toBe(false);
@@ -226,12 +469,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles delivered + timeout (no reply)', async () => {
     const fakeResponse = { delivered: true, reply: null, timedOut: true, waitMs: 30000 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -245,12 +487,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles not-delivered response', async () => {
     const fakeResponse = { delivered: false, reply: null, timedOut: false, error: 'Agent offline' };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -265,12 +506,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles empty-string reply (not treated as no reply)', async () => {
     const fakeResponse = { delivered: true, reply: '', timedOut: false, waitMs: 50 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -283,11 +523,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler captures waitStart before sendChat (timing race fix)', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const waitStartIdx = chatOclawBlock.indexOf('const waitStart = Date.now()');
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     expect(waitStartIdx).toBeGreaterThan(-1);
@@ -296,11 +531,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler persists message with delivered flag after sendChat', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     const insertIdx = chatOclawBlock.indexOf('insertChatMessage');
     expect(sendChatIdx).toBeGreaterThan(-1);
@@ -311,56 +541,1096 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('daemon handler returns 200 for undelivered messages (not 502)', () => {
     const daemonSrc = readCliFile('daemon.ts');
-    // Slice only the P2P chat-openclaw block (before the channel bridge section)
-    const blockStart = daemonSrc.indexOf("path === '/api/chat-openclaw'");
+    const blockStart = daemonSrc.search(/path\s*===\s*["']\/api\/chat-openclaw["']/);
     const blockEnd = daemonSrc.indexOf("// OpenClaw channel bridge", blockStart);
     const chatOclawBlock = daemonSrc.slice(blockStart, blockEnd !== -1 ? blockEnd : daemonSrc.indexOf("// POST /api/connect"));
     expect(chatOclawBlock).not.toContain('502');
     expect(chatOclawBlock).toContain('delivered: false');
-    expect(chatOclawBlock).toContain("reply: null");
-    expect(chatOclawBlock).toContain("timedOut: false");
+    expect(chatOclawBlock).toMatch(/reply:\s*null/);
+    expect(chatOclawBlock).toMatch(/timedOut:\s*false/);
   });
 
   it('daemon local channel send handler includes gateway-route fallback', () => {
-    const daemonSrc = readCliFile('daemon.ts');
     expect(daemonSrc).toContain('function getOpenClawChannelTargets');
     expect(daemonSrc).toContain('const standaloneBridgeBase = explicitBridgeBase');
-    expect(daemonSrc).toContain("? (bridgeLooksLikeGateway ? undefined : explicitBridgeBase)");
-    expect(daemonSrc).toContain(": (!explicitGatewayBase ? 'http://127.0.0.1:9201' : undefined);");
-    expect(daemonSrc).toContain('const gatewayBase = explicitGatewayBase ?? (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);');
-    expect(daemonSrc).toContain("healthUrl: `${normalizedGatewayBase}/health`");
-    expect(daemonSrc).toContain("return value.endsWith('/api/dkg-channel') ? value : `${value}/api/dkg-channel`;");
+    expect(daemonSrc).toContain('bridgeLooksLikeGateway');
+    expect(daemonSrc).toContain('http://127.0.0.1:9201');
+    expect(daemonSrc).toContain('const gatewayBase =');
+    expect(daemonSrc).toContain('explicitGatewayBase ??');
+    expect(daemonSrc).toContain('const explicitHealthUrl = openclawIntegration?.transport.healthUrl');
+    expect(daemonSrc).toContain('function classifyExplicitOpenClawHealthUrl');
+    expect(daemonSrc).toContain('const explicitHealthTarget = classifyExplicitOpenClawHealthUrl');
+    expect(daemonSrc).toContain("healthUrl: explicitHealthTarget === 'bridge'");
+    expect(daemonSrc).toContain("healthUrl: explicitHealthTarget === 'gateway'");
+    expect(daemonSrc).toContain(': `${normalizedGatewayBase}/health`,');
+    expect(daemonSrc).toContain('function buildOpenClawGatewayBase');
+    expect(daemonSrc).toContain('return value.endsWith("/api/dkg-channel")');
+    expect(daemonSrc).toContain(': `${value}/api/dkg-channel`;');
     expect(daemonSrc).toContain('shouldTryNextOpenClawTarget');
   });
 
   it('UI sends via local channel bridge (not P2P)', () => {
-    const agentHub = readUiFile('pages/AgentHub.tsx');
-    expect(agentHub).toContain('streamOpenClawLocalChat');
-    expect(agentHub).toContain('event.text');
+    const panelRight = readPanelRightSources();
+    expect(panelRight).toContain('streamLocalAgentChat');
+    expect(panelRight).toContain('Connect OpenClaw');
   });
 
-  it('fetchOpenClawLocalHistory requests newest rows first and returns chronological order', async () => {
-    const fakeFetch = vi.fn().mockResolvedValue({
+  it('fetchOpenClawLocalHistory requests the newest turns from /api/memory/sessions/:sessionId and normalizes them back to chronological order for chat display', async () => {
+    const { fetch, calls } = createTrackingFetch([{
       ok: true,
       json: async () => ({
-        result: {
-          bindings: [
-            { uri: { value: 'urn:3' }, text: { value: 'third' }, author: { value: 'agent' }, ts: { value: '2026-03-11T10:02:00Z' } },
-            { uri: { value: 'urn:2' }, text: { value: 'second' }, author: { value: 'user' }, ts: { value: '2026-03-11T10:01:00Z' } },
-            { uri: { value: 'urn:1' }, text: { value: 'first' }, author: { value: 'user' }, ts: { value: '2026-03-11T10:00:00Z' } },
-          ],
-        },
+        session: 'openclaw:dkg-ui',
+        messages: [
+          { uri: 'urn:dkg:chat:msg:agent-3', text: 'third', author: 'agent', ts: '2026-03-11T10:02:00Z', turnId: 'turn-3' },
+          { uri: 'urn:dkg:chat:msg:user-2', text: 'second', author: 'user', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          { uri: 'urn:dkg:chat:msg:user-1', text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
+        ],
       }),
-    });
+    }]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchOpenClawLocalHistory } = await import('../src/ui/api.js');
       const history = await fetchOpenClawLocalHistory(3);
-      const [, opts] = fakeFetch.mock.calls[0];
-      const body = JSON.parse(opts.body);
-      expect(body.sparql).toContain('ORDER BY DESC(?ts)');
+      expect(calls[0].url).toContain('/api/memory/sessions/openclaw%3Adkg-ui');
+      expect(calls[0].url).toContain('limit=3');
+      expect(calls[0].url).toContain('order=desc');
       expect(history.map((row: any) => row.text)).toEqual(['first', 'second', 'third']);
+      expect(history[0].turnId).toBe('turn-1');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('preserves a reopened non-default session when reselecting or reconnecting the same integration', async () => {
+    const {
+      shouldPreserveSessionForIntegrationSelection,
+      shouldPreserveSessionOnReconnect,
+    } = await import('../src/ui/components/Shell/PanelRight.tsx');
+    const integrations = [
+      {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        connected: false,
+        chatReady: false,
+        persistentChat: true,
+        connectSupported: true,
+      },
+      {
+        id: 'hermes',
+        name: 'Hermes',
+        framework: 'Hermes',
+        connected: false,
+        chatReady: false,
+        persistentChat: true,
+        connectSupported: true,
+      },
+    ];
+
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: 'openclaw:dkg-ui:worker-1',
+      integrations,
+    })).toBe(true);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: 'hermes:dkg-ui',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'openclaw',
+      selectedSessionId: null,
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: 'openclaw:dkg-ui:worker-1',
+      integrations,
+    })).toBe(true);
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: 'hermes:dkg-ui',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'openclaw',
+      selectedSessionId: null,
+      integrations,
+    })).toBe(false);
+  });
+
+  it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread, while returning chronological rows', async () => {
+    const { fetch, calls } = createTrackingFetch([{
+      ok: true,
+      json: async () => ({
+        session: 'openclaw:dkg-ui:worker-1',
+        messages: [
+          {
+            uri: 'urn:dkg:chat:msg:worker-agent-2',
+            text: 'worker reply',
+            author: 'agent',
+            ts: '2026-03-11T10:01:00Z',
+            turnId: 'turn-2',
+            toolCalls: [{ name: 'dkg_query', args: { sparql: 'ASK {}' }, result: { ok: true } }],
+          },
+          { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
+        ],
+      }),
+    }]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentHistory } = await import('../src/ui/api.js');
+      const history = await fetchLocalAgentHistory('openclaw', 10, {
+        sessionId: 'openclaw:dkg-ui:worker-1',
+      });
+      expect(calls[0].url).toContain('/api/memory/sessions/openclaw%3Adkg-ui%3Aworker-1');
+      expect(calls[0].url).toContain('limit=10');
+      expect(calls[0].url).toContain('order=desc');
+      expect(history).toHaveLength(2);
+      expect(history[0].text).toBe('worker hello');
+      expect(history[1].text).toBe('worker reply');
+      expect(history[1].toolCalls).toEqual([
+        { name: 'dkg_query', args: { sparql: 'ASK {}' }, result: { ok: true } },
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentHistory uses stable backend message URIs when the loaded history window shifts', async () => {
+    const firstWindow = {
+      session: 'openclaw:dkg-ui',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
+      ],
+    };
+    const shiftedWindow = {
+      session: 'openclaw:dkg-ui',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-older', text: 'older context', author: 'user', ts: '2026-03-11T09:59:00Z' },
+      ],
+    };
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => firstWindow },
+      { ok: true, json: async () => shiftedWindow },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentHistory } = await import('../src/ui/api.js');
+      const firstHistory = await fetchLocalAgentHistory('openclaw', 2);
+      const secondHistory = await fetchLocalAgentHistory('openclaw', 3);
+      expect(firstHistory[0].uri).toBe('urn:dkg:chat:msg:user-hello');
+      expect(firstHistory[1].uri).toBe('urn:dkg:chat:msg:agent-reply');
+      expect(firstHistory[0].uri).toBe(secondHistory[1].uri);
+      expect(firstHistory[1].uri).toBe(secondHistory[2].uri);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('streamLocalAgentChat forwards the non-default OpenClaw identity so follow-up sends stay on the selected session', async () => {
+    const { fetch, calls } = createTrackingFetch([{
+      ok: true,
+      headers: { get: () => 'application/json' },
+      body: null,
+      json: async () => ({ text: 'reply', correlationId: 'corr-1' }),
+    }]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { streamLocalAgentChat } = await import('../src/ui/api.js');
+      await streamLocalAgentChat('openclaw', 'hello', {
+        sessionId: 'openclaw:dkg-ui:background-worker',
+      });
+      const body = JSON.parse(calls[0].opts?.body as string);
+      expect(body.identity).toBe('background-worker');
+      expect(body.correlationId).toBeTruthy();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('Hermes keeps a static fallback session id when no profile or transport is known', async () => {
+    const { getDefaultLocalAgentSessionId } = await import('../src/ui/api.js');
+    expect(getDefaultLocalAgentSessionId('hermes')).toBe('hermes:dkg-ui');
+  });
+
+  it('streamLocalAgentChat forwards injected context entries', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        body: null,
+        json: async () => ({ text: 'reply', correlationId: 'corr-2' }),
+      } as unknown as Response;
+    }) as typeof globalThis.fetch;
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { streamLocalAgentChat } = await import('../src/ui/api.js');
+      await streamLocalAgentChat('openclaw', 'hello', {
+        contextEntries: [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+        ],
+      });
+      const [, opts] = fetchCalls[0];
+      const body = JSON.parse(opts!.body as string);
+      expect(body.contextEntries).toEqual([
+        { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations maps OpenClaw readiness and Hermes connectable state', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'openclaw',
+              name: 'OpenClaw',
+              description: 'OpenClaw framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true },
+            },
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: false,
+              capabilities: { connectFromUi: true },
+            },
+          ],
+        }),
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'gateway' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const openclaw = result.integrations.find((item) => item.id === 'openclaw');
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(openclaw?.chatReady).toBe(true);
+      expect(openclaw?.persistentChat).toBe(true);
+      expect(openclaw?.bridgeOnline).toBe(true);
+      expect(openclaw?.bridgeStatusLabel).toBe('Connected');
+      expect(openclaw?.status).toBe('chat_ready');
+      expect(openclaw?.target).toBe('gateway');
+      expect(hermes?.status).toBe('available');
+      expect(hermes?.connectSupported).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations maps Hermes health metadata into degraded detail', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              runtime: { status: 'degraded' },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'bridge',
+          bridge: {
+            ok: true,
+            profile: 'dkg-smoke',
+            status: 'provider_conflict',
+            memory: { provider: 'honcho', conflict: true },
+            error: 'provider conflict',
+          },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes).toMatchObject({
+        status: 'degraded',
+        statusLabel: 'Degraded',
+        bridgeStatusLabel: 'Degraded',
+        chatAttachments: true,
+      });
+      expect(hermes?.chatReady).toBe(false);
+      expect(hermes?.bridgeOnline).toBe(false);
+      expect(hermes?.defaultSessionId).toBe('hermes:dkg-ui:profile-dkg-smoke');
+      expect(hermes?.defaultSessionId).not.toBe('hermes:dkg-ui');
+      expect(hermes?.detail).toContain('profile dkg-smoke');
+      expect(hermes?.detail).toContain('memory provider conflict');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations treats nested Hermes bridge failures as not chat-ready', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          bridge: {
+            ok: false,
+            profile: 'dkg-smoke',
+            status: 'provider_conflict',
+            memory: { provider: 'mem0', conflict: true },
+            error: 'daemon auth failed',
+          },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes).toMatchObject({
+        status: 'degraded',
+        statusLabel: 'Degraded',
+        bridgeStatusLabel: 'Degraded',
+        chatReady: false,
+        bridgeOnline: false,
+        target: 'bridge',
+      });
+      expect(hermes?.detail).toContain('profile dkg-smoke');
+      expect(hermes?.detail).toContain('memory provider conflict');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations separates Hermes default sessions by profile and home', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              transport: {
+                kind: 'hermes-channel',
+                bridgeUrl: 'http://127.0.0.1:9202',
+                healthUrl: 'http://127.0.0.1:9202/health',
+              },
+              metadata: {
+                profileName: 'dkg-smoke',
+                hermesHome: '/home/alice/.hermes/profiles/dkg-smoke',
+              },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'bridge',
+          bridge: { ok: true, profile: 'dkg-smoke' },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:home-[a-z0-9]+$/);
+      expect(hermes?.profile).toBe('dkg-smoke');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations separates Hermes default sessions by transport when home is unavailable', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              transport: {
+                kind: 'hermes-channel',
+                gatewayUrl: 'https://hermes.example.com',
+                healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
+              },
+              metadata: {
+                profileName: 'dkg-smoke',
+              },
+              runtime: { status: 'ready', ready: true },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'gateway',
+          gateway: { ok: true, profile: 'dkg-smoke' },
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes?.defaultSessionId).toMatch(/^hermes:dkg-ui:profile-dkg-smoke:transport-[a-z0-9]+$/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations keeps OpenClaw in connecting state until the bridge is ready', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'openclaw',
+              name: 'OpenClaw',
+              description: 'OpenClaw framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true },
+              runtime: { status: 'connecting' },
+            },
+          ],
+        }),
+      },
+      { ok: true, json: async () => ({ ok: false, error: 'still booting' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      expect(result.integrations[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: true,
+        chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Connecting',
+        status: 'connecting',
+        statusLabel: 'Connecting',
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations does not treat a failed unattached OpenClaw record as a persistent chat tab', async () => {
+    const { fetch, calls } = createTrackingFetch([{
+      ok: true,
+      json: async () => ({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: false,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'error', lastError: 'setup failed' },
+          },
+        ],
+      }),
+    }]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      expect(result.integrations[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: false,
+        chatReady: false,
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'setup failed',
+      });
+      expect(calls).toHaveLength(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('resolveLocalAgentSelectionState reopens disconnected session history in the Agents view', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveLocalAgentSelectionState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const state = resolveLocalAgentSelectionState({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            framework: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            chatSupported: true,
+            connectSupported: true,
+            configured: false,
+            detected: false,
+            persistentChat: false,
+            chatReady: false,
+            bridgeOnline: false,
+            bridgeStatusLabel: 'Ready to connect',
+            status: 'available',
+            statusLabel: 'Ready to connect',
+            detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+            source: 'live',
+          },
+        ],
+        selectedIntegrationId: 'openclaw',
+        selectedSessionId: 'openclaw:dkg-ui:session-1',
+        localMessagesByConversation: {},
+        sessions: [
+          {
+            sessionId: 'openclaw:dkg-ui:session-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            preview: 'Hey there',
+            messageCount: 1,
+            lastTs: '2026-04-13T20:00:00Z',
+          },
+        ],
+      });
+
+      expect(state.selectedIntegration?.id).toBe('openclaw');
+      expect(state.selectedHasConversation).toBe(true);
+      expect(state.selectedConversation?.sessionId).toBe('openclaw:dkg-ui:session-1');
+      expect(state.connectedIntegrations).toHaveLength(0);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('resolveLocalAgentSelectionState does not treat an empty history load as an existing conversation', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { getLocalAgentConversationStateKey, resolveLocalAgentSelectionState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const state = resolveLocalAgentSelectionState({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            framework: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            chatSupported: true,
+            connectSupported: true,
+            configured: true,
+            detected: true,
+            persistentChat: true,
+            chatReady: true,
+            bridgeOnline: true,
+            bridgeStatusLabel: 'Connected',
+            status: 'chat_ready',
+            statusLabel: 'Chat ready',
+            detail: 'Connected through the bridge.',
+            source: 'live',
+          },
+        ],
+        selectedIntegrationId: 'openclaw',
+        selectedSessionId: 'openclaw:dkg-ui',
+        localMessagesByConversation: {
+          [getLocalAgentConversationStateKey('openclaw', 'openclaw:dkg-ui')]: [],
+        },
+        sessions: [],
+      });
+
+      expect(state.selectedHasConversation).toBe(false);
+      expect(state.selectedConversation?.sessionId).toBe('openclaw:dkg-ui');
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('resolveLocalAgentSelectionState keeps integration-wide stored sessions separate from the selected default thread', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveLocalAgentSelectionState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const state = resolveLocalAgentSelectionState({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            framework: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            chatSupported: true,
+            connectSupported: true,
+            configured: false,
+            detected: false,
+            persistentChat: false,
+            chatReady: false,
+            bridgeOnline: false,
+            bridgeStatusLabel: 'Ready to connect',
+            status: 'available',
+            statusLabel: 'Ready to connect',
+            detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+            source: 'live',
+          },
+        ],
+        selectedIntegrationId: 'openclaw',
+        selectedSessionId: 'openclaw:dkg-ui',
+        localMessagesByConversation: {},
+        sessions: [
+          {
+            sessionId: 'openclaw:dkg-ui:worker-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            preview: 'Worker thread',
+            messageCount: 2,
+            lastTs: '2026-04-13T21:00:00Z',
+          },
+        ],
+      });
+
+      expect(state.selectedConversation?.sessionId).toBe('openclaw:dkg-ui');
+      expect(state.selectedHasConversation).toBe(false);
+      expect(state.selectedIntegrationHasAnyConversation).toBe(true);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('resolveConnectedAgentsTabState keeps a disconnected integration visible when it has saved sessions elsewhere', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { resolveConnectedAgentsTabState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const openclaw = {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: false,
+        detected: false,
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Ready to connect',
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+        source: 'live',
+      };
+      const connectedHermes = {
+        id: 'hermes',
+        name: 'Hermes',
+        framework: 'Hermes',
+        description: 'Hermes framework adapter',
+        chatSupported: true,
+        connectSupported: false,
+        configured: true,
+        detected: true,
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        bridgeStatusLabel: 'Connected',
+        status: 'chat_ready',
+        statusLabel: 'Chat ready',
+        detail: 'Connected through the bridge.',
+        source: 'live',
+      };
+
+      const state = resolveConnectedAgentsTabState({
+        connectedAgents: [connectedHermes],
+        selectedIntegration: openclaw,
+        selectedIntegrationId: 'openclaw',
+        selectedHasConversation: false,
+        selectedIntegrationHasAnyConversation: true,
+        localHistoryLoaded: false,
+        localMessagesCount: 0,
+      });
+
+      expect(state.showingSessionHistory).toBe(false);
+      expect(state.showingStoredSessions).toBe(true);
+      expect(state.showAddFlow).toBe(false);
+      expect(state.visibleAgentTabs.map((item: any) => item.id)).toEqual(['openclaw', 'hermes']);
+      expect(state.shouldShowConversationLoader).toBe(false);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('shouldPreserveSelectedLocalAgentTab keeps a disconnected integration selected when other saved sessions exist', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { shouldPreserveSelectedLocalAgentTab } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const openclaw = {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: false,
+        detected: false,
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        bridgeStatusLabel: 'Ready to connect',
+        status: 'available',
+        statusLabel: 'Ready to connect',
+        detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+        source: 'live',
+      };
+
+      const preserve = shouldPreserveSelectedLocalAgentTab({
+        selectedIntegrationId: 'openclaw',
+        selectedItem: openclaw,
+        selectedSessionId: 'openclaw:dkg-ui',
+        localMessagesByConversation: {},
+        sessionSummaries: [
+          {
+            sessionId: 'openclaw:dkg-ui:worker-1',
+            integrationId: 'openclaw',
+            integrationName: 'OpenClaw',
+            preview: 'Worker thread',
+            messageCount: 2,
+            lastTs: '2026-04-13T21:00:00Z',
+          },
+        ],
+      });
+
+      expect(preserve).toBe(true);
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('networkPeerCardStatusClass keeps disconnected known peers out of the connected styling', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { networkPeerCardStatusClass } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      expect(networkPeerCardStatusClass({ connectionStatus: 'connected' } as any)).toBe('connected');
+      expect(networkPeerCardStatusClass({ connectionStatus: 'disconnected' } as any)).toBe('offline');
+      expect(networkPeerCardStatusClass({ connectionStatus: 'known' } as any)).toBe('offline');
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('upsertLocalAgentIntegrationState replaces a stale unattached OpenClaw record with the attached chat state', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { upsertLocalAgentIntegrationState } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const result = upsertLocalAgentIntegrationState([
+        {
+          id: 'openclaw',
+          name: 'OpenClaw',
+          framework: 'OpenClaw',
+          description: 'OpenClaw framework adapter',
+          chatSupported: true,
+          connectSupported: true,
+          configured: false,
+          detected: false,
+          persistentChat: false,
+          chatReady: false,
+          bridgeOnline: false,
+          bridgeStatusLabel: 'Ready to connect',
+          status: 'available',
+          statusLabel: 'Ready to connect',
+          detail: 'Use the node-served skill plus OpenClaw onboarding to attach an existing local agent.',
+          source: 'live',
+        },
+      ], {
+        id: 'openclaw',
+        name: 'OpenClaw',
+        framework: 'OpenClaw',
+        description: 'OpenClaw framework adapter',
+        chatSupported: true,
+        connectSupported: true,
+        configured: true,
+        detected: true,
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        bridgeStatusLabel: 'Bridge live',
+        status: 'chat_ready',
+        statusLabel: 'Chat ready',
+        detail: 'Connected through the bridge.',
+        source: 'live',
+      });
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: true,
+        chatReady: true,
+        bridgeOnline: true,
+        status: 'chat_ready',
+      });
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('markLocalAgentIntegrationDisconnected keeps the integration record but clears persistent chat', async () => {
+    const originalLocalStorage = (globalThis as any).localStorage;
+    (globalThis as any).localStorage = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    try {
+      const { markLocalAgentIntegrationDisconnected } = await import('../src/ui/components/Shell/PanelRight.tsx');
+      const result = markLocalAgentIntegrationDisconnected([
+        {
+          id: 'openclaw',
+          name: 'OpenClaw',
+          framework: 'OpenClaw',
+          description: 'OpenClaw framework adapter',
+          chatSupported: true,
+          connectSupported: true,
+          configured: true,
+          detected: true,
+          persistentChat: true,
+          chatReady: true,
+          bridgeOnline: true,
+          bridgeStatusLabel: 'Bridge live',
+          status: 'chat_ready',
+          statusLabel: 'Chat ready',
+          detail: 'Connected through the bridge.',
+          source: 'live',
+        },
+      ], 'openclaw');
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'openclaw',
+        persistentChat: false,
+        chatReady: false,
+        bridgeOnline: false,
+        status: 'available',
+        statusLabel: 'Ready to connect',
+      });
+      expect(result[0].detail).toContain('Reconnect from the + tab');
+    } finally {
+      (globalThis as any).localStorage = originalLocalStorage;
+    }
+  });
+
+  it('connectLocalAgentIntegration returns the refreshed OpenClaw integration plus daemon notice', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          notice: 'OpenClaw is connected and chat-ready.',
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'ready', ready: true },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
+        }),
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'bridge' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
+      const result = await connectLocalAgentIntegration('openclaw');
+      expect(calls[0].url).toContain('/api/local-agent-integrations/connect');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      });
+      expect(result.integration.chatReady).toBe(true);
+      expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+      expect(calls).toHaveLength(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('connectLocalAgentIntegration does not require a second integrations fetch when the daemon already returns the connected record', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          notice: 'OpenClaw attach is in progress.',
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'connecting' },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
+        }),
+      },
+      { ok: true, json: async () => ({ ok: false, error: 'still booting' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
+      const result = await connectLocalAgentIntegration('openclaw');
+      expect(result.integration).toMatchObject({
+        id: 'openclaw',
+        persistentChat: true,
+        chatReady: false,
+        status: 'connecting',
+      });
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toContain('/api/local-agent-integrations/connect');
+      expect(calls[1].url).toContain('/api/openclaw-channel/health');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('refreshLocalAgentIntegration posts to the per-integration refresh endpoint and returns the refreshed record', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'ready', ready: true },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
+        }),
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'bridge' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { refreshLocalAgentIntegration } = await import('../src/ui/api.js');
+      const result = await refreshLocalAgentIntegration('openclaw');
+      expect(calls[0].url).toContain('/api/local-agent-integrations/openclaw/refresh');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(result.integration.id).toBe('openclaw');
+      expect(result.integration.chatReady).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('disconnectLocalAgentIntegration disables the stored integration without deleting the registry record', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => ({ ok: true }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { disconnectLocalAgentIntegration } = await import('../src/ui/api.js');
+      await disconnectLocalAgentIntegration('openclaw');
+      expect(calls[0].url).toContain('/api/local-agent-integrations/openclaw');
+      expect(calls[0].opts?.method).toBe('PUT');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({
+        enabled: false,
+        runtime: {
+          status: 'disconnected',
+          ready: false,
+          lastError: null,
+        },
+      });
     } finally {
       globalThis.fetch = original;
     }

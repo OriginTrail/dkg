@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,12 +17,14 @@ describe.sequential('blue-green integration', () => {
   let rDir: string;
   let slotA: string;
   let slotB: string;
+  let prevDkgHome: string | undefined;
 
   function git(cmd: string, cwd: string) {
     return execSync(cmd, { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
   }
 
   beforeAll(async () => {
+    prevDkgHome = process.env.DKG_HOME;
     tmpDir = await mkdtemp(join(tmpdir(), 'dkg-bg-int-'));
     bareRepo = join(tmpDir, 'origin.git');
     dkgHome = join(tmpDir, '.dkg');
@@ -30,7 +32,7 @@ describe.sequential('blue-green integration', () => {
     slotA = join(rDir, 'a');
     slotB = join(rDir, 'b');
 
-    vi.stubEnv('DKG_HOME', dkgHome);
+    process.env.DKG_HOME = dkgHome;
 
     // Create bare repo with initial-branch=main
     execSync(`git init --bare --initial-branch=main "${bareRepo}"`, { stdio: 'pipe' });
@@ -75,7 +77,8 @@ describe.sequential('blue-green integration', () => {
   });
 
   afterAll(async () => {
-    vi.unstubAllEnvs();
+    if (prevDkgHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = prevDkgHome;
     await rm(tmpDir, { recursive: true, force: true });
   });
 

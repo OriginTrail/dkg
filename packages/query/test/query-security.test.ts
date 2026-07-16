@@ -5,18 +5,19 @@
  * - Default query access is deny (not public)
  * - Explicit GRAPH clauses in remote SPARQL are rejected
  * - FROM/FROM NAMED clauses in remote SPARQL are rejected
- * - Standard paranet-scoped queries still work correctly
+ * - Standard context-graph-scoped queries still work correctly
  */
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
-const PARANET = 'test-security';
-const OTHER_PARANET = 'other-secret';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
-const OTHER_GRAPH = `did:dkg:paranet:${OTHER_PARANET}`;
+const CONTEXT_GRAPH = 'test-security';
+const OTHER_CONTEXT_GRAPH = 'other-secret';
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+const OTHER_GRAPH = `did:dkg:context-graph:${OTHER_CONTEXT_GRAPH}`;
 const ENTITY_A = 'did:dkg:entity:alice';
 const ENTITY_SECRET = 'did:dkg:entity:secret-data';
 const SCHEMA_NAME = 'https://schema.org/name';
@@ -31,8 +32,31 @@ function makeRequest(overrides: Partial<QueryRequest> = {}): QueryRequest {
   return {
     operationId: 'security-test',
     lookupType: 'SPARQL_QUERY',
-    paranetId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     ...overrides,
+  };
+}
+
+function makeNoExecuteBoundary(): { handler: QueryHandler; wasExecuted: () => boolean } {
+  let executed = false;
+  const noExecuteEngine = {
+    query: async () => {
+      executed = true;
+      return { bindings: [] };
+    },
+    resolveKA: async () => {
+      throw new Error('not used');
+    },
+  } as unknown as DKGQueryEngine;
+
+  return {
+    handler: new QueryHandler(noExecuteEngine, {
+      defaultPolicy: 'deny',
+      contextGraphs: {
+        [CONTEXT_GRAPH]: { policy: 'public', sparqlEnabled: true },
+      },
+    }),
+    wasExecuted: () => executed,
   };
 }
 
@@ -49,7 +73,7 @@ describe('I-004: Default query access should be deny', () => {
     ]);
   });
 
-  it('deny-by-default blocks queries to unconfigured paranets', async () => {
+  it('deny-by-default blocks queries to unconfigured contextGraphs', async () => {
     const handler = new QueryHandler(engine, {
       defaultPolicy: 'deny',
     });
@@ -65,11 +89,11 @@ describe('I-004: Default query access should be deny', () => {
     expect(response.status).toBe('ACCESS_DENIED');
   });
 
-  it('deny-by-default with explicit paranet allows queries', async () => {
+  it('deny-by-default with explicit context graph allows queries', async () => {
     const handler = new QueryHandler(engine, {
       defaultPolicy: 'deny',
-      paranets: {
-        [PARANET]: { policy: 'public' },
+      contextGraphs: {
+        [CONTEXT_GRAPH]: { policy: 'public' },
       },
     });
 
@@ -85,7 +109,7 @@ describe('I-004: Default query access should be deny', () => {
     expect(response.resultCount).toBe(2);
   });
 
-  it('public policy allows queries without explicit paranet config', async () => {
+  it('public policy allows queries without explicit context graph config', async () => {
     const handler = new QueryHandler(engine, {
       defaultPolicy: 'public',
     });
@@ -112,7 +136,7 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     store = new OxigraphStore();
     engine = new DKGQueryEngine(store);
 
-    // Insert data into two different paranets
+    // Insert data into two different contextGraphs
     await store.insert([
       q(ENTITY_A, SCHEMA_NAME, '"Alice"', GRAPH),
       q(ENTITY_SECRET, SCHEMA_NAME, '"TopSecret"', OTHER_GRAPH),
@@ -120,8 +144,8 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
 
     handler = new QueryHandler(engine, {
       defaultPolicy: 'deny',
-      paranets: {
-        [PARANET]: { policy: 'public', sparqlEnabled: true },
+      contextGraphs: {
+        [CONTEXT_GRAPH]: { policy: 'public', sparqlEnabled: true },
       },
     });
   });
@@ -150,7 +174,22 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
-  it('rejects SPARQL with GRAPH clause targeting the allowed paranet too', async () => {
+  it('rejects token-adjacent GRAPH variables before executing remote SPARQL', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { GRAPH?g { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('rejects SPARQL with GRAPH clause targeting the allowed context graph too', async () => {
     // Even queries targeting the "correct" graph should not use explicit GRAPH
     const response = await handler.handle(
       makeRequest({
@@ -175,6 +214,21 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('FROM');
   });
 
+  it('rejects token-adjacent FROM IRIs before executing remote SPARQL', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: `SELECT ?name FROM<${OTHER_GRAPH}> WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
   it('rejects SPARQL with FROM NAMED clause', async () => {
     const response = await handler.handle(
       makeRequest({
@@ -186,7 +240,7 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.status).toBe('ERROR');
   });
 
-  it('allows normal paranet-scoped SPARQL without GRAPH clause', async () => {
+  it('allows normal context-graph-scoped SPARQL without GRAPH clause', async () => {
     const response = await handler.handle(
       makeRequest({
         sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
@@ -196,13 +250,13 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
 
     expect(response.status).toBe('OK');
     const bindings = JSON.parse(response.bindings!);
-    // Should only see data from the allowed paranet, not the secret one
+    // Should only see data from the allowed context graph, not the secret one
     const names = bindings.map((b: Record<string, string>) => b['name']);
     expect(names.some((n: string) => n.includes('Alice'))).toBe(true);
     expect(names.some((n: string) => n.includes('TopSecret'))).toBe(false);
   });
 
-  it('prevents cross-paranet data access via case-variant GRAPH', async () => {
+  it('prevents cross-context-graph data access via case-variant GRAPH', async () => {
     const response = await handler.handle(
       makeRequest({
         sparql: `SELECT ?name WHERE { graph <${OTHER_GRAPH}> { ?s <${SCHEMA_NAME}> ?name } }`,
@@ -266,8 +320,8 @@ describe('I-009: SPARQL keyword detection — no false positives on literals/com
 
     handler = new QueryHandler(engine, {
       defaultPolicy: 'deny',
-      paranets: {
-        [PARANET]: { policy: 'public', sparqlEnabled: true },
+      contextGraphs: {
+        [CONTEXT_GRAPH]: { policy: 'public', sparqlEnabled: true },
       },
     });
   });
@@ -466,5 +520,15 @@ describe('I-009: SPARQL keyword detection — no false positives on literals/com
     );
     expect(response.status).toBe('ERROR');
     expect(response.error).toContain('FROM');
+  });
+});
+
+describe('caller documentation for named graph scope', () => {
+  it('documents that local GRAPH variables stay constrained by contextGraphId and view', () => {
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+
+    expect(readme).toContain('contextGraphId and view are authoritative');
+    expect(readme).toContain('GRAPH ?g');
+    expect(readme).toMatch(/constrained locally/i);
   });
 });

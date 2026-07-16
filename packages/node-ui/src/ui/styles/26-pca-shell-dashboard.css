@@ -1,0 +1,30 @@
+/* PCA styles — dashboard "Publishing discount" row + settings-card line (B3). Split from 26-pca.css (#1354); class names + cascade order unchanged. Selectors are self-contained (.v10-ws-pca*, .v10-pca-settings-line) — order-independent. */
+
+/* ----- Dashboard "Publishing discount" row (B3) ----- */
+.v10-ws-pca {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.v10-ws-pca-label { font-size: 11px; color: var(--text-tertiary); }
+.v10-ws-pca-value { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.v10-ws-pca-value[data-covered='true'] { color: var(--text-success); }
+.v10-ws-pca-cta {
+  margin-left: auto;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-link);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.v10-ws-pca-cta:hover { background: var(--bg-hover); }
+
+/* ----- Settings card line (B3) ----- */
+.v10-pca-settings-line { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 12px; }
+

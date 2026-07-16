@@ -1,0 +1,240 @@
+/**
+ * BlazegraphStore INTEGRATION tests — run against a REAL Blazegraph server.
+ *
+ * These are the no-mock regression tests for the large-publish bug: publishing
+ * a bigger batch (~1,800 triples / ~200 KB) to a Blazegraph node used to fail
+ * with HTTP 400 "Unable to parse form content". Root cause: the adapter sent
+ * SPARQL updates/queries as URL-encoded form data (`update=…` / `query=…`),
+ * which Jetty's form parser caps at `maxFormContentSize` (~200 KB on a stock
+ * Blazegraph image). A publish issues a single large DELETE DATA over the full
+ * quad set, so any operator on the default node-setup image hit the wall. The
+ * fix switches the transport to a W3C SPARQL 1.1 direct POST
+ * (`application/sparql-update` / `application/sparql-query`), which is not form
+ * parsed and so has no size cap.
+ *
+ * The unit suite (`blazegraph.unit.test.ts`) asserts the wire format with a
+ * mocked fetch; this suite proves the behaviour end-to-end against a live
+ * server. It is gated on BLAZEGRAPH_TEST_URL so local `pnpm test` runs skip it
+ * (no Docker required); CI provisions a Blazegraph service container and sets
+ * the env var (see `.github/workflows/ci.yml`, job `tornado-blazegraph`).
+ *
+ * BLAZEGRAPH_TEST_URL example:
+ *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import type { Quad } from '../src/triple-store.js';
+
+const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
+
+// A unique graph prefix per run so repeated runs against a persistent
+// namespace never collide or see stale data.
+const RUN = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+const GRAPH = `urn:bg-int:${RUN}:graph`;
+const PRED = 'urn:bg-int:prop';
+
+// ~120-char ASCII literal so each DELETE DATA line is ~300 bytes; well under
+// the per-literal MUTF-8 cap (65 535 bytes) but big enough that the whole
+// batch blows past Jetty's ~200 KB form-content limit.
+const PADDING = 'x'.repeat(120);
+
+function makeQuads(n: number): Quad[] {
+  const quads: Quad[] = [];
+  for (let i = 0; i < n; i++) {
+    quads.push({
+      subject: `urn:bg-int:${RUN}:subject-${i}`,
+      predicate: PRED,
+      object: `"value-${i}-${PADDING}"`,
+      graph: GRAPH,
+    });
+  }
+  return quads;
+}
+
+describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', () => {
+  let store: BlazegraphStore;
+
+  beforeAll(async () => {
+    store = new BlazegraphStore(BLAZEGRAPH_URL as string);
+    // Start from a clean graph in case the namespace persists across runs.
+    await store.dropGraph(GRAPH);
+  });
+
+  afterAll(async () => {
+    if (store) await store.dropGraph(GRAPH).catch(() => {});
+  });
+
+  it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {
+    const deadlineStore = new BlazegraphStore(BLAZEGRAPH_URL as string, { timeout: 5_000 });
+    const controller = new AbortController();
+    const reason = new Error('cancel live probe');
+    controller.abort(reason);
+
+    await expect(
+      deadlineStore.query('ASK { ?s ?p ?o }', { signal: controller.signal }),
+    ).rejects.toBe(reason);
+
+    const result = await deadlineStore.query('ASK { ?s ?p ?o }');
+    expect(result.type).toBe('boolean');
+    await deadlineStore.close();
+  });
+
+  it(
+    'large DELETE DATA (publish path) succeeds — the form-content-limit regression',
+    async () => {
+      // 2 000 quads → a single DELETE DATA body of ~600 KB raw. Form-encoded
+      // (`update=` + URL-escaping) this is >1 MB, far past Jetty's ~200 KB
+      // cap — the exact shape a large publish produces.
+      const quads = makeQuads(2000);
+
+      await store.insert(quads);
+      expect(await store.countQuads(GRAPH)).toBe(quads.length);
+
+      // Sanity-check the assumption: the DELETE DATA body really is large
+      // enough that the old form-encoded transport would have been rejected.
+      const deleteBodyBytes = quads
+        .map((q) => `GRAPH <${q.graph}> { <${q.subject}> <${q.predicate}> ${q.object} . }`)
+        .join('\n').length;
+      expect(deleteBodyBytes).toBeGreaterThan(200_000);
+
+      // This is the operation that used to throw HTTP 400 on Blazegraph.
+      await expect(store.delete(quads)).resolves.toBeUndefined();
+      expect(await store.countQuads(GRAPH)).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    'large SELECT query body succeeds — the query-path form-limit regression',
+    async () => {
+      const quads = makeQuads(3);
+      await store.insert(quads);
+
+      // Build a SELECT whose VALUES block alone exceeds ~200 KB so the old
+      // form-encoded `query=` transport would have been rejected. Includes
+      // the 3 real subjects plus thousands of decoys. A non-aggregate
+      // projection (`SELECT ?s`) is used deliberately — Blazegraph evaluates
+      // `VALUES + COUNT(*)` without GROUP BY as a per-binding aggregate, so we
+      // count the returned rows instead.
+      const realIris = quads.map((q) => `<${q.subject}>`);
+      const decoyIris: string[] = [];
+      for (let i = 0; i < 4000; i++) {
+        decoyIris.push(`<urn:bg-int:${RUN}:decoy-${i}-${PADDING}>`);
+      }
+      const values = [...realIris, ...decoyIris].join('\n');
+      const sparql = `SELECT ?s WHERE {
+        VALUES ?s { ${values} }
+        GRAPH <${GRAPH}> { ?s <${PRED}> ?o }
+      }`;
+      expect(sparql.length).toBeGreaterThan(200_000);
+
+      const result = await store.query(sparql);
+      expect(result.type).toBe('bindings');
+      if (result.type === 'bindings') {
+        const matched = new Set(result.bindings.map((b) => b.s));
+        expect(matched.size).toBe(quads.length);
+        for (const q of quads) expect(matched.has(q.subject)).toBe(true);
+      }
+
+      await store.delete(quads);
+    },
+    60_000,
+  );
+
+  it(
+    'round-trips non-ASCII literals byte-identical — BMP, astral (surrogate-pair), and \\U-escape inputs',
+    async () => {
+      // Regression for the devnet pr1386-term-canon "astral" hazard: Blazegraph's
+      // N-Quads bulk-insert parser reads the body byte-wise as ASCII, so a raw
+      // UTF-8 literal (2-byte é as much as a 4-byte emoji) used to be stored as
+      // U+FFFD garbage — a published KA carrying it then failed storage-ACK
+      // merkle verification and the publish died. The adapter now ships an
+      // ASCII-safe body (\uXXXX per UTF-16 code unit, astral chars as their
+      // surrogate pair), which this proves round-trips byte-identical live.
+      const GRAPH_NA = `${GRAPH}:nonascii`;
+      // 🚀 U+1F680 (astral emoji), 𝔘𝔫𝔦 U+1D518/U+1D52B/U+1D526 (math fraktur),
+      // 𠜎 U+2070E (CJK Ext-B, 4-byte UTF-8) — plus BMP é and a lang tag.
+      const astral = '"smile\u{1F680}\u{1D518}\u{1D52B}\u{1D526}\u{2070E}"';
+      const bmp = '"café"';
+      const langTagged = '"emoji\u{1F600}"@en';
+      const quads: Quad[] = [
+        { subject: `urn:bg-int:${RUN}:na-1`, predicate: PRED, object: astral, graph: GRAPH_NA },
+        { subject: `urn:bg-int:${RUN}:na-2`, predicate: PRED, object: bmp, graph: GRAPH_NA },
+        { subject: `urn:bg-int:${RUN}:na-3`, predicate: PRED, object: langTagged, graph: GRAPH_NA },
+      ];
+      await store.insert(quads);
+
+      // SELECT read-back must be byte-identical to the inserted term (the
+      // adapter emits raw UTF-8 with minimal \ " \n \r escaping, like oxigraph).
+      const readBack = async (subject: string): Promise<string> => {
+        const r = await store.query(
+          `SELECT ?o WHERE { GRAPH <${GRAPH_NA}> { <${subject}> <${PRED}> ?o } }`,
+        );
+        expect(r.type).toBe('bindings');
+        if (r.type !== 'bindings') throw new Error('unreachable');
+        expect(r.bindings).toHaveLength(1);
+        return r.bindings[0].o;
+      };
+      expect(await readBack(`urn:bg-int:${RUN}:na-1`)).toBe(astral);
+      expect(await readBack(`urn:bg-int:${RUN}:na-2`)).toBe(bmp);
+      expect(await readBack(`urn:bg-int:${RUN}:na-3`)).toBe(langTagged);
+
+      // A term arriving with a verbatim \UXXXXXXXX escape (which Blazegraph's
+      // parser used to truncate to the low 16 bits: U+1F600 → U+F600) must
+      // land on the same stored VALUE as the raw character. The adapter
+      // rewrites it to the surrogate-pair \uXXXX form Blazegraph parses
+      // correctly, so read-back returns the raw astral char.
+      const escapedInput = '"esc\\U0001F600ape"';
+      await store.insert([
+        { subject: `urn:bg-int:${RUN}:na-4`, predicate: PRED, object: escapedInput, graph: GRAPH_NA },
+      ]);
+      expect(await readBack(`urn:bg-int:${RUN}:na-4`)).toBe('"esc\u{1F600}ape"');
+
+      // CONSTRUCT read-back: Blazegraph emits ASCII \u-escaped N-Quads
+      // (surrogate pairs as two escapes); after decoding, the value must match.
+      const c = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${GRAPH_NA}> { ?s ?p ?o } }`,
+      );
+      expect(c.type).toBe('quads');
+      if (c.type === 'quads') {
+        const bySubject = new Map(c.quads.map((q) => [q.subject, q.object]));
+        const decodeUchar = (s: string) =>
+          s.replace(/\\u([0-9A-Fa-f]{4})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+        expect(decodeUchar(bySubject.get(`urn:bg-int:${RUN}:na-1`) ?? '')).toBe(astral);
+        expect(decodeUchar(bySubject.get(`urn:bg-int:${RUN}:na-3`) ?? '')).toBe(langTagged);
+      }
+
+      // DELETE with raw non-ASCII terms (SPARQL-update path, charset=utf-8)
+      // must match the stored values — silent non-matches were the old
+      // ISO-8859-1 failure mode.
+      await store.delete([
+        ...quads,
+        { subject: `urn:bg-int:${RUN}:na-4`, predicate: PRED, object: '"esc\u{1F600}ape"', graph: GRAPH_NA },
+      ]);
+      expect(await store.countQuads(GRAPH_NA)).toBe(0);
+      await store.dropGraph(GRAPH_NA).catch(() => {});
+    },
+    60_000,
+  );
+
+  it(
+    'round-trips data through the live server (insert → query → delete)',
+    async () => {
+      const quads = makeQuads(50);
+      await store.insert(quads);
+
+      const r = await store.query(
+        `SELECT ?o WHERE { GRAPH <${GRAPH}> { <urn:bg-int:${RUN}:subject-7> <${PRED}> ?o } }`,
+      );
+      expect(r.type).toBe('bindings');
+      if (r.type === 'bindings') {
+        expect(r.bindings).toHaveLength(1);
+        expect(r.bindings[0].o).toContain('value-7-');
+      }
+
+      await store.delete(quads);
+      expect(await store.countQuads(GRAPH)).toBe(0);
+    },
+    60_000,
+  );
+});

@@ -1,0 +1,175 @@
+/* ── Bottom panel ── */
+.v10-panel-bottom {
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  /* Height is driven by inline style (store-persisted) when expanded.
+     Transition only applies when collapsing/expanding, not during drag. */
+  transition: height 0.15s ease;
+}
+.v10-panel-bottom.collapsed { height: var(--tab-h); }
+.v10-panel-bottom.maximised { height: 80vh !important; }
+
+.v10-resize-handle-v {
+  height: 4px;
+  min-height: 4px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+.v10-resize-handle-v:hover,
+.v10-resize-handle-v.active { background: var(--accent-blue, #3b82f6); }
+.v10-bottom-tabs {
+  height: var(--tab-h);
+  min-height: var(--tab-h);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-bottom-tab {
+  padding: 0 12px;
+  height: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  color: var(--text-tertiary);
+  border: none;
+  outline: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.v10-bottom-tab:hover { color: var(--text-secondary); }
+.v10-bottom-tab:focus { outline: none; }
+.v10-bottom-tab.active { color: var(--text-primary); border-bottom-color: var(--accent-blue, #3b82f6); }
+.v10-bottom-toggle {
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: none;
+  outline: none;
+  background: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.v10-bottom-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.v10-bottom-toggle:focus { outline: none; }
+.v10-bottom-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+/* Log viewer */
+.v10-log-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.v10-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.v10-log-filter {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  outline: none;
+}
+.v10-log-filter:focus { border-color: var(--accent-blue, #3b82f6); }
+.v10-log-level-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 3px 22px 3px 8px;
+  font-size: 11px;
+  background: var(--bg-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E") no-repeat right 6px center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  outline: none;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.v10-log-level-select:hover { border-color: var(--border-default); color: var(--text-primary); }
+.v10-log-level-select:focus { outline: none; border-color: var(--accent-blue, #3b82f6); }
+.v10-log-output {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.v10-log-line {
+  padding: 1px 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.v10-log-line:hover { background: rgba(255,255,255,.03); }
+
+/* ══════════════════════════════════════════
+   AGENT CHAT (V10)
+   ══════════════════════════════════════════ */
+.v10-chat-messages { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.v10-chat-msg { display: flex; flex-direction: column; }
+.v10-chat-msg.user { align-items: flex-end; }
+.v10-chat-msg.assistant {
+  align-items: stretch;
+  /* Assistant messages render full-width within the messages region,
+     matching Claude Desktop / ChatGPT / VS Code Copilot. The .v10-chat-msg
+     wrapper sets the stretch axis so the inner .v10-chat-bubble.assistant
+     fills the available width without an explicit width: 100%. */
+}
+.v10-chat-bubble {
+  /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
+     while tracking the body base bump (PR8). */
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+.v10-chat-plaintext {
+  /* User-side bubbles render as literal text — preserve whitespace and
+     newlines so the transcript shows the exact prompt the user sent.
+     `pre-wrap` keeps `\n` visible without collapsing runs of spaces;
+     the inherited word-break / overflow-wrap on the bubble still
+     handles long unbroken tokens. */
+  white-space: pre-wrap;
+}
+.v10-chat-failure-notice {
+  display: block;
+  margin-top: 8px;
+}
+.v10-chat-bubble.user {
+  /* User pill — right-aligned, capped width, distinct surface. */
+  padding: 10px 14px;
+  border-radius: 10px;
+  max-width: 85%;
+  background: var(--bg-active);
+  border: 1px solid var(--border-default);
+}
+.v10-chat-bubble.assistant {
+  /* No bubble container — assistant content reads as full-width body
+     copy on the panel background, the same pattern industry-standard
+     AI chat UIs use. Padding stays narrow so the assistant typography
+     visually separates from the bordered code blocks / blockquotes /
+     tables that live inside `.v10-md`. No background, no border, no
+     `max-width` — those previously created the "two cramped chat boxes"
+     look. */
+  padding: 4px 0;
+}

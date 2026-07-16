@@ -1,15 +1,18 @@
 {
   "name": "@origintrail-official/dkg-demo",
-  "version": "0.0.1",
+  "version": "10.0.0-rc.17",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test kafka-streams/test/*.mjs epcis-bike/test/*.mjs"
+  },
   "dependencies": {
+    "@multiformats/multiaddr": "^13.0.3",
     "@origintrail-official/dkg-agent": "workspace:*",
-    "@origintrail-official/dkg-core": "workspace:*",
-    "@origintrail-official/dkg-storage": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
-    "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
-    "@multiformats/multiaddr": "*"
+    "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
   }
 }

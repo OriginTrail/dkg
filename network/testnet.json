@@ -1,29 +1,41 @@
 {
-  "networkName": "DKG V9 Testnet",
-  "networkId": "6f63f485c6cce67e677f7844ec835024c6d97f13fe8cacaf0ceedfd3ad658510",
+  "networkName": "DKG V10 Base Testnet",
+  "genesisId": "base-testnet",
+  "networkId": "7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b",
   "genesisVersion": 1,
   "relays": [
-    "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj",
     "/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
     "/ip4/157.180.37.169/tcp/9090/p2p/12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw",
-    "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge"
+    "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
+    "/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ"
   ],
-  "defaultParanets": ["testing", "origin-trail-game"],
+  "defaultContextGraphs": [],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,
-    "repo": "OriginTrail/dkg-v9",
+    "repo": "OriginTrail/dkg",
     "branch": "main",
-    "checkIntervalMinutes": 5
+    "checkIntervalMinutes": 5,
+    "channel": "testnet"
   },
+  "chainResetMarker": "v10-rc12-ka-rename-2026-06-01",
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",
+    "rpcUrls": [
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
     "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
     "chainId": "base:84532"
   },
   "faucet": {
     "url": "https://euphoria.origin-trail.network/faucet/fund",
-    "mode": "v9_base_sepolia"
+    "mode": "v10_base_sepolia"
   }
 }

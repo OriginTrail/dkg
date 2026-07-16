@@ -1,0 +1,52 @@
+policy: context_corroboration_readable
+version: 0.1.0
+kind: canonical_policy
+description: Deterministic corroboration and promotion with descriptive variable names.
+rules:
+  - name: corroborated
+    params: [Claim]
+    all:
+      - atom: {pred: claim, args: ["$Claim"]}
+      - count_distinct:
+          vars: [Evidence]
+          where:
+            - atom: {pred: supports, args: ["$Evidence", "$Claim"]}
+            - atom: {pred: evidence_view, args: ["$Evidence", "accepted"]}
+            - atom: {pred: independent, args: ["$Evidence"]}
+          op: ">="
+          value: 2
+      - exists:
+          where:
+            - atom: {pred: supports, args: ["$Evidence", "$Claim"]}
+            - atom: {pred: evidence_view, args: ["$Evidence", "accepted"]}
+            - atom: {pred: authority_class, args: ["$Evidence", "vendor"]}
+      - not_exists:
+          where:
+            - atom: {pred: contradicts, args: ["$Contradiction", "$Claim"]}
+            - atom: {pred: accepted_status, args: ["$Contradiction", "accepted"]}
+  - name: disputed
+    params: [Claim]
+    all:
+      - atom: {pred: claim, args: ["$Claim"]}
+      - exists:
+          where:
+            - atom: {pred: contradicts, args: ["$Contradiction", "$Claim"]}
+            - atom: {pred: accepted_status, args: ["$Contradiction", "accepted"]}
+  - name: promotable
+    params: [Claim]
+    all:
+      - atom: {pred: corroborated, args: ["$Claim"]}
+      - exists:
+          where:
+            - atom: {pred: claim_epoch, args: ["$Claim", "$Epoch"]}
+            - atom: {pred: quorum_epoch, args: ["incident_review", "$Epoch"]}
+      - atom: {pred: quorum_reached, args: ["incident_review", 3, 4]}
+decisions:
+  - name: propose_accept
+    params: [Claim]
+    all:
+      - atom: {pred: promotable, args: ["$Claim"]}
+  - name: propose_reject
+    params: [Claim]
+    all:
+      - atom: {pred: disputed, args: ["$Claim"]}

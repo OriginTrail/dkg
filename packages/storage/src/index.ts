@@ -2,21 +2,142 @@ export {
   type Quad,
   type TripleStore,
   type QueryResult,
+  type QueryOptions,
+  type StoreWorkPriority,
+  type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type TripleStoreQueryOptions,
+  type UpdateOptions,
+  type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
+  tryUpdateWithTouchedGraphs,
+  tryReplaceGraphAtomically,
+  tryReplaceGraphAndSubjectAtomically,
+  isExternalBackend,
+  getSparqlEndpoint,
+  type SparqlEndpoint,
 } from './triple-store.js';
+export {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphAndSubjectReplaceUpdate,
+  buildAtomicGraphReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+  type AtomicGraphAndSubjectReplaceUpdate,
+  type AtomicGraphReplaceUpdate,
+} from './atomic-graph-replace.js';
+export {
+  UnsupportedTripleStoreCapabilityError,
+  isReplaceGraphAndSubjectCapabilityRefusal,
+  isReplaceGraphCapabilityRefusal,
+  type TripleStoreCapability,
+} from './unsupported-capability-error.js';
+export {
+  StorePriorityScheduler,
+  StoreSchedulerBusyError,
+  externalStorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
+  DEFAULT_STORE_QUEUE_LIMIT,
+  DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
+  type StorePrioritySchedulerSnapshot,
+  type StorePrioritySchedulerOptions,
+  type StorePriorityQueueLimits,
+  type StoreSchedulerBusyReason,
+} from './store-priority-scheduler.js';
+export {
+  EXTERNAL_LITERAL_REF_DATATYPE,
+  SHARED_MEMORY_GRAPH_SUFFIX,
+  DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
+  SharedMemoryLiteralBlobStore,
+  type SharedMemoryLiteralBlobStoreOptions,
+} from './shared-memory-literal-blob-store.js';
+export {
+  DEFAULT_GRAPH_SET_REVALIDATE_MS,
+  DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
+  GraphSetIndexStore,
+  type GraphSetIndexStoreOptions,
+  type GraphSetMutationEvent,
+  type GraphSetMutationSource,
+} from './graph-set-index-store.js';
+export {
+  CHANGELOG_GRAPH,
+  CHANGELOG_SCHEMA_VERSION,
+  ChangelogStore,
+  changelogSchemaQuad,
+  asChangelogReader,
+  type ChangeOp,
+  type ChangeRecord,
+  type ChangelogEraGuard,
+  type ChangelogHead,
+  type ChangelogReader,
+  type ChangelogStoreOptions,
+} from './changelog-store.js';
+export {
+  GraphWriteGenTracker,
+  asGraphWriteGenSource,
+  type GraphWriteGenSource,
+} from './graph-write-gen.js';
+export {
+  ExactGraphReadError,
+  quadToNQuad,
+  quadsToNQuads,
+  readExactGraphPaged,
+  type ExactGraphReadErrorCode,
+  type ExactGraphReadErrorKind,
+  type ReadExactGraphPagedOptions,
+} from './bounded-rdf.js';
+export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  resolveGraphScopedOrLegacyMetadata,
+  type GraphScopedOrLegacyMetadata,
+} from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
-export { BlazegraphStore } from './adapters/blazegraph.js';
-export { SparqlHttpStore, type SparqlHttpStoreOptions } from './adapters/sparql-http.js';
-export { GraphManager } from './graph-manager.js';
-export { PrivateContentStore } from './private-store.js';
+export {
+  BlazegraphStore,
+  DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
+  type BlazegraphStoreOptions,
+} from './adapters/blazegraph.js';
+export {
+  SparqlHttpStore,
+  type SparqlHttpStoreOptions,
+  type SparqlHttpQueryOptions,
+  type SparqlHttpSlowQueryEvent,
+} from './adapters/sparql-http.js';
+export {
+  ContextGraphManager,
+  GraphManager,
+  loadSelectedSharedMemoryQuads,
+  loadSharedMemoryQuadsForScope,
+  loadSharedMemorySliceWithKaBoundFallback,
+  canonicalSharedMemoryScopeWriteGraph,
+  resolveSharedMemoryScopeGraphs,
+  resolveSharedMemoryScopeWriteGraph,
+  loadSelectedVerifiableMemoryQuads,
+  resolveSharedMemoryReadGraphs,
+  resolveVerifiableMemoryReadGraphs,
+  type LoadSelectedSharedMemoryQuadsOptions,
+  type SharedMemoryResultBudget,
+  SharedMemoryResultBudgetError,
+  type LoadSelectedVerifiableMemoryQuadsOptions,
+  type NonEmptyGraphList,
+  type NamedKnowledgeAssetGraphIdentity,
+  type SharedMemoryReadSelection,
+  type SharedMemoryGraphScope,
+  type SwmKaGraphBound,
+  type SwmSliceSourceTags,
+  type LoadSharedMemorySliceWithKaBoundFallbackOptions,
+} from './graph-manager.js';
+export {
+  PrivateContentStore,
+  type KnowledgeAssetPrivateReadOptions,
+} from './private-store.js';
+export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';

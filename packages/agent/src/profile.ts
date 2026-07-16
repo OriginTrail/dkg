@@ -1,5 +1,76 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { DKG_ONTOLOGY, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
+  isPublicLikeAddress,
+} from '@origintrail-official/dkg-core';
+
+/**
+ * Canonicalise the DID subject for an agent.
+ *
+ * A-12 review: the same wallet can be supplied with different casings
+ * (e.g. `ethers.Wallet.address` returns checksum case, while config
+ * files and JSON bodies often carry lowercase). Without normalisation
+ * a profile publish would mint `did:dkg:agent:0xAb...` while an
+ * endorsement from the same wallet would mint `did:dkg:agent:0xab...`,
+ * splitting the entity into two RDF subjects that never converge.
+ *
+ * Rule: if the raw subject matches the EVM-address shape `0x<40hex>`,
+ * fold it to lowercase. Any other shape (peer id, non-hex) is passed
+ * through unchanged — callers upstream may have minted a legacy
+ * peer-id subject and we must not silently rewrite it to look like an
+ * address.
+ */
+export function canonicalAgentDidSubject(raw: string): string {
+  if (/^0x[0-9a-fA-F]{40}$/.test(raw)) {
+    return raw.toLowerCase();
+  }
+  return raw;
+}
+
+/**
+ * Filter a node's live libp2p multiaddrs down to the set worth
+ * publishing in the agent profile.
+ *
+ * Reuses the shared `isPublicLikeAddress` classifier from `dkg-core`
+ * (the same one `share-project-modal.test.ts` and the daemon's
+ * "node is remotely-dialable" check pin to). That classifier rejects:
+ *   - loopback (127.0.0.0/8, ::1)
+ *   - unspecified bind (0.0.0.0, ::)
+ *   - link-local (169.254.0.0/16, fe80::/10)
+ *   - RFC1918 (10/8, 172.16/12, 192.168/16)
+ *   - CGNAT (100.64/10)
+ *   - multicast / reserved (224.0.0.0+)
+ *   - IPv6 ULA (fc00::/7) and multicast (ff00::/8)
+ *   - `/dns4/` / `/dns6/` / `/dnsaddr/` hostnames that resolve to
+ *     localhost-y / `.local` / etc.
+ *
+ * The classifier evaluates the LEADING address segment, which is
+ * exactly what we want for `/p2p-circuit` entries — those are encoded
+ * as `/ip4/<relay-ip>/.../p2p-circuit/p2p/<peer-id>` and only the
+ * public-relay form should be advertised.
+ *
+ * Codex review of PR #700 round 2 flagged that the round-1 regex
+ * filter still leaked RFC1918 / CGNAT / ULA into the agent profile, so
+ * peers learnt self-referential or private multiaddrs from the
+ * phonebook and wasted dial attempts before falling back to the relay.
+ *
+ * Exported separately so it can be unit-tested without standing up a
+ * full agent.
+ */
+export function collectPublishableMultiaddrs(
+  raw: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const ma of raw) {
+    if (!ma || seen.has(ma)) continue;
+    if (!isPublicLikeAddress(ma)) continue;
+    seen.add(ma);
+    out.push(ma);
+  }
+  return out;
+}
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'https://schema.org/';
@@ -8,8 +79,8 @@ const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
-export const AGENT_REGISTRY_PARANET = SYSTEM_PARANETS.AGENTS;
-export const AGENT_REGISTRY_GRAPH = `did:dkg:paranet:${AGENT_REGISTRY_PARANET}`;
+export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_CONTEXT_GRAPHS.AGENTS;
+export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_CONTEXT_GRAPH}`;
 
 export interface SkillOfferingConfig {
   skillType: string;
@@ -19,28 +90,90 @@ export interface SkillOfferingConfig {
   pricingModel?: 'PerInvocation' | 'Subscription' | 'Free';
 }
 
+export interface AgentProfileEncryptionKey {
+  encryptionKeyAlgorithm: string;
+  publicEncryptionKey: string;
+  encryptionKeyProof: string;
+  encryptionKeyId: string;
+  revokedAt?: string;
+  revocationProof?: string;
+}
+
 export interface AgentProfileConfig {
   peerId: string;
   name: string;
   description?: string;
   framework?: string;
   skills: SkillOfferingConfig[];
-  paranetsServed?: string[];
+  contextGraphsServed?: string[];
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
   relayAddress?: string;
+  agentAddress?: string;
+  /**
+   * Live libp2p multiaddrs other peers should use to dial this node.
+   * Should be the publicly-reachable / circuit-relayed forms (filtered
+   * to exclude loopback + link-local). Empty/undefined leaves the
+   * `dkg:multiaddr` triples unset — older agents may publish profiles
+   * without these and the discovery path falls back to
+   * `dkg:relayAddress` alone.
+   *
+   * Caller is responsible for filtering; this function emits whatever
+   * it receives. See `DKGAgent.publishProfile` for the production
+   * filter (drops loopback / link-local / unspecified).
+   */
+  multiaddrs?: readonly string[];
+  /**
+   * ISO-8601 timestamp of when this profile was generated. Consumers
+   * use this as a freshness signal: profiles older than the
+   * application's staleness threshold (typically 24h) are skipped
+   * during dial fallback so we don't try addresses from a node that
+   * has been offline for days. Defaults to `new Date().toISOString()`
+   * when omitted.
+   */
+  lastSeen?: string;
+  /**
+   * Every workspace encryption key registered to this agent, including retired
+   * ones (so the registry can publish their wallet-signed revocations and
+   * peers' resolvers can filter them out). When this is non-empty the legacy
+   * `publicEncryptionKey` / `encryptionKeyAlgorithm` / `encryptionKeyProof`
+   * fields below are ignored — callers should populate either the array OR the
+   * singular fields, not both.
+   */
+  encryptionKeys?: readonly AgentProfileEncryptionKey[];
+  /** @deprecated single-key shape kept for backward compatibility with older test fixtures. */
+  encryptionKeyAlgorithm?: string;
+  /** @deprecated */
+  publicEncryptionKey?: string;
+  /** @deprecated */
+  encryptionKeyProof?: string;
 }
 
 /**
  * Builds RDF quads for an agent profile KA using the ERC-8004 aligned ontology.
- * The agent's rootEntity is `did:dkg:agent:{peerId}`.
- * Uses three vocabulary layers: erc8004: (identity), prov: (provenance), dkg: (P2P).
+ *
+ * Spec §03_AGENTS.md / §22_AGENT_ONBOARDING.md require the agent DID to be
+ * the Ethereum-address form `did:dkg:agent:0x<40hex>`. When an
+ * `agentAddress` is supplied (which is always the case at runtime — the
+ * node auto-registers a default agent and passes its address through
+ * `DKGAgent.publishProfile`) the root entity uses that spec form. We
+ * keep the legacy `did:dkg:agent:<peerId>` fallback only for test
+ * harnesses that still construct profiles without an agent address;
+ * the A-12 drift-scan test enforces that no production fixtures rely
+ * on it.
+ *
+ * Uses three vocabulary layers: erc8004: (identity), prov: (provenance),
+ * dkg: (P2P).
  */
 export function buildAgentProfile(config: AgentProfileConfig): {
   quads: Quad[];
   rootEntity: string;
 } {
-  const entity = `did:dkg:agent:${config.peerId}`;
+  // A-12: normalise the DID subject so profile + endorsement subjects
+  // converge for the same wallet regardless of the source casing. See
+  // `canonicalAgentDidSubject` for rationale.
+  const didSubject = canonicalAgentDidSubject(config.agentAddress ?? config.peerId);
+  const entity = `did:dkg:agent:${didSubject}`;
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
 
@@ -66,6 +199,48 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
   if (config.relayAddress) {
     q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
+  }
+  if (config.agentAddress) {
+    q(entity, `${DKG}agentAddress`, `"${canonicalAgentDidSubject(config.agentAddress)}"`);
+  }
+  // Distributed phonebook (PR feat/chain-agents-cg-phonebook).
+  // Note: properties `dkg:multiaddr` and `dkg:lastSeen` are emitted on
+  // the agent entity without a matching genesis ontology declaration.
+  // Adding them to genesis would change the hashed `networkId`
+  // (`computeNetworkId` hashes all genesis quads), breaking any node
+  // still on rc.11. RDF doesn't require properties to be declared —
+  // they're usable as-is. Ontology declarations can land in a
+  // coordinated genesis bump later.
+  if (config.multiaddrs && config.multiaddrs.length > 0) {
+    for (const ma of config.multiaddrs) {
+      // Defensive: skip entries containing a `"` which would break
+      // the N-Quad literal encoding. Real libp2p multiaddrs never
+      // contain quote characters; this guard is purely against
+      // malformed callers.
+      if (!ma || ma.includes('"')) continue;
+      q(entity, `${DKG}multiaddr`, `"${ma}"`);
+    }
+  }
+  q(entity, `${DKG}lastSeen`, `"${config.lastSeen ?? new Date().toISOString()}"`);
+  // Encryption keys: prefer the multi-key array; fall back to the deprecated
+  // singular fields only when the array isn't supplied (legacy callers /
+  // test fixtures). Retired keys still get published so peers learn their
+  // wallet-signed revocations and the resolver can prune them.
+  if (config.encryptionKeys && config.encryptionKeys.length > 0) {
+    for (const key of config.encryptionKeys) {
+      q(entity, `${DKG}publicEncryptionKey`, `"${key.publicEncryptionKey}"`);
+      q(entity, `${DKG}encryptionKeyAlgorithm`, `"${key.encryptionKeyAlgorithm}"`);
+      q(entity, `${DKG}encryptionKeyProof`, `"${key.encryptionKeyProof}"`);
+      if (key.revokedAt && key.revocationProof) {
+        q(key.encryptionKeyId, `${DKG}revokedAt`, `"${key.revokedAt}"`);
+        q(key.encryptionKeyId, `${DKG}revokedBy`, entity);
+        q(key.encryptionKeyId, `${DKG}encryptionKeyRevocationProof`, `"${key.revocationProof}"`);
+      }
+    }
+  } else if (config.publicEncryptionKey && config.encryptionKeyAlgorithm && config.encryptionKeyProof) {
+    q(entity, `${DKG}publicEncryptionKey`, `"${config.publicEncryptionKey}"`);
+    q(entity, `${DKG}encryptionKeyAlgorithm`, `"${config.encryptionKeyAlgorithm}"`);
+    q(entity, `${DKG}encryptionKeyProof`, `"${config.encryptionKeyProof}"`);
   }
   if (config.framework) {
     q(entity, `${SKILL}framework`, `"${config.framework}"`);
@@ -106,11 +281,14 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
   q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
-  if (config.paranetsServed?.length) {
+  const served = config.contextGraphsServed;
+  if (served?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;
     q(entity, `${SKILL}hostingProfile`, hostingUri);
     q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
-    q(hostingUri, `${SKILL}paranetsServed`, `"${config.paranetsServed.join(',')}"`);
+    for (const cg of served) {
+      q(hostingUri, `${SKILL}contextGraphsServed`, `"${cg}"`);
+    }
   }
 
   return { quads, rootEntity: entity };

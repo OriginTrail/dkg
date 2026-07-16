@@ -1,3 +1,12 @@
+import {
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphSharedMemoryUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSubGraphPrivateUri,
+  contextGraphSubGraphUri,
+} from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
 
 const PREFIXES = `
@@ -36,17 +45,41 @@ export function normalizeBizStep(value: string): string {
   return normalizeGs1Vocabulary('BizStep', value);
 }
 
+function extensionLocalNameFilter(predicateVariable: string, localName: string): string {
+  return `FILTER(REPLACE(STR(?${predicateVariable}), "^.*[/#]", "") = "${localName}")`;
+}
+
 /**
  * Build a composite SPARQL query for EPCIS events.
  *
  * Adapted for v9's flat data graph model:
- * - Data lives in GRAPH <did:dkg:paranet:{id}>
- * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:paranet:{id}/_meta>
+ * - Data lives in GRAPH <did:dkg:context-graph:{id}>
+ * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:context-graph:{id}/_meta>
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
-export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): string {
-  const dataGraph = `did:dkg:paranet:${paranetId}`;
-  const metaGraph = `${dataGraph}/_meta`;
+export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
+  const partition = params.finalized === false ? 'swm' : 'finalized';
+  // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
+  // see `packages/agent/src/finalization-handler.ts:358-362`, which
+  // calls `contextGraphSubGraphUri(contextGraphId, subGraphName)`.
+  // Earlier this branch used `contextGraphDataUri(cg, sub)` which yields
+  // `<cg>/context/<sub>` — a different graph URI than where the publisher
+  // actually writes, so finalized sub-graph queries returned zero events
+  // whenever `subGraphName` was set. The unsub-graph (cg-only) finalized
+  // URI keeps `contextGraphDataUri`'s single-arg fallback (`<cg>`).
+  const publicGraph =
+    partition === 'swm'
+      ? contextGraphSharedMemoryUri(contextGraphId, params.subGraphName)
+      : params.subGraphName
+        ? contextGraphSubGraphUri(contextGraphId, params.subGraphName)
+        : contextGraphDataUri(contextGraphId);
+  const metaGraph =
+    partition === 'swm'
+      ? contextGraphSharedMemoryMetaUri(contextGraphId, params.subGraphName)
+      : contextGraphMetaUri(contextGraphId);
+  const privateGraph = params.subGraphName
+    ? contextGraphSubGraphPrivateUri(contextGraphId, params.subGraphName)
+    : contextGraphPrivateUri(contextGraphId);
 
   const wherePatterns: string[] = [];
   const filterClauses: string[] = [];
@@ -68,25 +101,24 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
     filterClauses.push(`FILTER(?eventType = <https://gs1.github.io/EPCIS/${escapeSparql(params.eventType)}>)`);
   }
 
-  // EPC filter — UNION epcList + childEPCs per Section 8.2.7.1
+  // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
+  // Uses VALUES + predicate variable instead of UNION to avoid
+  // Blazegraph's nested-UnionNode crash when this lands inside a
+  // GRAPH block that is itself part of an outer UNION.
+  // Each filter gets its own scoped { VALUES ... } block so
+  // the two predicate variables never collide when both are set.
   if (params.epc) {
     const epcValue = escapeSparql(params.epc);
-    wherePatterns.push(`{
-          { ?event epcis:epcList "${epcValue}" }
-          UNION { ?event epcis:childEPCs "${epcValue}" }
-        }`);
+    wherePatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcis:childEPCs }
+      ?event ?_epcPred "${epcValue}" . }`);
   }
 
-  // anyEPC — 5-way UNION across all EPC fields
+  // anyEPC — match across all 5 EPC fields (same VALUES approach,
+  // own variable name to avoid collision with the epc filter above)
   if (params.anyEPC) {
     const epcValue = escapeSparql(params.anyEPC);
-    wherePatterns.push(`{
-          { ?event epcis:epcList "${epcValue}" }
-          UNION { ?event epcis:childEPCs "${epcValue}" }
-          UNION { ?event epcis:parentID "${epcValue}" }
-          UNION { ?event epcis:inputEPCList "${epcValue}" }
-          UNION { ?event epcis:outputEPCList "${epcValue}" }
-        }`);
+    wherePatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcis:childEPCs epcis:parentID epcis:inputEPCList epcis:outputEPCList }
+      ?event ?_anyEpcPred "${epcValue}" . }`);
   }
   optionalClauses.push('OPTIONAL { ?event epcis:epcList ?epc . }');
 
@@ -143,6 +175,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   }
+  optionalClauses.push('OPTIONAL { ?event epcis:eventTimeZoneOffset ?eventTimeZoneOffset . }');
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {
@@ -174,30 +207,67 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
   optionalClauses.push('OPTIONAL { ?event epcis:inputEPCList ?inputEPCList . }');
   optionalClauses.push('OPTIONAL { ?event epcis:outputEPCList ?outputEPCList . }');
 
+  // Extension identifiers carried as JSON-LD triples. Match by predicate local
+  // name so project-specific ontologies stay outside the generic DKG EPCIS API.
+  if (params.configurationId) {
+    wherePatterns.push(`?event ?configurationIdPredicate ?configurationId .
+      ${extensionLocalNameFilter('configurationIdPredicate', 'configurationId')}`);
+    filterClauses.push(`FILTER(STR(?configurationId) = "${escapeSparql(params.configurationId)}")`);
+  } else {
+    optionalClauses.push(`OPTIONAL { ?event ?configurationIdPredicate ?configurationId .
+      ${extensionLocalNameFilter('configurationIdPredicate', 'configurationId')} }`);
+  }
+
+  if (params.shipmentId) {
+    wherePatterns.push(`?event ?shipmentIdPredicate ?shipmentId .
+      ${extensionLocalNameFilter('shipmentIdPredicate', 'shipmentId')}`);
+    filterClauses.push(`FILTER(STR(?shipmentId) = "${escapeSparql(params.shipmentId)}")`);
+  } else {
+    optionalClauses.push(`OPTIONAL { ?event ?shipmentIdPredicate ?shipmentId .
+      ${extensionLocalNameFilter('shipmentIdPredicate', 'shipmentId')} }`);
+  }
+
   // Pagination
   const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
   const offset = Math.max(params.offset ?? 0, 0);
+  const graphBody = [
+    ...wherePatterns,
+    ...optionalClauses,
+  ].join('\n      ');
 
   return `${PREFIXES}
-SELECT ?event ?eventType ?eventTime ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?ual
+SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
   (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)
   (GROUP_CONCAT(DISTINCT ?childEPCs; SEPARATOR=", ") AS ?childEPCList)
   (GROUP_CONCAT(DISTINCT ?inputEPCList; SEPARATOR=", ") AS ?inputEPCs)
   (GROUP_CONCAT(DISTINCT ?outputEPCList; SEPARATOR=", ") AS ?outputEPCs)
 WHERE {
-  GRAPH <${dataGraph}> {
-    ${wherePatterns.join('\n    ')}
-    ${optionalClauses.join('\n    ')}
+  {
+    GRAPH <${publicGraph}> {
+      ${graphBody}
+    }
+  }
+  union
+  {
+    GRAPH <${publicGraph}> {
+      ?event dkg:privateDataAnchor "true" .
+    }
+    GRAPH <${privateGraph}> {
+      ?event a ?eventType .
+      ${wherePatterns.slice(1).join('\n      ')}
+      ${optionalClauses.join('\n      ')}
+    }
   }
   ${filterClauses.join('\n  ')}
   OPTIONAL {
     GRAPH <${metaGraph}> {
-      ?ka dkg:rootEntity ?event .
-      ?ka dkg:partOf ?ual .
+      { ?ka dkg:rootEntity ?event . ?ka dkg:partOf ?ual . }
+      union
+      { ?ual dkg:rootEntity ?event . ?ual dkg:batchId ?ualBid . }
     }
   }
 }
-GROUP BY ?event ?eventType ?eventTime ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?ual
+GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
 ORDER BY DESC(?eventTime) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;

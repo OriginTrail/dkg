@@ -24,22 +24,13 @@ describe('NoChainAdapter', () => {
       publisherSignature: { r: new Uint8Array(), vs: new Uint8Array() },
       receiverSignatures: [],
     })],
-    ['publishKnowledgeAssets', () => adapter.publishKnowledgeAssets({
-      kaCount: 1, publisherNodeIdentityId: 0n, merkleRoot: new Uint8Array(),
-      publicByteSize: 0n, epochs: 1, tokenAmount: 0n,
-      publisherSignature: { r: new Uint8Array(), vs: new Uint8Array() },
-      receiverSignatures: [],
-    })],
-    ['updateKnowledgeAssets', () => adapter.updateKnowledgeAssets({
-      batchId: 0n, newMerkleRoot: new Uint8Array(), newPublicByteSize: 0n,
-    })],
-    ['extendStorage', () => adapter.extendStorage({
-      batchId: 0n, additionalEpochs: 1, tokenAmount: 0n,
-    })],
-    ['transferNamespace', () => adapter.transferNamespace('0x0')],
-    ['createParanet', () => adapter.createParanet({})],
-    ['submitToParanet', () => adapter.submitToParanet('kc1', 'paranet1')],
-    ['revealParanetMetadata', () => adapter.revealParanetMetadata('p1', 'name', 'desc')],
+    // V9 publishKnowledgeAssets / updateKnowledgeAssets / extendStorage /
+    // transferNamespace stubs were archived in `archive-non-v10-contracts`.
+    // The V10 surface (createKnowledgeAssets) is exercised by
+    // `no-chain-adapter-extra.test.ts`.
+    ['createContextGraph', () => adapter.createContextGraph({})],
+    ['submitToContextGraph', () => adapter.submitToContextGraph('kc1', 'cg1')],
+    ['revealContextGraphMetadata', () => adapter.revealContextGraphMetadata('cg1', 'name', 'desc')],
   ];
 
   it.each(throwingMethods)('%s throws "No blockchain configured"', async (_name, fn) => {

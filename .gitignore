@@ -6,6 +6,11 @@ dist-ui/
 .turbo/
 *.tsbuildinfo
 coverage/
+test-results/
+playwright-report/
+packages/node-ui/results.xml
+bench/results/
+.esbench-tmp/
 .env
 .env.*
 
@@ -13,13 +18,52 @@ coverage/
 tests/publish/summary_*.json
 tests/publish/errors_*.json
 .dkg/
+.cache/
 data/
 
 # Hardhat build output
 packages/evm-module/artifacts/
 packages/evm-module/cache/
 packages/evm-module/typechain/
+# Devnet-only (hardhat.devnet.config.ts) compile output — isolated from the
+# production artifacts so a UI-test devnet boot never overwrites them (#1403 P3)
+packages/evm-module/artifacts-devnet/
+packages/evm-module/cache-devnet/
+# .devnet/ is a runtime workspace (Hardhat data dir, per-node DKG_HOME
+# state, daemon logs). Not checked in.
 .devnet/
+# devnet suite `turns/` dirs hold n-quads files generated at test runtime.
+devnet/**/turns/
+# .dkg-testnet-node/ is a default DKG_HOME a daemon writes into when
+# started without --data-dir against a testnet. Runtime state only.
+.dkg-testnet-node/
+
+# Agent scratch (project memory across orchestrator runs). Local only,
+# except checked-in ADRs that preserve durable engineering decisions.
+.ai/*
+!.ai/adr/
+!.ai/adr/*.md
+.scratch/
+
+# WM persistence regression repro (Phase 1 of fix/graphify-import-issues).
+# Daemon state (.dkg-repro/) contains agent keystore, tokens, the Oxigraph
+# store, and the local node-ui DB — never check in. The matrix forensic
+# dumps stay local too; the actionable summary lives in
+# docs/bugs/wm-persistence-regression.md and the harness can regenerate
+# the matrix on demand.
+.dkg-repro/
+.dkg-repro-reports/
 
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
+packages/evm-module/deployments/localhost/
+snapshots/_cache_phase1_neuroweb_epoch16.json
+.claude/
+.orchestrator/
+.worktrees/
+
+# isolated admin-demo devnet runtime dir (see DKG-NODE-UI-ADMIN-PAGE-PLAN.md)
+.devnet-admin/
+# OKF export test writes reconstructed bundles here at runtime.
+devnet/**/.okf-export-*/
+devnet/**/.okf-manifest-*.json

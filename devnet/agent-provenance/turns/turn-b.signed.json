@@ -1,0 +1,14 @@
+{
+  "_comment_template": "Replace with a real signed payload. The signature is over the EIP-712 author attestation built via @origintrail-official/dkg-core's buildAuthorAttestationTypedData. See `devnet/agent-provenance/README.md` mode (b) for context.",
+  "sessionId": "mode-b-session",
+  "userMessage": "Edge user request",
+  "assistantReply": "Mode (b): publisher-as-a-service via core 2 PCA",
+  "turnId": "mode-b-turn-1",
+  "authorAttestation": {
+    "_comment": "Phase 4 — adapter-side EIP-712 signing — is not implemented in PR #436. This payload field is forward-looking; until Phase 4 lands, the on-chain `author` for Hermes/OpenClaw publishes is the daemon publisher EOA, not the agent EOA. See README §Out-of-scope.",
+    "authorAddress": "0x...",
+    "schemeVersion": 1,
+    "r": "0x...",
+    "vs": "0x..."
+  }
+}

@@ -1,16 +1,28 @@
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { Publisher, CaptureResult, CaptureOptions, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
-export interface CaptureConfig {
-  paranetId: string;
-  publisher: Publisher;
+export interface AsyncCaptureConfig {
+  contextGraphId: string;
+  publisher: AsyncPublisher;
 }
 
 export interface CaptureRequest {
   epcisDocument: unknown;
   publishOptions?: CaptureOptions;
+  /**
+   * Optional per-request override for the target context graph. When
+   * present takes precedence over `AsyncCaptureConfig.contextGraphId`,
+   * which acts as the daemon-level fallback.
+   */
+  contextGraphId?: string;
+  /**
+   * Optional sub-graph name within the target context graph. Threaded
+   * straight into the publisher's opts — no fallback, sub-graphs are
+   * inherently per-payload.
+   */
+  subGraphName?: string;
 }
 
 export class EpcisValidationError extends Error {
@@ -31,7 +43,14 @@ export class EpcisQueryError extends Error {
 }
 
 export interface EventsQueryConfig {
-  paranetId: string;
+  contextGraphId: string;
+  /**
+   * Optional sub-graph name within the context graph. When set, the
+   * query reads from the `<cg>/<sub>/_shared_memory` (or canonical
+   * `<cg>/<sub>` for finalized) partition and joins from
+   * `<cg>/<sub>/_private`.
+   */
+  subGraphName?: string;
   queryEngine: QueryEngine;
   basePath: string;
 }
@@ -49,12 +68,36 @@ const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
 /**
  * Strip N-Quads literal wrapping from a SPARQL binding value.
  * The triplestore returns string literals as '"value"' or '"value"^^<type>'.
+ *
+ * Implemented as a linear scan rather than the prior greedy regex
+ * `/^"(.*)"(?:\^\^<.*>)?$/s` — that pattern is vulnerable to catastrophic
+ * backtracking on malformed inputs (e.g. repeated typed-literal suffixes)
+ * because `(.*)` is greedy with the `s` flag and the optional trailing
+ * group forces an exponential backoff. Since the input comes from a
+ * remote triplestore, that is reachable input. The linear parser below
+ * runs in O(n) regardless of input shape.
  */
-function unwrapLiteral(value: string): string {
-  if (!value) return value;
-  // Handle typed literals: "value"^^<type>
-  const typedMatch = value.match(/^"(.*)"(?:\^\^<.*>)?$/s);
-  if (typedMatch) return typedMatch[1];
+export function unwrapLiteral(value: string): string {
+  if (!value || value.length < 2 || value.charCodeAt(0) !== 34 /* '"' */) {
+    return value;
+  }
+  // Find the closing quote, honouring backslash escapes per N-Quads.
+  let i = 1;
+  for (; i < value.length; i++) {
+    const ch = value.charCodeAt(i);
+    if (ch === 92 /* '\\' */) {
+      i++;
+      continue;
+    }
+    if (ch === 34 /* '"' */) break;
+  }
+  if (i >= value.length) return value; // no closing quote — return as-is
+  const inner = value.slice(1, i);
+  const tail = value.slice(i + 1);
+  // Tail must be empty or a typed-literal suffix `^^<...>`.
+  if (tail.length === 0) return inner;
+  if (tail.startsWith('^^<') && tail.endsWith('>')) return inner;
+  // Anything else: not a recognised literal shape — return as-is.
   return value;
 }
 
@@ -74,6 +117,9 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
   const eventTime = unwrapLiteral(binding['eventTime']);
   if (eventTime) event.eventTime = eventTime;
 
+  const eventTimeZoneOffset = unwrapLiteral(binding['eventTimeZoneOffset']);
+  if (eventTimeZoneOffset) event.eventTimeZoneOffset = eventTimeZoneOffset;
+
   const action = unwrapLiteral(binding['action']);
   if (action) event.action = action;
 
@@ -85,6 +131,12 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 
   const parentID = unwrapLiteral(binding['parentID']);
   if (parentID) event.parentID = parentID;
+
+  const configurationId = unwrapLiteral(binding['configurationId']);
+  if (configurationId) event.configurationId = configurationId;
+
+  const shipmentId = unwrapLiteral(binding['shipmentId']);
+  if (shipmentId) event.shipmentId = shipmentId;
 
   // DKG provenance — namespaced field
   const ual = unwrapLiteral(binding['ual']);
@@ -118,7 +170,12 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 }
 
 const GS1_EPCIS_CONTEXT = 'https://ref.gs1.org/standards/epcis/2.0.0/epcis-context.jsonld';
-const DKG_CONTEXT = { dkg: 'http://dkg.io/ontology/' };
+const DKG_BASE_IRI = 'http://dkg.io/ontology/';
+const DKG_CONTEXT = {
+  dkg: DKG_BASE_IRI,
+  configurationId: `${DKG_BASE_IRI}epcis/configurationId`,
+  shipmentId: `${DKG_BASE_IRI}epcis/shipmentId`,
+};
 
 export async function handleEventsQuery(
   searchParams: URLSearchParams,
@@ -133,9 +190,34 @@ export async function handleEventsQuery(
   const perPage = Math.min(Math.max(params.perPage ?? DEFAULT_PER_PAGE, 1), MAX_PER_PAGE);
   const offset = Math.max(params.offset ?? 0, 0);
 
-  // Request one extra row to detect if more pages exist
-  const sparql = buildEpcisQuery({ ...params, limit: perPage + 1, offset }, config.paranetId);
-  const result = await config.queryEngine.query(sparql, { paranetId: config.paranetId });
+  // Request one extra row to detect if more pages exist. Sub-graph
+  // selection is per-request (route-level), not derivable from the
+  // SPARQL query string, so it lives on the config rather than in
+  // `params`.
+  const sparql = buildEpcisQuery(
+    { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
+    config.contextGraphId,
+  );
+  // The engine's scope guard rejects any explicit GRAPH IRI outside the
+  // allow-set it derives from the query options, so the options MUST match
+  // exactly the graphs `buildEpcisQuery` references for this route:
+  //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
+  //                               private-anchored-events branch always names.
+  //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
+  //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
+  //                               sub-graph private/meta graphs.
+  //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
+  //                               partition (`…/_shared_memory[_meta]`) instead
+  //                               of the canonical data graph.
+  // Omitting any of these makes the guard reject the query with
+  // "GRAPH <…> is outside the allowed graph set" (it fails for every
+  // sub-graph or non-finalized request, on every store backend).
+  const result = await config.queryEngine.query(sparql, {
+    contextGraphId: config.contextGraphId,
+    subGraphName: config.subGraphName,
+    graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
+    includePrivate: true,
+  });
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
@@ -178,33 +260,69 @@ export async function handleEventsQuery(
 
 const validator = createValidator();
 
-export async function handleCapture(
+export async function handleCaptureAsync(
   request: CaptureRequest,
-  config: CaptureConfig,
-): Promise<CaptureResult> {
-  const validation = validator.validate(request.epcisDocument);
+  config: AsyncCaptureConfig,
+): Promise<CaptureAcceptedResult> {
+  const { document, content } = resolveCaptureContent(request.epcisDocument);
+  const validation = validator.validate(document);
 
   if (!validation.valid) {
     throw new EpcisValidationError(validation.errors!);
   }
 
-  // REVISIT: eventID (EPCIS 2.0 §7.4.1) maps to @id in JSON-LD, giving each event a
-  // named URI as its RDF subject. Without it, blank nodes are auto-assigned uuid: URIs
-  // (like dkg.js v8), so publishing works either way. However, user-provided eventIDs
-  // are preferred because they're deterministic and meaningful for provenance queries.
-  // Consider making eventID mandatory once the EPCIS plugin is stable.
+  const effectiveContextGraphId = request.contextGraphId ?? config.contextGraphId;
 
-  const opts = request.publishOptions
-    ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
+  const opts: PublisherCaptureOpts | undefined = (request.publishOptions || request.subGraphName)
+    ? {
+        ...(request.publishOptions?.accessPolicy !== undefined && { accessPolicy: request.publishOptions.accessPolicy }),
+        ...(request.publishOptions?.allowedPeers !== undefined && { allowedPeers: request.publishOptions.allowedPeers }),
+        ...(request.subGraphName !== undefined && { subGraphName: request.subGraphName }),
+      }
     : undefined;
 
-  const result = await config.publisher.publish(config.paranetId, request.epcisDocument, opts);
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, content, opts);
 
   return {
-    ual: result.ual,
-    kcId: result.kcId,
+    captureID: result.captureID,
     receivedAt: new Date().toISOString(),
     eventCount: validation.eventCount!,
-    status: result.status,
+    status: 'accepted',
+  };
+}
+
+function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown } {
+  if (!epcisDocument || typeof epcisDocument !== 'object' || Array.isArray(epcisDocument)) {
+    return { document: epcisDocument, content: { private: epcisDocument } };
+  }
+
+  const obj = epcisDocument as Record<string, unknown>;
+  if (obj.type === 'EPCISDocument') {
+    return { document: epcisDocument, content: { private: epcisDocument } };
+  }
+
+  const hasPublic = Object.prototype.hasOwnProperty.call(obj, 'public');
+  const hasPrivate = Object.prototype.hasOwnProperty.call(obj, 'private');
+  if (!hasPublic && !hasPrivate) {
+    throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
+  }
+
+  const publicDoc = obj.public;
+  const privateDoc = obj.private;
+  if (publicDoc === undefined && privateDoc === undefined) {
+    throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
+  }
+
+  const content: Record<string, unknown> = {};
+  if (hasPublic) {
+    content.public = publicDoc;
+  }
+  if (hasPrivate) {
+    content.private = privateDoc;
+  }
+
+  return {
+    document: hasPublic ? publicDoc : privateDoc,
+    content,
   };
 }

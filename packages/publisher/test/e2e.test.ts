@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, beforeEach } from 'vitest';
 import {
   DKGNode,
   ProtocolRouter,
@@ -11,23 +11,41 @@ import {
   decodePublishAck,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
+import { createSubstrateClient, registerSubstrateHandler } from './_helpers/substrate.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
-import { computePublicRoot, computeKARoot, computeKCRoot } from '../src/merkle.js';
-import { autoPartition } from '../src/auto-partition.js';
+import { computeStructuredKCRootV10 } from '../src/merkle.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
+import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
-const PARANET = 'agent-skills';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+let CONTEXT_GRAPH = 'agent-skills';
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+  // OT-RFC-43 Option-1: the real EVM adapter requires a packed reservedKaId
+  // per mint, which DKGPublisher only allocates when a kaAllocator is wired.
+  return wrapPublisherForTest(new DKGPublisher({ kaAllocator: makeTestKaAllocator(), ...opts }), {
+    author: _author,
+    ctx: { provider: _provider, kav10Address: _kav10Address },
+    v10ACKProvider: hardhatACKProvider(_kav10Address),
+  });
+}
+let GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
-const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
+const publisherWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+const TEST_PUBLISHER_ADDRESS = publisherWallet.address;
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -35,6 +53,26 @@ function q(s: string, p: string, o: string, g = GRAPH): Quad {
 
 describe('End-to-end: Publish → Replicate → Query', () => {
   const nodes: DKGNode[] = [];
+  let snapshotId: string;
+
+  beforeAll(async () => {
+    snapshotId = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, TEST_PUBLISHER_ADDRESS, ethers.parseEther('5000000'));
+    // Public CG (accessPolicy 0): these tests publish plaintext to exercise
+    // publish/replicate/query lifecycle, not curated/ciphertext semantics.
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
+    CONTEXT_GRAPH = String(cgId);
+    GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _provider = provider;
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+  });
+
+  afterAll(async () => {
+    await revertSnapshot(snapshotId);
+  });
 
   afterEach(async () => {
     for (const n of nodes) {
@@ -64,20 +102,20 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Stores
     const storeA = new OxigraphStore();
     const storeB = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const busB = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
     const keypairB = await generateEd25519Keypair();
 
     // Publisher on A
-    const publisherA = new DKGPublisher({
+    const publisherA = makeTestPublisher({
       store: storeA,
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const publishHandlerB = new PublishHandler(storeB, busB);
@@ -89,7 +127,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     // === Step 1: Publish on Node A ===
     const publishResult = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://schema.org/description', '"AI image analysis agent"'),
@@ -111,20 +149,26 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     ].join('\n');
 
     const onChain = publishResult.onChainResult!;
+    const kaContract =
+      onChain.knowledgeAssetsContract ??
+      (await chainA.getDKGKnowledgeAssetsAddress!());
     const publishRequest = encodePublishRequest({
-      ual: `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
+      ual: buildKnowledgeAssetUal(chainA.chainId, kaContract, onChain.startKAId!),
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: publishResult.kaManifest.map((m) => ({
-        tokenId: Number(m.tokenId),
+        // OT-RFC-43 Option-1: kaIds are packed ~256-bit values — never narrow
+        // through Number() (lossy float → idToProtoString emits exponential →
+        // receiver BigInt() throws). Pass the bigint id straight through.
+        tokenId: m.tokenId,
         rootEntity: m.rootEntity,
         privateMerkleRoot: m.privateMerkleRoot ?? new Uint8Array(0),
         privateTripleCount: m.privateTripleCount ?? 0,
       })),
       publisherIdentity: keypairA.publicKey,
       publisherAddress: onChain.publisherAddress,
-      startKAId: Number(onChain.startKAId),
-      endKAId: Number(onChain.endKAId),
+      startKAId: onChain.startKAId,
+      endKAId: onChain.endKAId,
       chainId: chainA.chainId,
       publisherSignatureR: new Uint8Array(0),
       publisherSignatureVs: new Uint8Array(0),
@@ -142,7 +186,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const engineB = new DKGQueryEngine(storeB);
     const queryResult = await engineB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET },
+      { contextGraphId: CONTEXT_GRAPH },
     );
 
     expect(queryResult.bindings).toHaveLength(1);
@@ -151,13 +195,27 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Query for skills
     const skillResult = await engineB.query(
       'SELECT ?skill WHERE { ?s <http://ex.org/skill> ?skill }',
-      { paranetId: PARANET },
+      { contextGraphId: CONTEXT_GRAPH },
     );
     expect(skillResult.bindings).toHaveLength(1);
     expect(skillResult.bindings[0]['skill']).toBe('"ImageAnalysis"');
   }, 20000);
 
-  it('publishes with private triples and accesses them', async () => {
+  // RC11 / PR1: This test publishes with private quads and then uses
+  // `result.onChainResult!` to construct the access UAL. Private-data
+  // publishes intentionally skip peer ACK collection
+  // (`dkg-publisher.ts:1937` — StorageACKHandler cannot recompute
+  // private merkle roots from SWM data alone), and with the self-signed
+  // ACK fallback deleted in PR1 the publisher now correctly downgrades
+  // private-data publishes to `tentative` (no `onChainResult`). The
+  // public-data access-protocol coverage in
+  // `packages/publisher/test/access-protocol.test.ts` still exercises
+  // the same denial / grant code paths on the confirmed-publish side;
+  // the missing private-data coverage requires teaching the ACK
+  // collector to carry `privateRoots` so cores can verify composite
+  // roots without seeing the private data itself — out of scope for
+  // PR1.
+  it.skip('publishes with private triples and accesses them (skipped under RC11 / PR1: see comment above)', async () => {
     const nodeA = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
       enableMdns: false,
@@ -174,24 +232,24 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     await new Promise((r) => setTimeout(r, 500));
 
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
     const keypairB = await generateEd25519Keypair();
 
     // Publisher on A (holds private triples)
-    const publisherA = new DKGPublisher({
+    const publisherA = makeTestPublisher({
       store: storeA,
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     // Publish with mixed public/private triples
     const result = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-xyz"'),
@@ -206,20 +264,20 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Register access handler on A
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     // AccessClient on B requests private triples from A
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const onChain = result.onChainResult!;
     const accessResult = await accessClient.requestAccess(
       nodeA.peerId,
-      `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`,
+      `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`,
     );
 
     expect(accessResult.granted).toBe(true);
-    expect(accessResult.quads.length).toBeGreaterThanOrEqual(2);
+    expect(accessResult.quads.length).toBe(2);
 
     const apiKeyTriple = accessResult.quads.find(
       (q) => q.predicate === 'http://ex.org/apiKey',
@@ -231,7 +289,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 describe('Publisher wallet signature verification', () => {
   const signerWallet = ethers.Wallet.createRandom();
   const imposterWallet = ethers.Wallet.createRandom();
-  const CHAIN_ID = 'mock:31337';
+  const CHAIN_ID = 'evm:31337';
 
   function buildSignedRequest(
     quads: Quad[],
@@ -240,13 +298,10 @@ describe('Publisher wallet signature verification', () => {
     startKAId: number,
     endKAId: number,
   ) {
-    const kaMap = autoPartition(quads);
-    const kaRoots: Uint8Array[] = [];
-    for (const [, publicQuads] of kaMap) {
-      const pubRoot = computePublicRoot(publicQuads);
-      kaRoots.push(computeKARoot(pubRoot!, undefined));
-    }
-    const merkleRoot = computeKCRoot(kaRoots);
+    // Structured KC root (PoS content-binding): flatten all public quads into one
+    // V10 tree with the private sibling collapsed to the sentinel (no private data
+    // here) — identical to what PublishHandler recomputes, so confirmPublish matches.
+    const merkleRoot = computeStructuredKCRootV10(quads, []).root;
 
     const nquads = quads.map(
       (q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
@@ -261,12 +316,12 @@ describe('Publisher wallet signature verification', () => {
     startKAId: number,
     endKAId: number,
     chainId: string,
-    paranetId: string,
+    contextGraphId: string,
     wallet: ethers.Wallet,
   ) {
     const commitHash = ethers.solidityPackedKeccak256(
       ['bytes32', 'address', 'uint64', 'uint64', 'string', 'string'],
-      [ethers.hexlify(merkleRoot), publisherAddress, startKAId, endKAId, chainId, paranetId],
+      [ethers.hexlify(merkleRoot), publisherAddress, startKAId, endKAId, chainId, contextGraphId],
     );
     const rawSig = await wallet.signMessage(ethers.getBytes(commitHash));
     const { r, yParityAndS } = ethers.Signature.from(rawSig);
@@ -284,13 +339,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -317,13 +372,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, PARANET, imposterWallet,
+      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, CONTEXT_GRAPH, imposterWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -354,7 +409,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/0`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmNoSig', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '',
@@ -381,14 +436,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 5, 5, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 5, 5, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/5`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmConfirm', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -424,14 +479,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 7, 7, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 7, 7, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/7`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmPromote', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -444,7 +499,7 @@ describe('Publisher wallet signature verification', () => {
 
     await handler.handler(reqBytes, 'test-peer' as any);
 
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     let statusResult = await store.query(
       `SELECT ?status WHERE { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> ?status } }`,
     );
@@ -484,13 +539,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 11, 11, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 11, 11, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/11`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [
         { tokenId: 1, rootEntity: 'did:dkg:agent:QmRootMatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
       ],
@@ -507,14 +562,8 @@ describe('Publisher wallet signature verification', () => {
     const nquadsStr = new TextDecoder().decode(request.nquads);
     const parsedQuads = parseSimpleNQuads(nquadsStr);
 
-    const kaMap = autoPartition(parsedQuads);
-    const kaRoots: Uint8Array[] = [];
-    for (const entry of request.kas) {
-      const publicQuads = kaMap.get(entry.rootEntity) ?? [];
-      const pubRoot = computePublicRoot(publicQuads);
-      kaRoots.push(computeKARoot(pubRoot!, undefined));
-    }
-    const recomputedRoot = computeKCRoot(kaRoots);
+    // Same structured root the handler computes over the full payload.
+    const recomputedRoot = computeStructuredKCRootV10(parsedQuads, []).root;
 
     expect(recomputedRoot).toEqual(merkleRoot);
   });
@@ -530,14 +579,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 10, 10, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 10, 10, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/10`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMismatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,

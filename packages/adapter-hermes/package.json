@@ -1,0 +1,46 @@
+{
+  "name": "@origintrail-official/dkg-adapter-hermes",
+  "version": "10.0.6",
+  "description": "Hermes Agent adapter — connects Hermes AI agents to a DKG V10 node for verifiable shared memory",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "hermes-plugin",
+    "setup-entry.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run && node pytests/run-pytest.mjs",
+    "test:ts": "vitest run",
+    "test:py": "node pytests/run-pytest.mjs",
+    "test:coverage": "vitest run --coverage",
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/adapter-hermes"
+  }
+}

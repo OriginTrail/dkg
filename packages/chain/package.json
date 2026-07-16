@@ -1,12 +1,13 @@
 {
   "name": "@origintrail-official/dkg-chain",
-  "version": "0.0.1",
+  "version": "10.0.6",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
@@ -16,6 +17,12 @@
   },
   "optionalDependencies": {
     "@origintrail-official/dkg-evm-module": "workspace:*"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-metrics": "^2.8.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "vitest": "^4.0.18"
   },
   "publishConfig": {
     "access": "public"
@@ -29,7 +36,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "url": "https://github.com/OriginTrail/dkg.git",
     "directory": "packages/chain"
   }
 }

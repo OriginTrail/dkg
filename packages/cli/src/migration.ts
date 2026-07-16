@@ -1,8 +1,77 @@
-import { existsSync, lstatSync } from 'node:fs';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { mkdir, rm, readFile, readlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, loadResolvedNetworkConfig, gitCommandEnv, gitCommandArgs, slotReady, activeSlot, dkgDir } from './config.js';
+import {
+  FULL_BUILD_COMMAND,
+  isNodeUiGitLayoutSlot,
+  NODE_UI_PACKAGE_NAME_FALLBACKS,
+  nodeUiPackageJsonPath,
+  nodeUiPackageNamesFromCliPackageJson,
+  nodeUiPackageNameFromPackageJson,
+  nodeUiNpmStaticIndexPaths,
+  nodeUiStaticBuildCommand,
+  nodeUiStaticIndexPath,
+  runtimeBuildCommandFromPackageJson,
+} from './node-ui-static.js';
+
+function npmCliPackageJsonPath(slotDir: string): string {
+  return join(
+    slotDir,
+    'node_modules',
+    '@origintrail-official',
+    'dkg',
+    'package.json',
+  );
+}
+
+function nodeUiPackageNamesForNpmSlot(slotDir: string): string[] {
+  try {
+    return nodeUiPackageNamesFromCliPackageJson(
+      readFileSync(npmCliPackageJsonPath(slotDir), 'utf-8'),
+    );
+  } catch {
+    return NODE_UI_PACKAGE_NAME_FALLBACKS;
+  }
+}
+
+function npmNodeUiStaticIndexPaths(slotDir: string): string[] {
+  return nodeUiNpmStaticIndexPaths(slotDir, nodeUiPackageNamesForNpmSlot(slotDir));
+}
+
+function hasNpmNodeUiStaticBundle(slotDir: string): boolean {
+  return npmNodeUiStaticIndexPaths(slotDir).some((indexFile) => existsSync(indexFile));
+}
+
+function hasRequiredNodeUiStaticBundle(slotDir: string): boolean {
+  if (isNodeUiGitLayoutSlot(slotDir)) {
+    return existsSync(nodeUiStaticIndexPath(slotDir));
+  }
+  return hasNpmNodeUiStaticBundle(slotDir);
+}
+
+function assertNodeUiStaticBundle(slotDir: string): void {
+  const indexFile = nodeUiStaticIndexPath(slotDir);
+  if (!existsSync(indexFile)) {
+    throw new Error(`Node UI static bundle missing (${indexFile})`);
+  }
+}
+
+function assertNpmNodeUiStaticBundle(slotDir: string): void {
+  if (!hasNpmNodeUiStaticBundle(slotDir)) {
+    throw new Error(`Node UI static bundle missing (${npmNodeUiStaticIndexPaths(slotDir).join(', ')})`);
+  }
+}
+
+export const _migrationIo = {
+  execSync: execSync as (...args: any[]) => any,
+  execFileSync: execFileSync as (...args: any[]) => any,
+  repoDir: repoDir as () => string | null,
+  loadConfig: loadConfig as () => Promise<any>,
+  loadNetworkConfig: loadNetworkConfig as (network?: string) => Promise<any>,
+  swapSlot: swapSlot as (slot: 'a' | 'b') => Promise<void>,
+};
 
 /**
  * One-time migration from old single-directory layout to blue-green slots.
@@ -10,8 +79,10 @@ import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitComma
  */
 export async function migrateToBlueGreen(
   log: (msg: string) => void = console.log,
-  opts: { allowRemoteBootstrap?: boolean } = {},
+  opts: { allowRemoteBootstrap?: boolean; repairLiveNodeUi?: boolean } = {},
 ): Promise<void> {
+  const { execSync, execFileSync, repoDir, loadConfig, loadNetworkConfig, swapSlot: swapActiveSlot } = _migrationIo;
+  const repairLiveNodeUi = opts.repairLiveNodeUi ?? true;
   const INSTALL_TIMEOUT_MS = 10 * 60_000;
   const BUILD_TIMEOUT_MS = 15 * 60_000;
   const rDir = releasesDir();
@@ -31,7 +102,9 @@ export async function migrateToBlueGreen(
   }
 
   const config = await loadConfig().catch(() => ({} as any));
-  const network = await loadNetworkConfig().catch(() => undefined);
+  const network = await loadResolvedNetworkConfig(config, loadNetworkConfig)
+    .then((resolved) => resolved.network)
+    .catch(() => undefined);
   const gitEnv = gitCommandEnv(config?.autoUpdate ?? network?.autoUpdate);
   const localRepo = repoDir();
   const hasLocalRepo = Boolean(localRepo && existsSync(join(localRepo, '.git')));
@@ -46,18 +119,19 @@ export async function migrateToBlueGreen(
   let sourceRepo = localRepo ?? '';
   let sourceBranch = process.env.DKG_BRANCH?.trim() || 'main';
   if (!hasLocalRepo) {
+    const proj = loadProjectConfig();
     sourceRepo = normalizeCloneRepo(
       process.env.DKG_REPO
         ?? config?.autoUpdate?.repo
         ?? network?.autoUpdate?.repo
-        ?? 'https://github.com/OriginTrail/dkg-v9.git',
+        ?? `${proj.githubUrl}.git`,
     );
     sourceBranch = (
       process.env.DKG_BRANCH
       ?? config?.autoUpdate?.branch
       ?? network?.autoUpdate?.branch
-      ?? 'main'
-    ).trim() || 'main';
+      ?? proj.defaultBranch
+    ).trim() || proj.defaultBranch;
     if (!opts.allowRemoteBootstrap) {
       log('Migration: no local checkout with .git; skipping remote bootstrap in this mode.');
       return;
@@ -69,14 +143,147 @@ export async function migrateToBlueGreen(
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
-  const slotReady = (slotDir: string) => {
-    const entry = slotEntryPoint(slotDir);
-    if (!entry) return false;
-    return existsSync(join(slotDir, '.git')) || existsSync(join(slotDir, 'package.json'));
-  };
-  if (hadCurrentLink && slotReady(slotA) && slotReady(slotB)) return;
+  if (
+    hadCurrentLink &&
+    slotReady(slotA) &&
+    slotReady(slotB) &&
+    hasRequiredNodeUiStaticBundle(slotA) &&
+    hasRequiredNodeUiStaticBundle(slotB)
+  ) {
+    return;
+  }
 
   log('Migrating to blue-green release slots...');
+
+  const runSlotCommand = (cmd: string, cwd: string, timeout: number): void => {
+    execSync(cmd, {
+      cwd,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout,
+    });
+  };
+
+  const resolveNodeUiPackageNames = (slotDir: string): string[] => {
+    try {
+      return [nodeUiPackageNameFromPackageJson(
+        readFileSync(nodeUiPackageJsonPath(slotDir), 'utf-8'),
+      )];
+    } catch {
+      return NODE_UI_PACKAGE_NAME_FALLBACKS;
+    }
+  };
+
+  const runNodeUiStaticBuild = (slotDir: string): void => {
+    let lastError: unknown;
+    for (const packageName of resolveNodeUiPackageNames(slotDir)) {
+      try {
+        runSlotCommand(
+          nodeUiStaticBuildCommand(packageName),
+          slotDir,
+          BUILD_TIMEOUT_MS,
+        );
+        return;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError;
+  };
+
+  const runtimeBuildCommand = (slotDir: string): string => {
+    try {
+      return runtimeBuildCommandFromPackageJson(
+        readFileSync(join(slotDir, 'package.json'), 'utf-8'),
+      );
+    } catch {
+      return FULL_BUILD_COMMAND;
+    }
+  };
+
+  const buildRuntimeAndNodeUi = (slotDir: string): void => {
+    runSlotCommand(runtimeBuildCommand(slotDir), slotDir, BUILD_TIMEOUT_MS);
+    if (!existsSync(nodeUiStaticIndexPath(slotDir))) {
+      runNodeUiStaticBuild(slotDir);
+    }
+    assertNodeUiStaticBundle(slotDir);
+  };
+
+  const repairNodeUiStaticBundle = (slotDir: string): void => {
+    if (isNodeUiGitLayoutSlot(slotDir)) {
+      runNodeUiStaticBuild(slotDir);
+      assertNodeUiStaticBundle(slotDir);
+      return;
+    }
+
+    assertNpmNodeUiStaticBundle(slotDir);
+  };
+
+  const activeSlotFromCurrent = async (): Promise<'a' | 'b' | null> => {
+    try {
+      const target = (await readlink(currentLink)).trim().split(/[\\/]/).pop();
+      if (target === 'a' || target === 'b') return target;
+    } catch {
+      // Fall back to active metadata below.
+    }
+    try {
+      const activeRaw = (await readFile(join(rDir, 'active'), 'utf-8')).trim();
+      if (activeRaw === 'a' || activeRaw === 'b') return activeRaw;
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const slotReadyWithNodeUi = (label: 'a' | 'b'): boolean => {
+    const slotDir = label === 'a' ? slotA : slotB;
+    return slotReady(slotDir) && hasRequiredNodeUiStaticBundle(slotDir);
+  };
+
+  const hasRestorableSlot = (): boolean =>
+    slotReadyWithNodeUi('a') || slotReadyWithNodeUi('b');
+  let noCurrentRepairError: unknown;
+
+  const ensureNodeUiBundle = (
+    slotDir: string,
+    label: 'a' | 'b',
+    liveSlot: 'a' | 'b' | null,
+  ): void => {
+    if (!slotReady(slotDir) || hasRequiredNodeUiStaticBundle(slotDir)) return;
+    if (liveSlot === label) {
+      if (!repairLiveNodeUi) {
+        log(`  Slot ${label}: Node UI static bundle missing in active slot; leaving live slot untouched.`);
+        return;
+      }
+      log(`  Slot ${label}: Node UI static bundle missing in active slot; rebuilding UI assets in place.`);
+    } else {
+      log(`  Slot ${label}: Node UI static bundle missing; building UI assets.`);
+    }
+    try {
+      repairNodeUiStaticBundle(slotDir);
+      log(`  Slot ${label}: Node UI static bundle built`);
+    } catch (err: any) {
+      if (liveSlot === label) {
+        log(
+          `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+            'Continuing startup with the existing Node UI fallback page.',
+        );
+        return;
+      }
+      if (!liveSlot) {
+        noCurrentRepairError ??= err;
+        log(
+          `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+            'Trying remaining slots before selecting an initial slot.',
+        );
+        return;
+      }
+      log(
+        `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+          'Leaving inactive slot for the next update to rebuild.',
+      );
+    }
+  };
 
   const git = (args: string[], cwd?: string, repoUrl?: string): string =>
     String(execFileSync('git', [...gitCommandArgs(repoUrl, config?.autoUpdate ?? network?.autoUpdate), ...args], {
@@ -94,18 +301,8 @@ export async function migrateToBlueGreen(
     } else {
       git(['clone', '--branch', sourceBranch, sourceRepo, slotA], undefined, sourceRepo);
     }
-    execSync('pnpm install --frozen-lockfile', {
-      cwd: slotA,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: INSTALL_TIMEOUT_MS,
-    });
-    execSync('pnpm build:runtime', {
-      cwd: slotA,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: BUILD_TIMEOUT_MS,
-    });
+    runSlotCommand('pnpm install --frozen-lockfile', slotA, INSTALL_TIMEOUT_MS);
+    buildRuntimeAndNodeUi(slotA);
     log(`  Slot a: cloned and built from ${hasLocalRepo ? localRepo : sourceRepo}`);
   }
 
@@ -122,18 +319,8 @@ export async function migrateToBlueGreen(
       if (!hasLocalRepo) {
         git(['checkout', sourceBranch], slotB);
       }
-      execSync('pnpm install --frozen-lockfile', {
-        cwd: slotB,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: INSTALL_TIMEOUT_MS,
-      });
-      execSync('pnpm build:runtime', {
-        cwd: slotB,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: BUILD_TIMEOUT_MS,
-      });
+      runSlotCommand('pnpm install --frozen-lockfile', slotB, INSTALL_TIMEOUT_MS);
+      buildRuntimeAndNodeUi(slotB);
       log(`  Slot b: cloned and built`);
     } catch (err: any) {
       log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
@@ -152,20 +339,118 @@ export async function migrateToBlueGreen(
     }
   }
 
+  const liveSlot = hadCurrentLink ? await activeSlotFromCurrent() : null;
+  ensureNodeUiBundle(slotA, 'a', liveSlot);
+  ensureNodeUiBundle(slotB, 'b', liveSlot);
+
+  if (hadCurrentLink && liveSlot && !slotReadyWithNodeUi(liveSlot)) {
+    if (!repairLiveNodeUi) {
+      log(`Migration complete: active slot ${liveSlot} is missing Node UI static bundle; live slot left untouched.`);
+      return;
+    }
+    log(
+      `Migration complete: active slot ${liveSlot} is missing Node UI static bundle; ` +
+        'startup will continue with the existing Node UI fallback page.',
+    );
+    return;
+  }
+
   if (!hadCurrentLink) {
-    let initialSlot: 'a' | 'b' = 'a';
+    let initialSlot: 'a' | 'b' | null = null;
     try {
       const activeRaw = (await readFile(join(rDir, 'active'), 'utf-8')).trim();
-      if ((activeRaw === 'a' || activeRaw === 'b') && slotReady(join(rDir, activeRaw))) {
+      if ((activeRaw === 'a' || activeRaw === 'b') && slotReadyWithNodeUi(activeRaw)) {
         initialSlot = activeRaw;
       }
     } catch {
       // No prior active metadata; default to a.
     }
-    await swapSlot(initialSlot);
+    initialSlot ??= slotReadyWithNodeUi('a') ? 'a' : null;
+    initialSlot ??= slotReadyWithNodeUi('b') ? 'b' : null;
+    if (!initialSlot) {
+      if (noCurrentRepairError) throw noCurrentRepairError;
+      throw new Error('No blue-green slot has the required Node UI static bundle');
+    }
+    await swapActiveSlot(initialSlot);
     log(`Migration complete: releases/current → ${initialSlot}`);
     return;
   }
 
   log('Migration complete: repaired incomplete blue-green slots');
+}
+
+/**
+ * Edge first-start migration (OT-RFC-41 §4.1, Bundle B1a).
+ *
+ * Under rc.12+, Edge nodes do not use blue-green slots — they run the
+ * daemon directly from the npm-global install. Pre-rc.12 Edge users
+ * who got slots from `install.sh` or an earlier `dkg update` will
+ * still have `~/.dkg/releases/{a,b,current}` on disk; this helper:
+ *
+ *   - Detects the legacy layout (`releases/current` resolves to a slot
+ *     that contains an `@origintrail-official/dkg` package.json).
+ *   - Reads the active slot's package.json version and writes it to
+ *     `~/.dkg/previous-version` so a follow-up `dkg rollback` (Edge
+ *     branch, Bundle B1b) has a target to reinstall.
+ *   - Surfaces an operator advisory pointing at `dkg doctor` and the
+ *     RFC's safe-cleanup steps.
+ *
+ * Deliberately **does not** delete `~/.dkg/releases/`. Per the RFC's
+ * "no auto-delete" invariant, the operator owns slot cleanup — the
+ * doctor's `install-layout` check (Bundle A2) flags the directory as
+ * cleanable legacy state, and `MIGRATE_TO_NPM.md` documents the
+ * `rm -rf ~/.dkg/releases/` step.
+ *
+ * Idempotent: re-invocations with `~/.dkg/previous-version` already
+ * present do nothing (preserving whatever the most recent successful
+ * `dkg update` recorded).
+ */
+export async function noteEdgeLegacyReleases(
+  log: (msg: string) => void = console.log,
+): Promise<void> {
+  const rDir = releasesDir();
+  if (!existsSync(rDir)) return;
+
+  const previousVersionPath = join(dkgDir(), 'previous-version');
+  if (existsSync(previousVersionPath)) {
+    // Either a prior `dkg update` Edge run already recorded it, or
+    // this helper already ran. Either way, leave it alone.
+    return;
+  }
+
+  const slot = await activeSlot().catch(() => null);
+  if (!slot) return;
+  const slotDir = join(rDir, slot);
+  // Try both npm-layout and git-layout slot package.json shapes —
+  // mirrors the resolution `dkg rollback`'s pre-Bundle-B logic
+  // already used (cli.ts ~4650).
+  const candidates = [
+    join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'package.json'),
+    join(slotDir, 'packages', 'cli', 'package.json'),
+  ];
+  let slotVersion: string | null = null;
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, 'utf-8')) as { version?: unknown };
+      if (typeof parsed.version === 'string' && parsed.version.length > 0) {
+        slotVersion = parsed.version;
+        break;
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+  if (!slotVersion) return;
+
+  await writeFile(previousVersionPath, slotVersion);
+  log(
+    `Edge migration (RFC-41 §4.1): detected legacy ~/.dkg/releases/ from a pre-rc.12 ` +
+      `install. Recorded slot ${slot} version ${slotVersion} as the rollback target.`,
+  );
+  log(
+    '  Edge nodes run directly from the npm-global install under rc.12. ' +
+      "Safe to clean up the slot tree once you've confirmed the new install works: " +
+      "'rm -rf ~/.dkg/releases/'. See OT-RFC-41 §4.1 and 'dkg doctor' for details.",
+  );
 }

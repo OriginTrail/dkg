@@ -7,13 +7,25 @@
  * replaced with a constrained entity-lookup schema). Do not register a handler
  * for /dkg/query/1.0.0 in Part 1.
  */
+/**
+ * Protobuf wire schemas used by this module for encode/decode helpers.
+ *
+ * The `*Schema` consts below are exported strictly for backwards
+ * compatibility with external consumers that deep-imported them
+ * before `@origintrail-official/dkg-core` had an `exports` map.
+ * They are implementation detail — prefer the `*Msg` types and
+ * `encode*` / `decode*` functions re-exported from
+ * `packages/core/src/proto/index.ts`.
+ *
+ * @internal
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
 export const QueryRequestSchema = new Type('QueryRequest')
   .add(new Field('sparql', 1, 'string'))
-  .add(new Field('paranetId', 2, 'string'))
+  .add(new Field('contextGraphId', 2, 'string'))
   .add(new Field('timeout', 3, 'uint32'));
 
 export const QueryResponseSchema = new Type('QueryResponse')
@@ -23,7 +35,7 @@ export const QueryResponseSchema = new Type('QueryResponse')
 
 export interface QueryRequestMsg {
   sparql: string;
-  paranetId: string;
+  contextGraphId: string;
   timeout: number;
 }
 
@@ -40,7 +52,18 @@ export function encodeQueryRequest(msg: QueryRequestMsg): Uint8Array {
 }
 
 export function decodeQueryRequest(buf: Uint8Array): QueryRequestMsg {
-  return QueryRequestSchema.decode(buf) as unknown as QueryRequestMsg;
+  const decoded = QueryRequestSchema.decode(buf) as unknown as QueryRequestMsg;
+  if (
+    typeof decoded.sparql !== 'string' ||
+    decoded.sparql.length === 0 ||
+    typeof decoded.contextGraphId !== 'string' ||
+    decoded.contextGraphId.length === 0 ||
+    typeof decoded.timeout !== 'number' ||
+    decoded.timeout <= 0
+  ) {
+    throw new Error('Invalid QueryRequest payload');
+  }
+  return decoded;
 }
 
 export function encodeQueryResponse(msg: QueryResponseMsg): Uint8Array {

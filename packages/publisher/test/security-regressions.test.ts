@@ -2,29 +2,67 @@
  * Regression tests for all security fixes from PR #28 review rounds.
  * Each test targets a specific vulnerability that was identified and fixed.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad, GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, encodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   UpdateHandler,
-  WorkspaceHandler,
-  autoPartition,
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  SharedMemoryHandler,
+  computeStructuredKCRootV10,
 } from '../src/index.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
+import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from './_helpers/rootless-workspace.js';
 
-const PARANET = 'test-security';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
-const WORKSPACE_GRAPH = `did:dkg:paranet:${PARANET}/_workspace`;
-const WORKSPACE_META_GRAPH = `did:dkg:paranet:${PARANET}/_workspace_meta`;
+let CONTEXT_GRAPH: string;
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+  // OT-RFC-43 Option-1: wire a KA-number allocator so the real EVM adapter
+  // gets a packed reservedKaId per mint.
+  return wrapPublisherForTest(new DKGPublisher({ kaAllocator: makeTestKaAllocator(), ...opts }), {
+    author: _author,
+    ctx: { provider: _provider, kav10Address: _kav10Address },
+    v10ACKProvider: hardhatACKProvider(_kav10Address),
+  });
+}
+let DATA_GRAPH: string;
+let WORKSPACE_GRAPH: string;
+let WORKSPACE_META_GRAPH: string;
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+/**
+ * rc.17 uniform per-KA layout: published / verifiable-memory data no longer lives
+ * in the monolithic root data graph (`did:dkg:context-graph:{cg}`) — each KA's
+ * public quads land in its own `…/_verifiable_memory/{author}/{number}` graph.
+ *
+ * This is the engine's DEFAULT read: union the per-KA `_verifiable_memory/` graphs
+ * with the legacy root data graph (read-both), exactly as the query engine /
+ * async-lift-subtraction do. Tests use it instead of pinning `GRAPH <rootData>`,
+ * which is now empty for published data.
+ */
+function selectObjectsViaDefaultRead(store: OxigraphStore, dataGraph: string, subject: string) {
+  return store.query(
+    `SELECT ?o WHERE {
+      GRAPH ?g { <${subject}> <http://schema.org/name> ?o }
+      FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}")
+    }`,
+  );
 }
 
 function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
@@ -34,49 +72,77 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
+// Mirrors the gossip-receive path in `UpdateHandler` (update-handler.ts): the
+// structured KC root flattens ALL public quads into one V10 tree and collapses
+// the manifest's private roots into a single committed sibling —
+// `hashPair(publicRoot, privateDataHash)`. (The old per-entity KA→KC tree model
+// predates the PoS content-binding redesign; partitioning is irrelevant to the
+// root now.) Keeping this identical to the handler is what the chainId=none
+// "accepts correct root" test verifies.
 function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
-  const partitioned = autoPartition(quads);
-  const kaRoots: Uint8Array[] = [];
-  for (const m of manifest) {
-    const entityQuads = partitioned.get(m.rootEntity) ?? [];
-    const pubRoot = computePublicRoot(entityQuads);
-    const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-    kaRoots.push(computeKARoot(pubRoot, privRoot));
-  }
-  return computeKCRoot(kaRoots);
+  const privateRoots = manifest
+    .map((m) => m.privateMerkleRoot)
+    .filter((r): r is Uint8Array => r != null && r.length > 0)
+    .map((r) => new Uint8Array(r));
+  return computeStructuredKCRootV10(quads, privateRoots).root;
 }
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+
+  const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  // PR #1072: these regression tests publish PLAINTEXT to exercise lifecycle /
+  // update / ordering / SWM / provenance mechanics (not curated/ciphertext
+  // semantics), so use a PUBLIC CG (accessPolicy 0) that does not require a
+  // ciphertext commitment.
+  const cgId = await createTestContextGraph(chain, undefined, 0);
+  CONTEXT_GRAPH = String(cgId);
+  DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+  WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+  WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
+  _provider = provider;
+  _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 // =====================================================================
 // 1. Prefix deletion safety
 // =====================================================================
 
 describe('Prefix deletion safety', () => {
-  describe('DKGPublisher.writeToWorkspace', () => {
+  describe('DKGPublisher.share', () => {
     let store: OxigraphStore;
     let publisher: DKGPublisher;
 
     beforeEach(async () => {
       store = new OxigraphStore();
-      const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
-      publisher = new DKGPublisher({
+      publisher = makeTestPublisher({
         store, chain, eventBus: new TypedEventBus(), keypair,
-        publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-        publisherNodeIdentityId: 1n,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
     });
 
     it('upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(CONTEXT_GRAPH, [
         q('urn:x:foo', 'http://schema.org/name', '"Foo"'),
       ], { publisherPeerId: 'peer1' });
 
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(CONTEXT_GRAPH, [
         q('urn:x:foobar', 'http://schema.org/name', '"Foobar"'),
       ], { publisherPeerId: 'peer1' });
 
       // Upsert urn:x:foo — urn:x:foobar must survive
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(CONTEXT_GRAPH, [
         q('urn:x:foo', 'http://schema.org/name', '"Foo Updated"'),
       ], { publisherPeerId: 'peer1' });
 
@@ -100,52 +166,49 @@ describe('Prefix deletion safety', () => {
     });
   });
 
-  describe('WorkspaceHandler', () => {
+  describe('SharedMemoryHandler', () => {
     let store: OxigraphStore;
-    let handler: WorkspaceHandler;
+    let handler: SharedMemoryHandler;
 
     beforeEach(async () => {
       store = new OxigraphStore();
       const owned = new Map<string, Map<string, string>>();
-      handler = new WorkspaceHandler(store, new TypedEventBus(), { workspaceOwnedEntities: owned });
+      handler = new SharedMemoryHandler(store, new TypedEventBus(), { sharedMemoryOwnedEntities: owned });
     });
 
     it('gossip upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
       const peerId = '12D3KooWPrefixTest';
 
-      const msg1 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg1 = encodeRootlessWorkspaceRequest({
+        contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-1',
+        shareOperationId: 'ws-prefix-1',
         timestampMs: Date.now(),
       });
       await handler.handle(msg1, peerId);
 
-      const msg2 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg2 = encodeRootlessWorkspaceRequest({
+        contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foobar> <http://schema.org/name> "Foobar" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foobar', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-2',
+        shareOperationId: 'ws-prefix-2',
         timestampMs: Date.now(),
       });
       await handler.handle(msg2, peerId);
 
       // Upsert urn:x:foo
-      const msg3 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg3 = encodeRootlessWorkspaceRequest({
+        contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo Updated" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-3',
+        shareOperationId: 'ws-prefix-3',
+        assertionVersion: '2',
         timestampMs: Date.now(),
       });
       await handler.handle(msg3, peerId);
 
-      const gm = new GraphManager(store);
-      const wsGraph = gm.workspaceGraphUri(PARANET);
+      const wsGraph = rootlessSharedMemoryGraphFromWire(msg2);
 
       const foobarResult = await store.query(
         `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:x:foobar> <http://schema.org/name> ?o } }`,
@@ -162,36 +225,46 @@ describe('Prefix deletion safety', () => {
     let store: OxigraphStore;
     let publisher: DKGPublisher;
     let handler: UpdateHandler;
-    const wallet = ethers.Wallet.createRandom();
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    let _snap: string;
 
     beforeEach(async () => {
+      _snap = await takeSnapshot();
       store = new OxigraphStore();
-      const chain = new MockChainAdapter('mock:31337', wallet.address);
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
       const eventBus = new TypedEventBus();
-      publisher = new DKGPublisher({
+      publisher = makeTestPublisher({
         store, chain, eventBus, keypair,
-        publisherPrivateKey: wallet.privateKey,
-        publisherNodeIdentityId: 1n,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
       handler = new UpdateHandler(store, chain, eventBus);
+    });
+
+    afterEach(async () => {
+      await revertSnapshot(_snap);
     });
 
     it('KA update for urn:x:foo does NOT delete urn:x:foobar in data graph', async () => {
       const fooQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo"')];
       const foobarQuads = [q('urn:x:foobar', 'http://schema.org/name', '"Foobar"')];
 
-      await publisher.publish({ paranetId: PARANET, quads: [...fooQuads, ...foobarQuads] });
+      // Greenfield (PR #815): one KA per publish, so foo and foobar are
+      // published as two separate single-KA assets. Both land in the same
+      // data graph, which is what the prefix-deletion-safety check needs.
+      const published = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: fooQuads });
+      await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: foobarQuads });
 
       const updateQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo Updated"')];
-      const updateResult = await publisher.update(1n, {
-        paranetId: PARANET,
+      const updateResult = await publisher.update(published.kaId, {
+        contextGraphId: CONTEXT_GRAPH,
         quads: updateQuads,
       });
 
       const gossipMsg = encodeKAUpdateRequest({
-        paranetId: PARANET,
-        batchId: 1n,
+        contextGraphId: CONTEXT_GRAPH,
+        batchId: published.kaId,
         nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: '12D3KooWPeer',
@@ -203,9 +276,10 @@ describe('Prefix deletion safety', () => {
       });
       await handler.handle(gossipMsg, '12D3KooWPeer');
 
-      const foobarResult = await store.query(
-        `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:x:foobar> <http://schema.org/name> ?o } }`,
-      );
+      // rc.17: foobar was published as its own KA, so it lives in its per-KA
+      // _verifiable_memory graph (not the root data graph). Read via the engine's
+      // default read — the foo KA update must NOT have deleted it.
+      const foobarResult = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:x:foobar');
       expect(foobarResult.type).toBe('bindings');
       if (foobarResult.type === 'bindings') {
         expect(foobarResult.bindings.length).toBe(1);
@@ -225,12 +299,12 @@ describe('Workspace metadata precision', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
-    publisher = new DKGPublisher({
+    publisher = makeTestPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 
@@ -239,7 +313,7 @@ describe('Workspace metadata precision', () => {
     const entityB = 'urn:test:meta:b';
 
     // Write both roots in a single operation
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(entityA, 'http://schema.org/name', '"A"'),
       q(entityB, 'http://schema.org/name', '"B"'),
     ], { publisherPeerId: 'peer1' });
@@ -251,7 +325,7 @@ describe('Workspace metadata precision', () => {
     const opCountBefore = metaBefore.type === 'bindings' ? metaBefore.bindings.length : 0;
 
     // Upsert only entityA
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(entityA, 'http://schema.org/name', '"A Updated"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -292,8 +366,8 @@ describe('chainId=none validation', () => {
 
   it('rejects gossip with wrong merkle root even without chain verification', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
-    const dataGraph = gm.dataGraphUri(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
+    const dataGraph = gm.dataGraphUri(CONTEXT_GRAPH);
 
     // Insert some existing data
     await store.insert([{ subject: 'urn:existing', predicate: 'http://schema.org/name', object: '"Original"', graph: dataGraph }]);
@@ -302,7 +376,7 @@ describe('chainId=none validation', () => {
     const fakeRoot = new Uint8Array(32).fill(0xDE);
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: 1n,
       nquads: quadsToNQuads(quads, dataGraph),
       manifest: [{ rootEntity: 'urn:existing', privateTripleCount: 0 }],
@@ -327,15 +401,15 @@ describe('chainId=none validation', () => {
 
   it('accepts gossip with correct merkle root on chainId=none', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
-    const dataGraph = gm.dataGraphUri(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
+    const dataGraph = gm.dataGraphUri(CONTEXT_GRAPH);
 
     const quads = [q('urn:new:entity', 'http://schema.org/name', '"Hello"')];
     const manifest = [{ rootEntity: 'urn:new:entity', privateTripleCount: 0 }];
     const correctRoot = computeGossipMerkleRoot(quads, manifest);
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: 1n,
       nquads: quadsToNQuads(quads, dataGraph),
       manifest,
@@ -349,9 +423,9 @@ describe('chainId=none validation', () => {
 
     await handler.handle(msg, '12D3KooWPeer');
 
-    const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <urn:new:entity> <http://schema.org/name> ?o } }`,
-    );
+    // rc.17: the UpdateHandler applies gossip into the per-KA _verifiable_memory
+    // graph keyed by batchId, not the root data graph. Read via the default read.
+    const result = await selectObjectsViaDefaultRead(store, dataGraph, 'urn:new:entity');
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings[0]['o']).toBe('"Hello"');
@@ -360,13 +434,13 @@ describe('chainId=none validation', () => {
 
   it('rejects gossip with empty merkle root on chainId=none', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
 
     const quads = [q('urn:new', 'http://schema.org/name', '"Should not apply"')];
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: 1n,
-      nquads: quadsToNQuads(quads, gm.dataGraphUri(PARANET)),
+      nquads: quadsToNQuads(quads, gm.dataGraphUri(CONTEXT_GRAPH)),
       manifest: [{ rootEntity: 'urn:new', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       publisherAddress: '0xAny',
@@ -379,7 +453,7 @@ describe('chainId=none validation', () => {
     await handler.handle(msg, '12D3KooWPeer');
 
     const result = await store.query(
-      `ASK { GRAPH <${gm.dataGraphUri(PARANET)}> { <urn:new> ?p ?o } }`,
+      `ASK { GRAPH <${gm.dataGraphUri(CONTEXT_GRAPH)}> { <urn:new> ?p ?o } }`,
     );
     expect(result.type).toBe('boolean');
     if (result.type === 'boolean') {
@@ -389,89 +463,112 @@ describe('chainId=none validation', () => {
 });
 
 // =====================================================================
-// 4. MockChainAdapter.verifyKAUpdate fidelity
+// 4. EVMChainAdapter.verifyKAUpdate fidelity
 // =====================================================================
 
-describe('MockChainAdapter.verifyKAUpdate', () => {
+describe('EVMChainAdapter.verifyKAUpdate', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('returns correct on-chain merkle root and block number', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
-    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
-
-    const publishResult = await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n,
-      epochs: 1,
-      tokenAmount: 0n,
-      publisherSignature: sig,
-      receiverSignatures: [{ identityId: 2n, ...sig }],
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const newRoot = new Uint8Array(32).fill(0xAB);
-    const updateResult = await chain.updateKnowledgeAssets({
-      batchId: publishResult.batchId,
-      newMerkleRoot: newRoot,
-      newPublicByteSize: 200n,
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:root', 'http://schema.org/name', '"Root Test"')],
     });
+    expect(original.status).toBe('confirmed');
+
+    const updateQuads = [q('urn:verify:root', 'http://schema.org/name', '"Updated"')];
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: updateQuads,
+    });
+    expect(updateResult.status).toBe('confirmed');
+
+    // Verify the first update only after a later root exists. The adapter must
+    // read history at the receipt block; a latest-state read would report
+    // count=3 and make an otherwise-valid delayed gossip message look like
+    // assertion version 3 instead of 2.
+    const laterUpdate = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:root', 'http://schema.org/name', '"Later"')],
+    });
+    expect(laterUpdate.status).toBe('confirmed');
 
     const verification = await chain.verifyKAUpdate(
-      updateResult.hash,
-      publishResult.batchId,
+      updateResult.onChainResult!.txHash,
+      original.kaId,
       wallet.address,
     );
 
     expect(verification.verified).toBe(true);
-    expect(verification.onChainMerkleRoot).toEqual(newRoot);
-    expect(verification.blockNumber).toBe(updateResult.blockNumber);
+    expect(verification.onChainMerkleRoot).toEqual(new Uint8Array(updateResult.merkleRoot));
+    expect(verification.blockNumber).toBe(updateResult.onChainResult!.blockNumber);
+    expect(verification.merkleRootCount).toBe(2n);
   });
 
   it('rejects verification with wrong txHash', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
-    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
-
-    await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
-      publisherSignature: sig,
-      receiverSignatures: [{ identityId: 2n, ...sig }],
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    await chain.updateKnowledgeAssets({
-      batchId: 1n,
-      newMerkleRoot: new Uint8Array(32).fill(0xAB),
-      newPublicByteSize: 200n,
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:wrong-tx', 'http://schema.org/name', '"WrongTx"')],
     });
+    expect(original.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate('0xWRONG', 1n, wallet.address);
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:wrong-tx', 'http://schema.org/name', '"Updated"')],
+    });
+    expect(updateResult.status).toBe('confirmed');
+
+    const verification = await chain.verifyKAUpdate('0xWRONG', original.kaId, wallet.address);
     expect(verification.verified).toBe(false);
   });
 
   it('rejects verification with wrong publisher address', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
-    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
-
-    await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
-      publisherSignature: sig,
-      receiverSignatures: [{ identityId: 2n, ...sig }],
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const updateResult = await chain.updateKnowledgeAssets({
-      batchId: 1n,
-      newMerkleRoot: new Uint8Array(32).fill(0xAB),
-      newPublicByteSize: 200n,
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:wrong-addr', 'http://schema.org/name', '"WrongAddr"')],
     });
+    expect(original.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate(updateResult.hash, 1n, '0xWrongAddress');
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:wrong-addr', 'http://schema.org/name', '"Updated"')],
+    });
+    expect(updateResult.status).toBe('confirmed');
+
+    const verification = await chain.verifyKAUpdate(
+      updateResult.onChainResult!.txHash, original.kaId, '0xWrongAddress',
+    );
     expect(verification.verified).toBe(false);
   });
 });
@@ -481,32 +578,36 @@ describe('MockChainAdapter.verifyKAUpdate', () => {
 // =====================================================================
 
 describe('Same-block ordering', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('accepts two updates with increasing chain blocks', async () => {
-    const wallet = ethers.Wallet.createRandom();
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:same:block', 'http://schema.org/name', '"Original"')],
     });
 
     const update1Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 1"')];
-    const update1 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update1 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
 
     const update2Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 2"')];
-    const update2 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update2 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
 
@@ -514,8 +615,8 @@ describe('Same-block ordering', () => {
 
     const buildMsg = (quads: Quad[], txHash: string, blockNumber: number) =>
       encodeKAUpdateRequest({
-        paranetId: PARANET,
-        batchId: original.kcId,
+        contextGraphId: CONTEXT_GRAPH,
+        batchId: original.kaId,
         nquads: quadsToNQuads(quads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:same:block', privateTripleCount: 0 }],
         publisherPeerId: '12D3KooWPeer',
@@ -536,9 +637,10 @@ describe('Same-block ordering', () => {
       '12D3KooWPeer',
     );
 
-    const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:same:block> <http://schema.org/name> ?o } }`,
-    );
+    // rc.17: the update rewrites the KA's per-KA _verifiable_memory graph (keyed by
+    // batchId = original.kaId), not the root data graph. Read via the engine's
+    // default read — the later update (block 2) must have won.
+    const result = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:same:block');
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
@@ -547,32 +649,32 @@ describe('Same-block ordering', () => {
   });
 
   it('rejects replay of same (block, txIndex)', async () => {
-    const wallet = ethers.Wallet.createRandom();
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:replay', 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q('urn:replay', 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:replay', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -586,9 +688,10 @@ describe('Same-block ordering', () => {
     await handler.handle(msg, '12D3KooWPeer');
     await handler.handle(msg, '12D3KooWPeer'); // replay — same (block, txIndex) → rejected
 
-    const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:replay> <http://schema.org/name> ?o } }`,
-    );
+    // rc.17: the applied update lands in the KA's per-KA _verifiable_memory graph
+    // (keyed by batchId = original.kaId). Read via the engine's default read —
+    // the single applied "Updated" value must be present exactly once.
+    const result = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:replay');
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
@@ -602,33 +705,38 @@ describe('Same-block ordering', () => {
 // =====================================================================
 
 describe('publisher.update() atomicity', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('does not mutate local graph when chain tx fails', async () => {
-    const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
     });
 
-    // Attempt to update a non-existent batch — chain tx will fail
-    const result = await publisher.update(999n, {
-      paranetId: PARANET,
+    // Attempt to update a non-existent batch. The pre-staging owner check
+    // (getKnowledgeAssetOwner -> ownerOf) reverts ERC721NonexistentToken, which
+    // update() maps to status: 'failed' (no throw, no store mutation). Expiry is
+    // a separate submit-time revert — see ka-update-submit-failure.test.ts.
+    const failedUpdate = await publisher.update(999n, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Should not appear"')],
     });
-    expect(result.status).toBe('failed');
+    expect(failedUpdate.status).toBe('failed');
 
-    // Original data must be untouched
-    const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:atomic> <http://schema.org/name> ?o } }`,
-    );
+    // Original data must be untouched. rc.17: the published KA lives in its
+    // per-KA _verifiable_memory graph; read via the engine's default read.
+    const nameResult = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:atomic');
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
       expect(nameResult.bindings.length).toBe(1);
@@ -641,28 +749,37 @@ describe('publisher.update() atomicity', () => {
 // 7. verifyKAUpdate returns txIndex for deterministic ordering
 // =====================================================================
 
-describe('MockChainAdapter.verifyKAUpdate txIndex', () => {
+describe('EVMChainAdapter.verifyKAUpdate txIndex', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('returns txIndex from chain verification', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
-    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
-
-    await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
-      publisherSignature: sig,
-      receiverSignatures: [{ identityId: 2n, ...sig }],
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const updateResult = await chain.updateKnowledgeAssets({
-      batchId: 1n,
-      newMerkleRoot: new Uint8Array(32).fill(0xAB),
-      newPublicByteSize: 200n,
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:txidx:verify', 'http://schema.org/name', '"TxIndex"')],
     });
+    expect(original.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate(updateResult.hash, 1n, wallet.address);
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:txidx:verify', 'http://schema.org/name', '"Updated"')],
+    });
+    expect(updateResult.status).toBe('confirmed');
+
+    const verification = await chain.verifyKAUpdate(
+      updateResult.onChainResult!.txHash, original.kaId, wallet.address,
+    );
     expect(verification.verified).toBe(true);
     expect(verification.txIndex).toBeDefined();
     expect(typeof verification.txIndex).toBe('number');
@@ -675,31 +792,29 @@ describe('MockChainAdapter.verifyKAUpdate txIndex', () => {
 
 describe('Workspace peerId spoofing', () => {
   let store: OxigraphStore;
-  let handler: WorkspaceHandler;
+  let handler: SharedMemoryHandler;
 
   beforeEach(async () => {
     store = new OxigraphStore();
     const owned = new Map<string, Map<string, string>>();
-    handler = new WorkspaceHandler(store, new TypedEventBus(), { workspaceOwnedEntities: owned });
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), { sharedMemoryOwnedEntities: owned });
   });
 
   it('rejects message where publisherPeerId does not match fromPeerId', async () => {
     const victimPeerId = '12D3KooWVictim';
     const attackerPeerId = '12D3KooWAttacker';
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
       publisherPeerId: victimPeerId,
-      workspaceOperationId: 'ws-spoof-1',
+      shareOperationId: 'ws-spoof-1',
       timestampMs: Date.now(),
     });
 
     await handler.handle(msg, attackerPeerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <urn:spoof> ?p ?o } }`,
     );
@@ -712,19 +827,17 @@ describe('Workspace peerId spoofing', () => {
   it('accepts message where publisherPeerId matches fromPeerId', async () => {
     const peerId = '12D3KooWLegit';
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
       publisherPeerId: peerId,
-      workspaceOperationId: 'ws-legit-1',
+      shareOperationId: 'ws-legit-1',
       timestampMs: Date.now(),
     });
 
     await handler.handle(msg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:legit> <http://schema.org/name> ?o } }`,
     );
@@ -737,44 +850,48 @@ describe('Workspace peerId spoofing', () => {
 });
 
 // =====================================================================
-// 9. Cross-paranet binding from trusted source
+// 9. Cross-contextGraph binding from trusted source
 // =====================================================================
 
-describe('Cross-paranet binding (trusted source)', () => {
-  it('rejects update when publisher has pre-registered batch→paranet binding', async () => {
-    const wallet = ethers.Wallet.createRandom();
+describe('Cross-contextGraph binding (trusted source)', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
+  it('rejects update when publisher has pre-registered batch→contextGraph binding', async () => {
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
-    const knownBatchParanets = new Map<string, string>();
+    const knownBatchContextGraphs = new Map<string, string>();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
-      knownBatchParanets,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      knownBatchContextGraphs,
     });
-    const handler = new UpdateHandler(store, chain, eventBus, { knownBatchParanets });
+    const handler = new UpdateHandler(store, chain, eventBus, { knownBatchContextGraphs });
 
-    // Publish on the correct paranet — binding is registered automatically
+    // Publish on the correct contextGraph — binding is registered automatically
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:trusted:bind', 'http://schema.org/name', '"Original"')],
     });
-    expect(knownBatchParanets.get(String(original.kcId))).toBe(PARANET);
+    expect(knownBatchContextGraphs.get(String(original.kaId))).toBe(CONTEXT_GRAPH);
 
-    // Attacker tries to replay the same batchId on a different paranet
+    // Attacker tries to replay the same batchId on a different contextGraph
     const updateQuads = [q('urn:trusted:bind', 'http://schema.org/name', '"Hacked"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const attackMsg = encodeKAUpdateRequest({
-      paranetId: 'attacker-paranet',
-      batchId: original.kcId,
-      nquads: quadsToNQuads(updateQuads, 'did:dkg:paranet:attacker-paranet'),
+      contextGraphId: 'attacker-contextGraph',
+      batchId: original.kaId,
+      nquads: quadsToNQuads(updateQuads, 'did:dkg:context-graph:attacker-contextGraph'),
       manifest: [{ rootEntity: 'urn:trusted:bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWAttacker',
       publisherAddress: wallet.address,
@@ -786,11 +903,11 @@ describe('Cross-paranet binding (trusted source)', () => {
 
     await handler.handle(attackMsg, '12D3KooWAttacker');
 
-    // Verify the attacker's paranet graph is empty
+    // Verify the attacker's contextGraph graph is empty
     const gm = new GraphManager(store);
-    await gm.ensureParanet('attacker-paranet');
+    await gm.ensureContextGraph('attacker-contextGraph');
     const result = await store.query(
-      `ASK { GRAPH <${gm.dataGraphUri('attacker-paranet')}> { <urn:trusted:bind> ?p ?o } }`,
+      `ASK { GRAPH <${gm.dataGraphUri('attacker-contextGraph')}> { <urn:trusted:bind> ?p ?o } }`,
     );
     expect(result.type).toBe('boolean');
     if (result.type === 'boolean') {
@@ -800,91 +917,86 @@ describe('Cross-paranet binding (trusted source)', () => {
 });
 
 // =====================================================================
-// 10. Mock same-block txIndex ordering
+// 10. Same-block txIndex ordering
 // =====================================================================
 
-describe('Mock same-block txIndex ordering', () => {
-  it('assigns distinct txIndex values when autoMine is off', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
-    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+describe('Same-block txIndex ordering', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
 
-    await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
-      publisherSignature: sig,
-      receiverSignatures: [{ identityId: 2n, ...sig }],
-    });
-
-    // Disable auto-mine so multiple updates share a block
-    chain.autoMine = false;
-
-    const update1 = await chain.updateKnowledgeAssets({
-      batchId: 1n,
-      newMerkleRoot: new Uint8Array(32).fill(0xAA),
-      newPublicByteSize: 200n,
-    });
-
-    const update2 = await chain.updateKnowledgeAssets({
-      batchId: 1n,
-      newMerkleRoot: new Uint8Array(32).fill(0xBB),
-      newPublicByteSize: 300n,
-    });
-
-    // Both should be in the same block
-    expect(update1.blockNumber).toBe(update2.blockNumber);
-    // But different tx hashes
-    expect(update1.hash).not.toBe(update2.hash);
-
-    // Verify txIndex differs
-    const v1 = await chain.verifyKAUpdate(update1.hash, 1n, wallet.address);
-    const v2 = await chain.verifyKAUpdate(update2.hash, 1n, wallet.address);
-    expect(v1.verified).toBe(true);
-    expect(v2.verified).toBe(true);
-    expect(v1.txIndex).toBe(0);
-    expect(v2.txIndex).toBe(1);
-    expect(v1.blockNumber).toBe(v2.blockNumber);
-  });
-
-  it('handler applies higher txIndex and rejects lower within same block', async () => {
-    const wallet = ethers.Wallet.createRandom();
+  it('assigns distinct txIndex values across updates', async () => {
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
     const keypair = await generateEd25519Keypair();
-    const eventBus = new TypedEventBus();
-    const publisher = new DKGPublisher({
-      store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:sameblock:txidx', 'http://schema.org/name', '"Original"')],
+    });
+    expect(original.status).toBe('confirmed');
+
+    const update1 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:sameblock:txidx', 'http://schema.org/name', '"Update 1"')],
+    });
+    expect(update1.status).toBe('confirmed');
+
+    const update2 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:sameblock:txidx', 'http://schema.org/name', '"Update 2"')],
+    });
+    expect(update2.status).toBe('confirmed');
+
+    // Different tx hashes
+    expect(update1.onChainResult!.txHash).not.toBe(update2.onChainResult!.txHash);
+
+    // Verify both updates
+    const v1 = await chain.verifyKAUpdate(update1.onChainResult!.txHash, original.kaId, wallet.address);
+    const v2 = await chain.verifyKAUpdate(update2.onChainResult!.txHash, original.kaId, wallet.address);
+    expect(v1.verified).toBe(true);
+    expect(v2.verified).toBe(true);
+    expect(v1.txIndex).toBeDefined();
+    expect(v2.txIndex).toBeDefined();
+  });
+
+  it('handler applies later update and rejects earlier within ordering', async () => {
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:txidx', 'http://schema.org/name', '"Original"')],
     });
 
-    // Disable auto-mine for same-block updates
-    chain.autoMine = false;
+    const q1 = [q('urn:txidx', 'http://schema.org/name', '"Update 1"')];
+    const update1 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q1 });
 
-    const q1 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=0"')];
-    const update1 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q1 });
+    const q2 = [q('urn:txidx', 'http://schema.org/name', '"Update 2"')];
+    const update2 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
 
-    const q2 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=1"')];
-    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
-
-    chain.autoMine = true;
-    chain.advanceBlock();
-
-    expect(update1.onChainResult!.blockNumber).toBe(update2.onChainResult!.blockNumber);
+    expect(update2.onChainResult!.blockNumber).toBeGreaterThanOrEqual(update1.onChainResult!.blockNumber);
 
     const handler = new UpdateHandler(store, chain, eventBus);
 
-    // Apply update2 (txIndex=1) first
+    // Apply update2 (later) first
     const msg2 = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -896,10 +1008,10 @@ describe('Mock same-block txIndex ordering', () => {
     });
     await handler.handle(msg2, '12D3KooWPeer');
 
-    // Now try update1 (txIndex=0, same block) — should be rejected (lower txIndex)
+    // Now try update1 (earlier) — should be rejected (lower block/txIndex)
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q1, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -911,50 +1023,54 @@ describe('Mock same-block txIndex ordering', () => {
     });
     await handler.handle(msg1, '12D3KooWPeer');
 
-    // Should still have update2's data (txIndex=1 wins)
-    const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:txidx> <http://schema.org/name> ?o } }`,
-    );
+    // Should still have update2's data (later update wins). rc.17: the update
+    // rewrites the KA's per-KA _verifiable_memory graph (keyed by batchId =
+    // original.kaId), not the root data graph — read via the engine's default read.
+    const result = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:txidx');
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
-      expect(result.bindings[0]['o']).toBe('"Update txIdx=1"');
+      expect(result.bindings[0]['o']).toBe('"Update 2"');
     }
   });
 });
 
 // =====================================================================
-// 12. lookupBatchParanet typed literal match
+// 12. lookupBatchContextGraph typed literal match
 // =====================================================================
 
-describe('lookupBatchParanet typed-literal SPARQL', () => {
-  it('finds paranet binding from metadata stored with xsd:integer literal', async () => {
-    const wallet = ethers.Wallet.createRandom();
+describe('lookupBatchContextGraph typed-literal SPARQL', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
+  it('finds contextGraph binding from metadata stored with xsd:integer literal', async () => {
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     const quads = [q('urn:typed-lit', 'http://schema.org/name', '"Typed"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(original.status).toBe('confirmed');
 
     // UpdateHandler without pre-registered binding — should discover it via SPARQL lookup
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:typed-lit', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:typed-lit', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -966,9 +1082,10 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     });
     await handler.handle(msg, '12D3KooWPeer');
 
-    const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:typed-lit> <http://schema.org/name> ?o } }`,
-    );
+    // rc.17: the update (binding discovered via SPARQL lookup) rewrites the KA's
+    // per-KA _verifiable_memory graph (keyed by batchId = original.kaId), not the
+    // root data graph — read via the engine's default read.
+    const result = await selectObjectsViaDefaultRead(store, DATA_GRAPH, 'urn:typed-lit');
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
@@ -976,34 +1093,34 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     }
   });
 
-  it('rejects cross-paranet attack when binding is discovered via SPARQL lookup', async () => {
-    const wallet = ethers.Wallet.createRandom();
+  it('rejects cross-contextGraph attack when binding is discovered via SPARQL lookup', async () => {
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     const quads = [q('urn:xpara-lookup', 'http://schema.org/name', '"Original"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(original.status).toBe('confirmed');
 
-    const evilParanet = 'evil-paranet';
+    const evilContextGraph = 'evil-contextGraph';
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:xpara-lookup', 'http://schema.org/name', '"Evil"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
-      paranetId: evilParanet,
-      batchId: original.kcId,
-      nquads: quadsToNQuads(q2, `did:dkg:paranet:${evilParanet}`),
+      contextGraphId: evilContextGraph,
+      batchId: original.kaId,
+      nquads: quadsToNQuads(q2, `did:dkg:context-graph:${evilContextGraph}`),
       manifest: [{ rootEntity: 'urn:xpara-lookup', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       publisherAddress: wallet.address,
@@ -1014,9 +1131,9 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     });
     await handler.handle(msg, '12D3KooWPeer');
 
-    // Evil paranet graph should be empty — update was rejected
+    // Evil contextGraph graph should be empty — update was rejected
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:xpara-lookup> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${evilContextGraph}> { <urn:xpara-lookup> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -1026,35 +1143,39 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
 });
 
 // =====================================================================
-// 13. Mock adapter case-insensitive address comparison
+// 13. EVMChainAdapter address case normalization
 // =====================================================================
 
-describe('MockChainAdapter address case normalization', () => {
+describe('EVMChainAdapter address case normalization', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('verifyKAUpdate matches addresses case-insensitively', async () => {
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     const quads = [q('urn:addr-case', 'http://schema.org/name', '"CaseTest"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(original.status).toBe('confirmed');
 
     const q2 = [q('urn:addr-case', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     // Verify with address in all lowercase
     const v1 = await chain.verifyKAUpdate(
       update.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       wallet.address.toLowerCase(),
     );
     expect(v1.verified).toBe(true);
@@ -1062,7 +1183,7 @@ describe('MockChainAdapter address case normalization', () => {
     // Verify with address in all uppercase (except 0x prefix)
     const v2 = await chain.verifyKAUpdate(
       update.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       '0x' + wallet.address.slice(2).toUpperCase(),
     );
     expect(v2.verified).toBe(true);
@@ -1070,38 +1191,42 @@ describe('MockChainAdapter address case normalization', () => {
 });
 
 // =====================================================================
-// 14. Untrusted gossip must not persist batch→paranet binding
+// 14. Untrusted gossip must not persist batch→contextGraph binding
 // =====================================================================
 
-describe('Gossip-only batch→paranet binding rejected', () => {
+describe('Gossip-only batch→contextGraph binding rejected', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('does not persist binding from gossip when no trusted source exists', async () => {
-    const wallet = ethers.Wallet.createRandom();
+    const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     const quads = [q('urn:gossip-bind', 'http://schema.org/name', '"Original"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(original.status).toBe('confirmed');
 
-    // Handler with separate knownBatchParanets (empty) — no trusted binding
+    // Handler with separate knownBatchContextGraphs (empty) — no trusted binding
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:gossip-bind', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
-    // First update on correct paranet should go through (discovered via SPARQL lookup)
+    // First update on correct contextGraph should go through (discovered via SPARQL lookup)
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1113,16 +1238,16 @@ describe('Gossip-only batch→paranet binding rejected', () => {
     });
     await handler.handle(msg1, '12D3KooWPeer');
 
-    // Now send a second message on a DIFFERENT paranet with a new valid chain tx
+    // Now send a second message on a DIFFERENT contextGraph with a new valid chain tx
     const q3 = [q('urn:gossip-bind', 'http://schema.org/name', '"Spoofed"')];
-    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q3 });
+    const update2 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q3 });
     expect(update2.status).toBe('confirmed');
 
-    const evilParanet = 'evil-gossip';
+    const evilContextGraph = 'evil-gossip';
     const msg2 = encodeKAUpdateRequest({
-      paranetId: evilParanet,
-      batchId: original.kcId,
-      nquads: quadsToNQuads(q3, `did:dkg:paranet:${evilParanet}`),
+      contextGraphId: evilContextGraph,
+      batchId: original.kaId,
+      nquads: quadsToNQuads(q3, `did:dkg:context-graph:${evilContextGraph}`),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       publisherAddress: wallet.address,
@@ -1133,9 +1258,9 @@ describe('Gossip-only batch→paranet binding rejected', () => {
     });
     await handler.handle(msg2, '12D3KooWPeer');
 
-    // Evil paranet graph should be empty — binding discovered from metadata prevents cross-paranet
+    // Evil contextGraph graph should be empty — binding discovered from metadata prevents cross-contextGraph
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:gossip-bind> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${evilContextGraph}> { <urn:gossip-bind> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -1149,27 +1274,30 @@ describe('Gossip-only batch→paranet binding rejected', () => {
 // =====================================================================
 
 describe('Update provenance shape', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
+
   it('update() result omits startKAId and endKAId', async () => {
-    const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     const quads = [q('urn:prov-shape', 'http://schema.org/name', '"V1"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(original.status).toBe('confirmed');
     expect(original.onChainResult!.startKAId).toBeDefined();
     expect(original.onChainResult!.endKAId).toBeDefined();
 
     const q2 = [q('urn:prov-shape', 'http://schema.org/name', '"V2"')];
-    const updated = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const updated = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(updated.status).toBe('confirmed');
     expect(updated.onChainResult).toBeDefined();
     expect(updated.onChainResult!.txHash).toBeTruthy();
@@ -1185,24 +1313,23 @@ describe('Update provenance shape', () => {
 
 describe('parseCountLiteral robustness', () => {
   it('deleteMetaForRoot handles various COUNT result formats', async () => {
-    const wallet = ethers.Wallet.createRandom();
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus, keypair,
-      publisherPrivateKey: wallet.privateKey,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    publisher.setIdentityId(1n);
 
     // Write two entities to workspace to create workspace_meta ops
     const wsQuads = [
       q('urn:count-a', 'http://schema.org/name', '"CountA"'),
       q('urn:count-b', 'http://schema.org/name', '"CountB"'),
     ];
-    await publisher.writeToWorkspace(PARANET, wsQuads, {
+    await publisher.share(CONTEXT_GRAPH, wsQuads, {
       publisherPeerId: 'test-peer',
     });
 
@@ -1210,7 +1337,7 @@ describe('parseCountLiteral robustness', () => {
     const wsQuads2 = [
       q('urn:count-a', 'http://schema.org/name', '"CountA-v2"'),
     ];
-    await publisher.writeToWorkspace(PARANET, wsQuads2, {
+    await publisher.share(CONTEXT_GRAPH, wsQuads2, {
       publisherPeerId: 'test-peer',
     });
 
@@ -1237,34 +1364,41 @@ describe('parseCountLiteral robustness', () => {
 });
 
 // =====================================================================
-// 17. Mock adapter KnowledgeBatchCreated events include txHash
+// 17. EVMChainAdapter publish events include txHash
 // =====================================================================
 
-describe('MockChainAdapter KnowledgeBatchCreated event txHash', () => {
-  it('publishKnowledgeAssets includes txHash in event data', async () => {
-    const chain = new MockChainAdapter('mock:31337', '0xABCD');
+describe('EVMChainAdapter publish event txHash', () => {
+  let _snap: string;
+  beforeEach(async () => { _snap = await takeSnapshot(); });
+  afterEach(async () => { await revertSnapshot(_snap); });
 
-    const result = await chain.publishKnowledgeAssets({
-      kaCount: 1,
-      publisherNodeIdentityId: 1n,
-      merkleRoot: new Uint8Array(32).fill(0x01),
-      publicByteSize: 100n,
-      epochs: 1,
-      tokenAmount: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
+  it('publish includes txHash in KCCreated event data', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const publisher = makeTestPublisher({
+      store, chain, eventBus: new TypedEventBus(), keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+
+    const publishResult = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evt:txhash', 'http://schema.org/name', '"EventTest"')],
+    });
+    expect(publishResult.status).toBe('confirmed');
+    const blockNumber = publishResult.onChainResult!.blockNumber;
 
     const events: { txHash: unknown }[] = [];
     for await (const evt of chain.listenForEvents({
-      eventTypes: ['KnowledgeBatchCreated'],
-      fromBlock: result.blockNumber,
-      toBlock: result.blockNumber,
+      eventTypes: ['KCCreated'],
+      fromBlock: blockNumber,
+      toBlock: blockNumber,
     })) {
       events.push({ txHash: evt.data['txHash'] });
     }
 
     expect(events).toHaveLength(1);
-    expect(events[0].txHash).toBe(result.txHash);
+    expect(events[0].txHash).toBe(publishResult.onChainResult!.txHash);
   });
 });

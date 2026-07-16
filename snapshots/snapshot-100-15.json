@@ -1,0 +1,2902 @@
+{
+  "chain": "gnosis",
+  "chainId": "100",
+  "blockNumber": 45575172,
+  "blockDate": "2026-04-08T22:03:15.000Z",
+  "epoch": 15,
+  "timestamp": "2026-04-08T22:04:55.245Z",
+  "hubAddress": "0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f",
+  "totalStake": "40556182180098105028906423",
+  "lastIdentityId": 61,
+  "totalDelegators": 665,
+  "nodes": [
+    {
+      "identityId": 1,
+      "stake": "591974748253035876533473",
+      "delegators": [
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "162712384094450713323890"
+        },
+        {
+          "address": "0xf19FdC795C314f1934210c5e60c0703C16866F7B",
+          "stakeBase": "401074142832876619821644"
+        },
+        {
+          "address": "0xb7ED501Cb5a6470cAF0B97085B00ddfaC601Bb59",
+          "stakeBase": "149902694105151304"
+        },
+        {
+          "address": "0x2796A1233b6919d833C98f210d4636dd1327c8Ce",
+          "stakeBase": "7970086804467379"
+        },
+        {
+          "address": "0x1F70AB7A96554F0cc1F6a4c57f2b244E8cBA2f92",
+          "stakeBase": "12027990380704493845"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "428764088147761446176"
+        },
+        {
+          "address": "0xcF3F1e9D688283C105CF8301EEcd905B23E9E807",
+          "stakeBase": "7014197793258462407"
+        },
+        {
+          "address": "0xBa8368d2a17207638ddCe6112f4ad03003a28F0A",
+          "stakeBase": "1735598763674140942007"
+        },
+        {
+          "address": "0xaF0F64222A720840BeFD808e71f24365c3c66422",
+          "stakeBase": "50613168801098142"
+        },
+        {
+          "address": "0xD75c8fdD2d14f53848ABD34c7c9748Dc3e78341A",
+          "stakeBase": "14421827741343231201"
+        },
+        {
+          "address": "0x851A88571Af500482399CC2CC69d9edD48332638",
+          "stakeBase": "4972895513230970665"
+        },
+        {
+          "address": "0xaDB1a76cdAc5F9440DCaB127f99af52ab4b996Af",
+          "stakeBase": "168413747987016450310"
+        },
+        {
+          "address": "0xCce967d8F21B62C5Eb3Fc5040C1677eF4CDE54Ba",
+          "stakeBase": "96545664500975"
+        },
+        {
+          "address": "0x2284FB05B06133cEda72A81036b48c188aABd0dD",
+          "stakeBase": "3305540444784851972"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "17671052227312067255603"
+        },
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "2543409309941711664834"
+        },
+        {
+          "address": "0x242bFa90a5160893c4926b7Da5A17355D67f3ffC",
+          "stakeBase": "166690262512379924610"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "145721804855752"
+        },
+        {
+          "address": "0x4988a3caef629dC9369Dd3909B035F74B7E728B2",
+          "stakeBase": "335182481414742550488"
+        },
+        {
+          "address": "0x53f2736FaE551C998D4e72E519F1aCf474264de4",
+          "stakeBase": "33826709935807502"
+        },
+        {
+          "address": "0xA053d9d31596B505C7bA2129B31193A1C37473AF",
+          "stakeBase": "103156372839533236172"
+        },
+        {
+          "address": "0xDd110F9167C16DB2F71D9F3a47D47988a5e530AD",
+          "stakeBase": "322472995875"
+        },
+        {
+          "address": "0xf1E085349d492A5546658e28a470055cED37c3F4",
+          "stakeBase": "976238845408143615305"
+        },
+        {
+          "address": "0xf46cd09FC1aEC116a10A1092f78d2c3da02547f2",
+          "stakeBase": "96564961763606027387"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "348502006281739927"
+        },
+        {
+          "address": "0x67f63eBa2A4dC296237FfC11192c1f9769A646A8",
+          "stakeBase": "491885616179512511926"
+        },
+        {
+          "address": "0xDB3B95a0567c27a0D1fd6020550dD566A903300d",
+          "stakeBase": "10516151841860"
+        },
+        {
+          "address": "0xa8a809c5B9681617da775E6E16a6eae1792AfB42",
+          "stakeBase": "395448213044268"
+        },
+        {
+          "address": "0xc9c20E0362DfD7C3d406fD6C6338d10Ee170BaA3",
+          "stakeBase": "419209897922409805934"
+        },
+        {
+          "address": "0x949605222AF4932299501DC358Ae5A25839f22E4",
+          "stakeBase": "1101066361314329784"
+        },
+        {
+          "address": "0x73bD57e45b16cdCf75b7775B9605304A7f659483",
+          "stakeBase": "3008619769150646114318"
+        }
+      ]
+    },
+    {
+      "identityId": 2,
+      "stake": "500000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "500000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 3,
+      "stake": "100000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "100000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 5,
+      "stake": "412152813004943023474778",
+      "delegators": [
+        {
+          "address": "0xf19FdC795C314f1934210c5e60c0703C16866F7B",
+          "stakeBase": "296574700052634022387737"
+        },
+        {
+          "address": "0x7232Af3552C83E646E4A43368CCDe98c4433533f",
+          "stakeBase": "23516537869962609"
+        },
+        {
+          "address": "0x1cb3b88FA6C79E4cC3163a04d5ae7862b600E55B",
+          "stakeBase": "11170869464059891"
+        },
+        {
+          "address": "0xDA3C72d83B40acd5301d8fcF30bF6648B0e6401B",
+          "stakeBase": "7133326723947967352"
+        },
+        {
+          "address": "0xAAE68aF87f22e813537DCC5a21cDCF4B002bB2B1",
+          "stakeBase": "17380113905872053470"
+        },
+        {
+          "address": "0x7B1ba3b9B9f284619f2deD52EbabBb8cFE7ddBe9",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xBADEBDa3fAB41CcFEd0ED701872Ef69a7fA3C155",
+          "stakeBase": "3044202931429177673"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "7229172411852969683"
+        },
+        {
+          "address": "0x3f203b41906C0d099Dc82b7C71aDc27De4323001",
+          "stakeBase": "3418417563147828596"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "1660144457014833542"
+        },
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "14662460060339055179025"
+        },
+        {
+          "address": "0x39DcaAfa2ebF43E8822a7Ad308b26Ec2A06CdcbA",
+          "stakeBase": "931699351619"
+        },
+        {
+          "address": "0x4366CdBFD0D5797E229103529C2db4ADcfd755F1",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x6746A8efdc6b503e0cFEF757288Ff41fBD034070",
+          "stakeBase": "139873639734527333784"
+        },
+        {
+          "address": "0x737240Ede9E72AC15EEbD2cB9d41A3071870b82d",
+          "stakeBase": "382466983649098178371"
+        },
+        {
+          "address": "0x88f1706c20d94A4d1551C5F799C9E3380A24C3AC",
+          "stakeBase": "635045549119"
+        },
+        {
+          "address": "0xB51dA33B5b218225680FB18eEFb82F7AbD9814C8",
+          "stakeBase": "41620205217005440412151"
+        },
+        {
+          "address": "0xB939053577269eeb39bCeEa2b9f99DE05BA7668b",
+          "stakeBase": "58649840241356220716235"
+        },
+        {
+          "address": "0xDEd9521912ee0AfEd354b6B4cDB47B9941C9cC2B",
+          "stakeBase": "61170676602026336615"
+        },
+        {
+          "address": "0xe6F432a24657324625caA044cE3767aAD1d0A550",
+          "stakeBase": "507343648124"
+        },
+        {
+          "address": "0xdafE7e22798A078E0F10A2aA1133a7DD20A22F01",
+          "stakeBase": "22194210512813712445"
+        },
+        {
+          "address": "0xcB8968BD598Ad69AF959EE4fCA39Aa2BB1fd5AA5",
+          "stakeBase": "1855635131816724"
+        }
+      ]
+    },
+    {
+      "identityId": 7,
+      "stake": "324140964101161172754788",
+      "delegators": [
+        {
+          "address": "0xf70A6BEf1918334bAd085E09f50237E10A45B220",
+          "stakeBase": "803885963559454466"
+        },
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "324140160215197613300321"
+        }
+      ]
+    },
+    {
+      "identityId": 8,
+      "stake": "5003340986570810962990703",
+      "delegators": [
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "324928452750894792714859"
+        },
+        {
+          "address": "0xf19FdC795C314f1934210c5e60c0703C16866F7B",
+          "stakeBase": "476217651182625066605991"
+        },
+        {
+          "address": "0xb508B13981Aa0cC16ea83EE519b79b5D364e3463",
+          "stakeBase": "1547707366343531466469820"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "384676117286618330739459"
+        },
+        {
+          "address": "0x6F4345bca4Ac638D80db7da11Cf735bFf189c2c8",
+          "stakeBase": "169496983799522749854843"
+        },
+        {
+          "address": "0x712Ee4a3b10f4598e00D0F85B88D827d493d0940",
+          "stakeBase": "48112274665050168"
+        },
+        {
+          "address": "0x0e54b1913426aD5588DD9363eCf80ABd288A4a89",
+          "stakeBase": "16467928507849921332"
+        },
+        {
+          "address": "0x3F0C43a28e2fF930D194A42B97dFe2AE06C5F5Ec",
+          "stakeBase": "583611370728567134544150"
+        },
+        {
+          "address": "0xaF0F64222A720840BeFD808e71f24365c3c66422",
+          "stakeBase": "9872469134615464356324"
+        },
+        {
+          "address": "0xBdd13FdCAC67C73f167C30A90A51BD93e22F7241",
+          "stakeBase": "161092693234855803971"
+        },
+        {
+          "address": "0xDB3B95a0567c27a0D1fd6020550dD566A903300d",
+          "stakeBase": "12075639381375719124"
+        },
+        {
+          "address": "0xD75c8fdD2d14f53848ABD34c7c9748Dc3e78341A",
+          "stakeBase": "26548548288314872056427"
+        },
+        {
+          "address": "0x95FE996AF6d08933b563b198c3a9bFE91C61C4e9",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x7457667ee63BCa3c134f246af687091e7E259Bc2",
+          "stakeBase": "2339587072568877738063"
+        },
+        {
+          "address": "0xb43C5279E3B5322d8cBFB617Be310c37870Bb8Cb",
+          "stakeBase": "7007536184719599814964"
+        },
+        {
+          "address": "0xe6B4ACcc6a58D5998ce7d0740E471e2cdE0d3cfA",
+          "stakeBase": "5798364255057759685568"
+        },
+        {
+          "address": "0xBCdAf14F7966522ca3A8A282aa3A13b1772D1dCA",
+          "stakeBase": "5738210146156210457934"
+        },
+        {
+          "address": "0x09F331CDDd8b2A3EAc1169e938133371c3fce528",
+          "stakeBase": "3232737622885280381846"
+        },
+        {
+          "address": "0xCce967d8F21B62C5Eb3Fc5040C1677eF4CDE54Ba",
+          "stakeBase": "7512035027556361413"
+        },
+        {
+          "address": "0x3008f3C33FeFB6f0FafD749caC0101F326A7cfb3",
+          "stakeBase": "5510741313858590668872"
+        },
+        {
+          "address": "0xc2a4d6D2CDdd3280ff22440cab6C3E44d4F774D9",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x851A88571Af500482399CC2CC69d9edD48332638",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x5898213B10F76f422871b1300069E10Ae7D56e89",
+          "stakeBase": "828791115402089131846"
+        },
+        {
+          "address": "0xf70A6BEf1918334bAd085E09f50237E10A45B220",
+          "stakeBase": "1826737963010981253897"
+        },
+        {
+          "address": "0xcAECfCD6CE3D265B947D28d6E84B7164595fFa7A",
+          "stakeBase": "35276903562609054355261"
+        },
+        {
+          "address": "0x4b5FffA39fA909D0742F4A8242b765Ff3E7368Bc",
+          "stakeBase": "7150877050933761868"
+        },
+        {
+          "address": "0xf46cd09FC1aEC116a10A1092f78d2c3da02547f2",
+          "stakeBase": "119426378629749417031356"
+        },
+        {
+          "address": "0x4C9BE7044779ff6713238Ad5Ce60298c78314C7a",
+          "stakeBase": "8446326817666267636771"
+        },
+        {
+          "address": "0xEb4F3983E82Fc975d87132aEE780E893eB8FEc08",
+          "stakeBase": "6977300459245296683402"
+        },
+        {
+          "address": "0x23a881E335A116e8edf04AD2c254ED10Ce489ABF",
+          "stakeBase": "537932999460932251930"
+        },
+        {
+          "address": "0x5EF5D89Ab637D941A82fC30872aBEBEC02D3e3F1",
+          "stakeBase": "947102734431862525633"
+        },
+        {
+          "address": "0xC3Bd46c54286cD0BD386EEe8000AC3DB0cafad01",
+          "stakeBase": "4118376656028598829921"
+        },
+        {
+          "address": "0x24393a7E6b782762567D97e3800601eB7f8E80a5",
+          "stakeBase": "16884957635737014707867"
+        },
+        {
+          "address": "0x4988a3caef629dC9369Dd3909B035F74B7E728B2",
+          "stakeBase": "351008319011471268141812"
+        },
+        {
+          "address": "0x2ca389EB130Ca46A49557b054584423a12175146",
+          "stakeBase": "1331692351263198247"
+        },
+        {
+          "address": "0x242bFa90a5160893c4926b7Da5A17355D67f3ffC",
+          "stakeBase": "218155430502698371565086"
+        },
+        {
+          "address": "0xad67310FD8E078bd153E5704325886620C33fDE4",
+          "stakeBase": "2498408004110670770030"
+        },
+        {
+          "address": "0x69Ec70645D69A75D21b6b3d4c40363131C1E30E6",
+          "stakeBase": "56298096974692595536731"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "12440124385150479"
+        },
+        {
+          "address": "0x873b0D0b5dE0cCA15a7E7406Bc573eb4E4F567EF",
+          "stakeBase": "29316962399202303815898"
+        },
+        {
+          "address": "0x8Bbc36Cab44ab21A85237F334305FDA8Cf19645b",
+          "stakeBase": "63980623764804752743213"
+        },
+        {
+          "address": "0xaDB1a76cdAc5F9440DCaB127f99af52ab4b996Af",
+          "stakeBase": "8010243365027808506475"
+        },
+        {
+          "address": "0x18A428CE0c31584a21CF8ceFDb8849d8013E1994",
+          "stakeBase": "802754101553891967805"
+        },
+        {
+          "address": "0x691447B33b309a15AaE73F0209159c61b59eddf7",
+          "stakeBase": "32151523920227324654879"
+        },
+        {
+          "address": "0x2796A1233b6919d833C98f210d4636dd1327c8Ce",
+          "stakeBase": "28272706203094309658915"
+        },
+        {
+          "address": "0xE8E5085A60E25Fd706D3e070551D5bFd958efFbb",
+          "stakeBase": "33356734224467139489"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "56564451608939129768877"
+        },
+        {
+          "address": "0x96bEf12EF51c33df12a6dd137E687EA316F93091",
+          "stakeBase": "7389088880910556217957"
+        },
+        {
+          "address": "0xFaAfb1FbEa6756d82425A1db4bf6b2C42Af6dDa3",
+          "stakeBase": "1660917629690251937534"
+        },
+        {
+          "address": "0xe58204e201456AC0c595f66Ab0aa35fB9C55D461",
+          "stakeBase": "25012308996282505679"
+        },
+        {
+          "address": "0xcF5D461A5FE9aAd1f87B343135E3f1618F724f42",
+          "stakeBase": "1277334980278265868501"
+        },
+        {
+          "address": "0x41A410966B63F707AE6e13C81a322fc026DB8e5b",
+          "stakeBase": "314206448397678825012"
+        },
+        {
+          "address": "0x3e7aa069b179ceb803d2c63B32532d8936545Caa",
+          "stakeBase": "210787245464428526269"
+        },
+        {
+          "address": "0x175437b00dA09f18D89571b95a41a15Aa8415Eba",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xaE629B978581C5af0305E148A72881114498b44e",
+          "stakeBase": "577189363029588646256"
+        },
+        {
+          "address": "0xEa58F70F78302aE7E43a13E0617b66fbB49C15D7",
+          "stakeBase": "15833903590313336017882"
+        },
+        {
+          "address": "0x47d06A6d5e3f4E738dEA3E8DF98a4525499f7619",
+          "stakeBase": "1464174089585962663"
+        },
+        {
+          "address": "0xB98bD08341Ea110088d2bCE3cA09Ac9AD18290Cf",
+          "stakeBase": "1669325724938228708822"
+        },
+        {
+          "address": "0xc6580859757bF54d2280DED6330C357169f4FE8f",
+          "stakeBase": "333352418431724776763"
+        },
+        {
+          "address": "0xC90C18B5dce4B322F384403f38F0505548582778",
+          "stakeBase": "257845533103873137673"
+        },
+        {
+          "address": "0xF3057792478fDf9F2899af41a6366e767ed89961",
+          "stakeBase": "403380984206152962576"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "8637423493601454171"
+        },
+        {
+          "address": "0x1F70AB7A96554F0cc1F6a4c57f2b244E8cBA2f92",
+          "stakeBase": "12514463973413611476572"
+        },
+        {
+          "address": "0x50D55e6Ed4146425C52c26521FF14be90bd4d1A5",
+          "stakeBase": "3298613136104043279"
+        },
+        {
+          "address": "0x0c482B89B35Ee7f84e3EB23FeE08838634015227",
+          "stakeBase": "101629359597321877599804"
+        },
+        {
+          "address": "0x07cEae37D0Cff6BaEb729B885e36527Bd123baeb",
+          "stakeBase": "21615419894747208932829"
+        },
+        {
+          "address": "0x2B2616a7f474554Ac4DAc7b23d020b02525ab6BB",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x70AF35BdFfe4b2d98824d1dB6022525EF65FFaFd",
+          "stakeBase": "398142918676415951"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xfe8c1e0D733815Bdd889144ea721a39b44fdA866",
+          "stakeBase": "110073024557619519782975"
+        },
+        {
+          "address": "0xe8a86148d15d9992CC52e4845E9eCD25FdFfE39C",
+          "stakeBase": "24253837206000000000000"
+        },
+        {
+          "address": "0x5BdFD9639b01Ca4E66EE09039fb3DD89E862A3f7",
+          "stakeBase": "5588660748040000000000"
+        },
+        {
+          "address": "0x3B2998a618b2a87F8EE67ef7b4C870F3Cd4d31D8",
+          "stakeBase": "21208218286707830611640"
+        },
+        {
+          "address": "0x02c39cC9dc7b63Ab6fdAC41F905dCD5113cf01B0",
+          "stakeBase": "55975464441370000000000"
+        },
+        {
+          "address": "0xaA6Ac66852739b8B88F8e6605C0B0FA775D1eD61",
+          "stakeBase": "1489438351769009130359"
+        },
+        {
+          "address": "0x0F587D27bDBEEC9dCC204609287FA1a735Fb6f40",
+          "stakeBase": "1500000000000000000000"
+        },
+        {
+          "address": "0x161E6317B80e57BBe6F54F08Ab632C280cc152a6",
+          "stakeBase": "12461507347734309156244"
+        },
+        {
+          "address": "0x1302f5A45E902d20FE1b695865D25FF469baf900",
+          "stakeBase": "9313036641070296096453"
+        },
+        {
+          "address": "0x9383920E3302a7cCE8fA957F934Db6794766f71e",
+          "stakeBase": "496899372341474464022"
+        }
+      ]
+    },
+    {
+      "identityId": 10,
+      "stake": "5238344598732254920120758",
+      "delegators": [
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "3601120866465431491610082"
+        },
+        {
+          "address": "0x6447B9B40536436b42424A984876d7e3B858F8f7",
+          "stakeBase": "2409311270519032661"
+        },
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "489357298568905956486267"
+        },
+        {
+          "address": "0xb7ED501Cb5a6470cAF0B97085B00ddfaC601Bb59",
+          "stakeBase": "19390249708606959"
+        },
+        {
+          "address": "0xaF0F64222A720840BeFD808e71f24365c3c66422",
+          "stakeBase": "1622341287183705465864"
+        },
+        {
+          "address": "0x712Ee4a3b10f4598e00D0F85B88D827d493d0940",
+          "stakeBase": "591897519635354013787"
+        },
+        {
+          "address": "0xFd1e8266E4896601C783e2b9bF8505F6a308cf09",
+          "stakeBase": "9733316668535539474375"
+        },
+        {
+          "address": "0xe6B4ACcc6a58D5998ce7d0740E471e2cdE0d3cfA",
+          "stakeBase": "3005277273694002734775"
+        },
+        {
+          "address": "0x48e3d72961360C382548D42bB4dDA346386Bf01c",
+          "stakeBase": "30584831160556622280258"
+        },
+        {
+          "address": "0xdcb9608eDC5920F17df68A40F82D4c6d86942209",
+          "stakeBase": "24467864928445297824130"
+        },
+        {
+          "address": "0x7f5AAf1Bc0f5B2e2be88Bd2294a8694c41CCd8D6",
+          "stakeBase": "50573795863972215334282"
+        },
+        {
+          "address": "0x203Cb60813C25Fd26f064e676EEd43AeD4448C3c",
+          "stakeBase": "3761273600395396517248"
+        },
+        {
+          "address": "0xEaaaDC16d54D5A9D584478Ec420166324323d652",
+          "stakeBase": "523054953101463056147"
+        },
+        {
+          "address": "0x3e23706eba2703a61694460E3B6a845758AEC896",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x3f203b41906C0d099Dc82b7C71aDc27De4323001",
+          "stakeBase": "12233932464222648911996"
+        },
+        {
+          "address": "0xf100f7514c1101b5D898b6a2Bd0D04d620D85d65",
+          "stakeBase": "327869390041166990718"
+        },
+        {
+          "address": "0x5aD5d14fD858a729736Aad114A25f89319F9A2d8",
+          "stakeBase": "1983002126931194001"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "54948140566580160114990"
+        },
+        {
+          "address": "0x53f2736FaE551C998D4e72E519F1aCf474264de4",
+          "stakeBase": "171631332140220827"
+        },
+        {
+          "address": "0xDd110F9167C16DB2F71D9F3a47D47988a5e530AD",
+          "stakeBase": "669327392565"
+        },
+        {
+          "address": "0xDEd9521912ee0AfEd354b6B4cDB47B9941C9cC2B",
+          "stakeBase": "621483769182510564737654"
+        },
+        {
+          "address": "0x0b23cDed376bcaD8faaF345cF2E23991aa03829f",
+          "stakeBase": "879006327963235177362"
+        },
+        {
+          "address": "0x2e7797C30A53442d50a567eA451967C3411cE7Aa",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x64B4086aE5Ac4Fd2a19deDF511f35C7666DC872f",
+          "stakeBase": "40371977131934741409957"
+        },
+        {
+          "address": "0xA3E17f3559E7520fEA3C87bBecb411C5199c359C",
+          "stakeBase": "1797392667946736364"
+        },
+        {
+          "address": "0xC0aeA64654Af4A0b51A9e3B791cC2512E76d88d7",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xC4e5B8Eb0ad9e04d27A1F223cED57a17D549a6D3",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xe2279952dcc9Bc80307FAF048bDd80AFEd9ca663",
+          "stakeBase": "2580891295624408431"
+        },
+        {
+          "address": "0xE23B5FD78c7230Ce4d1F414255789751f22F6d47",
+          "stakeBase": "91754493481669866841038"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "3950510492109941046425"
+        },
+        {
+          "address": "0xA053d9d31596B505C7bA2129B31193A1C37473AF",
+          "stakeBase": "164171421793873696973915"
+        },
+        {
+          "address": "0x2B2616a7f474554Ac4DAc7b23d020b02525ab6BB",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "65700199455417799"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x1cb3b88FA6C79E4cC3163a04d5ae7862b600E55B",
+          "stakeBase": "166028803168500692851"
+        },
+        {
+          "address": "0xF31e8CA84382Bf02D4367905B6Fb536bEb08E11D",
+          "stakeBase": "20546048494103257342166"
+        },
+        {
+          "address": "0xb7356C5964AeEA4777248CE02547FF256E54a4C0",
+          "stakeBase": "10012574957962188282957"
+        },
+        {
+          "address": "0xaA6Ac66852739b8B88F8e6605C0B0FA775D1eD61",
+          "stakeBase": "647980036446253791893"
+        },
+        {
+          "address": "0x0F587D27bDBEEC9dCC204609287FA1a735Fb6f40",
+          "stakeBase": "1500000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 12,
+      "stake": "6047886185403703302914789",
+      "delegators": [
+        {
+          "address": "0xC40bcA6fB415A0e1307c56fCb12329e6A16A78be",
+          "stakeBase": "2059161838233299169513836"
+        },
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "60563583477449975573801"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "242900563115484568343480"
+        },
+        {
+          "address": "0x4C9BE7044779ff6713238Ad5Ce60298c78314C7a",
+          "stakeBase": "30281791738724987693"
+        },
+        {
+          "address": "0x2549393a45A63dc08Ecf6CB2C76710DcFC6832fD",
+          "stakeBase": "8478901686842996580118"
+        },
+        {
+          "address": "0x533cea0111Aad10CB8EbEdFCF992556A8Da1DAf1",
+          "stakeBase": "6722557765996947288604"
+        },
+        {
+          "address": "0x4d8AE772132CE83301e07457F12ea74B6DDccc93",
+          "stakeBase": "126737498735766920615051"
+        },
+        {
+          "address": "0xbC4474161cc3F712F4C5F0e5f481AC7A82fEd52f",
+          "stakeBase": "86902116242080736"
+        },
+        {
+          "address": "0xC5DC925205346AB8Cb774FECb316FD7AD7b78c6b",
+          "stakeBase": "25861293691116897734910"
+        },
+        {
+          "address": "0x961debf98Ecfc3085554Ff217d235CE1cb445Be9",
+          "stakeBase": "5332807944135534891034"
+        },
+        {
+          "address": "0xA058F05A1A54C7Fc473fe6169b5CB9E83Aa0A68f",
+          "stakeBase": "48207467417545692967566"
+        },
+        {
+          "address": "0x86dE4D5E5498b0d635c29E187d38C6f0bE76889A",
+          "stakeBase": "20321728602867488448918"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "16989497435"
+        },
+        {
+          "address": "0x23852ad4213645013E5b073738A8514F88ecf5bE",
+          "stakeBase": "283899410804"
+        },
+        {
+          "address": "0x71D7d9836884ab6801160F3F12063B262f44fe7a",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x8CEA81b7F23a0F56Cd98A76cc9a82F2970bA1f7e",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "208706460338039354"
+        },
+        {
+          "address": "0x593c04CEBEF88b6cB85526fb4C9eaC57769Da720",
+          "stakeBase": "15898336259843327806757"
+        },
+        {
+          "address": "0xB939053577269eeb39bCeEa2b9f99DE05BA7668b",
+          "stakeBase": "698503479831714218732094"
+        },
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "2145765206566711601222117"
+        },
+        {
+          "address": "0xaF0F64222A720840BeFD808e71f24365c3c66422",
+          "stakeBase": "278828296637089075305810"
+        },
+        {
+          "address": "0x0e54b1913426aD5588DD9363eCf80ABd288A4a89",
+          "stakeBase": "784136441336125460941"
+        },
+        {
+          "address": "0x6c4b96cfCE013C8d63DA25f7227CbBb350fEB6E3",
+          "stakeBase": "4412780625386492302274"
+        },
+        {
+          "address": "0x3bbb0EC324EaB25D345C12875c1488ECCA53f135",
+          "stakeBase": "1357995419328903798566"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "2812126923715476235522"
+        },
+        {
+          "address": "0xC4Aeb5fD1f73755b18BD6d3B51a478278A1cce0d",
+          "stakeBase": "486567026251528449576"
+        },
+        {
+          "address": "0xb7ED501Cb5a6470cAF0B97085B00ddfaC601Bb59",
+          "stakeBase": "498526447200688014563"
+        },
+        {
+          "address": "0x3008f3C33FeFB6f0FafD749caC0101F326A7cfb3",
+          "stakeBase": "1680638955856966128190"
+        },
+        {
+          "address": "0x851A88571Af500482399CC2CC69d9edD48332638",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xc2a4d6D2CDdd3280ff22440cab6C3E44d4F774D9",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x1F70AB7A96554F0cc1F6a4c57f2b244E8cBA2f92",
+          "stakeBase": "10050227527279170594776"
+        },
+        {
+          "address": "0x44B1baE7719350aaF9b91215332de4Eea239fE8a",
+          "stakeBase": "112402671474142089401685"
+        },
+        {
+          "address": "0x50D55e6Ed4146425C52c26521FF14be90bd4d1A5",
+          "stakeBase": "25306534253697622172990"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "44473077204362982"
+        },
+        {
+          "address": "0x95FE996AF6d08933b563b198c3a9bFE91C61C4e9",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xE8E5085A60E25Fd706D3e070551D5bFd958efFbb",
+          "stakeBase": "14366780953801420870018"
+        },
+        {
+          "address": "0xCce967d8F21B62C5Eb3Fc5040C1677eF4CDE54Ba",
+          "stakeBase": "1039091920528502060984"
+        },
+        {
+          "address": "0x4b5FffA39fA909D0742F4A8242b765Ff3E7368Bc",
+          "stakeBase": "2595737217494126418730"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x00Bc1ACBf18De6B09Cc7a78d20a0e22A63Bcc494",
+          "stakeBase": "20000000000000000"
+        },
+        {
+          "address": "0xD28B3107724E066264F735ffedAAD0d5f35a426c",
+          "stakeBase": "153218053593200299443"
+        },
+        {
+          "address": "0xF31e8CA84382Bf02D4367905B6Fb536bEb08E11D",
+          "stakeBase": "20074978586776011961864"
+        },
+        {
+          "address": "0xb7356C5964AeEA4777248CE02547FF256E54a4C0",
+          "stakeBase": "25029771957036636157853"
+        },
+        {
+          "address": "0x7fA2502862eA610D20b8d8d7675DeA104558E94E",
+          "stakeBase": "50006000265343317433526"
+        },
+        {
+          "address": "0xe8a86148d15d9992CC52e4845E9eCD25FdFfE39C",
+          "stakeBase": "7500000000000000000000"
+        },
+        {
+          "address": "0xaA6Ac66852739b8B88F8e6605C0B0FA775D1eD61",
+          "stakeBase": "680904887191539935137"
+        },
+        {
+          "address": "0xED85Ace7Cc10b996A84905e5635F25228De8DF6a",
+          "stakeBase": "20333294628185671815040"
+        },
+        {
+          "address": "0x0F587D27bDBEEC9dCC204609287FA1a735Fb6f40",
+          "stakeBase": "2000000000000000000000"
+        },
+        {
+          "address": "0x0b792e9a9ccF8e8f6cb17ED0E0E1A2D949D95EbE",
+          "stakeBase": "1000000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 13,
+      "stake": "1128905306829705798234343",
+      "delegators": [
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "431986690964169194622789"
+        },
+        {
+          "address": "0x9b3a67c038cD22c8eDa541061C213f3099650ea4",
+          "stakeBase": "3099727754568700722"
+        },
+        {
+          "address": "0xe23A6B2ec7954704422afE8C4C422803928408bA",
+          "stakeBase": "494428379140104810"
+        },
+        {
+          "address": "0x48e3d72961360C382548D42bB4dDA346386Bf01c",
+          "stakeBase": "26999168185260574663881"
+        },
+        {
+          "address": "0xdafE7e22798A078E0F10A2aA1133a7DD20A22F01",
+          "stakeBase": "22038331009352615182"
+        },
+        {
+          "address": "0x7457667ee63BCa3c134f246af687091e7E259Bc2",
+          "stakeBase": "517304359883067007"
+        },
+        {
+          "address": "0x37D0Ab7f87c6790a53f6ac8Ab3950BC6f77Bb9Bd",
+          "stakeBase": "291289133221835891255792"
+        },
+        {
+          "address": "0x3F0C43a28e2fF930D194A42B97dFe2AE06C5F5Ec",
+          "stakeBase": "83674309572738614797"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "1488354450319034301424"
+        },
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "7185749375927505061264"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xDd110F9167C16DB2F71D9F3a47D47988a5e530AD",
+          "stakeBase": "359030843770"
+        },
+        {
+          "address": "0xB939053577269eeb39bCeEa2b9f99DE05BA7668b",
+          "stakeBase": "15798116549340950501135"
+        },
+        {
+          "address": "0x6f4EbbbA78F679c5Eb4DDCB53D9051079113C5DE",
+          "stakeBase": "353507733614712221661045"
+        },
+        {
+          "address": "0xd1eFfD61437E29b12788F1914dA6Da3c98932352",
+          "stakeBase": "526995005054362709866"
+        },
+        {
+          "address": "0x24393a7E6b782762567D97e3800601eB7f8E80a5",
+          "stakeBase": "4761478041259545300"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "8779883610089965551"
+        }
+      ]
+    },
+    {
+      "identityId": 16,
+      "stake": "4936130278116208802609038",
+      "delegators": [
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "735262428764646328211455"
+        },
+        {
+          "address": "0x48ED67C359E46D6AD9173de87D6e7f45B56de3A0",
+          "stakeBase": "1219346501796981047699590"
+        },
+        {
+          "address": "0x67BCF422Cf756d34f8abaeDe9082391e0f460374",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x70978f453C9ac86817bb4Ae2fE3Fb985F3aa5C0a",
+          "stakeBase": "472249557007494548806"
+        },
+        {
+          "address": "0xC3Bd46c54286cD0BD386EEe8000AC3DB0cafad01",
+          "stakeBase": "54000719936"
+        },
+        {
+          "address": "0x48e3d72961360C382548D42bB4dDA346386Bf01c",
+          "stakeBase": "18290197526954715715308"
+        },
+        {
+          "address": "0xDA3C72d83B40acd5301d8fcF30bF6648B0e6401B",
+          "stakeBase": "3853897617221957591"
+        },
+        {
+          "address": "0x1F70AB7A96554F0cc1F6a4c57f2b244E8cBA2f92",
+          "stakeBase": "5284430447602047410496"
+        },
+        {
+          "address": "0x07cEae37D0Cff6BaEb729B885e36527Bd123baeb",
+          "stakeBase": "315956431068847014492"
+        },
+        {
+          "address": "0x09F331CDDd8b2A3EAc1169e938133371c3fce528",
+          "stakeBase": "2118619929773432557596"
+        },
+        {
+          "address": "0xC6e93ef0F898626928fCB7f5c8563AfA3D303D8d",
+          "stakeBase": "93455857089260832032"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xA053d9d31596B505C7bA2129B31193A1C37473AF",
+          "stakeBase": "1584536232317091245915"
+        },
+        {
+          "address": "0x1EFf243Cc9f239E69Df647a2D2be0B536C3B42a0",
+          "stakeBase": "822401186151589435436"
+        },
+        {
+          "address": "0x24A69B6034EBbd70A215234e48E5A87515BDbeCd",
+          "stakeBase": "276015708134043891491"
+        },
+        {
+          "address": "0x98e7D41CB1822Fc5e86F41C0290561cfFCF87e99",
+          "stakeBase": "164208483807377985729"
+        },
+        {
+          "address": "0xf92aE35665eee1EC37Ea88FF7669f34Ac14a7C6c",
+          "stakeBase": "309314536203"
+        },
+        {
+          "address": "0xCce967d8F21B62C5Eb3Fc5040C1677eF4CDE54Ba",
+          "stakeBase": "1070851359252381"
+        },
+        {
+          "address": "0x67f63eBa2A4dC296237FfC11192c1f9769A646A8",
+          "stakeBase": "588831538311972836623"
+        },
+        {
+          "address": "0x00A3DC81B16A5c508C7BCCA64F17B59A25420e7D",
+          "stakeBase": "401338908233307656367"
+        },
+        {
+          "address": "0x38df5EaB959095F4589686f4D725c7d0a7ba8F75",
+          "stakeBase": "77461829994577186094"
+        },
+        {
+          "address": "0xB939053577269eeb39bCeEa2b9f99DE05BA7668b",
+          "stakeBase": "1281185606888762883654075"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "219859492350521662991994"
+        },
+        {
+          "address": "0xe23A6B2ec7954704422afE8C4C422803928408bA",
+          "stakeBase": "10986204362965936753"
+        },
+        {
+          "address": "0xcAECfCD6CE3D265B947D28d6E84B7164595fFa7A",
+          "stakeBase": "9886547816976285"
+        },
+        {
+          "address": "0x3e7aa069b179ceb803d2c63B32532d8936545Caa",
+          "stakeBase": "335520254507244736166"
+        },
+        {
+          "address": "0xBADEBDa3fAB41CcFEd0ED701872Ef69a7fA3C155",
+          "stakeBase": "5078346604750930559546"
+        },
+        {
+          "address": "0x70AF35BdFfe4b2d98824d1dB6022525EF65FFaFd",
+          "stakeBase": "26123576649946913"
+        },
+        {
+          "address": "0x02CC95B317FfFf75878A8508885aE4842c6d2694",
+          "stakeBase": "1355529072848228137906550"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "10861338695477482941"
+        },
+        {
+          "address": "0x5CD5A90c589e7bf5c939704CE7e36653bc92679f",
+          "stakeBase": "68693543514820413476457"
+        },
+        {
+          "address": "0x0b23cDed376bcaD8faaF345cF2E23991aa03829f",
+          "stakeBase": "2025870260009366957934"
+        },
+        {
+          "address": "0x4988a3caef629dC9369Dd3909B035F74B7E728B2",
+          "stakeBase": "4056398542184859908011"
+        },
+        {
+          "address": "0x0c482B89B35Ee7f84e3EB23FeE08838634015227",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x161E6317B80e57BBe6F54F08Ab632C280cc152a6",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x7617c6Aa3325767Eb00C5Afc318cEF5094138D4a",
+          "stakeBase": "180913405173527922"
+        },
+        {
+          "address": "0xcB8968BD598Ad69AF959EE4fCA39Aa2BB1fd5AA5",
+          "stakeBase": "14241873089421326872089"
+        },
+        {
+          "address": "0x8Bbc36Cab44ab21A85237F334305FDA8Cf19645b",
+          "stakeBase": "129508860981851"
+        }
+      ]
+    },
+    {
+      "identityId": 17,
+      "stake": "2281235493334963706524638",
+      "delegators": [
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "447802560707619874457515"
+        },
+        {
+          "address": "0xC3Bd46c54286cD0BD386EEe8000AC3DB0cafad01",
+          "stakeBase": "173397969391"
+        },
+        {
+          "address": "0x95bf08839Ca5fA3d41f66719d5582293DeF70454",
+          "stakeBase": "2336456758273077786"
+        },
+        {
+          "address": "0xfe8c1e0D733815Bdd889144ea721a39b44fdA866",
+          "stakeBase": "12476277922910540"
+        },
+        {
+          "address": "0x44B1baE7719350aaF9b91215332de4Eea239fE8a",
+          "stakeBase": "11240853419402846149"
+        },
+        {
+          "address": "0xe58204e201456AC0c595f66Ab0aa35fB9C55D461",
+          "stakeBase": "52331435463297752299"
+        },
+        {
+          "address": "0x6F4345bca4Ac638D80db7da11Cf735bFf189c2c8",
+          "stakeBase": "70692416820548249552"
+        },
+        {
+          "address": "0xb7489f301092389CC327D90EFEAf18c253038951",
+          "stakeBase": "1079000745536893679252"
+        },
+        {
+          "address": "0xEb4F3983E82Fc975d87132aEE780E893eB8FEc08",
+          "stakeBase": "30494775332824806576"
+        },
+        {
+          "address": "0x3008f3C33FeFB6f0FafD749caC0101F326A7cfb3",
+          "stakeBase": "480411310862"
+        },
+        {
+          "address": "0x48e3d72961360C382548D42bB4dDA346386Bf01c",
+          "stakeBase": "27987660044226242153457"
+        },
+        {
+          "address": "0xcAECfCD6CE3D265B947D28d6E84B7164595fFa7A",
+          "stakeBase": "5191382352042208"
+        },
+        {
+          "address": "0xcF3F1e9D688283C105CF8301EEcd905B23E9E807",
+          "stakeBase": "274204396500767796466"
+        },
+        {
+          "address": "0xaA6Ac66852739b8B88F8e6605C0B0FA775D1eD61",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xB98bD08341Ea110088d2bCE3cA09Ac9AD18290Cf",
+          "stakeBase": "12539465924507862069"
+        },
+        {
+          "address": "0xD75c8fdD2d14f53848ABD34c7c9748Dc3e78341A",
+          "stakeBase": "59878797955218513088"
+        },
+        {
+          "address": "0x476Bb16B25D552485Bb1E2441Aa06bD329d903BE",
+          "stakeBase": "5653329131242425988872"
+        },
+        {
+          "address": "0xaDB1a76cdAc5F9440DCaB127f99af52ab4b996Af",
+          "stakeBase": "156835620504208475918"
+        },
+        {
+          "address": "0x3f203b41906C0d099Dc82b7C71aDc27De4323001",
+          "stakeBase": "51171959192597193125"
+        },
+        {
+          "address": "0x613f0B91a8e9eBCb8ddd527136bc21CaaD2c4981",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x37D0Ab7f87c6790a53f6ac8Ab3950BC6f77Bb9Bd",
+          "stakeBase": "788416716361372250676238"
+        },
+        {
+          "address": "0x3F0C43a28e2fF930D194A42B97dFe2AE06C5F5Ec",
+          "stakeBase": "470319151780359103589"
+        },
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "665136766986545024813444"
+        },
+        {
+          "address": "0x10C7aaFb769BeC2Db2a872D9019d2C70F85a618c",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x12c7EE5CCaE17bf92ecd80933587F9b40430fcB1",
+          "stakeBase": "621941776917969173258"
+        },
+        {
+          "address": "0x4B096f14938a5BF00DDA4aE63fa5C079C658b8a8",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x51bC3dd10a9ee4946F961038CF5D50057E49eb77",
+          "stakeBase": "59990616058566937"
+        },
+        {
+          "address": "0x88E6F41c171c823c2e9242f9Ec4dBF8B544b39c0",
+          "stakeBase": "167925959027441951245669"
+        },
+        {
+          "address": "0xa38C19D25aD4001a901c1E2c9dF689C4BC14C222",
+          "stakeBase": "5575141839711072781215"
+        },
+        {
+          "address": "0xb7cb2610712E9c7b4DC21752E196B1D893944d13",
+          "stakeBase": "1100090823461648188"
+        },
+        {
+          "address": "0xce8453cc4200c37B25FEF3C8C90f544D1370e248",
+          "stakeBase": "671703836109767804864"
+        },
+        {
+          "address": "0x95420C8F22c95E94F0c443d4c075B819644014b0",
+          "stakeBase": "1513341099125847453920"
+        },
+        {
+          "address": "0xC6e93ef0F898626928fCB7f5c8563AfA3D303D8d",
+          "stakeBase": "6508581310677816409151"
+        },
+        {
+          "address": "0xF7B8BfB1c2d7185Bd804584D15104B71b695840C",
+          "stakeBase": "9121744436177796650134"
+        },
+        {
+          "address": "0x5aD5d14fD858a729736Aad114A25f89319F9A2d8",
+          "stakeBase": "22513956597561115299181"
+        },
+        {
+          "address": "0xC4Aeb5fD1f73755b18BD6d3B51a478278A1cce0d",
+          "stakeBase": "64433842148873453"
+        },
+        {
+          "address": "0xAAE68aF87f22e813537DCC5a21cDCF4B002bB2B1",
+          "stakeBase": "358016520589001032871"
+        },
+        {
+          "address": "0x3e23706eba2703a61694460E3B6a845758AEC896",
+          "stakeBase": "11645527804424207"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xBdd13FdCAC67C73f167C30A90A51BD93e22F7241",
+          "stakeBase": "2296314797309069038"
+        },
+        {
+          "address": "0x23e88b69ABD98210A155C966123aCb6480Fa49ae",
+          "stakeBase": "177143490099318931756"
+        },
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "128976333950436465482383"
+        },
+        {
+          "address": "0x2B2616a7f474554Ac4DAc7b23d020b02525ab6BB",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x593c04CEBEF88b6cB85526fb4C9eaC57769Da720",
+          "stakeBase": "0"
+        }
+      ]
+    },
+    {
+      "identityId": 18,
+      "stake": "1003100000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "3100000000000000000"
+        },
+        {
+          "address": "0xeF1718B4e84b47A63EC9fE66EB2A787b33C3989b",
+          "stakeBase": "1000000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 20,
+      "stake": "500000000000000000",
+      "delegators": [
+        {
+          "address": "0xCC5Ef20cfFe5c184892E9302d879b189f7c7da53",
+          "stakeBase": "500000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 24,
+      "stake": "1966288661365951777944739",
+      "delegators": [
+        {
+          "address": "0x48ED67C359E46D6AD9173de87D6e7f45B56de3A0",
+          "stakeBase": "285924076314326766865701"
+        },
+        {
+          "address": "0x712Ee4a3b10f4598e00D0F85B88D827d493d0940",
+          "stakeBase": "118293728881600946"
+        },
+        {
+          "address": "0x7fA2502862eA610D20b8d8d7675DeA104558E94E",
+          "stakeBase": "40173203208146933233409"
+        },
+        {
+          "address": "0x5EF5D89Ab637D941A82fC30872aBEBEC02D3e3F1",
+          "stakeBase": "8063703462865236562"
+        },
+        {
+          "address": "0xe6B4ACcc6a58D5998ce7d0740E471e2cdE0d3cfA",
+          "stakeBase": "18070603806784934096"
+        },
+        {
+          "address": "0xE8E5085A60E25Fd706D3e070551D5bFd958efFbb",
+          "stakeBase": "62318389286360412"
+        },
+        {
+          "address": "0x4b5FffA39fA909D0742F4A8242b765Ff3E7368Bc",
+          "stakeBase": "2732494827257098"
+        },
+        {
+          "address": "0xC6e93ef0F898626928fCB7f5c8563AfA3D303D8d",
+          "stakeBase": "6642590614117974038709"
+        },
+        {
+          "address": "0x7eE578D876f9Ef1d1deB2678AD9538e9a0ca4db0",
+          "stakeBase": "2185685192920862353867"
+        },
+        {
+          "address": "0xBdd13FdCAC67C73f167C30A90A51BD93e22F7241",
+          "stakeBase": "13532728920024632796"
+        },
+        {
+          "address": "0x873b0D0b5dE0cCA15a7E7406Bc573eb4E4F567EF",
+          "stakeBase": "128743729957881367350"
+        },
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "256308525776408000028871"
+        },
+        {
+          "address": "0x7b861eD96cBD628948F83fB097fB6433ca841545",
+          "stakeBase": "1327864983958359355314981"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "678251064963270365043"
+        },
+        {
+          "address": "0x95bf08839Ca5fA3d41f66719d5582293DeF70454",
+          "stakeBase": "34585251286682838068601"
+        },
+        {
+          "address": "0x593c04CEBEF88b6cB85526fb4C9eaC57769Da720",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xe73F65cC6d98da84A875158648Df19ef048a71f9",
+          "stakeBase": "1320891778725172621292"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "7423401119335688619"
+        },
+        {
+          "address": "0x2F875702c10444609517D47c96E84f2707d7306a",
+          "stakeBase": "96143652829892224"
+        },
+        {
+          "address": "0xD28B3107724E066264F735ffedAAD0d5f35a426c",
+          "stakeBase": "436796019236122906"
+        },
+        {
+          "address": "0xe9eCE9221c6DDBCf943f84436D60f15879F3Bb2e",
+          "stakeBase": "13633475847537748428"
+        },
+        {
+          "address": "0xBed16AdD0dA263C37a51892D5Fc3617435Eb8a99",
+          "stakeBase": "186245624826405117559"
+        },
+        {
+          "address": "0xBADEBDa3fAB41CcFEd0ED701872Ef69a7fA3C155",
+          "stakeBase": "5168672722645885122058"
+        },
+        {
+          "address": "0xccb46A23006edF123c7A102e5021094Fd705B470",
+          "stakeBase": "1013798170981496786"
+        },
+        {
+          "address": "0xb7ED501Cb5a6470cAF0B97085B00ddfaC601Bb59",
+          "stakeBase": "341169148835001125"
+        },
+        {
+          "address": "0x86dE4D5E5498b0d635c29E187d38C6f0bE76889A",
+          "stakeBase": "37132366407268862686"
+        },
+        {
+          "address": "0x7617c6Aa3325767Eb00C5Afc318cEF5094138D4a",
+          "stakeBase": "288519955820151076"
+        },
+        {
+          "address": "0xb43C5279E3B5322d8cBFB617Be310c37870Bb8Cb",
+          "stakeBase": "19423629341627175848"
+        },
+        {
+          "address": "0x1cb3b88FA6C79E4cC3163a04d5ae7862b600E55B",
+          "stakeBase": "895383696139927293"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "1005029708151358392"
+        },
+        {
+          "address": "0x2B2616a7f474554Ac4DAc7b23d020b02525ab6BB",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x0F587D27bDBEEC9dCC204609287FA1a735Fb6f40",
+          "stakeBase": "5000000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 25,
+      "stake": "29292353055776000289809",
+      "delegators": [
+        {
+          "address": "0xf19FdC795C314f1934210c5e60c0703C16866F7B",
+          "stakeBase": "26890923128055090071223"
+        },
+        {
+          "address": "0xBADEBDa3fAB41CcFEd0ED701872Ef69a7fA3C155",
+          "stakeBase": "2483572321831893"
+        },
+        {
+          "address": "0x31637faCEfbb72bA93679e282378148d18bd4276",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x2ca389EB130Ca46A49557b054584423a12175146",
+          "stakeBase": "131055150192026701652"
+        },
+        {
+          "address": "0x5CD5A90c589e7bf5c939704CE7e36653bc92679f",
+          "stakeBase": "2270372293956561685035"
+        },
+        {
+          "address": "0xC78912C51453b5A662411fbE86fc10b3AF3a0aAA",
+          "stakeBase": "1"
+        }
+      ]
+    },
+    {
+      "identityId": 26,
+      "stake": "422258946507358901508029",
+      "delegators": [
+        {
+          "address": "0x48ED67C359E46D6AD9173de87D6e7f45B56de3A0",
+          "stakeBase": "52534888204765301556630"
+        },
+        {
+          "address": "0xf19FdC795C314f1934210c5e60c0703C16866F7B",
+          "stakeBase": "89157836561284042878033"
+        },
+        {
+          "address": "0x1B2cF4Ac80502409EC0a80531eb506699D13a486",
+          "stakeBase": "217226005604296117"
+        },
+        {
+          "address": "0x38f7f812B7b08DE4aDd709c98A4891F08ddD5666",
+          "stakeBase": "46593022715346106092"
+        },
+        {
+          "address": "0xBB41B38dEA43ab698876A45Bb68bC5E5987fb97E",
+          "stakeBase": "111747242198643021020"
+        },
+        {
+          "address": "0x067a421166C931DB7204bC3008e16983C1028Eb8",
+          "stakeBase": "38042377988630279"
+        },
+        {
+          "address": "0x69Ec70645D69A75D21b6b3d4c40363131C1E30E6",
+          "stakeBase": "19684158728370631293"
+        },
+        {
+          "address": "0xdafE7e22798A078E0F10A2aA1133a7DD20A22F01",
+          "stakeBase": "36345968417553723247"
+        },
+        {
+          "address": "0xdFf199C986eca54263b031c1528E3C2C77A293d6",
+          "stakeBase": "73365029826568786323394"
+        },
+        {
+          "address": "0x7232Af3552C83E646E4A43368CCDe98c4433533f",
+          "stakeBase": "2862773617851026"
+        },
+        {
+          "address": "0x98A96425b337c80bC9E2BD493A65e7546be8DAaE",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x7556E6208491Aa331026dd781AdE541cABBFA176",
+          "stakeBase": "2590131450841392"
+        },
+        {
+          "address": "0xFb965e02dD06121DB86416774c78b176805E0eEc",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x34446D2b12bCb468403386Be511EA857e41d5C04",
+          "stakeBase": "509459072553"
+        },
+        {
+          "address": "0xe23A6B2ec7954704422afE8C4C422803928408bA",
+          "stakeBase": "1048993250455996211"
+        },
+        {
+          "address": "0x48e3d72961360C382548D42bB4dDA346386Bf01c",
+          "stakeBase": "26528229889347606968565"
+        },
+        {
+          "address": "0x0Dff74d0E2Ba5AC1e8Eb10E22e795003CC5Bfad3",
+          "stakeBase": "2751828026881019"
+        },
+        {
+          "address": "0x930Ad55a9330b53D14001Ab0cBe017dA83D1D331",
+          "stakeBase": "617909598412703552"
+        },
+        {
+          "address": "0xDA3C72d83B40acd5301d8fcF30bF6648B0e6401B",
+          "stakeBase": "3577456767455746964"
+        },
+        {
+          "address": "0xcF3F1e9D688283C105CF8301EEcd905B23E9E807",
+          "stakeBase": "500000000000000000"
+        },
+        {
+          "address": "0xF7B8BfB1c2d7185Bd804584D15104B71b695840C",
+          "stakeBase": "3378640467019039668"
+        },
+        {
+          "address": "0x50cB01E6998192c40367637fEB61ce6Cff575214",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xF99F7ec305ba1bAefA8879ef93CeDECfaD0815D7",
+          "stakeBase": "97315228217"
+        },
+        {
+          "address": "0xcB8968BD598Ad69AF959EE4fCA39Aa2BB1fd5AA5",
+          "stakeBase": "5100456862517994347"
+        },
+        {
+          "address": "0x7A0B2557b94E65d8BF16E3511f2bB9AAF62D33d1",
+          "stakeBase": "632260691367718380055"
+        },
+        {
+          "address": "0xf57d2B61068fA45CBd49cD9bAE942A78FA5f0dd5",
+          "stakeBase": "209511647092907020"
+        },
+        {
+          "address": "0xe9eCE9221c6DDBCf943f84436D60f15879F3Bb2e",
+          "stakeBase": "230402730689"
+        },
+        {
+          "address": "0x8862dc6Ed689996Bed3783ACAaB21e0c81B6d305",
+          "stakeBase": "12514678557544825140275"
+        },
+        {
+          "address": "0x14D761b2c84d99c2b9f8aF3206dd8D764ed89D81",
+          "stakeBase": "2434153240561670772"
+        },
+        {
+          "address": "0xBf0b7bCb58ed411F702526c5307760d38a7682CE",
+          "stakeBase": "547254815609838528"
+        },
+        {
+          "address": "0xC6e93ef0F898626928fCB7f5c8563AfA3D303D8d",
+          "stakeBase": "194969559982576010654"
+        },
+        {
+          "address": "0xD6926Be19705147Adf5F4fb06322a5b46ba3a9cC",
+          "stakeBase": "2652822988934760696827"
+        },
+        {
+          "address": "0xAB543DfFa0E9EB2F8ED3A46aF9e9923fA4B168A1",
+          "stakeBase": "453029963790847906491"
+        },
+        {
+          "address": "0xa392177087F1637205ABe91784C2276510788F93",
+          "stakeBase": "283271405032903319015"
+        },
+        {
+          "address": "0x613f0B91a8e9eBCb8ddd527136bc21CaaD2c4981",
+          "stakeBase": "269808494611"
+        },
+        {
+          "address": "0xBA39CB790834d441e625f5E361D0366fa7C1603e",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xB69d57ECDa4CEfFaEf277A98023777AF34aaa995",
+          "stakeBase": "227417974571833033947"
+        },
+        {
+          "address": "0x95420C8F22c95E94F0c443d4c075B819644014b0",
+          "stakeBase": "20080800573335"
+        },
+        {
+          "address": "0xa27bC4fc5f30E67f8A75AcB5AE8dfE9B1b3c320D",
+          "stakeBase": "500080625704529648106"
+        },
+        {
+          "address": "0x37D0Ab7f87c6790a53f6ac8Ab3950BC6f77Bb9Bd",
+          "stakeBase": "78486034283501712919411"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "2147355157328790637835"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "336875368657622015"
+        },
+        {
+          "address": "0xf46cd09FC1aEC116a10A1092f78d2c3da02547f2",
+          "stakeBase": "10845518506657255119"
+        },
+        {
+          "address": "0x4366CdBFD0D5797E229103529C2db4ADcfd755F1",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xB939053577269eeb39bCeEa2b9f99DE05BA7668b",
+          "stakeBase": "12093130416723756033764"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "104910031864088832"
+        },
+        {
+          "address": "0x6f4EbbbA78F679c5Eb4DDCB53D9051079113C5DE",
+          "stakeBase": "59678042503246018987458"
+        },
+        {
+          "address": "0x65Aa35353Fe7a6beaeAAbA1b46E3fD5B0816d4C5",
+          "stakeBase": "2122258391147808557457"
+        },
+        {
+          "address": "0x6d6C1F43d4A94ce113bbE82655F24fAF94F1D478",
+          "stakeBase": "66516003614"
+        },
+        {
+          "address": "0x7C791910960d0fa63e3B6C9dd54DCbf4A9c6C69f",
+          "stakeBase": "1539697848907872729423"
+        },
+        {
+          "address": "0x9157E2B9c9b8bA52c14E178ea08bA0ba2a184d9A",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xa8D3d6889053e880f57638Ac71dB049ba7C404ba",
+          "stakeBase": "5540152768843518"
+        },
+        {
+          "address": "0xbE2488EE9c4B4F5b357b511b70BBE2fbac321DaD",
+          "stakeBase": "6078148032247323708610"
+        },
+        {
+          "address": "0xc4bE47fF997157eA1A869cE1442ECA889121BCf3",
+          "stakeBase": "270888321953344097211"
+        },
+        {
+          "address": "0xD250fcfA9D50692F88913b0d14B8381a0e7C3E25",
+          "stakeBase": "519953305831213096559"
+        },
+        {
+          "address": "0xDE704a64C1C5c35EebFAB2906F3081cE6355ae2c",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xE86C25e6D4a9780A49095bE1DAdBeF890D218129",
+          "stakeBase": "4889185853926766"
+        },
+        {
+          "address": "0x97718F153bcd086Cc4927d7dAe1197BE02c71c90",
+          "stakeBase": "1548162991845364489"
+        },
+        {
+          "address": "0x18405396C4CEc8447e74D408faBEF1A9C2dC6269",
+          "stakeBase": "1504418782469"
+        },
+        {
+          "address": "0x1cb3b88FA6C79E4cC3163a04d5ae7862b600E55B",
+          "stakeBase": "209333413603296"
+        },
+        {
+          "address": "0x2284FB05B06133cEda72A81036b48c188aABd0dD",
+          "stakeBase": "122570270980053"
+        },
+        {
+          "address": "0x3f203b41906C0d099Dc82b7C71aDc27De4323001",
+          "stakeBase": "7817234723280894787"
+        },
+        {
+          "address": "0x4C9BE7044779ff6713238Ad5Ce60298c78314C7a",
+          "stakeBase": "2940761635384419604"
+        },
+        {
+          "address": "0x4cBD07e1b723eC2334c5c33dFC92DA94cbF8994C",
+          "stakeBase": "11596099695089007311"
+        },
+        {
+          "address": "0x691447B33b309a15AaE73F0209159c61b59eddf7",
+          "stakeBase": "11673408795794108443"
+        }
+      ]
+    },
+    {
+      "identityId": 27,
+      "stake": "38367339104784856173271",
+      "delegators": [
+        {
+          "address": "0xbF49B454818783D12Bf4f3375ff17C59015e66Cb",
+          "stakeBase": "370662814385"
+        },
+        {
+          "address": "0x6447B9B40536436b42424A984876d7e3B858F8f7",
+          "stakeBase": "5038207937313212669"
+        },
+        {
+          "address": "0x67BCF422Cf756d34f8abaeDe9082391e0f460374",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "238064124355"
+        },
+        {
+          "address": "0x63d28071c1574277b5Fd8F11886aDe869A660Fc9",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x31637faCEfbb72bA93679e282378148d18bd4276",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x44B1baE7719350aaF9b91215332de4Eea239fE8a",
+          "stakeBase": "993792344255381"
+        },
+        {
+          "address": "0x7232Af3552C83E646E4A43368CCDe98c4433533f",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x984e58e26985a24ecF7B424281A230B26dC81dD5",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xb7489f301092389CC327D90EFEAf18c253038951",
+          "stakeBase": "466119677789887355"
+        },
+        {
+          "address": "0xD28B3107724E066264F735ffedAAD0d5f35a426c",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x14D761b2c84d99c2b9f8aF3206dd8D764ed89D81",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x3008f3C33FeFB6f0FafD749caC0101F326A7cfb3",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x0Dff74d0E2Ba5AC1e8Eb10E22e795003CC5Bfad3",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xDE4e78aCAA067E90A9BE621daC6469B6ec1e73A3",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xDA3C72d83B40acd5301d8fcF30bF6648B0e6401B",
+          "stakeBase": "33211630175"
+        },
+        {
+          "address": "0xe529fC30cd6242Ac2800C56a03909e475835e1Fa",
+          "stakeBase": "121563530031038946"
+        },
+        {
+          "address": "0x36c15170088e6867Fb2D3B14dd7E05dFdd6D7f0F",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x7A0B2557b94E65d8BF16E3511f2bB9AAF62D33d1",
+          "stakeBase": "187228241910661986409"
+        },
+        {
+          "address": "0xdafE7e22798A078E0F10A2aA1133a7DD20A22F01",
+          "stakeBase": "10323262186899542309"
+        },
+        {
+          "address": "0x5ab911005B61d26420278f97f8694b59d1501Ba8",
+          "stakeBase": "104727262621375358663"
+        },
+        {
+          "address": "0xd04BE85d62bf3104E968F0D15cfeA52ec54900D8",
+          "stakeBase": "4197778493321387643"
+        },
+        {
+          "address": "0x851A88571Af500482399CC2CC69d9edD48332638",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xc2a4d6D2CDdd3280ff22440cab6C3E44d4F774D9",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xC6e93ef0F898626928fCB7f5c8563AfA3D303D8d",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xeEC02832CdbD8A88267094B73e56a7E6d9CB8c6A",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x873b0D0b5dE0cCA15a7E7406Bc573eb4E4F567EF",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xBed16AdD0dA263C37a51892D5Fc3617435Eb8a99",
+          "stakeBase": "23589410948660252321"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "202462125889619938"
+        },
+        {
+          "address": "0x39DcaAfa2ebF43E8822a7Ad308b26Ec2A06CdcbA",
+          "stakeBase": "17523125665756321"
+        },
+        {
+          "address": "0xe6F432a24657324625caA044cE3767aAD1d0A550",
+          "stakeBase": "22895978961"
+        },
+        {
+          "address": "0x23852ad4213645013E5b073738A8514F88ecf5bE",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "30344631973337961"
+        },
+        {
+          "address": "0x4B096f14938a5BF00DDA4aE63fa5C079C658b8a8",
+          "stakeBase": "602222920940"
+        },
+        {
+          "address": "0x51bC3dd10a9ee4946F961038CF5D50057E49eb77",
+          "stakeBase": "490633892592"
+        },
+        {
+          "address": "0xC78912C51453b5A662411fbE86fc10b3AF3a0aAA",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xc4bE47fF997157eA1A869cE1442ECA889121BCf3",
+          "stakeBase": "254768889671176819374"
+        },
+        {
+          "address": "0xFb965e02dD06121DB86416774c78b176805E0eEc",
+          "stakeBase": "674121389070"
+        },
+        {
+          "address": "0x006897E52eccDC802E7C19C88518b338f93BB2A8",
+          "stakeBase": "6985641"
+        },
+        {
+          "address": "0x0C00aE63e531F01daaC080fbD53b4Ef7E7bdD422",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x245F18b5d23d8a37412438d6C2C81eFbe59673f0",
+          "stakeBase": "996719756"
+        },
+        {
+          "address": "0x2828bFC9bCC2670316827CbffcB49e8e5604d741",
+          "stakeBase": "991244146355426120"
+        },
+        {
+          "address": "0x399f26e0A3D9E223c7437c6AaBDABc57b5A838cB",
+          "stakeBase": "5087141246769663018009"
+        },
+        {
+          "address": "0x45Bb1B43D178628a436D447e08E3cc044C737534",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x497583C2124441CB9387AdC81759fC0950Cb6eD8",
+          "stakeBase": "104839774564"
+        },
+        {
+          "address": "0x4d2c06203125ca34e067C39b7178FeA6F1D1504c",
+          "stakeBase": "379334255801"
+        },
+        {
+          "address": "0x502d629728b9C461726BEEe240F89c5D82c5f1C5",
+          "stakeBase": "171434528692"
+        },
+        {
+          "address": "0x50A3c110fC546Fa9A6a3762Aa97CFFDFa106EF53",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x5A9b15aC8395293Fe22AF77c9297d1C4c71a4E07",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x6C971778A43dA24BD583A4256da91E020BE707aB",
+          "stakeBase": "194135439008731"
+        },
+        {
+          "address": "0x7588EeE2109b499d2019c8d419E8326E4F54f3e0",
+          "stakeBase": "6961305751402008493481"
+        },
+        {
+          "address": "0x7c7406263754fD33c365AdCff20C0C50f2417204",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x8757406c293Bdf16A19aa3f97e7D4139797d4cCB",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x880E0b51Ead542e182dF85A74972e0cC066E7b87",
+          "stakeBase": "47031688881768154"
+        },
+        {
+          "address": "0x887cc8B84CbE6ccca60697A629B038a2c686AFFF",
+          "stakeBase": "5297155218238565385603"
+        },
+        {
+          "address": "0x8d6FC7C57871Aef0Aa3A2A465301aF5EC20A54eb",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x94B07C199b03Ec7DcE98795899C5D08099A25E1F",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x9D41ecceDD6911C60c523D528a326f0DC2b59F4e",
+          "stakeBase": "20321569757830772303034"
+        },
+        {
+          "address": "0x9F16BBe53cd85E44D5e83CaF7421316F7e81C8CF",
+          "stakeBase": "169966261305699764"
+        },
+        {
+          "address": "0xa84d3681260939166674043992530Dc053D32911",
+          "stakeBase": "298400727966"
+        },
+        {
+          "address": "0xb45715a2ECe9715B764e7084718D793e371678F5",
+          "stakeBase": "5228200409803459"
+        },
+        {
+          "address": "0xDE16f87ad0c89b308f3300cdCBDd9b9F3a2f0c6d",
+          "stakeBase": "291087808182548"
+        },
+        {
+          "address": "0xAAE68aF87f22e813537DCC5a21cDCF4B002bB2B1",
+          "stakeBase": "50943944352378465561"
+        },
+        {
+          "address": "0x285c49Da74886682ab72F8212D2905c5C2a52F14",
+          "stakeBase": "5754516278717317"
+        },
+        {
+          "address": "0xe73F65cC6d98da84A875158648Df19ef048a71f9",
+          "stakeBase": "11602785430975309189"
+        },
+        {
+          "address": "0xcF3F1e9D688283C105CF8301EEcd905B23E9E807",
+          "stakeBase": "1000000000000000000"
+        },
+        {
+          "address": "0xfa049fAa95C8bf2b01D5efeb7613b71bD0D875D1",
+          "stakeBase": "44688626684086394065"
+        }
+      ]
+    },
+    {
+      "identityId": 28,
+      "stake": "500000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "500000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 29,
+      "stake": "1000000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "1000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 32,
+      "stake": "6373490720514937368125",
+      "delegators": [
+        {
+          "address": "0x949605222AF4932299501DC358Ae5A25839f22E4",
+          "stakeBase": "2485498128200641211"
+        },
+        {
+          "address": "0x22b908c2FeA7a1e6043FfcDBc77D660D4D326961",
+          "stakeBase": "101385364976800611763"
+        },
+        {
+          "address": "0xe1abC585a258454095357442E2A709F980D4e6fA",
+          "stakeBase": "100812135429737701458"
+        },
+        {
+          "address": "0x3602Cc2f599aCBD548A30D94Ab9933ca4ab09E4d",
+          "stakeBase": "4054967371585392405335"
+        },
+        {
+          "address": "0xdafE7e22798A078E0F10A2aA1133a7DD20A22F01",
+          "stakeBase": "8474583488741440087"
+        },
+        {
+          "address": "0x3Ea854e9F4b28F3A48634ad4cd60e3Ae014a0F9e",
+          "stakeBase": "2056218525704760650182"
+        },
+        {
+          "address": "0xe9eCE9221c6DDBCf943f84436D60f15879F3Bb2e",
+          "stakeBase": "612495772961796486"
+        },
+        {
+          "address": "0xD28B3107724E066264F735ffedAAD0d5f35a426c",
+          "stakeBase": "6789825688905151"
+        },
+        {
+          "address": "0x5ab911005B61d26420278f97f8694b59d1501Ba8",
+          "stakeBase": "227288780761319851"
+        },
+        {
+          "address": "0x50cB01E6998192c40367637fEB61ce6Cff575214",
+          "stakeBase": "48300666821891896594"
+        }
+      ]
+    },
+    {
+      "identityId": 33,
+      "stake": "221722009635242424",
+      "delegators": [
+        {
+          "address": "0x3078C02fdf27A008BFb7eeEA3Cd5776acC892612",
+          "stakeBase": "221722009635242418"
+        }
+      ]
+    },
+    {
+      "identityId": 34,
+      "stake": "1833401779102260204",
+      "delegators": [
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "500000000000000000"
+        },
+        {
+          "address": "0x4C9BE7044779ff6713238Ad5Ce60298c78314C7a",
+          "stakeBase": "1333401779102260204"
+        }
+      ]
+    },
+    {
+      "identityId": 35,
+      "stake": "2111360214824912387578900",
+      "delegators": [
+        {
+          "address": "0x22b750c56A1E6e20799d470A8949896DC3f55C45",
+          "stakeBase": "542939005527931908916167"
+        },
+        {
+          "address": "0x6f4EbbbA78F679c5Eb4DDCB53D9051079113C5DE",
+          "stakeBase": "724333418054223082067676"
+        },
+        {
+          "address": "0x7b861eD96cBD628948F83fB097fB6433ca841545",
+          "stakeBase": "688807235661768870645066"
+        },
+        {
+          "address": "0x0822c61A35614cF3acf5978ad82EC0fF61a07Bcb",
+          "stakeBase": "155280555580988525949989"
+        }
+      ]
+    },
+    {
+      "identityId": 36,
+      "stake": "2863950000000000000",
+      "delegators": [
+        {
+          "address": "0x4609FFD1D9Bc8ebeeb048834721dbe43e420E528",
+          "stakeBase": "2863950000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 37,
+      "stake": "83512531392115248500920",
+      "delegators": [
+        {
+          "address": "0x67f63eBa2A4dC296237FfC11192c1f9769A646A8",
+          "stakeBase": "1132142730679365613482"
+        },
+        {
+          "address": "0x4cBD07e1b723eC2334c5c33dFC92DA94cbF8994C",
+          "stakeBase": "20092756898358670632"
+        },
+        {
+          "address": "0x840D11b8Cfd350c930AF8E3642F576Dc8A101428",
+          "stakeBase": "2761573615086740125922"
+        },
+        {
+          "address": "0x95bf08839Ca5fA3d41f66719d5582293DeF70454",
+          "stakeBase": "4300142890857357"
+        },
+        {
+          "address": "0x6F4345bca4Ac638D80db7da11Cf735bFf189c2c8",
+          "stakeBase": "93495666643542384277"
+        },
+        {
+          "address": "0xBCdAf14F7966522ca3A8A282aa3A13b1772D1dCA",
+          "stakeBase": "4960459195530475923"
+        },
+        {
+          "address": "0x984e58e26985a24ecF7B424281A230B26dC81dD5",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x896930E77cdF937b26aD5fA0f8E5957616F496e2",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x788b91a42Fe8D91536881ae28bFCF4Dd56605d7C",
+          "stakeBase": "462912649899"
+        },
+        {
+          "address": "0x5C64Adb7629B402b7F782A215AD24f101cfC1393",
+          "stakeBase": "1527988074316965521768"
+        },
+        {
+          "address": "0xDA3C72d83B40acd5301d8fcF30bF6648B0e6401B",
+          "stakeBase": "3489721507603273172"
+        },
+        {
+          "address": "0x02c39cC9dc7b63Ab6fdAC41F905dCD5113cf01B0",
+          "stakeBase": "49142381294964784318"
+        },
+        {
+          "address": "0x1F70AB7A96554F0cc1F6a4c57f2b244E8cBA2f92",
+          "stakeBase": "1136527699101710"
+        },
+        {
+          "address": "0xD44976676b7928c3430bB3D68c4a909ff6d7856B",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xb43C5279E3B5322d8cBFB617Be310c37870Bb8Cb",
+          "stakeBase": "42438887356864931655"
+        },
+        {
+          "address": "0x1BA0bf73d8849d7e8aAa63Ba18A3dF551369F30F",
+          "stakeBase": "7356733733028262412"
+        },
+        {
+          "address": "0xe304666CBbF6f836Fb97F235999b17352b74Cac7",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x15fB23A126174348E4ff03F217530bC01c681891",
+          "stakeBase": "742746366785254887232"
+        },
+        {
+          "address": "0xD4d80c5889b8863811A06163ed065241F298b95a",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x38df5EaB959095F4589686f4D725c7d0a7ba8F75",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xcF3F1e9D688283C105CF8301EEcd905B23E9E807",
+          "stakeBase": "23217893488989601732"
+        },
+        {
+          "address": "0x3e23706eba2703a61694460E3B6a845758AEC896",
+          "stakeBase": "461320287271"
+        },
+        {
+          "address": "0xcc67a8a17de696DCbE6660b6b1891a33Ed7B3EE6",
+          "stakeBase": "155265591832108321822"
+        },
+        {
+          "address": "0xA74A7a2e0E3BCF29eB320FEB1848eA16eCe838F0",
+          "stakeBase": "3027452639837662160"
+        },
+        {
+          "address": "0x38f7f812B7b08DE4aDd709c98A4891F08ddD5666",
+          "stakeBase": "22742329799529630794589"
+        },
+        {
+          "address": "0xf70A6BEf1918334bAd085E09f50237E10A45B220",
+          "stakeBase": "540618493467706596"
+        },
+        {
+          "address": "0x2799ee83D02761B7881aaa174d1c73163e1764C3",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x34DB6BbBC86BfB7c875bD72E4D2F075e9f9795c9",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xd571113086368254787902e2a0d8Fd9122e0a1CD",
+          "stakeBase": "3297793868526531699431"
+        },
+        {
+          "address": "0xAb7e112FCDAF26baAC2CaB135c9655F748318cc5",
+          "stakeBase": "1016192149689"
+        },
+        {
+          "address": "0x786f1684c52F2797E16838e4030d37e558A11c08",
+          "stakeBase": "425801004255516233091"
+        },
+        {
+          "address": "0x3902F114088AC61B054EE5904c390183aBACb2b1",
+          "stakeBase": "16682749290078"
+        },
+        {
+          "address": "0x3e7aa069b179ceb803d2c63B32532d8936545Caa",
+          "stakeBase": "533119132324919442"
+        },
+        {
+          "address": "0x37D0Ab7f87c6790a53f6ac8Ab3950BC6f77Bb9Bd",
+          "stakeBase": "3051686298383560620969"
+        },
+        {
+          "address": "0x3F0C43a28e2fF930D194A42B97dFe2AE06C5F5Ec",
+          "stakeBase": "4891840017776874"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "16277432177339114548007"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "551227225696771696"
+        },
+        {
+          "address": "0x23852ad4213645013E5b073738A8514F88ecf5bE",
+          "stakeBase": "9887716104"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "406000052772814516"
+        },
+        {
+          "address": "0x1EFf243Cc9f239E69Df647a2D2be0B536C3B42a0",
+          "stakeBase": "918363894195"
+        },
+        {
+          "address": "0xbE2488EE9c4B4F5b357b511b70BBE2fbac321DaD",
+          "stakeBase": "5678826507192405938042"
+        },
+        {
+          "address": "0x399f26e0A3D9E223c7437c6AaBDABc57b5A838cB",
+          "stakeBase": "5305331191323249194723"
+        },
+        {
+          "address": "0x8757406c293Bdf16A19aa3f97e7D4139797d4cCB",
+          "stakeBase": "11510865389557086"
+        },
+        {
+          "address": "0x9D41ecceDD6911C60c523D528a326f0DC2b59F4e",
+          "stakeBase": "20038458742419558886368"
+        },
+        {
+          "address": "0xA4B5C7a000416f587649c1Dd43205BAB4873bcd2",
+          "stakeBase": "90621003586831785829"
+        },
+        {
+          "address": "0x043B223fd4804Ca5F9151C1d44250BB7799287aC",
+          "stakeBase": "8112921711227017181"
+        },
+        {
+          "address": "0x0e54b1913426aD5588DD9363eCf80ABd288A4a89",
+          "stakeBase": "23939402144421919"
+        },
+        {
+          "address": "0xF3057792478fDf9F2899af41a6366e767ed89961",
+          "stakeBase": "257917351776345848"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "430616900354580349"
+        },
+        {
+          "address": "0x3008f3C33FeFB6f0FafD749caC0101F326A7cfb3",
+          "stakeBase": "11654016928073787410"
+        },
+        {
+          "address": "0x3af16178664DD4b2500C9D02c53347e86B3e7873",
+          "stakeBase": "14780231974432638117"
+        }
+      ]
+    },
+    {
+      "identityId": 38,
+      "stake": "11827269047154366675535",
+      "delegators": [
+        {
+          "address": "0x102547bd0075f7228f351452F762be6047356814",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x31637faCEfbb72bA93679e282378148d18bd4276",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xEa58F70F78302aE7E43a13E0617b66fbB49C15D7",
+          "stakeBase": "17395557588690133052"
+        },
+        {
+          "address": "0x2549393a45A63dc08Ecf6CB2C76710DcFC6832fD",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x984e58e26985a24ecF7B424281A230B26dC81dD5",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x14D761b2c84d99c2b9f8aF3206dd8D764ed89D81",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x61e8cA6805D0deC29e156Ab57042Fa3A11a06187",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x1f26633a2dE2DBd66950f5F821781EE852e7A04d",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x436fF2346040Bb4645E606975e72D5B11e86Af8F",
+          "stakeBase": "2087197809"
+        },
+        {
+          "address": "0xF75947aa09b03074491bF5bd2645927A3117ed12",
+          "stakeBase": "473924956676856551299"
+        },
+        {
+          "address": "0x1eDb87F1510622845B12853d11C7dFAAF14494E8",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x38df5EaB959095F4589686f4D725c7d0a7ba8F75",
+          "stakeBase": "1930050095765900403"
+        },
+        {
+          "address": "0x00Bc1ACBf18De6B09Cc7a78d20a0e22A63Bcc494",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xc37F44186703a322AAf77e8c7Abf5d96d0446e1E",
+          "stakeBase": "11211198362216859736664"
+        },
+        {
+          "address": "0x1BA0bf73d8849d7e8aAa63Ba18A3dF551369F30F",
+          "stakeBase": "3148487195240081742"
+        },
+        {
+          "address": "0xcc67a8a17de696DCbE6660b6b1891a33Ed7B3EE6",
+          "stakeBase": "51623595991776081378"
+        },
+        {
+          "address": "0x94def13CFB8BAf13c62d18b14E402616A25AD444",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x77DAe4BcB3bfE1458AB0e2E92C3667433C6f67F5",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xAB543DfFa0E9EB2F8ED3A46aF9e9923fA4B168A1",
+          "stakeBase": "62352947980332079816"
+        },
+        {
+          "address": "0x127167D035Fad457Dedc0A3FcF3de08339D146F1",
+          "stakeBase": "1933741356287645870"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "3383727769822061"
+        },
+        {
+          "address": "0x4Ba594b6648D1f105F37A71dd3C57117110150A4",
+          "stakeBase": "3106199152639713599"
+        },
+        {
+          "address": "0x24393a7E6b782762567D97e3800601eB7f8E80a5",
+          "stakeBase": "651765170061731816"
+        },
+        {
+          "address": "0x10C7aaFb769BeC2Db2a872D9019d2C70F85a618c",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xAb9Ff3b61c1fbC40D1ac6610b3b1093805165fb9",
+          "stakeBase": "1"
+        }
+      ]
+    },
+    {
+      "identityId": 39,
+      "stake": "2419243349789639179744",
+      "delegators": [
+        {
+          "address": "0x6447B9B40536436b42424A984876d7e3B858F8f7",
+          "stakeBase": "1000000000000000000"
+        },
+        {
+          "address": "0x96b915F7f8E2111A8a2123f5d0eF6DCcC74e9069",
+          "stakeBase": "706257413207"
+        },
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "524579702836"
+        },
+        {
+          "address": "0x34446D2b12bCb468403386Be511EA857e41d5C04",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x5a1DA3E17B415D912cC34D92f9ce275eac1b5cc6",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x1a4B7b5E62b4b2db338B6Cb4Bea4E34e37fb3573",
+          "stakeBase": "100218031897667979"
+        },
+        {
+          "address": "0x61e8cA6805D0deC29e156Ab57042Fa3A11a06187",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x2C3d48240CA1f544fF71ab11F0ba80Da277C539f",
+          "stakeBase": "47860000000000000000"
+        },
+        {
+          "address": "0x7bA439cb6043f603EB7fDaD70f873b566690cF07",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0x930Ad55a9330b53D14001Ab0cBe017dA83D1D331",
+          "stakeBase": "745353230150153126760"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "20052570392450147"
+        },
+        {
+          "address": "0x990a26caf47319ab09f8A11D79e1B3B5e67731bB",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xE75DB83E99b88Fe621620aD51137a959c8f43F6D",
+          "stakeBase": "179113253059"
+        },
+        {
+          "address": "0x3e23706eba2703a61694460E3B6a845758AEC896",
+          "stakeBase": "507131119129"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "40196153978801397"
+        },
+        {
+          "address": "0x8CEA81b7F23a0F56Cd98A76cc9a82F2970bA1f7e",
+          "stakeBase": "1"
+        },
+        {
+          "address": "0xa63c0a4FE845E2A755b197953b193B56eDe0b75a",
+          "stakeBase": "49999999999999999999"
+        },
+        {
+          "address": "0xe390C583024720A3cf610eD6fbeCb0f8A9E53C1E",
+          "stakeBase": "1574869627290662866566"
+        },
+        {
+          "address": "0xb4208E12c77788d4f51e8204A2408A9469FE89c4",
+          "stakeBase": "125823191349"
+        },
+        {
+          "address": "0x6B06Fb68bff1BAA72F668c2705EFADb888269374",
+          "stakeBase": "346579014401"
+        },
+        {
+          "address": "0xfA24290d3DaE3170bD4Fc2Ca5E3698Af9e1986e6",
+          "stakeBase": "22535655595647"
+        },
+        {
+          "address": "0x4f1Bc75be790B26341eaeF70f788FD3A94474E2f",
+          "stakeBase": "667414977250"
+        }
+      ]
+    },
+    {
+      "identityId": 40,
+      "stake": "1000000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "1000000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 43,
+      "stake": "3300000000000000000",
+      "delegators": [
+        {
+          "address": "0x3Ea854e9F4b28F3A48634ad4cd60e3Ae014a0F9e",
+          "stakeBase": "3000000000000000000"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "300000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 44,
+      "stake": "14912051948428963105",
+      "delegators": [
+        {
+          "address": "0xfe8c1e0D733815Bdd889144ea721a39b44fdA866",
+          "stakeBase": "14912051948428963104"
+        }
+      ]
+    },
+    {
+      "identityId": 47,
+      "stake": "100000000000000000",
+      "delegators": [
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "100000000000000000"
+        }
+      ]
+    },
+    {
+      "identityId": 48,
+      "stake": "1585314288005479511474515",
+      "delegators": [
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "1045996817308779588577647"
+        },
+        {
+          "address": "0x7232Af3552C83E646E4A43368CCDe98c4433533f",
+          "stakeBase": "423797695635345477"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "538609981546426851017704"
+        },
+        {
+          "address": "0x58214ca260a6344C0CA8F465CD33Cd516fe5A3F7",
+          "stakeBase": "0"
+        },
+        {
+          "address": "0x38df5EaB959095F4589686f4D725c7d0a7ba8F75",
+          "stakeBase": "95462173461388974197"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "598844365391796854912"
+        },
+        {
+          "address": "0xaDB1a76cdAc5F9440DCaB127f99af52ab4b996Af",
+          "stakeBase": "12758813724250704577"
+        }
+      ]
+    },
+    {
+      "identityId": 49,
+      "stake": "955794571064237450208331",
+      "delegators": [
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "4776054633833320753"
+        },
+        {
+          "address": "0x712Ee4a3b10f4598e00D0F85B88D827d493d0940",
+          "stakeBase": "3585519488921"
+        },
+        {
+          "address": "0x6c4b96cfCE013C8d63DA25f7227CbBb350fEB6E3",
+          "stakeBase": "161325686679523869235"
+        },
+        {
+          "address": "0x1473FCeaAb73108F17463a75A62d16eB77edEe95",
+          "stakeBase": "26267261070488658352930"
+        },
+        {
+          "address": "0xEa58F70F78302aE7E43a13E0617b66fbB49C15D7",
+          "stakeBase": "11524445576012088244"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "882548552194999499666371"
+        },
+        {
+          "address": "0x54e8E41B7620A49b2451634D9fd56650f0835Bb6",
+          "stakeBase": "37381476362682357663927"
+        },
+        {
+          "address": "0xcd97C87a7cf6B7292EcaEbf2180eAB7Cc168a77e",
+          "stakeBase": "118809356636970246"
+        },
+        {
+          "address": "0x00A3DC81B16A5c508C7BCCA64F17B59A25420e7D",
+          "stakeBase": "39340773020553387285"
+        },
+        {
+          "address": "0xA74A7a2e0E3BCF29eB320FEB1848eA16eCe838F0",
+          "stakeBase": "1005330046322466794"
+        },
+        {
+          "address": "0xa8a809c5B9681617da775E6E16a6eae1792AfB42",
+          "stakeBase": "2493000953234701"
+        },
+        {
+          "address": "0xe304666CBbF6f836Fb97F235999b17352b74Cac7",
+          "stakeBase": "8724801246411033145366"
+        },
+        {
+          "address": "0x2e1b1e1E91318Ea5a6A122b4F5bf07c562C59301",
+          "stakeBase": "654386593756546553556"
+        }
+      ]
+    },
+    {
+      "identityId": 50,
+      "stake": "784172180417540511493327",
+      "delegators": [
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "782460912428897898098221"
+        },
+        {
+          "address": "0x02CC95B317FfFf75878A8508885aE4842c6d2694",
+          "stakeBase": "1711267988642613395105"
+        }
+      ]
+    },
+    {
+      "identityId": 51,
+      "stake": "5056066199049336416270066",
+      "delegators": [
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "2154518565021492552933492"
+        },
+        {
+          "address": "0xdC5387E655781d2C83067169E3cf395D8202F4d4",
+          "stakeBase": "26729268224737809504"
+        },
+        {
+          "address": "0x3f203b41906C0d099Dc82b7C71aDc27De4323001",
+          "stakeBase": "32305329321295319767"
+        },
+        {
+          "address": "0x02CC95B317FfFf75878A8508885aE4842c6d2694",
+          "stakeBase": "1072757168034846967165120"
+        },
+        {
+          "address": "0x5CD5A90c589e7bf5c939704CE7e36653bc92679f",
+          "stakeBase": "1826387418887171623583634"
+        },
+        {
+          "address": "0x599C59081d9B673BBDdAfbc933B669aA84eA3eE1",
+          "stakeBase": "2344012508279239458549"
+        }
+      ]
+    },
+    {
+      "identityId": 52,
+      "stake": "1058671434914585151282107",
+      "delegators": [
+        {
+          "address": "0x874d218e6d28534D7aF5Ff97674BE65EDa375b18",
+          "stakeBase": "159901650539456282565931"
+        },
+        {
+          "address": "0x0E62bDC912A42367AE317ffD35C1b647c739C422",
+          "stakeBase": "897165520736745346469400"
+        },
+        {
+          "address": "0x42d9c67a77773FAde2B14Fb4Aec95FBCE61E23eE",
+          "stakeBase": "2974170700033886804"
+        },
+        {
+          "address": "0xB31fB8F1629fd1523bBd4f0AEf474bEce3e3453E",
+          "stakeBase": "204674112690503877"
+        },
+        {
+          "address": "0x02CC95B317FfFf75878A8508885aE4842c6d2694",
+          "stakeBase": "1601058194913604151475"
+        },
+        {
+          "address": "0x24393a7E6b782762567D97e3800601eB7f8E80a5",
+          "stakeBase": "1384342799748112"
+        },
+        {
+          "address": "0x95bf08839Ca5fA3d41f66719d5582293DeF70454",
+          "stakeBase": "25214314393956504"
+        }
+      ]
+    },
+    {
+      "identityId": 56,
+      "stake": "499999999999999999999",
+      "delegators": [
+        {
+          "address": "0x23a881E335A116e8edf04AD2c254ED10Ce489ABF",
+          "stakeBase": "499999999999999999999"
+        }
+      ]
+    },
+    {
+      "identityId": 61,
+      "stake": "428412314687988952854321",
+      "delegators": [
+        {
+          "address": "0x6Cf9518911F98Be2f9B655EFCECCB4e988a33935",
+          "stakeBase": "1589839415618283327034"
+        },
+        {
+          "address": "0xB5c6E62ED49FA55c25910167ba7650084Cf9a47e",
+          "stakeBase": "166216944506640238471762"
+        },
+        {
+          "address": "0x2B2616a7f474554Ac4DAc7b23d020b02525ab6BB",
+          "stakeBase": "2668879633140216554781"
+        },
+        {
+          "address": "0xCe45174e0FaFAE449652B24719f664eAF3B4677d",
+          "stakeBase": "52556750137377101386310"
+        },
+        {
+          "address": "0x7556E6208491Aa331026dd781AdE541cABBFA176",
+          "stakeBase": "25000000000000000000000"
+        },
+        {
+          "address": "0xF31e8CA84382Bf02D4367905B6Fb536bEb08E11D",
+          "stakeBase": "60000000000000000000000"
+        },
+        {
+          "address": "0x00Bc1ACBf18De6B09Cc7a78d20a0e22A63Bcc494",
+          "stakeBase": "120379900995213113114434"
+        }
+      ]
+    }
+  ]
+}

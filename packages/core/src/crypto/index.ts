@@ -8,8 +8,129 @@ export {
 
 export { sha256 } from './hashing.js';
 
-export { MerkleTree } from './merkle.js';
+export { keccak256, keccak256Hex } from './keccak.js';
 
-export { canonicalize, hashTriple } from './canonicalize.js';
+export { MerkleTree, compareBytes } from './merkle.js';
+
+export {
+  V10MerkleTree,
+  computeCatalogRoot,
+  SENTINEL_NO_PRIVATE_V10,
+  SENTINEL_NO_PUBLIC_V10,
+  collapsePrivateDataHashV10,
+  structuredKARootV10,
+  type CatalogTriple,
+  type CatalogRootResult,
+  type StructuredKARootResult,
+} from './v10-merkle.js';
+
+export {
+  V10CiphertextChunksMerkleTree,
+  buildCiphertextChunksRoot,
+  type CiphertextChunksCommitment,
+} from './v10-ciphertext-merkle.js';
+
+export {
+  buildV10ProofMaterial,
+  buildV10CatalogProofMaterial,
+  buildV10CiphertextChunksProofMaterial,
+  verifyV10ProofMaterial,
+  V10ProofRootMismatchError,
+  V10ProofLeafCountMismatchError,
+  V10ProofChunkOutOfRangeError,
+  type V10ProofMaterial,
+  type V10MerkleCommitment,
+} from './proof-material.js';
+
+export {
+  canonicalize,
+  canonicalBlankNodeIdMap,
+  hashTriple,
+  hashTripleV10,
+  tripleContentV10,
+} from './canonicalize.js';
+export { canonicalizeObjectTermForHash } from './term-canon.js';
 
 export { hexToBytes } from './oracle-verify.js';
+
+export {
+  computeACKDigest,
+  computePublishACKDigest,
+  computeUpdateACKDigest,
+  computePublishPublisherDigest,
+  floorPublishTokenAmount,
+  buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
+  AUTHOR_ATTESTATION_DOMAIN_NAME,
+  AUTHOR_ATTESTATION_DOMAIN_VERSION,
+  AUTHOR_ATTESTATION_PRIMARY_TYPE,
+  UPDATE_AUTHOR_ATTESTATION_PRIMARY_TYPE,
+  AUTHOR_SCHEME_VERSION_V1,
+  type AuthorAttestationTypedData,
+  eip191Hash,
+  uint256ToBytes,
+} from './ack.js';
+
+export {
+  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_PROOF_DOMAIN,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_REVOCATION_DOMAIN,
+  WORKSPACE_ENCRYPTION_KEY_BYTES,
+  WORKSPACE_X25519_KEY_BYTES,
+  WORKSPACE_ENCRYPTION_NONCE_BYTES,
+  generateWorkspaceRecipientEncryptionKey,
+  encryptWorkspacePayload,
+  decryptWorkspacePayload,
+  assertSupportedEncryptedWorkspaceEnvelope,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  computeWorkspaceAgentEncryptionKeyRevocationPayload,
+  workspaceAgentEncryptionKeyId,
+  encodeWorkspaceEncryptionKey,
+  decodeWorkspaceEncryptionKey,
+  type WorkspaceRecipientEncryptionKey,
+  type EncryptWorkspacePayloadInput,
+  type DecryptedWorkspacePayload,
+  type WorkspaceAgentEncryptionKeyProofFields,
+  type WorkspaceAgentEncryptionKeyRevocationFields,
+} from './workspace-encryption.js';
+
+export {
+  SWM_SENDER_KEY_CHAIN_KEY_BYTES,
+  SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  generateSwmSenderChainKey,
+  generateSwmSenderEpochId,
+  computeSwmSenderKeyMembershipHash,
+  encryptSwmSenderKeyPackage,
+  decryptSwmSenderKeyPackage,
+  encryptSwmSenderKeyMessage,
+  decryptSwmSenderKeyMessage,
+  ratchetSwmSenderChainKey,
+  assertSupportedSwmSenderKeyPackage,
+  assertSupportedSwmSenderKeyMessage,
+  type SwmSenderKeyMembershipMember,
+  type ComputeSwmSenderKeyMembershipHashInput,
+  type EncryptSwmSenderKeyPackageInput,
+  type DecryptSwmSenderKeyPackageInput,
+  type EncryptSwmSenderKeyMessageInput,
+  type DecryptSwmSenderKeyMessageInput,
+  type SwmSenderKeyMessageCryptResult,
+} from './swm-sender-key.js';
+
+export {
+  encryptV10PublishPayload,
+  decryptV10PublishPayload,
+  isEncryptedV10PublishPayload,
+  encryptChunked,
+  decryptChunked,
+  deriveChunkNonce,
+  V10_PUBLISH_PAYLOAD_MAGIC,
+  type EncryptV10PublishPayloadInput,
+  type DecryptV10PublishPayloadInput,
+  type EncryptChunkedInput,
+  type EncryptChunkedResult,
+  type DecryptChunkedInput,
+  type DecryptChunkedResult,
+} from './v10-publish-payload.js';
+
+export { resolveRootEntities, type Quad as RootEntityQuad } from './root-entity.js';

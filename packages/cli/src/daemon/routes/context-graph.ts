@@ -1,0 +1,2063 @@
+// daemon/routes/context-graph.ts
+//
+// Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
+//
+// Extracted verbatim from the legacy monolithic `handleRequest` —
+// every block is a contiguous slice of the original source with zero
+// edits to route bodies. Dispatch is driven by the surviving
+// `handle-request.ts` shell, which awaits each group handler in
+// sequence and uses `res.writableEnded` to short-circuit once a
+// route claims the request.
+//
+// See `packages/cli/scripts/split-handle-request.mjs` for the
+// extraction driver.
+
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  appendFile,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { execSync, exec, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join, dirname, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+// Namespace import: our Phase-8 install-context builder (~line 290) calls
+// `osModule.homedir()`, and the later agent-identity probe (~line 6851)
+// uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// below so both sites coexist without a duplicate-module import.
+import * as osModule from 'node:os';
+const { homedir } = osModule;
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { ethers } from 'ethers';
+
+// Lazy resolver used by the manifest-install flow: find the
+// @origintrail-official/dkg-mcp package via Node's own resolution
+// algorithm, so the daemon can write workspace-level configs that
+// point at a valid MCP server install regardless of whether it's
+// running from a monorepo checkout, an npm-global `dkg`, or a
+// `pnpm dlx` tarball.
+const daemonRequire = createRequire(import.meta.url);
+
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  ContextGraphNotFoundError,
+  ContextGraphOnChainIdUnresolvedError,
+  DKGAgent,
+  loadOpWallets,
+  VmReconcileQueueClosedError,
+  VmReconcileQueueFullError,
+  VmReconcileUnavailableError,
+} from '@origintrail-official/dkg-agent';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  DashboardDB,
+  MetricsCollector,
+  OperationTracker,
+  handleNodeUIRequest,
+  ChatMemoryManager,
+  LogPushWorker,
+  LlmClient,
+  type MetricsSource,
+} from "@origintrail-official/dkg-node-ui";
+import {
+  loadConfig,
+  saveConfig,
+  loadNetworkConfig,
+  dkgDir,
+  writePid,
+  removePid,
+  writeApiPort,
+  removeApiPort,
+  logPath,
+  ensureDkgDir,
+  TELEMETRY_ENDPOINTS,
+  type DkgConfig,
+  type AutoUpdateConfig,
+  type LocalAgentIntegrationCapabilities,
+  type LocalAgentIntegrationConfig,
+  type LocalAgentIntegrationManifest,
+  type LocalAgentIntegrationRuntime,
+  type LocalAgentIntegrationStatus,
+  type LocalAgentIntegrationTransport,
+  resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
+  resolveSharedMemoryTtlMs,
+  repoDir,
+  releasesDir,
+  activeSlot,
+  inactiveSlot,
+  swapSlot,
+  gitCommandEnv,
+  gitCommandArgs,
+  isStandaloneInstall,
+  slotEntryPoint,
+  CLI_NPM_PACKAGE,
+} from '../../config.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  catchupResultHasCleanResponse,
+  classifyContextGraphCatchupReadiness,
+  classifyExistingContextGraphReadiness,
+  readContextGraphReadiness,
+  writeContextGraphReadiness,
+} from '../../context-graph-readiness.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
+import {
+  expectedBundledMarkItDownBuildMetadata,
+  readCliPackageVersion,
+  type BundledMarkItDownMetadata,
+} from "../../extraction/markitdown-bundle-metadata.js";
+import {
+  checksumPathFor as markItDownChecksumPath,
+  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
+  metadataPathFor as markItDownMetadataPath,
+} from '../../../scripts/markitdown-bundle-validation.mjs';
+import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
+import { FileStore } from '../../file-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
+// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
+// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
+// format stays identical between curator/joiner/CLI paths.
+import {
+  publishManifest as publishManifestImpl,
+  assembleStandardTemplates,
+} from '@origintrail-official/dkg-mcp/manifest/publish';
+import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
+import {
+  planInstall as planInstallImpl,
+  writeInstall as writeInstallImpl,
+  buildReviewMarkdown as buildReviewMarkdownImpl,
+  type InstallContext,
+} from '@origintrail-official/dkg-mcp/manifest/install';
+import { DkgClient } from '@origintrail-official/dkg-mcp/client';
+
+// Daemon sub-module imports — every public symbol from sibling
+// modules is pulled in here because the legacy monolithic file used
+// them all without explicit imports. Unused ones are tolerated by
+// the project's tsconfig (`noUnusedLocals` is off).
+import {
+  daemonState,
+  DEBUG_SYNC_TRACE,
+  resolveAutoUpdateEnabled,
+  type CorsAllowlist,
+} from '../state.js';
+import {
+  type CatchupJobState,
+  type CatchupJob,
+  type CatchupTracker,
+  toCatchupStatusResponse,
+} from '../types.js';
+import {
+  type MarkItDownTarget,
+  manifestRepoRoot,
+  type McpDkgAssets,
+  resolveMcpDkgAssets,
+  readMcpDkgVersion,
+  parseSemver,
+  cmpSemverForRange,
+  versionSatisfiesRange,
+  manifestNetworkLabel,
+  formatDaemonAuthority,
+  manifestSelfClient,
+  manifestPublisherUri,
+  type SupportedTool,
+  nicknameToSlug,
+  buildManifestInstallContext,
+  _autoUpdateIo,
+  loadMarkItDownTargets,
+  getNodeVersion,
+  getCurrentCommitShort,
+  loadSkillTemplate,
+  buildSkillMd,
+  skillEtag,
+  DAEMON_EXIT_CODE_RESTART,
+  parseRequiredSignatures,
+  normalizeDetectedContentType,
+  currentBundledMarkItDownAssetName,
+  bindingValue,
+  carryForwardBundledMarkItDownBinary,
+} from '../manifest.js';
+import {
+  resolveNameToPeerId,
+  jsonResponse,
+  safeDecodeURIComponent,
+  safeParseJson,
+  validateOptionalSubGraphName,
+  validateRequiredContextGraphId,
+  resolveRequiredWriteContextGraphId,
+  validateEntities,
+  validateConditions,
+  MAX_BODY_BYTES,
+  SMALL_BODY_BYTES,
+  MAX_UPLOAD_BYTES,
+  type ImportFileExtractionPayload,
+  buildImportFileResponse,
+  unregisteredSubGraphError,
+  readBody,
+  readBodyBuffer,
+  buildCorsAllowlist,
+  resolveCorsOrigin,
+  corsHeaders,
+  HttpRateLimiter,
+  isLoopbackClientIp,
+  isLoopbackRateLimitExemptPath,
+  shouldBypassRateLimitForLoopbackTraffic,
+  isValidContextGraphId,
+  shortId,
+  sleep,
+  deriveBlockExplorerUrl,
+  classifyChainRpcTransportStatus,
+} from '../http-utils.js';
+import {
+  normalizeRepo,
+  isValidRepoSpec,
+  repoToFetchUrl,
+  githubRepoForApi,
+  resolveRemoteCommitSha,
+  type PendingUpdateState,
+  type CommitCheckStatus,
+  readPendingUpdateState,
+  clearPendingUpdateState,
+  writePendingUpdateState,
+  type NpmVersionResult,
+  resolveLatestNpmVersion,
+  compareSemver,
+  getCurrentCliVersion,
+  type NpmVersionStatus,
+  checkForNpmVersionUpdate,
+  type UpdateStatus,
+  acquireUpdateLock,
+  releaseUpdateLock,
+  performNpmUpdate,
+} from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
+import {
+  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
+  OPENCLAW_UI_CONNECT_POLL_MS,
+  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+  type PendingOpenClawUiAttachJob,
+  isOpenClawBridgeHealthCacheValid,
+  type OpenClawChannelTarget,
+  trimTrailingSlashes,
+  buildOpenClawGatewayBase,
+  loadBridgeAuthToken,
+  getOpenClawChannelTargets,
+  type OpenClawBridgeHealthState,
+  type OpenClawGatewayHealthState,
+  type OpenClawChannelHealthReport,
+  transportPatchFromOpenClawTarget,
+  probeOpenClawChannelHealth,
+  runOpenClawUiSetup,
+  localOpenclawConfigPath,
+  isOpenClawMemorySlotElected,
+  restartOpenClawGateway,
+  waitForOpenClawChatReady,
+  type OpenClawUiAttachDeps,
+  formatOpenClawUiAttachFailure,
+  scheduleOpenClawUiAttachJob,
+  cancelPendingLocalAgentAttachJob,
+  isOpenClawUiAttachCancelled,
+  shouldTryNextOpenClawTarget,
+  buildOpenClawChannelHeaders,
+  ensureOpenClawBridgeAvailable,
+  type OpenClawStreamRequest,
+  type OpenClawStreamResponse,
+  type OpenClawStreamReader,
+  writeOpenClawStreamChunk,
+  pipeOpenClawStream,
+  isValidOpenClawPersistTurnPayload,
+  type OpenClawAttachmentRef,
+  normalizeOpenClawAttachmentRef,
+  normalizeOpenClawAttachmentRefs,
+  type OpenClawChatContextEntry,
+  normalizeOpenClawChatContextEntry,
+  normalizeOpenClawChatContextEntries,
+  hasOpenClawChatTurnContent,
+  unescapeOpenClawAttachmentLiteralBody,
+  stripOpenClawAttachmentLiteral,
+  parseOpenClawAttachmentTripleCount,
+  isOpenClawAttachmentAssertionUriForContextGraph,
+  extractionRecordMatchesOpenClawAttachmentRef,
+  verifyOpenClawAttachmentRefsProvenance,
+} from '../openclaw.js';
+import {
+  type LocalAgentIntegrationDefinition,
+  type LocalAgentIntegrationRecord,
+  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
+  isPlainRecord,
+  normalizeIntegrationId,
+  normalizeLocalAgentTransport,
+  normalizeLocalAgentCapabilities,
+  normalizeLocalAgentManifest,
+  normalizeLocalAgentRuntime,
+  isLocalAgentExplicitlyUserDisabled,
+  isExplicitLocalAgentDisconnectPatch,
+  normalizeExplicitLocalAgentDisconnectBody,
+  mergeLocalAgentIntegrationConfig,
+  getStoredLocalAgentIntegrations,
+  computeLocalAgentIntegrationStatus,
+  buildLocalAgentIntegrationRecord,
+  listLocalAgentIntegrations,
+  getLocalAgentIntegration,
+  pruneLegacyOpenClawConfig,
+  extractLocalAgentIntegrationPatch,
+  connectLocalAgentIntegration,
+  updateLocalAgentIntegration,
+  hasConfiguredLocalAgentChat,
+  hasStoredLocalAgentTransportConfig,
+  connectLocalAgentIntegrationFromUi,
+  type ReverseLocalAgentSetupDeps,
+  reverseLocalAgentSetupForUi,
+  refreshLocalAgentIntegrationFromUi,
+} from '../local-agents.js';
+
+import type { RequestContext } from './context.js';
+
+/**
+ * Map a `registerContextGraph` failure to an HTTP status +
+ * stable error body. Shared by:
+ *   - POST /api/context-graph/register (standalone register call).
+ *   - POST /api/context-graph/create { register: true, pcaAccountId }
+ *     (atomic combined-flow inline register leg).
+ *
+ * Codex PR #502 round-8: the combined-flow register failure used to
+ * always return HTTP 200 with `registered: false`, which silently
+ * masks PCA / authz / shape errors as success unless callers
+ * remember to inspect the response body. Both endpoints now share
+ * the same 4xx / 5xx mapping for caller-input / unsupported-feature
+ * failures; only genuinely transient chain failures keep the
+ * 200-partial-success shape via `genericFallbackStatus = 200`.
+ *
+ * Returns `undefined` when no specific mapping applies — callers
+ * decide whether that means generic 500 (standalone /register
+ * shape) or a 200-partial-success body (combined flow's transient
+ * fallback).
+ */
+function classifyRegisterContextGraphError(err: unknown): { status: number; body?: Record<string, unknown> } | undefined {
+  // Transport-level RPC failures (all endpoints exhausted / receipt lookup
+  // failed / receipt-wait timeout) map to a retryable status via the shared,
+  // code-keyed helper — identical mapping across every chain-write route.
+  const transport = classifyChainRpcTransportStatus(err);
+  if (transport) return transport;
+  const msg = typeof err === 'string'
+    ? err
+    : err && typeof err === 'object' && 'message' in err
+      ? String((err as { message?: unknown }).message ?? '')
+      : '';
+  if (isPcaUnavailableError(err) || /DKGPublishingConvictionNFT (?:is )?not deployed on this Hub/i.test(msg)) {
+    return { status: 503, body: { error: msg || 'PCA support is unavailable on this network.' } };
+  }
+  if (msg.includes('already registered')) return { status: 409, body: { error: msg } };
+  if (msg.includes('does not exist')) return { status: 404, body: { error: msg } };
+  if (msg.includes('no known creator')) return { status: 503, body: { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' } };
+  if (msg.includes('Only the context graph creator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('Only the context graph curator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('address-scoped curator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('PCA account id can only be used with curated publish policy')
+    || msg.includes('PCA account id can only be used with curated/private context graphs')) {
+    return { status: 400, body: { error: msg } };
+  }
+  if (msg.includes('PCA account id must be a positive integer')) return { status: 400, body: { error: msg } };
+  if (msg.includes('requires chain adapter PCA owner lookup support')) return { status: 501, body: { error: msg } };
+  if (msg.includes('requires chain adapter PCA agent lookup support')) return { status: 501, body: { error: msg } };
+  if (/PCA account \d+ does not exist or cannot be looked up/.test(msg)) return { status: 404, body: { error: msg } };
+  if (/PCA account \d+ is owned by/.test(msg)) return { status: 403, body: { error: msg } };
+  // PCA signer authorization and local/on-chain ownership alignment.
+  if (msg.includes('is not a registered agent of PCA account')) return { status: 403, body: { error: msg } };
+  if (msg.includes('local curator') && msg.includes('differs from registration chain signer')) {
+    return { status: 403, body: { error: msg } };
+  }
+  // Compatibility with pre-#1366 owner-only agent errors.
+  if (msg.includes('chain signer') && msg.includes('differs from PCA owner')) return { status: 403, body: { error: msg } };
+  if (msg.includes('does not expose its registration-tx signer')
+    || msg.includes('invariant cannot be verified')
+    || msg.includes('owner/agent authorization cannot be verified')) {
+    return { status: 501, body: { error: msg } };
+  }
+  return undefined;
+}
+
+function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: bigint; error?: string } {
+  const raw = body.pcaAccountId;
+  if (raw === undefined || raw === null || raw === '') return {};
+  if (typeof raw === 'number') {
+    if (!Number.isSafeInteger(raw) || raw <= 0) {
+      return { error: 'pcaAccountId must be a positive safe integer' };
+    }
+    return { value: BigInt(raw) };
+  }
+  if (typeof raw === 'string') {
+    if (!/^[1-9]\d*$/.test(raw)) {
+      return { error: 'pcaAccountId must be a positive decimal integer string' };
+    }
+    return { value: BigInt(raw) };
+  }
+  return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
+}
+
+function respondReconcileError(res: ServerResponse, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ContextGraphNotFoundError) {
+    return jsonResponse(res, 404, { error: message });
+  }
+  if (err instanceof ContextGraphOnChainIdUnresolvedError) {
+    return jsonResponse(res, 409, { error: message });
+  }
+  if (err instanceof VmReconcileQueueFullError) {
+    return jsonResponse(res, 429, { error: message });
+  }
+  if (err instanceof VmReconcileQueueClosedError || err instanceof VmReconcileUnavailableError) {
+    return jsonResponse(res, 503, { error: message });
+  }
+  return jsonResponse(res, 500, { error: message });
+}
+
+async function handleReconcileContextGraphRoute(
+  ctx: Pick<RequestContext, 'req' | 'res' | 'agent'>,
+  isNodeAdminCaller: boolean,
+): Promise<void> {
+  const { req, res, agent } = ctx;
+  if (!isNodeAdminCaller) {
+    return jsonResponse(res, 403, {
+      error: 'POST /api/context-graph/reconcile requires a node-level admin token',
+    });
+  }
+
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body || '{}') as Record<string, unknown>;
+  } catch {
+    return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+  }
+  const contextGraphId = parsed.contextGraphId ?? parsed.id;
+  if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
+    return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+  }
+  try {
+    const result = await agent.runVmReconcileForCg(contextGraphId, 'manual');
+    return jsonResponse(res, 200, result);
+  } catch (err) {
+    return respondReconcileError(res, err);
+  }
+}
+
+export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
+  const {
+    req,
+    res,
+    agent,
+    publisherControl,
+    config,
+    startedAt,
+    dashDb,
+    opWallets,
+    network,
+    tracker,
+    memoryManager,
+    bridgeAuthToken,
+    nodeVersion,
+    nodeCommit,
+    catchupTracker,
+    extractionRegistry,
+    fileStore,
+    extractionStatus,
+    assertionImportLocks,
+    vectorStore,
+    embeddingProvider,
+    validTokens,
+    apiHost,
+    apiPortRef,
+    url,
+    path,
+    requestToken,
+    requestAgentAddress,
+    emitMemoryGraphChanged,
+  } = ctx;
+  // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
+  // require a node-level admin token — a recognised token (in validTokens) that
+  // resolves to no agent (agent-scoped tokens resolve to an address; a
+  // missing/unrecognised token isn't in validTokens). When auth is DISABLED the
+  // daemon runs admin maintenance routes tokenless (trusted local), so don't 403.
+  const authEnabled = config.auth?.enabled !== false;
+  const isNodeAdminCaller = (): boolean =>
+    !authEnabled ||
+    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
+  const writePreflightCallerAgentAddress = requestToken
+    ? agent.resolveAgentByToken(requestToken)
+    : undefined;
+  const writePreflightContextGraphOpts = {
+    callerAgentAddress: writePreflightCallerAgentAddress,
+    allowLocalExactFallback: !writePreflightCallerAgentAddress,
+  };
+
+
+  // POST /api/context-graph/create — context graph definition create.
+  // SPEC_CG_MEMORY_MODEL / Codex PR #595 round-4: per-CG hosting
+  // committees and per-CG quorum overrides were removed end-to-end.
+  // The on-chain contract no longer accepts those args, so silently
+  // stripping `participantIdentityIds` / `requiredSignatures` from the
+  // request body would let callers believe they created an M-of-N /
+  // roster-constrained CG when those constraints were actually
+  // discarded. We reject any body that still carries either field with
+  // a structured 400 + machine-readable `code`, forcing callers to
+  // migrate. The on-chain semantics those fields requested no longer
+  // exist; there is no faithful translation.
+  if (req.method === "POST" && path === "/api/context-graph/create") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    if (parsed.participantIdentityIds !== undefined || parsed.requiredSignatures !== undefined) {
+      return jsonResponse(res, 400, {
+        error:
+          '`participantIdentityIds` and `requiredSignatures` were removed in SPEC_CG_MEMORY_MODEL. Per-CG hosting committees and per-CG quorum overrides no longer exist on-chain — every CG uses the system-wide ACK quorum (parametersStorage.minimumRequiredSignatures()) and the network sharding table for hosting. Remove these fields from the request body and use `{ id, name, accessPolicy?, publishPolicy?, allowedAgents? }` instead.',
+        code: 'DEPRECATED_CONTEXT_GRAPH_FIELDS',
+        deprecatedFields: [
+          ...(parsed.participantIdentityIds !== undefined ? ['participantIdentityIds'] : []),
+          ...(parsed.requiredSignatures !== undefined ? ['requiredSignatures'] : []),
+        ],
+      });
+    }
+    // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
+    // #1102: accept `contextGraphId` as an alias for `id` — sibling routes
+    // (subscribe/unsubscribe) use `contextGraphId`, and the mixed naming was
+    // a recurring caller trap.
+    const { name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
+    const id = parsed.id ?? parsed.contextGraphId;
+    if (!id || !name)
+      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+    if (!isValidContextGraphId(id))
+      return jsonResponse(res, 400, { error: "Invalid context graph id" });
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    // publishPolicy override is forwarded to `registerContextGraph` in
+    // the combined-flow path (Codex PR #502 round-10) — validate the
+    // shape the same way /api/context-graph/register does so callers
+    // get an actionable 400 instead of a 500 from the agent layer.
+    if (publishPolicy !== undefined && publishPolicy !== 0 && publishPolicy !== 1) {
+      return jsonResponse(res, 400, { error: '"publishPolicy" must be 0 (curated) or 1 (open)' });
+    }
+    // pcaAccountId is a curated-publish signal: reject ONLY the
+    // explicit `publishPolicy: 1 (open)` combo at the API boundary
+    // instead of letting it surface as a 500 from the agent.
+    //
+    // Note: we deliberately do NOT reject `accessPolicy: 0 (public)`
+    // alongside pcaAccountId — the on-chain
+    // `ContextGraphs.createContextGraph` contract supports
+    // `{ accessPolicy: 0, publishPolicy: 0, pcaAccountId: !=0 }`
+    // (publicly-discoverable CG where only PCA-authorized publishers
+    // can write). Rejecting it here would block a valid registration
+    // mode (Codex PR #502 round-7).
+    if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
+      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid with curated publish policy (publishPolicy=0)' });
+    }
+    // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
+    // pcaAccountId on a create-only request used to be a silent foot-
+    // gun because `createContextGraph()` didn't persist it, so a later
+    // auto-register on first VM publish would silently fall back to
+    // raw EOA-curated. The same was true for `publishPolicy` — the UI
+    // exposes a curated-vs-open radio at create time, but the choice
+    // was lost when registration deferred. Both knobs are now
+    // persisted at create time via `DKG_PUBLISH_POLICY` /
+    // `DKG_PUBLISH_AUTHORITY_ACCOUNT_ID` triples and re-read by
+    // `memory.ts`'s deferred-register call. Codex PR #502 round-5's
+    // safety rationale is preserved end-to-end without forcing
+    // callers into the combined-flow constraint.
+    // Effective accessPolicy for both the create and the (optional)
+    // register-during-create leg below. Priority:
+    //   1. `private: true` is a curated signal that overrides any
+    //      explicit `accessPolicy` (matches the agent's createContextGraph
+    //      treatment of the legacy `private` flag).
+    //   2. Explicit `accessPolicy` wins next.
+    //   3. `pcaAccountId` alone is a curated signal — coerce to 1 so raw
+    //      HTTP/SDK callers don't have to also know to set accessPolicy.
+    //   4. Otherwise leave undefined and let the agent default it.
+    // Codex review #502-2: the register leg used to read raw `accessPolicy`
+    // here, so `{ private: true, accessPolicy: 0, pcaAccountId, register: true }`
+    // created the CG locally and then immediately failed registration as
+    // open-with-PCA. Routing through `inferredAccessPolicy` keeps the
+    // create+register pair consistent.
+    const inferredAccessPolicy = parsed.private === true
+      ? 1
+      : typeof accessPolicy === 'number'
+        ? accessPolicy
+        : parsedPcaAccountId.value !== undefined
+          ? 1
+          : undefined;
+    try {
+      // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
+      // forward both register-time knobs to createContextGraph so the
+      // user's create-time choice survives the deferred-registration
+      // path. Re-supplying them on `/register` still wins (caller
+      // arg > stored), so the two-step flow keeps its override
+      // semantics; the one-step flow keeps its single-call UX.
+      await agent.createContextGraph({
+        id,
+        name,
+        description,
+        allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
+        allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
+        participantAgents: Array.isArray(participantAgents) ? participantAgents : undefined,
+        accessPolicy: inferredAccessPolicy,
+        publishPolicy: typeof publishPolicy === 'number' ? publishPolicy : undefined,
+        publishAuthorityAccountId: parsedPcaAccountId.value,
+        callerAgentAddress: requestAgentAddress,
+        ...(parsed.private === true ? { private: true } : {}),
+      });
+      const createdSubscription = agent.getSubscribedContextGraphs().get(id);
+      try {
+        writeContextGraphReadiness(dashDb, id, {
+          durableVerified: createdSubscription?.synced === true,
+          sharedMemoryVerified: createdSubscription?.sharedMemorySynced === true,
+        });
+      } catch (readinessErr) {
+        process.stderr.write(
+          `[DKG-Daemon] WARN: Context graph "${id}" was created, but readiness provenance could not be persisted: ` +
+          `${readinessErr instanceof Error ? readinessErr.message : String(readinessErr)}\n`,
+        );
+      }
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (
+        msg.includes("already exists") ||
+        msg.includes("duplicate") ||
+        msg.includes("conflict")
+      ) {
+        return jsonResponse(res, 409, { error: msg });
+      }
+      throw err;
+    }
+    // Registration is opt-in: callers that want on-chain registration
+    // pass `register: true`. Otherwise CG stays local-only and can be
+    // registered later via POST /api/context-graph/register.
+    if (register === true) {
+      try {
+        const regResult = await agent.registerContextGraph(id, {
+          callerAgentAddress: requestAgentAddress,
+          accessPolicy: inferredAccessPolicy,
+          publishPolicy: typeof publishPolicy === 'number' ? publishPolicy : undefined,
+          publishAuthorityAccountId: parsedPcaAccountId.value,
+        });
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: true,
+          onChainId: regResult.onChainId,
+        });
+      } catch (regErr: any) {
+        const regMsg = regErr?.message ?? 'unknown error';
+        process.stderr.write(`[DKG-Daemon] WARN: Context graph "${id}" created locally but on-chain registration failed: ${regMsg}\n`);
+        // No rollback of `pcaAccountId` needed: `createContextGraph`
+        // no longer persists it (Codex PR #502 round-3) — callers must
+        // resupply at register time, so a failed register leg simply
+        // leaves the CG with no stored PCA id, which is the correct
+        // "no PCA yet" state.
+        //
+        // We deliberately keep the 200 partial-success shape here even
+        // for "classified" register failures (Codex PR #502 round-9
+        // reversal of round-8). The create leg already succeeded —
+        // the CG exists locally — so returning a hard HTTP error
+        // would break existing callers that rely on
+        // `created: true, registered: false` to retry the register
+        // step without re-running create (or hitting 409). Callers
+        // detect register-leg failures by inspecting `registered`
+        // (`true`/`false`) and `registerError`; the classified
+        // status code from `classifyRegisterContextGraphError` is
+        // surfaced as `registerErrorStatus` so SDK callers can map
+        // it to the same 4xx semantics as the standalone /register
+        // endpoint without changing the HTTP envelope status.
+        const classified = classifyRegisterContextGraphError(regErr);
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: false,
+          registerError: regMsg,
+          ...(classified ? { registerErrorStatus: classified.status } : {}),
+          hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
+        });
+      }
+    }
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+  }
+
+  // POST /api/context-graph/register — on-chain registration (upgrade from free CG)
+  if (req.method === 'POST' && path === '/api/context-graph/register') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { accessPolicy, publishPolicy, strictEoaCuratorMatch } = parsed;
+    // #1102: accept `contextGraphId` as an alias for `id`.
+    const id = parsed.id ?? parsed.contextGraphId;
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId")' });
+    if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      id,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
+      return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
+    }
+    if (publishPolicy !== undefined && (publishPolicy !== 0 && publishPolicy !== 1)) {
+      return jsonResponse(res, 400, { error: '"publishPolicy" must be 0 (curated) or 1 (open)' });
+    }
+    if (strictEoaCuratorMatch !== undefined && typeof strictEoaCuratorMatch !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"strictEoaCuratorMatch" must be a boolean' });
+    }
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    try {
+      // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2):
+      // expose `strictEoaCuratorMatch` opt-in on the public registration
+      // API. Default behaviour is the relaxed "auto-promote chain signer
+      // as on-chain owner" path (single-tenant edge nodes — the mainnet
+      // launch deployment shape — see `registerContextGraph` jsdoc),
+      // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
+      // to require an exact wallet match before registration proceeds.
+      // Effective register-time publishPolicy, resolved inline (like the sibling
+      // PCA routes): an explicit body value wins with no store read; an omitted
+      // policy LAZILY rehydrates the create-time policy from the stored
+      // registration options. Best-effort — a stored-read failure must NOT fail
+      // the registration, so it warns and falls back to the request/default
+      // policy. (The publish auto-register path reads the same store reader
+      // directly and stays FAIL-LOUD: it must never register under the wrong
+      // on-chain policy.) The stored PCA id is not consulted here — pcaAccountId
+      // is explicit-only for /register (validated just below against the
+      // EFFECTIVE policy, which governs on-chain publish authority).
+      let effectivePublishPolicy = publishPolicy;
+      if (publishPolicy === undefined) {
+        try {
+          effectivePublishPolicy = (
+            await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId)
+          ).publishPolicy;
+        } catch (err) {
+          console.warn(
+            `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+          );
+          effectivePublishPolicy = publishPolicy;
+        }
+      }
+      // The pcaAccountId request-validation stays at the route boundary:
+      // pcaAccountId is curated-only, so reject it against the EFFECTIVE
+      // (post-rehydration) policy.
+      if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
+        return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
+      }
+      const result = await agent.registerContextGraph(resolvedContextGraphId, {
+        accessPolicy,
+        publishPolicy: effectivePublishPolicy,
+        callerAgentAddress: requestAgentAddress,
+        publishAuthorityAccountId: parsedPcaAccountId.value,
+        ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),
+      });
+      return jsonResponse(res, 200, {
+        registered: resolvedContextGraphId,
+        onChainId: result.onChainId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
+        hint: 'Context graph registered on-chain. You can now publish SWM to Verifiable Memory.',
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified) {
+        return jsonResponse(res, classified.status, classified.body ?? { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/invite — invite a peer to a context graph
+  if (req.method === 'POST' && path === '/api/context-graph/invite') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, peerId: targetPeerId } = parsed;
+    if (!contextGraphId || !targetPeerId) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "peerId"' });
+    }
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    try {
+      await agent.inviteToContextGraph(resolvedContextGraphId, targetPeerId, requestAgentAddress);
+      return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId: resolvedContextGraphId });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      if (msg.includes('no known creator')) {
+        return jsonResponse(res, 503, { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' });
+      }
+      if (msg.includes('Only the context graph creator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('Invalid peer ID format')) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/sub-graph/create  { contextGraphId, subGraphName }
+  if (req.method === "POST" && path === "/api/sub-graph/create") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!subGraphName)
+      return jsonResponse(res, 400, { error: 'Missing "subGraphName"' });
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    if (typeof subGraphName !== "string")
+      return jsonResponse(res, 400, {
+        error: '"subGraphName" must be a string',
+      });
+    const sgVal = validateSubGraphName(subGraphName);
+    if (!sgVal.valid)
+      return jsonResponse(res, 400, {
+        error: `Invalid "subGraphName": ${sgVal.reason}`,
+      });
+    try {
+      await agent.createSubGraph(resolvedContextGraphId, subGraphName);
+      emitMemoryGraphChanged?.({
+        contextGraphId: resolvedContextGraphId,
+        layers: [],
+        subGraphName,
+        operation: "sub_graph_created",
+        source: "api",
+      });
+      return jsonResponse(res, 200, { created: subGraphName, contextGraphId: resolvedContextGraphId });
+    } catch (err: any) {
+      if (
+        err.message?.includes("already exists") ||
+        err.message?.includes("not found") ||
+        err.message?.includes("Invalid")
+      ) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // GET /api/sub-graph/list?contextGraphId=...
+  // Returns per-sub-graph metadata + entity/triple counts so UIs can render a
+  // SubGraphBar without a second round-trip per sub-graph.
+  if (req.method === "GET" && path === "/api/sub-graph/list") {
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const contextGraphId = qs.get("contextGraphId");
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    try {
+      const registered = await agent.listSubGraphs(contextGraphId!);
+      // One pass enumerates *all* named graphs in the project + their
+      // distinct-subject and triple counts. Sub-graph ownership is inferred
+      // from the named-graph path segment after the context-graph id:
+      //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
+      //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
+      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      const counts = new Map<string, { entityCount: number; tripleCount: number }>();
+      try {
+        const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+        const sparql = `
+          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
+          WHERE {
+            GRAPH ?g { ?s ?p ?o }
+            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
+          }
+          GROUP BY ?g
+        `;
+        const result = await agent.query(sparql, {
+          contextGraphId: contextGraphId!,
+          includeContextGraphPartitions: true,
+        });
+        const parseCount = (v: any) => {
+          if (v === undefined || v === null) return 0;
+          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
+          const m = String(s).match(/^"?(\d+)/);
+          return m ? Number(m[1]) : 0;
+        };
+        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
+          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
+          if (!g || !g.startsWith(prefix)) continue;
+          const tail = g.slice(prefix.length);
+          // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
+          // Only care about the first segment, but skip daemon-internal graphs.
+          const firstSlash = tail.indexOf('/');
+          const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
+          if (!seg || seg.startsWith('_')) continue;
+          const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
+          entry.entityCount += parseCount(row.entities);
+          entry.tripleCount += parseCount(row.triples);
+          counts.set(seg, entry);
+        }
+      } catch {
+        // Counts are best-effort — UI degrades to zeros on query failure.
+      }
+      const items = registered.map((sg) => ({
+        name: sg.name,
+        uri: sg.uri,
+        description: sg.description,
+        createdBy: sg.createdBy,
+        createdAt: sg.createdAt,
+        entityCount: counts.get(sg.name)?.entityCount ?? 0,
+        tripleCount: counts.get(sg.name)?.tripleCount ?? 0,
+      }));
+      return jsonResponse(res, 200, { contextGraphId, subGraphs: items });
+    } catch (err: any) {
+      if (err.message?.includes("not found") || err.message?.includes("Invalid")) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/context-graph/{id}/add-participant
+  const addParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/add-participant$/);
+  if (req.method === "POST" && addParticipantMatch) {
+    const contextGraphId = decodeURIComponent(addParticipantMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const body = await readBody(req);
+    const { agentAddress } = JSON.parse(body);
+    if (!agentAddress || typeof agentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress is required' });
+    }
+    try {
+      await agent.inviteAgentToContextGraph(resolvedContextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, { ok: true, contextGraphId: resolvedContextGraphId, agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/remove-participant
+  const removeParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/remove-participant$/);
+  if (req.method === "POST" && removeParticipantMatch) {
+    const contextGraphId = decodeURIComponent(removeParticipantMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const body = await readBody(req);
+    const { agentAddress } = JSON.parse(body);
+    if (!agentAddress || typeof agentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress is required' });
+    }
+    try {
+      await agent.removeAgentFromContextGraph(resolvedContextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, { ok: true, contextGraphId: resolvedContextGraphId, agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/participants
+  const listParticipantsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/participants$/);
+  if (req.method === "GET" && listParticipantsMatch) {
+    const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
+    try {
+      const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
+      return jsonResponse(res, 200, { contextGraphId, allowedAgents: agents });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/request-join — signed join request from an invitee
+  // If local node is the curator (owns the CG), store locally.
+  // Otherwise, forward via P2P only to the explicit curator from the invite.
+  const requestJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/request-join$/);
+  if (req.method === "POST" && requestJoinMatch) {
+    const contextGraphId = decodeURIComponent(requestJoinMatch[1]);
+    const body = await readBody(req);
+    try {
+      const parsed = JSON.parse(body);
+      const { agentName, curatorPeerId, delegation } = parsed;
+      if (!delegation || !delegation.agentAddress || !delegation.signature) {
+        return jsonResponse(res, 400, {
+          error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
+        });
+      }
+      const isCurator = await agent.isCuratorOf(contextGraphId);
+      if (isCurator) {
+        const decision = await agent.processIncomingJoinRequest(
+          contextGraphId,
+          delegation,
+          agentName,
+          agent.peerId,
+        );
+        return jsonResponse(res, 200, {
+          ok: true,
+          status: decision.alreadyMember ? 'already-member' : decision.status,
+          delivered: 'local',
+          // Legacy requesters only understand `alreadyMember`. Keep it as a
+          // compatibility alias for every completed approval while retaining
+          // the precise current status/autoApproved fields.
+          ...(decision.alreadyMember || decision.status === 'approved'
+            ? { alreadyMember: true }
+            : {}),
+          ...(decision.autoApproved ? { autoApproved: true } : {}),
+        });
+      }
+
+      // V10 invites carry the curator's peer-id (`<cgId>\n<peerId>`).
+      // Without it `forwardJoinRequest` can't authenticate the
+      // returning approval/rejection notification — see that method
+      // for details. Surface the error to the UI so the user sees a
+      // clear "ask curator for an updated invite code" message
+      // instead of a generic 502.
+      if (!curatorPeerId) {
+        return jsonResponse(res, 400, {
+          error: 'Missing curatorPeerId. Invite codes must include the curator peer id (V10 format: "<cgId>\\n<peerId>"). Ask the curator to share an updated invite code.',
+        });
+      }
+      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
+      if (result.delivered === 0) {
+        // Surface per-peer errors so the joiner can see WHY (curator
+        // rejected with a specific reason, transport timed out, etc.)
+        // instead of a generic "no curator". Silent error swallowing here
+        // hid bugs like protocol-format skew between curator and joiner
+        // versions during PR #448 multi-laptop testing.
+        return jsonResponse(res, 502, {
+          error: 'Could not deliver join request to curator. No reachable curator found.',
+          ...(result.errors.length > 0 ? { errors: result.errors } : {}),
+        });
+      }
+      return jsonResponse(res, 200, {
+        ok: true,
+        status: result.autoApproved
+          ? 'approved'
+          : result.alreadyMember
+            ? 'already-member'
+            : 'pending',
+        delivered: result.delivered,
+        ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
+        ...(result.autoApproved ? { autoApproved: true } : {}),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET/PUT /api/context-graph/{id}/join-policy — owner-scoped, durable
+  // manual/open enrollment policy. `open` is intentionally not called merely
+  // "auto approve": it permits any eligible agent that knows the CG id to
+  // request private membership without human review.
+  const joinPolicyMatch = path.match(/^\/api\/context-graph\/([^/]+)\/join-policy$/);
+  if (req.method === 'GET' && joinPolicyMatch) {
+    const contextGraphId = decodeURIComponent(joinPolicyMatch[1]);
+    try {
+      const policy = await agent.getContextGraphJoinPolicy(contextGraphId, requestAgentAddress);
+      return jsonResponse(res, 200, policy);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified?.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+  if (req.method === 'PUT' && joinPolicyMatch) {
+    const contextGraphId = decodeURIComponent(joinPolicyMatch[1]);
+    // A node-admin token intentionally has no agent-scoped identity, while
+    // requestAgentAddress resolves it to the node's default owner. Use that
+    // same owner for exact preflight and the policy mutation; otherwise a
+    // private CG cannot fast-accept and falls back to the global CG listing.
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      {
+        callerAgentAddress: requestAgentAddress,
+        allowLocalExactFallback: !requestAgentAddress,
+      },
+    );
+    if (!resolvedContextGraphId) return;
+    try {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body || '{}') as {
+        mode?: unknown;
+        maxMembers?: unknown;
+        maxApprovalsPerHour?: unknown;
+        acknowledgeOpenEnrollment?: unknown;
+      };
+      if (parsed.mode !== 'manual' && parsed.mode !== 'open') {
+        return jsonResponse(res, 400, { error: 'mode must be "manual" or "open"' });
+      }
+      const policy = await agent.setContextGraphJoinPolicy(
+        resolvedContextGraphId,
+        {
+          mode: parsed.mode,
+          ...(parsed.mode === 'open'
+            ? {
+                maxMembers: parsed.maxMembers as number,
+                maxApprovalsPerHour: parsed.maxApprovalsPerHour as number,
+                acknowledgeOpenEnrollment: parsed.acknowledgeOpenEnrollment === true,
+              }
+            : {}),
+        },
+        requestAgentAddress,
+      );
+      return jsonResponse(res, 200, policy);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified?.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graph/{id}/join-requests — list pending join requests (curator view)
+  const joinRequestsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/join-requests$/);
+  if (req.method === "GET" && joinRequestsMatch) {
+    const contextGraphId = decodeURIComponent(joinRequestsMatch[1]);
+    try {
+      // GH #757 — pass the caller so the agent can enforce curator-only access.
+      const requests = await agent.listPendingJoinRequests(contextGraphId, requestAgentAddress);
+      return jsonResponse(res, 200, { contextGraphId, requests });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // GH #757 — map the curator/creator owner-check failure to 403 (reusing
+      // the shared classifier that already handles "Only the context graph
+      // curator …"); everything else stays a 400.
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified && classified.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/approve-join — approve a pending request
+  const approveJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/approve-join$/);
+  if (req.method === "POST" && approveJoinMatch) {
+    const contextGraphId = decodeURIComponent(approveJoinMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const body = await readBody(req);
+    try {
+      const { agentAddress } = JSON.parse(body);
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      await agent.approveJoinRequest(resolvedContextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, { ok: true, status: 'approved', agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/redeliver-approval — re-fire a `join-approved`
+  // P2P notification to a previously-approved agent. Companion to the
+  // join-approval retry queue (`DKGAgent.redeliverJoinApproval`). Used when:
+  //   * The transient transport reset that originally dropped the
+  //     notification is too long-lived for the periodic retry tick to
+  //     recover quickly enough,
+  //   * The operator notices the invitee is reachable again and wants to
+  //     re-poke immediately rather than wait for the next backoff window,
+  //   * The chat-MCP agent on the curator side (PR-510) wants to re-poke
+  //     after a peer agent reports their join is stuck.
+  // Returns the delivery result so the caller can distinguish "delivered
+  // now" (peer was reachable) from "still queued, attempt N" (will fire
+  // again on the next tick / next reconnect).
+  const redeliverApprovalMatch = path.match(/^\/api\/context-graph\/([^/]+)\/redeliver-approval$/);
+  if (req.method === "POST" && redeliverApprovalMatch) {
+    const contextGraphId = decodeURIComponent(redeliverApprovalMatch[1]);
+    const body = await readBody(req);
+    try {
+      const parsed = body ? JSON.parse(body) : {};
+      const { agentAddress } = parsed;
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      const result = await agent.redeliverJoinApproval(contextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, {
+        ok: true,
+        contextGraphId,
+        agentAddress,
+        ...result,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Caller errors (no approval row, bad address) → 400. Anything else
+      // (store failure, etc.) bubbles up as 500 from the surrounding
+      // handler. The redeliver-approval code path itself catches transport
+      // failures internally and treats them as "still queued" successes.
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graphs/pending-redeliveries — operator diagnostic for
+  // join-approvals currently stuck in the retry queue across all curated CGs.
+  // Useful for "is anyone still waiting on an approval that failed to deliver?"
+  // dashboards. Read-only; the actual retry firing happens via the periodic
+  // tick + on-connect listener inside the agent.
+  if (req.method === "GET" && path === '/api/context-graphs/pending-redeliveries') {
+    try {
+      const entries = agent.listPendingJoinApprovalRetries();
+      return jsonResponse(res, 200, { pending: entries });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/reject-join — reject a pending request
+  const rejectJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/reject-join$/);
+  if (req.method === "POST" && rejectJoinMatch) {
+    const contextGraphId = decodeURIComponent(rejectJoinMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const body = await readBody(req);
+    try {
+      const { agentAddress } = JSON.parse(body);
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      // G1: thread the caller's agent address so rejectJoinRequest can
+      // enforce the curator-only authz check (mirrors approve-join, which
+      // passes requestAgentAddress at line ~961).
+      await agent.rejectJoinRequest(resolvedContextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, { ok: true, status: 'rejected', agentAddress });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/{id}/sign-join — sign a join-request delegation
+  //
+  // SIGN-ONLY. Returns the signed `SignedAgentDelegation` for the caller's
+  // agent to whoever is asking. Does NOT forward over P2P — that is the
+  // sole responsibility of `/api/context-graph/{id}/request-join`.
+  //
+  // Why split? PR #448 review (2026-05-11): an earlier revision of this
+  // route also called `forwardJoinRequest` before returning, but the UI +
+  // CLI then POST the same delegation to `/request-join`, which forwards
+  // it again. Curators received the same join request twice (and emitted
+  // two `JOIN_REQUEST_RECEIVED` notifications) on every single click.
+  // Splitting sign vs forward also lets the CLI sign without a curator
+  // peer id (sign locally, forward later) — the previous mandatory
+  // `curatorPeerId` body param hard-broke `dkg context-graph request-join`.
+  const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
+  if (req.method === "POST" && signJoinMatch) {
+    const contextGraphId = decodeURIComponent(signJoinMatch[1]);
+    try {
+      const callerAddress = agent.resolveAgentAddress(
+        extractBearerToken(req.headers.authorization),
+      );
+      // Body is intentionally ignored — sign-only. Drain it so a JSON body
+      // sent by older clients doesn't sit on the socket.
+      try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
+      const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
+      return jsonResponse(res, 200, {
+        ok: true,
+        contextGraphId,
+        delegation,
+        // Back-compat surface for older HTTP clients reading the
+        // top-level `agentAddress`. The full signed delegation lives
+        // in `delegation`; callers that want delivery POST it (with
+        // a `curatorPeerId`) to `/request-join`.
+        agentAddress: delegation.agentAddress,
+        // #1103: callers repeatedly read this route's 200 as "the join
+        // request is on its way to the curator" and then waited forever
+        // (the curator's /join-requests stays empty — nothing was sent).
+        // Make the sign-only contract explicit in the response itself.
+        forwarded: false,
+        next:
+          `This route only SIGNS the join request — nothing was sent to the curator. ` +
+          `To deliver it, POST /api/context-graph/${encodeURIComponent(contextGraphId)}/request-join ` +
+          `with body { "delegation": <the delegation object above>, "curatorPeerId": "<curator's libp2p peer id>", "agentName"?: "..." }.`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // ── Phase 8: project-manifest publish + install (UI-driven) ───────
+  //
+  // These three routes power the CreateProjectModal (curator side,
+  // /publish) and JoinProjectModal (joiner side, /plan-install +
+  // /install) wire-workspace flow. They reuse the same publish /
+  // fetch / plan / write helpers that scripts/import-manifest.mjs
+  // and `dkg-mcp join` use, by constructing a self-pointing DkgClient
+  // that talks back to this same daemon over HTTP.
+  //
+  // Why a self-client and not direct internal calls? Two reasons:
+  // (1) keeps the manifest helpers framework-agnostic (one wire
+  // format whether they're called from CLI, browser-via-daemon, or
+  // anywhere else), (2) honours the same auth/rate-limit/audit path
+  // any other client would go through.
+
+  const manifestPublishMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/publish$/);
+  if (req.method === 'POST' && manifestPublishMatch) {
+    const contextGraphId = decodeURIComponent(manifestPublishMatch[1]);
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    // Authorization gate (Codex tier-4g finding on 6921): publish
+    // rewrites + promotes the project's onboarding templates into
+    // Shared Working Memory. Without an owner-check, any participant
+    // who reaches the daemon with a valid bearer token could overwrite
+    // the manifest and poison every future install (malicious hook
+    // URLs, swapped agent URIs, etc.). Only the CG's registered
+    // curator/creator may publish.
+    try {
+      await agent.assertContextGraphOwner(resolvedContextGraphId, requestAgentAddress, 'publish a project manifest');
+    } catch (authErr: unknown) {
+      const msg = authErr instanceof Error ? authErr.message : String(authErr);
+      // Distinguish "not the owner" from "CG has no registered owner".
+      const code = /has no registered owner/.test(msg) ? 400 : 403;
+      return jsonResponse(res, code, { error: msg });
+    }
+
+    try {
+      const requestedNetwork = typeof body.networkLabel === 'string' ? body.networkLabel : null;
+      const networkLabel: 'testnet' | 'mainnet' | 'devnet' =
+        requestedNetwork === 'testnet' || requestedNetwork === 'mainnet' || requestedNetwork === 'devnet'
+          ? requestedNetwork
+          : manifestNetworkLabel(network?.networkName);
+      // Codex tier-4h finding N11: the prior `Array.isArray(...) && .length
+      // ? filter : defaults` chain accepted the request when `body.supportedTools`
+      // contained ONLY values the filter throws away (e.g. `['codex']`). The
+      // filter would return `[]`, `publishManifestImpl` would happily publish
+      // a manifest with zero supported tools, and then `fetchManifest()`'s Zod
+      // schema would reject the manifest because it requires at least one —
+      // so the project would be un-installable until someone republishes.
+      // Fail fast at the route when the caller supplied a non-empty array
+      // but nothing in it survives the filter; fall back to the default
+      // ONLY when the caller didn't specify anything.
+      let supportedTools: ('cursor' | 'claude-code')[];
+      if (Array.isArray(body.supportedTools) && body.supportedTools.length) {
+        supportedTools = body.supportedTools
+          .filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code');
+        if (supportedTools.length === 0) {
+          return jsonResponse(res, 400, {
+            error:
+              `"supportedTools" contained none of the supported values. ` +
+              `Pass one or more of ["cursor", "claude-code"], or omit the ` +
+              `field entirely to publish the default set.`,
+          });
+        }
+      } else {
+        supportedTools = ['cursor', 'claude-code'];
+      }
+      // Always derive the publisher from the authenticated caller. Accepting
+      // `publisherAgentUri` from the request body let any client forge
+      // `prov:wasAttributedTo` on the manifest entities, impersonating another
+      // agent's provenance on-chain. The server-side derivation below is the
+      // only source of truth.
+      const publisherAgentUri = manifestPublisherUri(requestAgentAddress);
+      const requiresMcpDkgVersion = (body.requiresMcpDkgVersion as string) ?? '>=0.1.0';
+
+      const repoRoot = manifestRepoRoot();
+      let templates;
+      try {
+        templates = assembleStandardTemplates(repoRoot);
+      } catch (assembleErr: unknown) {
+        const msg = assembleErr instanceof Error ? assembleErr.message : String(assembleErr);
+        return jsonResponse(res, 500, {
+          error: `Could not assemble templates from repo root ${repoRoot}: ${msg}. ` +
+            `The daemon must be started from a dkg-v9 checkout for manifest publish to work today.`,
+        });
+      }
+
+      const ontologyUri = body.ontologyUri ?? `urn:dkg:project:${resolvedContextGraphId}:ontology`;
+      const client = manifestSelfClient(apiHost, apiPortRef.value, requestToken);
+      const result = await publishManifestImpl({
+        contextGraphId: resolvedContextGraphId,
+        network: networkLabel,
+        supportedTools,
+        publisherAgentUri,
+        ontologyUri,
+        requiresMcpDkgVersion,
+        templates,
+        client,
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifestUri: result.manifestUri,
+        templateUris: result.templateUris,
+        tripleCount: result.tripleCount,
+        network: networkLabel,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest publish failed: ${msg}` });
+    }
+  }
+
+  const manifestPlanInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/plan-install$/);
+  if (req.method === 'POST' && manifestPlanInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestPlanInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
+      // Strip supportedTools the operator didn't pick — planner uses
+      // supportedTools to gate claude-code wiring, and we want the same
+      // gating to apply for any tool the operator deselected.
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Fail fast when the intersection of requested tools and the
+      // manifest's supportedTools is empty (Codex tier-4k N28). Without
+      // this, `plan-install` happily returns a "successful" plan that
+      // writes AGENTS.md / config.yaml but no usable Cursor/Claude
+      // wiring, because the planner gates each wiring block on
+      // `supportedTools.includes(…)`. Operators then hit a confusing
+      // "install succeeded but nothing works" state. Return 400 with
+      // the actionable options so the UI can surface the choice.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
+      // Enforce `requiresMcpDkgVersion` before planning (Codex tier-4k N30).
+      // A manifest can declare the minimum mcp-dkg version its wiring needs
+      // (e.g. new capture-hook format, new schema fields). Without this
+      // check an operator on an older local @origintrail-official/dkg-mcp
+      // gets a plan that looks fine but fails the moment Cursor/Claude
+      // tries to invoke the bundled entry. We skip gating when the range
+      // is absent OR when we can't read the local mcp-dkg version — the
+      // latter is very rare (no resolution path) and erring-permissive
+      // keeps existing deployments working.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
+      }
+      const manifest = {
+        ...fetched,
+        supportedTools: filteredSupportedTools,
+      };
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const markdown = buildReviewMarkdownImpl(manifest, plan);
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifest: {
+          uri: manifest.uri,
+          contextGraphId: manifest.contextGraphId,
+          network: manifest.network,
+          publishedBy: manifest.publishedBy,
+          publishedAt: manifest.publishedAt,
+          supportedTools: manifest.supportedTools,
+          ontologyUri: manifest.ontologyUri,
+        },
+        plan: {
+          files: plan.files.map((f) => ({
+            field: f.field,
+            absPath: f.absPath,
+            exists: f.exists,
+            merges: f.merges,
+            bytes: f.bytes,
+            encodingFormat: f.encodingFormat,
+          })),
+          warnings: plan.warnings,
+          substitutionValues: plan.substitutionValues,
+        },
+        markdown,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest plan-install failed: ${msg}` });
+    }
+  }
+
+  const manifestInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/install$/);
+  if (req.method === 'POST' && manifestInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Same fail-fast as `/manifest/plan-install` (Codex N28): refuse to
+      // run the install if the operator's selected tools don't intersect
+      // what the manifest actually supports — otherwise we silently
+      // write generic config without any of the editor wiring the user
+      // asked for.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
+      // Same `requiresMcpDkgVersion` gate as /manifest/plan-install
+      // (Codex tier-4k N30). Blocking here prevents the writeInstallImpl
+      // step from spraying incompatible wiring onto disk that the local
+      // mcp-dkg can't actually service.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
+      }
+      const manifest = {
+        ...fetched,
+        supportedTools: filteredSupportedTools,
+      };
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const written = await writeInstallImpl(plan);
+      const skipped: string[] = [];
+      if (!(ctx.context.tools as readonly string[]).includes('claude-code')) {
+        skipped.push('claudeHooksTemplate (claude-code not selected)');
+      }
+      if ((ctx.context.tools as readonly string[]).includes('codex')) {
+        skipped.push('codex wiring is "coming soon" — no template entries shipped yet');
+      }
+      return jsonResponse(res, 200, {
+        ok: true,
+        written: written.map((w) => ({
+          field: w.field,
+          absPath: w.absPath,
+          bytesWritten: w.bytesWritten,
+          action: w.action,
+        })),
+        warnings: plan.warnings,
+        skipped,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
+    }
+  }
+
+  // POST /api/context-graph/reconcile
+  //
+  // Explicit, one-CG chain reconciliation. This is intentionally not a blanket
+  // network resync: the agent first compares the durable contiguous VM
+  // watermark with the on-chain KC count and performs VM-slice / peer catch-up
+  // only when that evidence shows a gap. Manual work uses the foreground
+  // VM-reconcile lane, ahead of the periodic all-CG safety sweep.
+  if (req.method === "POST" && path === "/api/context-graph/reconcile") {
+    return handleReconcileContextGraphRoute(
+      { req, res, agent },
+      isNodeAdminCaller(),
+    );
+  }
+
+  // POST /api/context-graph/recover-shared-memory
+  // Explicit member recovery: re-fetch a context graph's shared memory to the
+  // current state from ONE chosen authoritative peer and apply via per-KA-graph
+  // REPLACE (not the corrupting union). Used to repair a stale or corrupt local
+  // SWM copy. Pulls only from the peer the caller names — never a blanket sweep.
+  if (req.method === "POST" && path === "/api/context-graph/recover-shared-memory") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const contextGraphId = parsed.contextGraphId;
+    const remotePeerId = parsed.remotePeerId ?? parsed.peerId;
+    if (!contextGraphId)
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!remotePeerId)
+      return jsonResponse(res, 400, { error: 'Missing "remotePeerId"' });
+    try {
+      const result = await agent.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+      return jsonResponse(res, 200, {
+        recovered: contextGraphId,
+        fromPeer: remotePeerId,
+        ...result,
+      });
+    } catch (err) {
+      return jsonResponse(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
+  if (
+    req.method === "POST" &&
+    (path === "/api/context-graph/subscribe" || path === "/api/subscribe")
+  ) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const { includeWorkspace, includeSharedMemory } = parsed;
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = parsed.contextGraphId ?? parsed.id;
+    if (!contextGraphId)
+      return jsonResponse(res, 400, {
+        error: 'Missing "contextGraphId" (or "id")',
+      });
+
+    // For curated CGs, verify this node's agent is on the allowlist.
+    // The allowlist may not be available locally yet (it lives on the
+    // curator's node), so this is a best-effort early rejection —
+    // the sync protocol enforces access on the remote side regardless.
+    const localAllowed = await agent.getContextGraphAllowedAgents(contextGraphId).catch(() => [] as string[]);
+    if (localAllowed.length > 0) {
+      // Issue #1596 / #865: an explicit `accessPolicy="public"` ALWAYS wins over
+      // the allowlist. On a public CG the allowlist gates PUBLISHERS, not
+      // subscribers/readers, so an allowlist entry must not turn a public CG
+      // into invite-only-to-join. Defer to the resolver's `isPrivateContextGraph`
+      // (the single source of truth) so this route can never re-drift from the
+      // resolver rule. Fail CLOSED on a read error (keep the gate) — the remote
+      // sync protocol is the real enforcement, and a public CG's `_meta` is
+      // already local here (we just read its allowlist from it), so the policy
+      // read is reliable in practice.
+      const isPrivate = await agent.isPrivateContextGraph(contextGraphId).catch(() => true);
+      if (isPrivate) {
+        const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+        const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
+        if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
+          return jsonResponse(res, 403, {
+            error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
+          });
+        }
+      }
+    }
+
+    const shouldSyncSharedMemory =
+      (includeSharedMemory ?? includeWorkspace) !== false;
+
+    const subMap = agent.getSubscribedContextGraphs();
+    const existingSub = subMap?.get(contextGraphId);
+    const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
+    const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
+    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+
+    if (existingSub?.subscribed) {
+      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        return jsonResponse(res, 200, {
+          subscribed: contextGraphId,
+          catchup: {
+            status: existingJob.status,
+            includeWorkspace: existingJob.includeWorkspace,
+            jobId: existingJob.jobId,
+          },
+        });
+      }
+
+      // The persisted bit alone is not proof on upgraded v10.0.6 nodes:
+      // startup could create a namespaced public shadow containing only an
+      // `unregistered` marker and still store metaSynced=true. Validate the
+      // live graph before taking the already-ready shortcut.
+      const hasConfirmedExistingMeta = existingSub.metaSynced === true &&
+        await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
+      const existingReadiness = classifyExistingContextGraphReadiness({
+        subscription: existingSub,
+        readiness: readinessBeforeCatchup,
+        includeSharedMemory: shouldSyncSharedMemory,
+        hasConfirmedMeta: hasConfirmedExistingMeta,
+      });
+      if (existingReadiness.alreadyReady) {
+        const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        if (!reusableDoneJob) {
+          const syntheticJob: CatchupJob = {
+            jobId,
+            contextGraphId,
+            includeWorkspace: shouldSyncSharedMemory,
+            status: "done",
+            queuedAt: Date.now(),
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          };
+          catchupTracker.jobs.set(jobId, syntheticJob);
+          catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
+        }
+        return jsonResponse(res, 200, {
+          subscribed: contextGraphId,
+          catchup: {
+            status: "done",
+            includeWorkspace: shouldSyncSharedMemory,
+            jobId,
+          },
+        });
+      }
+
+      if (existingReadiness.statePatch) {
+        agent.markContextGraphSubscriptionState(
+          contextGraphId,
+          existingReadiness.statePatch,
+        );
+      }
+      if (existingReadiness.readinessPatch) {
+        writeContextGraphReadiness(
+          dashDb,
+          contextGraphId,
+          existingReadiness.readinessPatch,
+        );
+      }
+      // The existing-state classifier may have just invalidated stale v1
+      // provenance because authoritative metadata was missing. Carry the
+      // corrected value into the queued catch-up so a later metadata-only or
+      // incomplete response cannot resurrect the pre-reset true bits.
+      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    }
+
+    console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
+    agent.subscribeToContextGraph(contextGraphId);
+
+    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const job: CatchupJob = {
+      jobId,
+      contextGraphId,
+      includeWorkspace: shouldSyncSharedMemory,
+      status: "queued",
+      queuedAt: Date.now(),
+    };
+    catchupTracker.jobs.set(jobId, job);
+    catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
+
+    while (catchupTracker.jobs.size > 100) {
+      let oldestId: string | undefined;
+      let oldestQueuedAt = Number.POSITIVE_INFINITY;
+      for (const [id, entry] of catchupTracker.jobs.entries()) {
+        if (entry.queuedAt < oldestQueuedAt) {
+          oldestQueuedAt = entry.queuedAt;
+          oldestId = id;
+        }
+      }
+      if (!oldestId) break;
+      const removed = catchupTracker.jobs.get(oldestId);
+      catchupTracker.jobs.delete(oldestId);
+      if (
+        removed &&
+        catchupTracker.latestByContextGraph.get(removed.contextGraphId) === oldestId
+      ) {
+        catchupTracker.latestByContextGraph.delete(removed.contextGraphId);
+      }
+    }
+
+    void (async () => {
+      job.status = "running";
+      job.startedAt = Date.now();
+      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
+      try {
+        const result = await daemonState.catchupRunner!.run({
+          contextGraphId: contextGraphId,
+          includeSharedMemory: shouldSyncSharedMemory,
+        });
+        job.result = result;
+        // Local scheduler pressure cut the round short. An incomplete round has
+        // no readiness to inspect and must never finalize the subscription, so
+        // short-circuit the whole classification path and report a distinct
+        // retryable status. A remote denial still wins: waiting for local
+        // capacity will never clear it.
+        if (result.deferredBackpressure > 0 && !result.denied) {
+          job.status = "deferred";
+          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+        } else {
+          const inspectReadiness = catchupResultHasCleanResponse(result);
+          const hasConfirmedMeta = inspectReadiness
+            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+            : false;
+          const isPrivate = hasConfirmedMeta
+            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+            : false;
+          const classification = classifyContextGraphCatchupReadiness({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
+            readinessBeforeCatchup,
+          });
+
+          job.status = classification.jobStatus;
+          job.error = classification.error;
+          if (classification.readinessPatch) {
+            writeContextGraphReadiness(
+              dashDb,
+              contextGraphId,
+              classification.readinessPatch,
+            );
+          }
+          if (classification.statePatch) {
+            agent.markContextGraphSubscriptionState(
+              contextGraphId,
+              classification.statePatch,
+            );
+          }
+          if (classification.eventPayload) {
+            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+              contextGraphId,
+              ...classification.eventPayload,
+            });
+          }
+
+          // Denial took precedence above, but a denied-yet-still-deferred round
+          // is likewise incomplete: never let it settle as a successful "done".
+          if (job.status === "done" && result.deferredBackpressure > 0) {
+            job.status = "deferred";
+            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          }
+        }
+
+        if (DEBUG_SYNC_TRACE) {
+          if (job.status === 'denied') {
+            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+          }
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
+              `connected=${result.totalPeers ?? result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
+        }
+      } catch (err) {
+        job.error = err instanceof Error ? err.message : String(err);
+        job.status = "failed";
+        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
+      } finally {
+        job.finishedAt = Date.now();
+      }
+    })();
+
+    return jsonResponse(res, 200, {
+      subscribed: contextGraphId,
+      catchup: {
+        status: "queued",
+        includeWorkspace: shouldSyncSharedMemory,
+        jobId,
+      },
+    });
+  }
+
+  // POST /api/context-graph/unsubscribe
+  //
+  // Inverse of subscribe: drops the LIVE member subscription (gossip topics +
+  // sync scope) while preserving any `coreHosted` hosting obligation. A core
+  // that hosts a public CG ends up `subscribed=0, coreHosted=1` — the pure
+  // host-only state that exercises the Phase D chain-driven fill path (a missed
+  // publish can then only be recovered via the chain reconcile sweep, not the
+  // finalization gossip fast-path). Does NOT delete any VM/SWM data.
+  if (
+    req.method === "POST" &&
+    (path === "/api/context-graph/unsubscribe" || path === "/api/unsubscribe")
+  ) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const unsubscribeParsed = JSON.parse(body);
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
+    if (!contextGraphId) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+    }
+    agent.unsubscribeFromContextGraph(contextGraphId);
+    const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
+    return jsonResponse(res, 200, {
+      unsubscribed: contextGraphId,
+      subscribed: sub?.subscribed === true,
+      coreHosted: sub?.coreHosted === true,
+    });
+  }
+
+  // GET /api/context-graph/subscriptions — list the node's ACTIVE in-memory
+  // context-graph subscriptions plus startup rehydration diagnostics (#997/#1180).
+  // Rows beyond the activation cap are persisted/dormant, not gossip/sync active.
+  if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
+    // Operator-only: this is a NODE-WIDE view, so an agent-scoped token would
+    // otherwise be able to enumerate OTHER agents' subscribed/private CG IDs.
+    if (!isNodeAdminCaller()) {
+      return jsonResponse(res, 403, {
+        error:
+          "GET /api/context-graph/subscriptions requires a node-level admin token " +
+          "(~/.dkg/auth.token); agent-scoped tokens cannot enumerate node-wide subscriptions.",
+      });
+    }
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const map = agent.getSubscribedContextGraphs?.();
+    const subscriptions = map
+      ? [...map.entries()]
+          // ACTIVE USER subscriptions only. Exclude discoverable/host-only
+          // registry entries and the always-on AGENTS/ONTOLOGY system CGs.
+          // Host-only boot activations are exposed separately through
+          // `rehydration.hostedActivatedIds` so the legacy subscriptions
+          // contract stays subscribed-only.
+          .filter(([id, s]) => s?.subscribed === true && !systemContextGraphs.has(id))
+          .map(([id, s]) => ({
+            contextGraphId: id,
+            subscribed: s?.subscribed === true,
+            synced: s?.synced === true,
+            coreHosted: s?.coreHosted === true,
+          }))
+      : [];
+    return jsonResponse(res, 200, {
+      count: subscriptions.length,
+      subscriptions,
+      rehydration: agent.getContextGraphSubscriptionRehydrationStatus?.() ?? null,
+    });
+  }
+
+  // DELETE /api/context-graph/subscriptions — operator recovery for #997: tear
+  // down every active subscription and wipe the persisted backlog so a node
+  // wedged by stale subscriptions can be reset without hand-editing the store.
+  // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
+  // cleared; legitimate context graphs re-subscribe on next access.
+  if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
+    // Destructive + node-wide: operator-only (node-admin token when auth is on;
+    // tokenless when auth is disabled). Prevents an agent-scoped token from
+    // wiping every user's subscription backlog.
+    if (!isNodeAdminCaller()) {
+      return jsonResponse(res, 403, {
+        error:
+          "DELETE /api/context-graph/subscriptions requires a node-level admin token " +
+          "(~/.dkg/auth.token); agent-scoped tokens cannot clear the node-wide subscription backlog.",
+      });
+    }
+    const cleared = await agent.clearContextGraphSubscriptions();
+    return jsonResponse(res, 200, { cleared });
+  }
+
+  // POST /api/context-graph/rename
+  //
+  // Updates the display name (schema:name) of an existing context graph
+  // without touching any of its data. Delegates to `agent.renameContextGraph`
+  // which (a) enforces owner-only authorization via `assertCallerIsOwner`
+  // (same protection as add/remove-participant), (b) wipes old name triples
+  // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
+  // the new name into both so the rename is durable for open AND private
+  // CGs (private curated graphs read their definition from `_meta`).
+  if (req.method === "POST" && path === "/api/context-graph/rename") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const renameParsed = JSON.parse(body);
+    // #1102: accept `contextGraphId` as an alias for `id` — SKILL.md
+    // documented `contextGraphId` for this route while the implementation
+    // only read `id`, so every documented call failed with a 400.
+    const id = renameParsed.id ?? renameParsed.contextGraphId;
+    const name = renameParsed.name;
+    if (!id || !name) {
+      return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId") or "name"' });
+    }
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      id,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    try {
+      await agent.renameContextGraph(resolvedContextGraphId, String(name), requestAgentAddress);
+      return jsonResponse(res, 200, { renamed: resolvedContextGraphId, name });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/Only the context graph creator/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (/does not exist|has no known creator|non-empty string/.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, {
+        error: `Failed to rename context graph: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/context-graph/list
+  if (req.method === "GET" && path === "/api/context-graph/list") {
+    const contextGraphs = await agent.listContextGraphs({
+      callerAgentAddress: requestAgentAddress ?? null,
+    });
+    return jsonResponse(res, 200, {
+      contextGraphs,
+    });
+  }
+
+  // GET /api/context-graph/exists
+  if (req.method === "GET" && path === "/api/context-graph/exists") {
+    const id = url.searchParams.get("id");
+    if (!id)
+      return jsonResponse(res, 400, { error: 'Missing "id" query param' });
+    const exists = await agent.contextGraphExists(id);
+    return jsonResponse(res, 200, { id, exists });
+  }
+}

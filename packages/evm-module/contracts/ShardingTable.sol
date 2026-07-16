@@ -4,7 +4,8 @@ pragma solidity ^0.8.20;
 
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -13,23 +14,38 @@ import {ShardingTableLib} from "./libraries/ShardingTableLib.sol";
 
 contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "ShardingTable";
-    string private constant _VERSION = "1.0.0";
+    // v2.0.0 — ABI-breaking: dropped the V8→V9 `migrationPeriodEnd` field
+    // and its constructor parameter, plus the matching public getter.
+    // Original purpose: gate the `migrateOldShardingTable` Neuroweb-only
+    // function set during the old ShardingTable migration window. That
+    // function was removed during the V9→V10 consolidation, leaving the
+    // field as dead state on a Logic contract — a violation of the
+    // Storage/Logic separation pattern. The Neuroweb-only branch in
+    // `019_deploy_sharding_table.ts` that referenced `migrateOldShardingTable`
+    // is removed in the same PR (the function it called no longer exists,
+    // so the branch was already unreachable on V10 deploys).
+    string private constant _VERSION = "10.0.3";
 
     ProfileStorage public profileStorage;
     ShardingTableStorage public shardingTableStorage;
-    StakingStorage public stakingStorage;
+    /// @notice v4.0.0 — V10 canonical node stake source. Replaces the prior
+    ///         `stakingStorage` reference; the V8 archive is unmaintained
+    ///         post-migration so its `getNodeStake` is not a faithful read.
+    ConvictionStakingStorage public convictionStakingStorage;
 
-    uint256 public migrationPeriodEnd;
+    /// @notice The sharding table is full: `nodesCount` has reached the
+    ///         governance-configured `shardingTableSizeLimit`. The cap bounds
+    ///         the O(n) re-index loops in `insertNode`/`removeNode` so they
+    ///         cannot exceed the block gas limit.
+    error ShardingTableIsFull(uint72 nodesCount, uint16 sizeLimit);
 
     // solhint-disable-next-line no-empty-blocks
-    constructor(address hubAddress, uint256 migrationPeriodEnd_) ContractStatus(hubAddress) {
-        migrationPeriodEnd = migrationPeriodEnd_;
-    }
+    constructor(address hubAddress) ContractStatus(hubAddress) {}
 
     function initialize() public onlyHub {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -127,6 +143,20 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
         ShardingTableStorage sts = shardingTableStorage;
         ProfileStorage ps = profileStorage;
 
+        // SECURITY FIX: enforce the configured size cap. `shardingTableSizeLimit`
+        // (default 500) had a setter but was checked at NO insert site, so the
+        // table could grow without bound — making the O(n) re-index loops in
+        // insertNode/removeNode (both walk every node after the touched index)
+        // exceed the block gas limit, which freezes unstake/redelegate/leave
+        // and any other op that re-indexes the table. ParametersStorage is
+        // resolved from the Hub at call time (it is deployed AFTER ShardingTable,
+        // so it cannot be cached in initialize() without breaking deployment).
+        uint72 nodesCount = sts.nodesCount();
+        uint16 sizeLimit = ParametersStorage(hub.getContractAddress("ParametersStorage")).shardingTableSizeLimit();
+        if (nodesCount >= sizeLimit) {
+            revert ShardingTableIsFull(nodesCount, sizeLimit);
+        }
+
         if (sts.nodeExists(identityId)) {
             revert ShardingTableLib.NodeAlreadyInTheShardingTable(identityId);
         }
@@ -196,16 +226,22 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
         nodesPage = new ShardingTableLib.NodeInfo[](nodesNumber);
 
         ProfileStorage ps = profileStorage;
-        StakingStorage ss = stakingStorage;
+        ConvictionStakingStorage cs = convictionStakingStorage;
 
         uint72 nextIdentityId = startingIdentityId;
         uint72 index;
         while ((index < nodesNumber) && (nextIdentityId != ShardingTableLib.NULL)) {
+            // v4.0.0 — V10 canonical node stake. Down-cast to uint96 is safe
+            // under protocol invariants: `StakingV10.stake` enforces
+            // `nodeStakeV10 <= parametersStorage.maximumStake()` (uint96), and
+            // the V10 raw stake field cannot exceed the cap.
+            uint256 stake256 = cs.getNodeStakeV10(nextIdentityId);
+            uint96 stakeView = stake256 > type(uint96).max ? type(uint96).max : uint96(stake256);
             nodesPage[index] = ShardingTableLib.NodeInfo({
                 nodeId: ps.getNodeId(nextIdentityId),
                 identityId: nextIdentityId,
                 ask: ps.getAsk(nextIdentityId),
-                stake: ss.getNodeStake(nextIdentityId)
+                stake: stakeView
             });
 
             unchecked {

@@ -63,58 +63,81 @@ export async function fetchAgents(nodeId: number) {
 
 export async function publishKA(
   nodeId: number,
-  paranetId: string,
+  contextGraphId: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
-  return post<{
-    kcId: string;
+  if (privateQuads?.length) {
+    throw new Error(
+      'privateQuads are not supported in the V10 assertion-lifecycle publish ' +
+      '— every published assertion goes through finalize, which signs an EIP-712 ' +
+      'attestation over the public quads.',
+    );
+  }
+  // RFC-001 §9.x — route through the knowledge-asset lifecycle (sign at
+  // creation): create an auto-named knowledge asset with the supplied quads,
+  // finalize (computes the merkle root and signs the AuthorAttestation
+  // stored in `_meta`), promote into SWM, then publish via the canonical
+  // per-KA `vm/publish` route so the publisher forwards the seal verbatim.
+  const assertionName = `netsim-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const quadsWithGraph = quads.map((q) => ({
+    subject: q.subject,
+    predicate: q.predicate,
+    object: q.object,
+    graph: q.graph ?? `did:dkg:context-graph:${contextGraphId}`,
+  }));
+  const created = await post<{ assertionUri: string; seal?: Record<string, unknown> }>(
+    `${nodeBase(nodeId)}/api/knowledge-assets`,
+    {
+      contextGraphId,
+      name: assertionName,
+      quads: quadsWithGraph,
+      finalize: true,
+      alsoShareSwm: true,
+    },
+  );
+  const published = await post<{
+    kaId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/publish`, { paranetId, quads, privateQuads });
+  }>(`${nodeBase(nodeId)}/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
+    contextGraphId,
+  });
+  return {
+    ...published,
+    assertionUri: created.assertionUri,
+    ...(created.seal ? { seal: created.seal } : {}),
+  };
 }
 
 export async function queryNode(
   nodeId: number,
   sparql: string,
-  paranetId?: string,
-  opts?: { graphSuffix?: '_workspace'; includeWorkspace?: boolean },
+  contextGraphId?: string,
+  opts?: { graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean },
 ) {
   return post<{ result: unknown }>(`${nodeBase(nodeId)}/api/query`, {
     sparql,
-    paranetId,
+    contextGraphId,
     ...opts,
   });
 }
 
-export async function writeToWorkspace(
+export async function createSharedKnowledgeAsset(
   nodeId: number,
-  paranetId: string,
+  contextGraphId: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
-  return post<{ workspaceOperationId: string }>(`${nodeBase(nodeId)}/api/workspace/write`, {
-    paranetId,
+  const name = `netsim-share-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const result = await post<Record<string, unknown>>(`${nodeBase(nodeId)}/api/knowledge-assets`, {
+    contextGraphId,
+    name,
     quads,
+    finalize: true,
+    alsoShareSwm: true,
   });
-}
-
-export async function enshrineFromWorkspace(
-  nodeId: number,
-  paranetId: string,
-  selection: 'all' | { rootEntities: string[] } = 'all',
-  clearAfter = true,
-) {
-  return post<{
-    kcId: string;
-    status: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/workspace/enshrine`, {
-    paranetId,
-    selection,
-    clearAfter,
-  });
+  return { ...result, name };
 }
 
 export async function sendChat(nodeId: number, to: string, text: string) {
@@ -134,21 +157,21 @@ export async function fetchMessages(nodeId: number, peer?: string) {
   }>(`${nodeBase(nodeId)}/api/messages${qs}`);
 }
 
-export async function fetchParanets(nodeId: number) {
-  return get<{ paranets: Array<{ id: string; name: string; uri?: string }> }>(
-    `${nodeBase(nodeId)}/api/paranet/list`,
+export async function fetchContextGraphs(nodeId: number) {
+  return get<{ contextGraphs: Array<{ id: string; name: string; uri?: string }> }>(
+    `${nodeBase(nodeId)}/api/context-graph/list`,
   );
 }
 
-export async function createParanet(nodeId: number, id: string, name: string) {
-  return post<{ created: boolean; uri: string }>(`${nodeBase(nodeId)}/api/paranet/create`, {
+export async function createContextGraph(nodeId: number, id: string, name: string) {
+  return post<{ created: boolean; uri: string }>(`${nodeBase(nodeId)}/api/context-graph/create`, {
     id,
     name,
   });
 }
 
-export async function subscribeParanet(nodeId: number, paranetId: string) {
-  return post<{ subscribed: string }>(`${nodeBase(nodeId)}/api/subscribe`, { paranetId });
+export async function subscribeContextGraph(nodeId: number, contextGraphId: string) {
+  return post<{ subscribed: string }>(`${nodeBase(nodeId)}/api/subscribe`, { contextGraphId });
 }
 
 export async function fetchWalletBalances(nodeId: number) {
@@ -161,7 +184,7 @@ export async function fetchWalletBalances(nodeId: number) {
 export async function queryRemote(
   nodeId: number,
   peerId: string,
-  opts: { lookupType: string; sparql?: string; ual?: string; paranetId?: string },
+  opts: { lookupType: string; sparql?: string; ual?: string; contextGraphId?: string },
 ) {
   return post<{
     operationId: string;
@@ -182,7 +205,7 @@ export interface MetricSnapshot {
   peer_count: number | null;
   direct_peers: number | null;
   relayed_peers: number | null;
-  paranet_count: number | null;
+  context_graph_count: number | null;
   total_triples: number | null;
   total_kcs: number | null;
   total_kas: number | null;

@@ -1,0 +1,40 @@
+{
+  "networkName": "DKG V10 Gnosis Mainnet",
+  "genesisId": "gnosis-mainnet",
+  "networkId": "e08a9fb72a648ec2eb2fd9c152ded90a8ad67bb56f27df4781d9bb7e261fb7a7",
+  "genesisVersion": 1,
+  "relays": [
+    "/ip4/178.104.101.41/tcp/9090/p2p/12D3KooWL9gwurFAVhQguJVs8CpzuSbt2hom9jyNJ5oHdHfyz351",
+    "/ip4/168.119.127.63/tcp/9090/p2p/12D3KooWS8pRJLrDgjqBNGJAjHDF7VoNrE4igbZ2tt9N61u7AUrG",
+    "/ip4/178.156.228.202/tcp/9090/p2p/12D3KooWGEW48Foccg27wPyKv66oUnjeAx46p1mQkWURXw8orCA1",
+    "/ip4/88.198.202.128/tcp/9090/p2p/12D3KooWLwPkoiastt27S2SRPtdx6t8KuFXwcbHovgCkAMfkJcXx",
+    "/ip4/91.98.129.173/tcp/9090/p2p/12D3KooWJth5STEUczjRh2NXqBedRtvrsjrB11172CUZbKGKNPKg",
+    "/ip4/78.47.4.139/tcp/9090/p2p/12D3KooWD2Q9pd6q6qT2hKPuXHRB6TGmGa12xNPyRphb2kTeVMZm"
+  ],
+  "defaultContextGraphs": [],
+  "defaultNodeRole": "edge",
+  "chain": {
+    "name": "gnosis",
+    "type": "evm",
+    "chainId": "gnosis:100",
+    "rpcUrl": "https://rpc.gnosischain.com",
+    "rpcUrls": [
+      "https://gnosis-rpc.publicnode.com",
+      "https://gnosis.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://rpc.gnosischain.com",
+      "https://gnosis-rpc.publicnode.com",
+      "https://gnosis.drpc.org"
+    ],
+    "hubAddress": "0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f"
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "repo": "OriginTrail/dkg",
+    "branch": "main",
+    "checkIntervalMinutes": 5,
+    "channel": "mainnet",
+    "allowPrerelease": false
+  }
+}

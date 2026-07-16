@@ -1,0 +1,7 @@
+{
+  "solc_version": "0.8.20",
+  "filter_paths": "contracts/\\.deps|contracts/archive|contracts/mocks|node_modules",
+  "exclude_informational": false,
+  "exclude_low": false,
+  "disable_color": true
+}

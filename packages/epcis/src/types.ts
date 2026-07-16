@@ -16,6 +16,8 @@ export interface EPCISEvent {
   type: string;
   eventTime: string;
   eventTimeZoneOffset?: string;
+  configurationId?: string;
+  shipmentId?: string;
   epcList?: string[];
   action?: string;
   bizStep?: string;
@@ -33,12 +35,11 @@ export interface ValidationResult {
   eventCount?: number;
 }
 
-export interface CaptureResult {
-  ual: string;
-  kcId: string;
+export interface CaptureAcceptedResult {
+  captureID: string;
   receivedAt: string;
   eventCount: number;
-  status: string;
+  status: 'accepted';
 }
 
 export interface CaptureOptions {
@@ -46,13 +47,21 @@ export interface CaptureOptions {
   allowedPeers?: string[];
 }
 
-/** Dependency-inversion boundary: the EPCIS package needs something that can publish JSON-LD. */
-export interface Publisher {
-  publish(
-    paranetId: string,
+/**
+ * Options the EPCIS handler hands to the async publisher. Wire-level
+ * `publishOptions` (CaptureOptions) plus a per-payload `subGraphName`
+ * lifted from the top of the capture body.
+ */
+export interface PublisherCaptureOpts extends CaptureOptions {
+  subGraphName?: string;
+}
+
+export interface AsyncPublisher {
+  publishAsync(
+    contextGraphId: string,
     content: unknown,
-    opts?: CaptureOptions,
-  ): Promise<{ ual: string; kcId: string; status: string }>;
+    opts?: PublisherCaptureOpts,
+  ): Promise<{ captureID: string }>;
 }
 
 // --- Events query types ---
@@ -69,10 +78,14 @@ export interface EpcisQueryParams {
   inputEPC?: string;
   outputEPC?: string;
   anyEPC?: string;
+  configurationId?: string;
+  shipmentId?: string;
   eventType?: string;
   action?: string;
   disposition?: string;
   readPoint?: string;
+  finalized?: boolean;
+  subGraphName?: string;
   perPage?: number;
   limit?: number;
   offset?: number;
@@ -82,7 +95,28 @@ export interface EpcisQueryParams {
 export interface QueryEngine {
   query(
     sparql: string,
-    opts?: { paranetId?: string },
+    opts?: {
+      contextGraphId?: string;
+      /**
+       * Sub-graph name within the context graph. Must match the sub-graph
+       * the query was built for so the engine's scope guard admits the
+       * `<cg>/<sub>` data graph (and the sub-graph private/meta graphs).
+       */
+      subGraphName?: string;
+      /**
+       * Route the scoped read to the shared-memory partition
+       * (`<cg>[/<sub>]/_shared_memory`). Set for `finalized=false` queries,
+       * which read non-finalized (SWM) events.
+       */
+      graphSuffix?: '_shared_memory';
+      /**
+       * Allow the scoped query to reference the context graph's own
+       * `_private` partition. The EPCIS events query always references
+       * `<cg>[/<sub>]/_private`, so this must be set or the engine's scope
+       * guard rejects the query.
+       */
+      includePrivate?: boolean;
+    },
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 

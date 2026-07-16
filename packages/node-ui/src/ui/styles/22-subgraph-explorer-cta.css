@@ -1,0 +1,268 @@
+/* ── Subgraph Explorer page header (S3) ── */
+/* Persistent page identity + 3-sentence intro. Rendered above the
+   SubGraphBar both in the All / overview state and inside every
+   detail body so the explanatory text never disappears. */
+.v10-subgraph-explorer-header {
+  padding: 12px 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.v10-subgraph-explorer-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+.v10-subgraph-explorer-intro {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  max-width: 760px;
+}
+
+/* ── Subgraph Explorer Root chip (S3) ── */
+/* Quieter than named chips — it's a fallback bucket. The ⊘ glyph
+   signals "no subgraph". Sits at the end of the chip row, after
+   any named chips. */
+.v10-subgraph-chip.v10-subgraph-chip-root {
+  color: var(--text-tertiary);
+}
+.v10-subgraph-chip.v10-subgraph-chip-root .v10-subgraph-chip-icon {
+  color: var(--text-tertiary);
+}
+.v10-subgraph-chip.v10-subgraph-chip-root.active {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: rgba(255,255,255,0.05);
+}
+
+/* ── Cross-layer count strip + active-layer pill (S3) ── */
+/* The count strip is the page's whole point — every subgraph is
+   cross-layer. The pill below it surfaces the active-layer scope
+   so it never silently changes meaning across a navigation
+   transition (M2 / S5 strand). */
+.v10-subgraph-cross-layer {
+  /* #11 polish (ui-locked) — `padding: 16px 16px 0` is +6px top
+     and -12px bottom vs. the prior `10px 16px 12px`. The bottom
+     padding moves into the active-layer-pill's `margin-top: 14px`,
+     so the cluster reads as a single layered breathing band (lede
+     +2px / count strip / pill +14px) instead of stacked rows with
+     bottom container padding. */
+  padding: 16px 16px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255,255,255,0.01);
+}
+.v10-subgraph-cross-layer-lede {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.01em;
+  /* #11 polish (ui-locked) — +2px below the lede so the count
+     strip sits cleanly beneath. */
+  margin-bottom: 10px;
+}
+.v10-subgraph-cross-layer-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.v10-subgraph-cross-layer-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  /* #6 polish — cells become interactive buttons (ui-locked).
+     The padding + negative margin pair enlarges the hit target
+     for click affordance while keeping the visual rhythm stable
+     (the negative margin negates the added padding so neighbours
+     don't shift). */
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  /* Native button reset so the cell inherits the rest of the
+     strip's typography rather than the UA <button> defaults. */
+  font-family: inherit;
+  text-align: left;
+}
+.v10-subgraph-cross-layer-cell:hover {
+  background: var(--bg-hover);
+}
+.v10-subgraph-cross-layer-cell[aria-pressed="false"] {
+  opacity: 0.5;
+}
+.v10-subgraph-cross-layer-cell-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.v10-subgraph-cross-layer-cell-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.v10-subgraph-cross-layer-cell-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.v10-subgraph-cross-layer-arrow {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+/* PR #793 round 2 (ui-locked option c) — demoted from
+   clickable pill chrome to inline caption-style metadata. The
+   pill used to be dressed as a chip but didn't go anywhere;
+   the `Reset filters` button is the canonical "restore scope"
+   affordance. Reduced to a transparent text label so it reads
+   as caption metadata, not a control. */
+.v10-subgraph-active-layer-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 8/12 asymmetry (ui-lead, round 3): caption reads as
+     "grouped with the strip above (tight 8px), terminated
+     from the chrome below (looser 12px)". */
+  margin-top: 8px;              /* was: 14px */
+  margin-bottom: 12px;          /* round 3: terminate before entity-tab strip */
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  font-family: var(--font-sans); /* was: --font-mono */
+  font-size: 11px;
+  color: var(--text-tertiary);
+  cursor: default;               /* not a clickable widget */
+  transition: color 0.15s;
+}
+.v10-subgraph-active-layer-pill:hover:not(:disabled) {
+  color: var(--text-secondary);
+  border-color: transparent;
+}
+.v10-subgraph-active-layer-pill:disabled,
+.v10-subgraph-active-layer-pill.all-layers {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+.v10-subgraph-active-layer-pill-label {
+  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+.v10-subgraph-active-layer-pill-value {
+  color: var(--text-secondary); /* was: --text-primary */
+  font-weight: 600;
+}
+
+/* PR #793 round 2 — `.v10-subgraph-swm-attribution-badge` rule
+   (sweep 0 Bug #8's "Colored by contributing agent" inline
+   badge above LayerGraphPanel) removed alongside the
+   corresponding render in SubGraphDetailView. The existing
+   SwmAttributionLegend inside LayerGraphPanel carries the
+   load-bearing disclosure; the badge added visual noise
+   without signal. The context-sensitive tooltip on the SWM
+   cross-layer cell remains as hover-only insurance. */
+
+/* ── Verify on DKG CTA (in KA detail right pane) ── */
+/* Two variants: .promote (WM -> SWM, amber) and .publish (SWM -> VM, green).
+   The layer-transition icon (◈ / ◉) matches LAYER_CONFIG so the CTA
+   visually anticipates the destination layer. */
+.v10-ka-verify {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.v10-ka-verify-promote {
+  background: linear-gradient(135deg,
+    rgba(245,158,11,0.10) 0%,
+    rgba(168,85,247,0.05) 100%);
+  border: 1px solid rgba(245,158,11,0.30);
+}
+.v10-ka-verify-publish {
+  background: linear-gradient(135deg,
+    rgba(34,197,94,0.10) 0%,
+    rgba(168,85,247,0.06) 100%);
+  border: 1px solid rgba(34,197,94,0.30);
+}
+.v10-ka-verify-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.v10-ka-verify-arrow {
+  font-size: 18px;
+  line-height: 1;
+}
+.v10-ka-verify-promote .v10-ka-verify-arrow { color: #f59e0b; }
+.v10-ka-verify-publish .v10-ka-verify-arrow { color: #22c55e; }
+.v10-ka-verify-title {
+  font-size: 13px; font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+.v10-ka-verify-btn {
+  display: block; width: 100%;
+  padding: 8px 12px;
+  border: none; border-radius: 6px;
+  font-size: 12px; font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: filter 0.15s, background 0.15s;
+}
+.v10-ka-verify-btn.promote {
+  background: #f59e0b;
+  color: #0a0a0a;
+}
+.v10-ka-verify-btn.publish {
+  background: #22c55e;
+  color: #0a0a0a;
+}
+.v10-ka-verify-btn:hover:not(:disabled) { filter: brightness(1.12); }
+.v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }
+.v10-ka-verify-hint {
+  margin-top: 8px;
+  font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
+}
+.v10-ka-verify-err {
+  margin-top: 8px; padding: 6px 8px;
+  background: rgba(239,68,68,0.12);
+  border-radius: 4px;
+  color: var(--text-danger); font-size: 11px;
+  font-family: var(--font-mono);
+}
+.v10-ka-verify-ok {
+  display: flex; flex-direction: column; gap: 4px;
+}
+/* Partial publish (HTTP 207): minted on-chain but the context-graph binding
+   failed. Same layout as the OK state, amber-tinted to read as a warning. */
+.v10-ka-verify-warn {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px;
+  background: rgba(245,158,11,0.12);
+  border-radius: 4px;
+}
+.v10-ka-verify-ok-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.06);
+  font-size: 11px;
+}
+.v10-ka-verify-ok-row:last-child { border-bottom: none; }
+.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: 9px; letter-spacing: 0.08em; }
+.v10-ka-verify-ok-val { color: var(--text-primary); font-weight: 600; }
+.v10-ka-verify-ok-val.mono {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}

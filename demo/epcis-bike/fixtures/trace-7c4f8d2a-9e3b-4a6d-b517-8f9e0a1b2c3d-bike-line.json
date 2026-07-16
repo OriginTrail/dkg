@@ -1,0 +1,127 @@
+{
+  "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+  "event_count": 7,
+  "products": [
+    "MODEL-RoadBike-2026"
+  ],
+  "stations": [
+    "FrameWelding",
+    "Painting",
+    "WheelAssembly",
+    "DrivetrainInstallation",
+    "PaintInspection",
+    "FunctionalTest",
+    "Packing"
+  ],
+  "time_range": [
+    "2026-05-12T08:12:00.000Z",
+    "2026-05-12T10:15:00.000Z"
+  ],
+  "events": [
+    {
+      "file": "event-01-FrameWelding.json",
+      "eventID": "urn:uuid:2b36e74e-b623-53a0-9208-6e61588a7173",
+      "eventTime": "2026-05-12T08:12:00.000Z",
+      "process_name": "FrameWelding",
+      "unit_name": "WC-FrameWelding",
+      "unit_id": "cycle-W18-001",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "ADD",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-02-Painting.json",
+      "eventID": "urn:uuid:2a0d116a-a10e-58b7-b6b2-73024ed64fad",
+      "eventTime": "2026-05-12T08:42:00.000Z",
+      "process_name": "Painting",
+      "unit_name": "WC-Painting",
+      "unit_id": "cycle-W18-002",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-03-WheelAssembly.json",
+      "eventID": "urn:uuid:4a779c36-24bd-5095-b6f5-3e977b150a85",
+      "eventTime": "2026-05-12T09:05:00.000Z",
+      "process_name": "WheelAssembly",
+      "unit_name": "WC-WheelAssembly",
+      "unit_id": "cycle-W18-003",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-04-DrivetrainInstallation.json",
+      "eventID": "urn:uuid:147d51ac-2a3e-544b-8a8a-b214e85ae333",
+      "eventTime": "2026-05-12T09:30:00.000Z",
+      "process_name": "DrivetrainInstallation",
+      "unit_name": "WC-DrivetrainInstallation",
+      "unit_id": "cycle-W18-004",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-05-PaintInspection.json",
+      "eventID": "urn:uuid:a4767217-a4a5-5aae-b35c-c881d98a5c35",
+      "eventTime": "2026-05-12T09:45:00.000Z",
+      "process_name": "PaintInspection",
+      "unit_name": "WC-PaintInspection",
+      "unit_id": "cycle-W18-005",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-inspecting",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-06-FunctionalTest.json",
+      "eventID": "urn:uuid:f0426c50-f395-51dd-82c3-ffdf8f8abd44",
+      "eventTime": "2026-05-12T10:00:00.000Z",
+      "process_name": "FunctionalTest",
+      "unit_name": "WC-FunctionalTest",
+      "unit_id": "cycle-W18-006",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-inspecting",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    },
+    {
+      "file": "event-07-Packing.json",
+      "eventID": "urn:uuid:b44fdba6-1ce0-5486-a2ff-0b963d3d08eb",
+      "eventTime": "2026-05-12T10:15:00.000Z",
+      "process_name": "Packing",
+      "unit_name": "WC-Packing",
+      "unit_id": "cycle-W18-007",
+      "item_ids": [
+        "BIKE-2026-W18-0001"
+      ],
+      "status": "Passed",
+      "action": "OBSERVE",
+      "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+      "disposition": "https://ref.gs1.org/cbv/Disp-in_progress"
+    }
+  ]
+}

@@ -1,75 +1,212 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
+import { _autoUpdateIo } from '../src/daemon.js';
 
-vi.mock('node:child_process', () => ({
-  execSync: vi.fn(),
-  exec: vi.fn((_cmd: string, _opts: any, cb: Function) => cb(null, '', '')),
-  execFile: vi.fn((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', '')),
-}));
-
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return {
-    ...actual,
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
-    mkdir: vi.fn(),
-    rm: vi.fn(),
-    symlink: vi.fn(),
-    rename: vi.fn(),
-    unlink: vi.fn(),
-    readlink: vi.fn(),
-  };
+const MARKITDOWN_TARGETS_JSON = JSON.stringify([
+  { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
+  { platform: 'darwin', arch: 'arm64', assetName: 'markitdown-darwin-arm64', runner: 'macos-14' },
+  { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe', runner: 'windows-latest' },
+]);
+const CLI_VERSION = '9.0.0-beta.6';
+const MARKITDOWN_BUILD_INFO_JSON = JSON.stringify({
+  markItDownUpstreamVersion: '0.1.5',
+  pyInstallerVersion: '6.19.0',
 });
+const MOCK_MARKITDOWN_ENTRY_SCRIPT = '# mock markitdown entry script\n';
+const MOCK_BUNDLER_SCRIPT = [
+  "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
+  "export const PYINSTALLER_VERSION = '6.19.0';",
+].join('\n');
+const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
+const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
+const RUNTIME_BUILD_COMPAT_WRAPPER = 'pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
+let mockBundledCliPackageVersion = CLI_VERSION;
+let mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
 
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    existsSync: vi.fn(() => true),
-    openSync: vi.fn(() => 99),
-    closeSync: vi.fn(),
-    writeFileSync: vi.fn(),
-    readFileSync: vi.fn(() => `${process.pid}:${Date.now()}:testtoken`),
-    unlinkSync: vi.fn(),
-  };
-});
+function buildFingerprintForTest(): string {
+  return sha256HexForTest([
+    '0.1.5',
+    '6.19.0',
+    sha256HexForTest(MOCK_MARKITDOWN_ENTRY_SCRIPT),
+    sha256HexForTest(MOCK_BUNDLER_SCRIPT),
+  ].join('\n'));
+}
 
-const fetchMock = vi.fn();
-vi.stubGlobal('fetch', fetchMock);
+function mockReadFileSyncValue(path: unknown): string {
+  const normalized = String(path).replace(/\\/g, '/');
+  if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
+  if (normalized.endsWith('/markitdown-build-info.json')) return MARKITDOWN_BUILD_INFO_JSON;
+  if (normalized.endsWith('/scripts/markitdown-entry.py')) return MOCK_MARKITDOWN_ENTRY_SCRIPT;
+  if (normalized.endsWith('/scripts/bundle-markitdown-binaries.mjs')) return MOCK_BUNDLER_SCRIPT;
+  if (normalized.includes('/node_modules/@origintrail-official/dkg/package.json')) {
+    return JSON.stringify({ version: mockInstalledPackageVersion });
+  }
+  if (normalized.endsWith('/packages/cli/package.json')) {
+    return JSON.stringify({ version: mockBundledCliPackageVersion });
+  }
+  return 'testtoken';
+}
+
+// Save original _autoUpdateIo values for restoration
+const origIo = { ..._autoUpdateIo };
+
+// Tracking arrays
+let readFileCalls: [any, ...any[]][] = [];
+let writeFileCalls: [any, any, ...any[]][] = [];
+let mkdirCalls: any[][] = [];
+let rmCalls: any[][] = [];
+let readdirCalls: any[][] = [];
+let copyFileCalls: any[][] = [];
+let chmodCalls: any[][] = [];
+let statCalls: any[][] = [];
+let existsSyncCalls: any[][] = [];
+let readFileSyncCalls: any[][] = [];
+let openSyncCalls: any[][] = [];
+let closeSyncCalls: any[][] = [];
+let writeFileSyncCalls: any[][] = [];
+let unlinkSyncCalls: any[][] = [];
+let execCalls: { cmd: string; cwd: string; timeout?: number }[] = [];
+let execFileCalls: { file: string; args: string[]; cwd: string; env: any }[] = [];
+let swapSlotCalls: string[] = [];
+let fetchCalls: any[][] = [];
+
+// Default mock implementations
+let readFileImpl: (path: any, ...rest: any[]) => Promise<any> = async () => '';
+let writeFileImpl: (path: any, data: any, ...rest: any[]) => Promise<any> = async () => {};
+let existsSyncImpl: (path: any) => boolean = () => true;
+let readFileSyncImpl: (path: any, ...rest: any[]) => any = (path: any) => mockReadFileSyncValue(path);
+let execImpl: (cmd: string, opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
+let execFileImpl: (file: string, args: string[], opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
+let swapSlotImpl: (slot: 'a' | 'b') => Promise<void> = async () => {};
+let fetchImpl: (...args: any[]) => Promise<any> = async () => ({ ok: true, json: async () => ({}) });
+// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo}`
+// and additionally wipes packages/cli's generated `network/` + `project.json`
+// (copied from repo root by the cli build script).
+// Default to a couple of canned package entries so the full flow runs end-to-end
+// in tests that don't care; tests targeting the cleaner override this directly.
+const DEFAULT_READDIR_PKG_ENTRIES = [
+  { name: 'core', isDirectory: () => true },
+  { name: 'cli', isDirectory: () => true },
+  { name: 'README.md', isDirectory: () => false },
+];
+let readdirImpl: (path: any, opts?: any) => Promise<any[]> = async (path: any) => {
+  if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+  return [];
+};
 
 let mockActiveSlot = 'a';
-vi.mock('../src/config.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/config.js')>();
-  return {
-    ...actual,
-    dkgDir: () => '/tmp/dkg-test',
-    releasesDir: () => '/tmp/dkg-test/releases',
-    activeSlot: () => Promise.resolve(mockActiveSlot as 'a' | 'b'),
-    inactiveSlot: () => Promise.resolve(mockActiveSlot === 'a' ? 'b' : 'a' as 'a' | 'b'),
-    swapSlot: vi.fn(),
+
+function resetMocks() {
+  readFileCalls = [];
+  writeFileCalls = [];
+  mkdirCalls = [];
+  rmCalls = [];
+  readdirCalls = [];
+  copyFileCalls = [];
+  chmodCalls = [];
+  statCalls = [];
+  existsSyncCalls = [];
+  readFileSyncCalls = [];
+  openSyncCalls = [];
+  closeSyncCalls = [];
+  writeFileSyncCalls = [];
+  unlinkSyncCalls = [];
+  execCalls = [];
+  execFileCalls = [];
+  swapSlotCalls = [];
+  fetchCalls = [];
+
+  readFileImpl = async () => '';
+  writeFileImpl = async () => {};
+  existsSyncImpl = () => true;
+  readFileSyncImpl = (path: any) => mockReadFileSyncValue(path);
+  execImpl = async (_cmd, _opts) => ({ stdout: '', stderr: '' });
+  execFileImpl = async (_file, _args, _opts) => ({ stdout: '', stderr: '' });
+  swapSlotImpl = async () => {};
+  fetchImpl = async () => ({ ok: true, json: async () => ({}) });
+  readdirImpl = async (path: any) => {
+    if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+    return [];
   };
-});
+}
 
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
-import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
-import { exec, execFile } from 'node:child_process';
-import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
-import { swapSlot } from '../src/config.js';
+function installMocks() {
+  _autoUpdateIo.readFile = (async (path: any, ...rest: any[]) => {
+    readFileCalls.push([path, ...rest]);
+    return readFileImpl(path, ...rest);
+  }) as any;
+  _autoUpdateIo.writeFile = (async (path: any, data: any, ...rest: any[]) => {
+    writeFileCalls.push([path, data, ...rest]);
+    return writeFileImpl(path, data, ...rest);
+  }) as any;
+  _autoUpdateIo.mkdir = (async (...args: any[]) => { mkdirCalls.push(args); }) as any;
+  _autoUpdateIo.rm = (async (...args: any[]) => { rmCalls.push(args); }) as any;
+  _autoUpdateIo.readdir = (async (path: any, opts?: any) => {
+    readdirCalls.push([path, opts]);
+    return readdirImpl(path, opts);
+  }) as any;
+  _autoUpdateIo.chmod = (async (...args: any[]) => { chmodCalls.push(args); }) as any;
+  _autoUpdateIo.copyFile = (async (...args: any[]) => { copyFileCalls.push(args); }) as any;
+  _autoUpdateIo.stat = (async (...args: any[]) => { statCalls.push(args); return { mode: 0o755 }; }) as any;
+  _autoUpdateIo.rename = (async () => {}) as any;
+  _autoUpdateIo.unlink = (async () => {}) as any;
+  _autoUpdateIo.existsSync = ((...args: any[]) => {
+    existsSyncCalls.push(args);
+    return existsSyncImpl(args[0]);
+  }) as any;
+  _autoUpdateIo.readFileSync = ((...args: any[]) => {
+    readFileSyncCalls.push(args);
+    return readFileSyncImpl(args[0], ...args.slice(1));
+  }) as any;
+  _autoUpdateIo.openSync = ((...args: any[]) => { openSyncCalls.push(args); return 99; }) as any;
+  _autoUpdateIo.closeSync = ((...args: any[]) => { closeSyncCalls.push(args); }) as any;
+  _autoUpdateIo.writeFileSync = ((...args: any[]) => { writeFileSyncCalls.push(args); }) as any;
+  _autoUpdateIo.unlinkSync = ((...args: any[]) => { unlinkSyncCalls.push(args); }) as any;
+  _autoUpdateIo.exec = (async (cmd: any, opts?: any) => {
+    execCalls.push({ cmd: String(cmd), cwd: normalizePathString(opts?.cwd), timeout: opts?.timeout });
+    return execImpl(String(cmd), opts);
+  }) as any;
+  _autoUpdateIo.execFile = (async (file: any, args: any[], opts?: any) => {
+    execFileCalls.push({ file: String(file), args: args ?? [], cwd: normalizePathString(opts?.cwd), env: opts?.env });
+    return execFileImpl(String(file), args ?? [], opts);
+  }) as any;
+  _autoUpdateIo.execSync = (() => '') as any;
+  _autoUpdateIo.dkgDir = () => '/tmp/dkg-test';
+  _autoUpdateIo.releasesDir = () => '/tmp/dkg-test/releases';
+  _autoUpdateIo.activeSlot = (async () => mockActiveSlot as 'a' | 'b') as any;
+  _autoUpdateIo.inactiveSlot = (async () => (mockActiveSlot === 'a' ? 'b' : 'a') as 'a' | 'b') as any;
+  _autoUpdateIo.swapSlot = (async (slot: 'a' | 'b') => { swapSlotCalls.push(slot); return swapSlotImpl(slot); }) as any;
+  _autoUpdateIo.fetch = (async (...args: any[]) => { fetchCalls.push(args); return fetchImpl(...args); }) as any;
+  _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async () => false;
+  _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => null;
+  _autoUpdateIo.readCliPackageVersion = (pkgDir: string) => {
+    try {
+      const raw = readFileSyncImpl(normalizePathString(pkgDir + '/package.json'), 'utf-8');
+      return JSON.parse(raw).version ?? null;
+    } catch { return null; }
+  };
+}
 
-const mockedReadFile = vi.mocked(readFile);
-const mockedWriteFile = vi.mocked(writeFile);
-const mockedMkdir = vi.mocked(mkdir);
-const mockedRm = vi.mocked(rm);
-const mockedExistsSync = vi.mocked(existsSync);
-const mockedOpenSync = vi.mocked(openSync);
-const mockedCloseSync = vi.mocked(closeSync);
-const mockedFsWriteFileSync = vi.mocked(fsWriteFileSync);
-const mockedReadFileSync = vi.mocked(readFileSync);
-const mockedUnlinkSync = vi.mocked(unlinkSync);
-const mockedSwapSlot = vi.mocked(swapSlot);
-const mockedExec = vi.mocked(exec);
-const mockedExecFile = vi.mocked(execFile);
+function restoreIo() {
+  Object.assign(_autoUpdateIo, origIo);
+}
+
+import {
+  checkForNewCommitWithStatus,
+  checkForUpdate,
+  formatAutoUpdateTagVerificationWarning,
+  normalizeGitRefInput,
+  performUpdate,
+  performNpmUpdate,
+  resolveAutoUpdateGitRef,
+  resolveAutoUpdateGitRefPlan,
+} from '../src/daemon.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
+import type { LastUpdateCheck } from '../src/daemon/state.js';
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -78,66 +215,187 @@ const AU: AutoUpdateConfig = {
   checkIntervalMinutes: 30,
 };
 
+describe('git auto-update ref normalization', () => {
+  it('normalizes bare branch values to full branch refs', () => {
+    expect(normalizeGitRefInput('main')).toBe('refs/heads/main');
+    expect(normalizeGitRefInput('release/v10')).toBe('refs/heads/release/v10');
+  });
+
+  it('preserves full refs and lets autoUpdate.ref override branch', () => {
+    expect(normalizeGitRefInput('refs/heads/main')).toBe('refs/heads/main');
+    expect(normalizeGitRefInput('refs/tags/v10.0.5')).toBe('refs/tags/v10.0.5');
+    expect(resolveAutoUpdateGitRef({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/heads/canary',
+      checkIntervalMinutes: 30,
+    })).toBe('refs/heads/canary');
+  });
+
+  it('rejects unsafe refs before they reach git', () => {
+    expect(() => normalizeGitRefInput('main; rm -rf /')).toThrow(/invalid branch\/ref/);
+    expect(() => normalizeGitRefInput('--upload-pack=/tmp/pwn')).toThrow(/invalid branch\/ref/);
+    expect(() => normalizeGitRefInput('refs/heads/')).toThrow(/invalid branch\/ref/);
+  });
+
+  it('plans signed tag verification and the matching force-fetch ref in one place', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: true,
+      fetchRef: '+refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toBeNull();
+  });
+
+  it('plans unverified tag fetches with a non-forced destination refspec', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: false,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: false,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+  });
+
+  it('plans branch verification as inert and formats the daemon startup warning', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/heads/main',
+      tagName: null,
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/heads/main',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toContain(
+      'verifyTagSignature=true is inert for non-tag ref "refs/heads/main"',
+    );
+  });
+});
+
+function normalizePathString(value: unknown): string {
+  return String(value).replace(/\\/g, '/');
+}
+
+function sha256HexForTest(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function makeFetchOk(sha: string) {
-  fetchMock.mockResolvedValueOnce({
+  fetchImpl = async () => ({
     ok: true,
     json: async () => ({ sha }),
   });
 }
 
+function mockGitUpdateReadFile(
+  currentCommit = 'aaa111',
+  cliVersion = '9.0.0',
+  nodeUiPackageName = '@origintrail-official/dkg-node-ui',
+  rootScripts: Record<string, string> = {
+    'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
+    'build:runtime': RUNTIME_BUILD_COMPAT_WRAPPER,
+  },
+) {
+  readFileImpl = async (path: any) => {
+    const p = normalizePathString(path);
+    if (p.endsWith('/packages/node-ui/package.json')) {
+      return JSON.stringify({
+        name: nodeUiPackageName,
+        scripts: { 'build:ui': 'vite build' },
+      });
+    }
+    if (p.endsWith('/package.json') && !p.endsWith('/packages/cli/package.json')) {
+      return JSON.stringify({
+        dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
+        scripts: rootScripts,
+      });
+    }
+    if (p.endsWith('/packages/cli/package.json')) {
+      return JSON.stringify({ version: cliVersion });
+    }
+    if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
+    return currentCommit;
+  };
+}
+
 function getExecCalls() {
-  return mockedExec.mock.calls.map(c => ({
-    cmd: String(c[0]),
-    cwd: (c[1] as any)?.cwd,
+  return execCalls.map(c => ({
+    cmd: c.cmd,
+    cwd: c.cwd,
+    timeout: c.timeout,
   }));
 }
 
 function getExecFileCalls() {
-  return mockedExecFile.mock.calls.map(c => ({
-    file: String(c[0]),
-    args: (c[1] as string[]) ?? [],
-    cwd: (c[2] as any)?.cwd,
-    env: (c[2] as any)?.env,
+  return execFileCalls.map(c => ({
+    file: c.file,
+    args: c.args,
+    cwd: c.cwd,
+    env: c.env,
   }));
 }
 
 describe('blue-green checkForUpdate', () => {
   beforeEach(() => {
-    vi.resetAllMocks();
+    resetMocks();
     mockActiveSlot = 'a';
-    mockedExistsSync.mockReturnValue(true);
-    mockedMkdir.mockResolvedValue(undefined as any);
-    mockedRm.mockResolvedValue(undefined as any);
-    mockedOpenSync.mockReturnValue(99 as any);
-    mockedCloseSync.mockReturnValue(undefined as any);
-    mockedFsWriteFileSync.mockReturnValue(undefined as any);
-    mockedReadFileSync.mockReturnValue(`${process.pid}:${Date.now()}:testtoken` as any);
-    mockedUnlinkSync.mockReturnValue(undefined as any);
-    (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
-    (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));
+    installMocks();
+  });
+
+  afterEach(() => {
+    restoreIo();
   });
 
   it('skips when blue-green slots are not initialized', async () => {
-    mockedExistsSync.mockReturnValue(false);
-    const log = vi.fn();
+    existsSyncImpl = () => false;
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('slots not initialized'));
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(logCalls.some(m => m.includes('slots not initialized'))).toBe(true);
+    expect(fetchCalls.length).toBe(0);
   });
 
   it('reinitializes missing target slot git metadata before fetch', async () => {
-    mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
-      if (path.endsWith('/releases/a')) return true; // active slot path
-      if (path.endsWith('/releases/b/.git')) return false; // target slot missing git metadata
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/releases/a')) return true;
+      if (path.endsWith('/releases/b/.git')) return false;
       if (path.includes('cli.js')) return true;
       return true;
-    });
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    };
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
 
-    const result = await performUpdate(AU, vi.fn());
+    const result = await performUpdate(AU, () => {});
     expect(result).toBe(true);
 
     const gitCmds = getExecFileCalls();
@@ -147,11 +405,11 @@ describe('blue-green checkForUpdate', () => {
   });
 
   it('uses ssh git transport with configured ssh key path', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa1111' as any);
-    (mockedExecFile as any).mockImplementation((file: string, args: string[], opts: any, cb: Function) => {
-      if (file === 'git' && args[0] === 'ls-remote') return cb(null, 'bbb2222\trefs/heads/main\n', '');
-      return cb(null, '', '');
-    });
+    readFileImpl = async () => 'aaa1111';
+    execFileImpl = async (file: string, args: string[], _opts?: any) => {
+      if (file === 'git' && args[0] === 'ls-remote') return { stdout: 'bbb2222\trefs/heads/main\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    };
 
     const sshAu: AutoUpdateConfig = {
       ...AU,
@@ -159,9 +417,9 @@ describe('blue-green checkForUpdate', () => {
       sshKeyPath: '/tmp/test key',
     };
 
-    const result = await checkForNewCommitWithStatus(sshAu, vi.fn());
+    const result = await checkForNewCommitWithStatus(sshAu, () => {});
     expect(result.status).toBe('available');
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchCalls.length).toBe(0);
 
     const gitCmds = getExecFileCalls().filter(c => c.file === 'git' && c.args[0] === 'ls-remote');
     expect(gitCmds.length).toBeGreaterThan(0);
@@ -169,41 +427,88 @@ describe('blue-green checkForUpdate', () => {
   });
 
   it('passes GITHUB_TOKEN to git fetch for https GitHub repos', async () => {
-    vi.stubEnv('GITHUB_TOKEN', 'ghp_test_123');
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    const origToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = 'ghp_test_123';
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
 
-    const result = await performUpdate({ ...AU, repo: 'https://github.com/owner/repo.git' }, vi.fn());
+    try {
+      const result = await performUpdate({ ...AU, repo: 'https://github.com/owner/repo.git' }, () => {});
+      expect(result).toBe(true);
+
+      const fetchCall = getExecFileCalls().find(c => c.file === 'git' && c.args.includes('fetch'));
+      expect(fetchCall).toBeTruthy();
+      expect(fetchCall?.args[0]).toBe('-c');
+      expect(fetchCall?.args[1]).toContain('http.extraHeader=Authorization: Basic ');
+      expect(fetchCall?.args).toContain('fetch');
+      expect(fetchCall?.args).toContain('https://github.com/owner/repo.git');
+    } finally {
+      if (origToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = origToken;
+    }
+  });
+
+  it('bootstraps from an npm-built active slot with no current git commit metadata', async () => {
+    const latest = 'bbb222';
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('/.current-commit')) throw new Error('ENOENT');
+      if (normalized.endsWith('/.update-pending.json')) throw new Error('ENOENT');
+      return '';
+    };
+    existsSyncImpl = (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized === '/tmp/dkg-test/releases/a') return true;
+      if (normalized.endsWith('/releases/b/.git')) return false;
+      if (normalized.includes('cli.js')) return true;
+      if (normalized.endsWith('/packages/node-ui/dist-ui/index.html')) return true;
+      return true;
+    };
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('git rev-parse HEAD') && normalizePathString(opts?.cwd) === '/tmp/dkg-test/releases/a') {
+        throw new Error('fatal: not a git repository');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    makeFetchOk(latest);
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(AU, (message) => logCalls.push(message));
+
     expect(result).toBe(true);
-
-    const fetchCall = getExecFileCalls().find(c => c.file === 'git' && c.args.includes('fetch'));
-    expect(fetchCall).toBeTruthy();
-    expect(fetchCall?.args[0]).toBe('-c');
-    expect(fetchCall?.args[1]).toContain('http.extraHeader=Authorization: Basic ');
-    expect(fetchCall?.args).toContain('fetch');
-    expect(fetchCall?.args).toContain('https://github.com/owner/repo.git');
-
-    delete process.env.GITHUB_TOKEN;
+    expect(logCalls.some(m => m.includes('active slot git commit is unknown'))).toBe(true);
+    const allCmds = getExecCalls();
+    const gitCmds = getExecFileCalls();
+    const activeDir = '/tmp/dkg-test/releases/a';
+    const targetDir = '/tmp/dkg-test/releases/b';
+    expect(allCmds.some(c => c.cmd.includes('git rev-parse HEAD') && c.cwd === activeDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'fetch' && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(swapSlotCalls).toContain('b');
   });
 
   it('skips when no new commit', async () => {
     const sha = 'abc123';
-    mockedReadFile.mockResolvedValueOnce(sha as any);
+    readFileImpl = async () => sha;
     makeFetchOk(sha);
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(mockedExec).not.toHaveBeenCalled();
+    expect(execCalls.length).toBe(0);
   });
 
   it('builds in inactive slot on new commit', async () => {
     const current = 'aaa111';
     const latest = 'bbb222';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(true);
 
@@ -214,66 +519,174 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(existsSyncCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui/index.html')
+    )).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('--force') && c.cwd === targetDir)).toBe(false);
+    expect(allCmds.some(c => c.cmd.includes('--best-effort') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build') && c.cwd === targetDir)).toBe(false);
 
     const activeDir = '/tmp/dkg-test/releases/a';
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
   });
 
+  it('runs the Node UI static build after the runtime package build before swapping', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb224';
+    mockGitUpdateReadFile(current);
+    makeFetchOk(latest);
+    let nodeUiBuilt = false;
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return nodeUiBuilt;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === NODE_UI_BUILD_CMD) nodeUiBuilt = true;
+      return { stdout: '', stderr: '' };
+    };
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const targetCalls = getExecCalls().filter(c => c.cwd === targetDir);
+    const allCmds = targetCalls.map(c => c.cmd);
+    const runtimeIdx = allCmds.indexOf(RUNTIME_PACKAGES_BUILD_CMD);
+    const uiIdx = allCmds.indexOf(NODE_UI_BUILD_CMD);
+    expect(runtimeIdx).toBeGreaterThanOrEqual(0);
+    expect(uiIdx).toBeGreaterThan(runtimeIdx);
+    expect(targetCalls.find(c => c.cmd === RUNTIME_PACKAGES_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(targetCalls.find(c => c.cmd === NODE_UI_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(allCmds).not.toContain(RUNTIME_BUILD_CMD);
+    expect(swapSlotCalls).toContain('b');
+    expect(rmCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui'),
+    )).toBe(true);
+    expect(existsSyncCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui/index.html')
+    )).toBe(true);
+  });
+
+  it('falls back to build:runtime when the target lacks the runtime-only package script', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb224-runtime-wrapper';
+    mockGitUpdateReadFile(current, '9.0.0', '@origintrail-official/dkg-node-ui', {
+      'build:runtime': RUNTIME_BUILD_CMD,
+    });
+    makeFetchOk(latest);
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
+    expect(allCmds).toContain(RUNTIME_BUILD_CMD);
+    expect(allCmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+  });
+
+  it('uses the Node UI workspace package name from the target slot', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb225';
+    mockGitUpdateReadFile(current, '9.0.0-beta.2', '@dkg/node-ui');
+    makeFetchOk(latest);
+    let nodeUiBuilt = false;
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return nodeUiBuilt;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === LEGACY_NODE_UI_BUILD_CMD) nodeUiBuilt = true;
+      return { stdout: '', stderr: '' };
+    };
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
+    expect(allCmds).toContain(LEGACY_NODE_UI_BUILD_CMD);
+    expect(allCmds).not.toContain(NODE_UI_BUILD_CMD);
+    expect(swapSlotCalls).toContain('b');
+  });
+
+  it('continues the update when MarkItDown staging fails inside the best-effort git-update step', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb223';
+    readFileImpl = async () => current;
+    makeFetchOk(latest);
+    execImpl = async (cmd: string) => {
+      if (String(cmd).includes('bundle-markitdown-binaries.mjs')) {
+        throw new Error('markitdown staging spawn failed');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(swapSlotCalls).toContain('b');
+    expect(logCalls.some(m => m.includes('MarkItDown staging failed in slot b'))).toBe(true);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
   it('swaps symlink after successful build', async () => {
     const current = 'aaa111';
     const latest = 'ccc333';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
 
-    await performUpdate(AU, vi.fn());
+    await performUpdate(AU, () => {});
 
-    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
-    expect(mockedWriteFile).toHaveBeenCalledWith(
-      '/tmp/dkg-test/.current-commit',
-      latest,
-    );
+    expect(swapSlotCalls).toContain('b');
+    expect(
+      writeFileCalls.some((call) =>
+        normalizePathString(call[0]).includes('/tmp/dkg-test/.current-commit') && call[1] === latest)
+    ).toBe(true);
   });
 
   it('returns true after swap via checkForUpdate', async () => {
     const current = 'aaa111';
     const latest = 'ddd444';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
 
-    const log = vi.fn();
-    const updated = await checkForUpdate(AU, log);
+    const updated = await checkForUpdate(AU, () => {});
     expect(updated).toBe(true);
   });
 
   it('build failure does not swap', async () => {
     const current = 'aaa111';
     const latest = 'eee555';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
-    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
-      if (String(cmd).includes('pnpm build')) return cb(new Error('build exploded'), '', '');
-      return cb(null, '', '');
-    });
+    execImpl = async (cmd: string) => {
+      if (String(cmd).includes('pnpm build')) throw new Error('build exploded');
+      return { stdout: '', stderr: '' };
+    };
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('build failed'));
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('build failed'))).toBe(true);
   });
 
   it('build failure does not touch active slot', async () => {
     const current = 'aaa111';
     const latest = 'fff666';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
-    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
-      if (String(cmd).includes('pnpm build')) return cb(new Error('build exploded'), '', '');
-      return cb(null, '', '');
-    });
+    execImpl = async (cmd: string) => {
+      if (String(cmd).includes('pnpm build')) throw new Error('build exploded');
+      return { stdout: '', stderr: '' };
+    };
 
-    await performUpdate(AU, vi.fn());
+    await performUpdate(AU, () => {});
 
     const allCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     const activeDir = '/tmp/dkg-test/releases/a';
@@ -283,14 +696,15 @@ describe('blue-green checkForUpdate', () => {
   it('fetch failure does not attempt build', async () => {
     const current = 'aaa111';
     const latest = 'ggg777';
-    mockedReadFile.mockResolvedValueOnce(current as any);
+    readFileImpl = async () => current;
     makeFetchOk(latest);
-    (mockedExecFile as any).mockImplementation((file: string, args: string[], _opts: any, cb: Function) => {
-      if (file === 'git' && args[0] === 'fetch') return cb(new Error('network down'), '', '');
-      return cb(null, '', '');
-    });
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'fetch') throw new Error('network down');
+      return { stdout: '', stderr: '' };
+    };
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
 
@@ -300,36 +714,30 @@ describe('blue-green checkForUpdate', () => {
   });
 
   it('slot alternation — consecutive updates build in alternating slots', async () => {
-    // First update: active=a, builds in b
     mockActiveSlot = 'a';
-    mockedReadFile.mockResolvedValueOnce('commit1' as any);
+    readFileImpl = async () => 'commit1';
     makeFetchOk('commit2');
 
-    await performUpdate(AU, vi.fn());
+    await performUpdate(AU, () => {});
     const firstBuildCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     expect(firstBuildCwds.some((cwd: string) => cwd.includes('/b'))).toBe(true);
 
-    vi.resetAllMocks();
-    mockedExistsSync.mockReturnValue(true);
-    (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
-
-    // Second update: active=b, builds in a
+    // Reset for second update
+    resetMocks();
     mockActiveSlot = 'b';
-    mockedReadFile.mockResolvedValueOnce('commit2' as any);
+    installMocks();
+    readFileImpl = async () => 'commit2';
     makeFetchOk('commit3');
 
-    await performUpdate(AU, vi.fn());
+    await performUpdate(AU, () => {});
     const secondBuildCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     expect(secondBuildCwds.some((cwd: string) => cwd.includes('/a'))).toBe(true);
   });
 
-  // -------------------------------------------------------------------
-  // Regression tests for bugs found during PR review cycles
-  // -------------------------------------------------------------------
-
   it('rejects branch names with shell injection characters', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
-    const log = vi.fn();
+    readFileImpl = async () => 'aaa111';
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const malicious: AutoUpdateConfig = {
       ...AU,
@@ -337,41 +745,194 @@ describe('blue-green checkForUpdate', () => {
     };
     const result = await performUpdate(malicious, log);
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
-    expect(mockedExec).not.toHaveBeenCalled();
-    expect(mockedExecFile).not.toHaveBeenCalled();
+    expect(logCalls.some(m => m.includes('invalid branch'))).toBe(true);
+    expect(execCalls.length).toBe(0);
+    expect(execFileCalls.length).toBe(0);
   });
 
   it('aborts swap when build output (cli.js) is missing', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('newcommit');
 
-    // existsSync returns true for dirs but false for cli.js entry file
-    mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
       if (path.includes('cli.js')) return false;
       return true;
-    });
+    };
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('build output missing'))).toBe(true);
+  });
+
+  it('aborts swap when the git Node UI static bundle is missing after build', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('newcommit');
+
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('Node UI static bundle missing'))).toBe(true);
+  });
+
+  it('does not swap when the Node UI static build fails', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('newcommit');
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return false;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('build failed') && m.includes('vite exploded'))).toBe(true);
+  });
+
+  it('continues the swap when the bundled MarkItDown binary is missing after build', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('newcommit');
+
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(swapSlotCalls.length).toBeGreaterThanOrEqual(1);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
+  it('reuses the active-slot MarkItDown binary when staging misses it during git update', async () => {
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.current-commit')) return 'aaa111';
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() });
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) return sourceBytes;
+      throw new Error(`Unexpected readFile path: ${normalized}`);
+    };
+    makeFetchOk('newcommit');
+
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/packages/cli/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion && !meta.buildFingerprint) return false;
+        if (metadata.buildFingerprint && meta.buildFingerprint !== metadata.buildFingerprint) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(copyFileCalls.length).toBeGreaterThanOrEqual(1);
+    expect(chmodCalls.length).toBeGreaterThanOrEqual(1);
+    expect(logCalls.some(m => m.includes('reused bundled MarkItDown binary from the active slot'))).toBe(true);
+  });
+
+  it('continues the update when active-slot MarkItDown reuse copy fails', async () => {
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.current-commit')) return 'aaa111';
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() });
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) return sourceBytes;
+      throw new Error(`Unexpected readFile path: ${normalized}`);
+    };
+    makeFetchOk('newcommit');
+    _autoUpdateIo.copyFile = (async () => { copyFileCalls.push([]); throw new Error('disk full'); }) as any;
+
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/packages/cli/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion && !meta.buildFingerprint) return false;
+        if (metadata.buildFingerprint && meta.buildFingerprint !== metadata.buildFingerprint) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(logCalls.some(m => m.includes('failed to reuse bundled MarkItDown binary from the active slot'))).toBe(true);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
   });
 
   it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
-    mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
       if (path.endsWith('/releases/a')) return true;
       if (path.endsWith('/releases/b/.git')) return false;
       if (path.includes('cli.js')) return true;
       return true;
-    });
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    };
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
 
-    const result = await performUpdate(AU, vi.fn());
+    const result = await performUpdate(AU, () => {});
     expect(result).toBe(true);
     const targetDir = '/tmp/dkg-test/releases/b';
     const gitCmds = getExecFileCalls();
@@ -379,18 +940,18 @@ describe('blue-green checkForUpdate', () => {
   });
 
   it('commit file is written before swap (crash safety)', async () => {
-    mockedReadFile.mockResolvedValueOnce('old-commit' as any);
+    readFileImpl = async () => 'old-commit';
     makeFetchOk('new-commit');
 
     const callOrder: string[] = [];
-    mockedWriteFile.mockImplementation(async (path: any) => {
+    writeFileImpl = async (path: any) => {
       const p = String(path);
       if (p.includes('.update-pending.json')) callOrder.push('writePending');
       else if (p.includes('.current-commit')) callOrder.push('writeCommit');
-    });
-    mockedSwapSlot.mockImplementation(async () => { callOrder.push('swapSlot'); });
+    };
+    swapSlotImpl = async () => { callOrder.push('swapSlot'); };
 
-    await performUpdate(AU, vi.fn());
+    await performUpdate(AU, () => {});
 
     const writeIdx = callOrder.indexOf('writePending');
     const swapIdx = callOrder.indexOf('swapSlot');
@@ -401,56 +962,59 @@ describe('blue-green checkForUpdate', () => {
   it('clears pending file if swap fails', async () => {
     const oldCommit = 'old-sha-111';
     const newCommit = 'new-sha-222';
-    mockedReadFile.mockResolvedValueOnce(oldCommit as any);
+    readFileImpl = async () => oldCommit;
     makeFetchOk(newCommit);
 
-    mockedSwapSlot.mockRejectedValueOnce(new Error('symlink failed'));
+    swapSlotImpl = async () => { throw new Error('symlink failed'); };
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
-    // commit file should not be rewritten to the new commit on failed swap
-    const commitWrites = mockedWriteFile.mock.calls.filter((c) => String(c[0]).includes('.current-commit'));
+    expect(logCalls.some(m => m.includes('symlink swap failed'))).toBe(true);
+    const commitWrites = writeFileCalls.filter((c) => String(c[0]).includes('.current-commit'));
     expect(commitWrites.length).toBe(0);
   });
 
   it('checkForNewCommit is read-only — does not build, swap, or modify files', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    readFileImpl = async () => 'current-sha';
     makeFetchOk('new-sha');
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await checkForNewCommit(AU, log);
 
     expect(result).toBe('new-sha');
-    expect(mockedExec).not.toHaveBeenCalled();
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
-    expect(mockedWriteFile).not.toHaveBeenCalled();
+    expect(execCalls.length).toBe(0);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(writeFileCalls.length).toBe(0);
   });
 
   it('checkForNewCommit supports non-GitHub repos via git ls-remote', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
-    (mockedExecFile as any).mockImplementation((file: string, args: string[], _opts: any, cb: Function) => {
+    readFileImpl = async () => 'current-sha';
+    execFileImpl = async (file: string, args: string[]) => {
       if (file === 'git' && args[0] === 'ls-remote') {
-        return cb(null, 'abcdef1234567890abcdef1234567890abcdef12\trefs/heads/main\n', '');
+        return { stdout: 'abcdef1234567890abcdef1234567890abcdef12\trefs/heads/main\n', stderr: '' };
       }
-      return cb(null, '', '');
-    });
-    const log = vi.fn();
+      return { stdout: '', stderr: '' };
+    };
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await checkForNewCommit({ ...AU, repo: 'ssh://git.example.com/non-github.git' }, log);
 
     expect(result).toBe('abcdef1234567890abcdef1234567890abcdef12');
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('failed to check for new commit'));
+    expect(fetchCalls.length).toBe(0);
+    expect(logCalls.every(m => !m.includes('failed to check for new commit'))).toBe(true);
   });
 
   it('checkForNewCommit also validates branch names', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
-    const log = vi.fn();
+    readFileImpl = async () => 'current-sha';
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await checkForNewCommit({
       ...AU,
@@ -458,13 +1022,14 @@ describe('blue-green checkForUpdate', () => {
     }, log);
 
     expect(result).toBeNull();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
+    expect(logCalls.some(m => m.includes('invalid branch'))).toBe(true);
   });
 
   it('rejects unsafe repo specs that start with dash', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await performUpdate(
       { ...AU, repo: '-c protocol.file.allow=always' },
@@ -472,14 +1037,15 @@ describe('blue-green checkForUpdate', () => {
     );
 
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid autoUpdate.repo'));
-    expect(mockedExecFile.mock.calls.some(c => String(c[0]) === 'git' && (c[1] as string[])[0] === 'fetch')).toBe(false);
+    expect(logCalls.some(m => m.includes('invalid autoUpdate.repo'))).toBe(true);
+    expect(execFileCalls.some(c => c.file === 'git' && c.args[0] === 'fetch')).toBe(false);
   });
 
   it('rejects refs that start with dash to avoid git option injection', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
-    const log = vi.fn();
+    readFileImpl = async () => 'current-sha';
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await checkForNewCommit({
       ...AU,
@@ -487,41 +1053,112 @@ describe('blue-green checkForUpdate', () => {
     }, log);
 
     expect(result).toBeNull();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch/ref'));
+    expect(logCalls.some(m => m.includes('invalid branch/ref'))).toBe(true);
   });
 
   it('checkForNewCommit handles fetch/network errors without throwing', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
-    fetchMock.mockRejectedValueOnce(new Error('network timeout'));
-    const log = vi.fn();
+    readFileImpl = async () => 'current-sha';
+    fetchImpl = async () => { throw new Error('network timeout'); };
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await checkForNewCommit(AU, log);
 
     expect(result).toBeNull();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('failed to check for new commit'));
+    expect(logCalls.some(m => m.includes('failed to check for new commit'))).toBe(true);
   });
 
   it('supports explicit tag refs for version-targeted updates', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    readFileImpl = async () => 'aaa111';
     makeFetchOk('tagsha123');
 
-    const result = await performUpdate(AU, vi.fn(), { refOverride: 'refs/tags/v9.0.5', verifyTagSignature: true });
+    const result = await performUpdate(AU, () => {}, { refOverride: 'refs/tags/v9.0.5', verifyTagSignature: true });
     expect(result).toBe(true);
-    const fetchUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
+    const fetchUrl = String(fetchCalls[0]?.[0] ?? '');
     expect(fetchUrl).toContain('/commits/v9.0.5');
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git +refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
+  });
+
+  it('defaults tag-signature verification from resolved git auto-update config', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
+  });
+
+  it('terminates git verify-tag options before option-shaped tag names', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/--signed-release', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    const verifyCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'verify-tag');
+    expect(verifyCall?.args).toEqual(['verify-tag', '--', '--signed-release']);
+  });
+
+  it('preserves normal tag immutability when tag verification is disabled', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5:refs/tags/v9.0.5') {
+        throw new Error('would clobber existing tag');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: false },
+      (msg) => { logCalls.push(msg); },
+    );
+
+    expect(result).toBe(false);
+    const allGitCalls = getExecFileCalls();
+    const fetchCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'fetch');
+    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5:refs/tags/v9.0.5']);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.includes('+refs/tags/v9.0.5:refs/tags/v9.0.5'))).toBe(false);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
+    expect(logCalls.some((msg) => msg.includes('would clobber existing tag'))).toBe(true);
+  });
+
+  it('does not run git verify-tag for branch refs when tag verification is requested', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('branchsha123');
+
+    const result = await performUpdate(
+      { ...AU, branch: 'main', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/heads/main')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
   });
 
   it('accepts refs containing build metadata (+) for tag checks', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
-    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    readFileImpl = async () => 'current-sha';
     makeFetchOk('new-sha');
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await checkForNewCommit(
       { ...AU, branch: 'refs/tags/v1.2.3+build.5' },
@@ -529,52 +1166,56 @@ describe('blue-green checkForUpdate', () => {
     );
 
     expect(result).toBe('new-sha');
-    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('invalid branch/ref'));
+    expect(logCalls.every(m => !m.includes('invalid branch/ref'))).toBe(true);
   });
 
   it('logs clear error when requested tag does not exist', async () => {
-    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 422 } as any);
-    const log = vi.fn();
+    readFileImpl = async () => 'aaa111';
+    fetchImpl = async () => ({ ok: false, status: 422 });
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
 
     const result = await performUpdate(AU, log, { refOverride: 'refs/tags/v9.0.5' });
 
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('tag "v9.0.5" not found'));
+    expect(logCalls.some(m => m.includes('tag "v9.0.5" not found'))).toBe(true);
   });
 
   it('blocks pre-release versions unless allowPrerelease is true', async () => {
-    mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
-      if (p.endsWith('.current-commit')) return 'aaa111' as any;
+    readFileImpl = async (path: any) => {
+      const p = normalizePathString(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
-      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
+      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' });
       throw new Error(`Unexpected readFile path: ${p}`);
-    });
+    };
     makeFetchOk('rcsha123');
 
-    const log = vi.fn();
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performUpdate({ ...AU, allowPrerelease: false }, log);
     expect(result).toBe(false);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('pre-release'));
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(logCalls.some(m => m.includes('pre-release'))).toBe(true);
+    expect(swapSlotCalls.length).toBe(0);
   });
 
   it('allows pre-release versions when allowPrerelease=true', async () => {
-    mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
-      if (p.endsWith('.current-commit')) return 'aaa111' as any;
+    readFileImpl = async (path: any) => {
+      const p = normalizePathString(path);
+      if (p.endsWith('.current-commit')) return 'aaa111';
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
-      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
+      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' });
       throw new Error(`Unexpected readFile path: ${p}`);
-    });
+    };
     makeFetchOk('rcsha999');
 
-    const result = await performUpdate({ ...AU, allowPrerelease: true }, vi.fn());
+    const result = await performUpdate({ ...AU, allowPrerelease: true }, () => {});
     expect(result).toBe(true);
-    expect(mockedSwapSlot).toHaveBeenCalled();
+    expect(swapSlotCalls.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+import { afterEach } from 'vitest';
 
 describe('checkForNpmVersionUpdate tag precedence', () => {
   function makeRegistryResponse(distTags: Record<string, string>) {
@@ -585,132 +1226,549 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
   }
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    mockedReadFile.mockImplementation(async (path: any) => {
+    resetMocks();
+    installMocks();
+    readFileImpl = async (path: any) => {
       const p = String(path);
-      if (p.endsWith('.current-version')) return '9.0.0-beta.3' as any;
+      if (p.endsWith('.current-version')) return '9.0.0-beta.3';
       throw new Error('ENOENT');
-    });
+    };
+  });
+
+  afterEach(() => {
+    restoreIo();
   });
 
   it('uses latest tag when allowPrerelease=false and latest is stable', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+    fetchImpl = async () => makeRegistryResponse({
       latest: '9.1.0',
       dev: '9.2.0-dev.123.abc1234',
-    }));
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, false);
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, false);
     expect(result.status).toBe('available');
     expect(result.version).toBe('9.1.0');
   });
 
   it('skips when allowPrerelease=false and latest is a prerelease', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+    fetchImpl = async () => makeRegistryResponse({
       latest: '9.1.0-beta.1',
       dev: '9.2.0-dev.123.abc1234',
-    }));
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, false);
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, false);
     expect(result.status).toBe('up-to-date');
   });
 
   it('picks highest version across dev/latest/beta when allowPrerelease=true', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+    fetchImpl = async () => makeRegistryResponse({
       latest: '9.0.0-beta.4',
       dev: '9.0.0-beta.4-dev.999.abc1234',
       beta: '9.0.0-beta.3',
-    }));
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, true);
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('available');
     expect(result.version).toBe('9.0.0-beta.4-dev.999.abc1234');
   });
 
   it('prefers stable latest over older dev tag when allowPrerelease=true', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+    fetchImpl = async () => makeRegistryResponse({
       latest: '9.1.0',
       dev: '9.0.0-beta.4-dev.123.abc1234',
-    }));
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, true);
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('available');
     expect(result.version).toBe('9.1.0');
   });
 
   it('returns error on registry failure', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 503 } as any);
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, true);
+    fetchImpl = async () => ({ ok: false, status: 503 });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('error');
   });
 
   it('returns up-to-date when current version matches latest', async () => {
     const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
-    fetchMock.mockResolvedValueOnce(makeRegistryResponse({
+    fetchImpl = async () => makeRegistryResponse({
       latest: '9.0.0-beta.3',
-    }));
-    const log = vi.fn();
-    const result = await checkForNpmVersionUpdate(log, true);
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('up-to-date');
+  });
+
+  // Channel pinning (OT-RFC-41): a node tracks ONE dist-tag and is never
+  // captured by whatever `latest` happens to point at. This is what keeps a
+  // testnet cohort on the `testnet` tag after `latest` is repurposed for mainnet.
+  it('channel pin follows ONLY that dist-tag, ignoring a higher latest', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '9.5.0',          // another release line — MUST be ignored
+      testnet: '9.0.0-beta.5',  // the pinned channel
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.5');
+  });
+
+  it('channel pin is up-to-date when the pinned tag does not advance', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '9.5.0',
+      testnet: '9.0.0-beta.3', // == current version
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
+    expect(result.status).toBe('up-to-date');
+  });
+
+  it('channel pin reports no-target (not up-to-date) when the dist-tag does not exist yet', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.5.0' }); // no `testnet`
+    const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
+    // Distinct from up-to-date: an unpublished/misconfigured channel must be
+    // visible, not silently reported as current.
+    expect(result.status).toBe('no-target');
+    expect(result.channel).toBe('testnet');
+  });
+
+  it('channel pin reports no-target when allowPrerelease=false rejects a prerelease tag', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ testnet: '9.6.0-rc.1' });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'testnet');
+    expect(result.status).toBe('no-target');
+    expect(result.channel).toBe('testnet');
+  });
+
+  it('channel pin reports no-target when the tag value is not valid semver', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ testnet: 'not-a-version' });
+    const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
+    expect(result.status).toBe('no-target');
+  });
+
+  it('channel pin rejects a semver-LIKE-but-invalid tag (empty prerelease identifier)', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ testnet: '10.0.0-alpha..1' });
+    const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
+    expect(result.status).toBe('no-target');
+  });
+
+  it('allowPrerelease=false accepts a STABLE version with hyphenated build metadata', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    // The hyphen is in +build metadata, not a prerelease — must NOT be rejected.
+    fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('10.0.0+mainnet-build.1');
+  });
+
+  it('channel pin follows a stable tag under allowPrerelease=false', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({
+      latest: '9.0.0-beta.9',
+      mainnet: '10.0.0',
+    });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('10.0.0');
+  });
+
+  it('default path does NOT attempt an update to a non-semver latest', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ latest: 'garbage' });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
+    expect(result.status).toBe('up-to-date'); // not 'available' on garbage
+  });
+});
+
+describe('deriveUpdateCheckState (runCheck → /api/status mapping)', () => {
+  it('no-target → upToDate:true + channelTargetMissing:true + cleared latestVersion (updateAvailable stays false)', async () => {
+    const { deriveUpdateCheckState } = await import('../src/daemon.js');
+    expect(deriveUpdateCheckState({ status: 'no-target', channel: 'mainnet' }))
+      .toEqual({ upToDate: true, channelTargetMissing: true, latestVersion: '' });
+  });
+
+  it('available → upToDate:false + clears channelTargetMissing + carries latestVersion', async () => {
+    const { deriveUpdateCheckState } = await import('../src/daemon.js');
+    expect(deriveUpdateCheckState({ status: 'available', version: '10.1.0' }))
+      .toEqual({ upToDate: false, channelTargetMissing: false, latestVersion: '10.1.0' });
+  });
+
+  it('up-to-date → upToDate:true, clears channelTargetMissing AND clears stale latestVersion', async () => {
+    const { deriveUpdateCheckState } = await import('../src/daemon.js');
+    expect(deriveUpdateCheckState({ status: 'up-to-date', version: 'should-be-ignored' }))
+      .toEqual({ upToDate: true, channelTargetMissing: false, latestVersion: '' });
+  });
+
+  it('error → null (caller leaves prior state untouched)', async () => {
+    const { deriveUpdateCheckState } = await import('../src/daemon.js');
+    expect(deriveUpdateCheckState({ status: 'error' })).toBeNull();
   });
 });
 
 describe('performNpmUpdate', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    resetMocks();
     mockActiveSlot = 'a';
-    mockedExistsSync.mockReturnValue(true);
-    mockedMkdir.mockResolvedValue(undefined as any);
-    mockedRm.mockResolvedValue(undefined as any);
-    mockedWriteFile.mockResolvedValue(undefined as any);
-    mockedReadFile.mockImplementation(async (path: any) => {
+    mockBundledCliPackageVersion = CLI_VERSION;
+    mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
+    installMocks();
+    readFileImpl = async (path: any) => {
       const p = String(path);
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
-      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
+      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' });
       throw new Error(`Unexpected readFile: ${p}`);
-    });
-    mockedExec.mockImplementation((_cmd: any, _opts: any, cb: any) => cb(null, '', '') as any);
+    };
+  });
+
+  afterEach(() => {
+    restoreIo();
   });
 
   it('installs package and swaps slot on success', async () => {
-    const log = vi.fn();
-    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', log);
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', () => {});
     expect(result).toBe('updated');
-    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
-    expect(mockedWriteFile).toHaveBeenCalledWith(
-      expect.stringContaining('.current-version'),
-      '9.0.0-beta.4-dev.100.abc1234',
-    );
+    expect(swapSlotCalls).toContain('b');
+    expect(writeFileCalls.some(c =>
+      String(c[0]).includes('.current-version') && c[1] === '9.0.0-beta.4-dev.100.abc1234'
+    )).toBe(true);
   });
 
   it('returns failed when npm install throws', async () => {
-    mockedExec.mockImplementation((_cmd: any, _opts: any, cb: any) =>
-      cb(new Error('npm ERR! 404'), '', '') as any);
-    const log = vi.fn();
-    const result = await performNpmUpdate('9.99.0', log);
+    execImpl = async () => { throw new Error('npm ERR! 404'); };
+    const result = await performNpmUpdate('9.99.0', () => {});
     expect(result).toBe('failed');
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(swapSlotCalls.length).toBe(0);
   });
 
   it('returns failed when entry point missing after install', async () => {
-    mockedExistsSync.mockImplementation((p: any) => {
+    existsSyncImpl = (p: any) => {
       if (String(p).includes('cli.js')) return false;
       return true;
-    });
-    const log = vi.fn();
-    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    };
+    const result = await performNpmUpdate('9.0.0-beta.5', () => {});
     expect(result).toBe('failed');
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(swapSlotCalls.length).toBe(0);
+  });
+
+  it('returns failed when npm Node UI static bundle is missing after install', async () => {
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+
+    expect(result).toBe('failed');
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('Node UI static bundle missing'))).toBe(true);
+    expect(existsSyncCalls.some(([path]) =>
+      normalizePathString(path).endsWith('/packages/node-ui/dist-ui/index.html'),
+    )).toBe(false);
+  });
+
+  it('does not accept a legacy npm UI bundle for a current-package npm update', async () => {
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.endsWith('/node_modules/@origintrail-official/dkg/package.json')) {
+        return JSON.stringify({
+          version: '9.0.0-beta.5',
+          dependencies: { '@origintrail-official/dkg-node-ui': '9.0.0-beta.5' },
+        });
+      }
+      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.5' });
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/node_modules/@origintrail-official/dkg/dist/cli.js')) return true;
+      if (path.includes('/@dkg/node-ui/dist-ui/index.html')) return true;
+      if (path.endsWith('/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const result = await performNpmUpdate('9.0.0-beta.5', () => {});
+
+    expect(result).toBe('failed');
+    expect(swapSlotCalls.length).toBe(0);
+    expect(existsSyncCalls.some(([path]) =>
+      normalizePathString(path).includes('/@dkg/node-ui/dist-ui/index.html'),
+    )).toBe(false);
+  });
+
+  it('continues when the bundled MarkItDown binary is missing after install', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    existsSyncImpl = (p: any) => {
+      const path = String(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    };
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(swapSlotCalls.length).toBeGreaterThanOrEqual(1);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
+  it('reuses the active-slot MarkItDown binary when npm install leaves it missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.5' });
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion && !meta.buildFingerprint) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: '9.0.0-beta.5' });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBeGreaterThanOrEqual(1);
+    expect(chmodCalls.length).toBeGreaterThanOrEqual(1);
+    expect(logCalls.some(m => m.includes('reused bundled MarkItDown binary from the active slot'))).toBe(true);
+  });
+
+  it('skips active-slot MarkItDown reuse when metadata targets a different npm version', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.4' });
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sha256HexForTest(Buffer.from('active-slot-markitdown', 'utf-8'))}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) {
+        return Buffer.from('active-slot-markitdown', 'utf-8');
+      }
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion && !meta.buildFingerprint) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: '9.0.0-beta.5' });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('incompatible metadata'))).toBe(true);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
+  it('skips active-slot MarkItDown reuse when the checksum sidecar is missing', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && path.endsWith('.sha256')) return false;
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('skipping active-slot bundled MarkItDown binary without a valid checksum sidecar'))).toBe(true);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
+  it('does not probe a source-slot build binary as an npm reuse candidate', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.5';
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-')) {
+        throw new Error(`npm update should not inspect source-slot MarkItDown candidates: ${normalized}`);
+      }
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBe(0);
+    expect(existsSyncCalls.some(
+      ([path]) => normalizePathString(path).includes('/releases/a/packages/cli/bin/markitdown-'),
+    )).toBe(false);
+    expect(logCalls.some(m => m.includes('Continuing without document conversion'))).toBe(true);
+  });
+
+  it('validates npm-installed MarkItDown metadata against the resolved package version instead of the requested spec', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.6' });
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: '9.0.0-beta.6' });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('latest', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBeGreaterThanOrEqual(1);
+    expect(writeFileCalls.some(c =>
+      String(c[0]).includes('.current-version') && c[1] === '9.0.0-beta.6'
+    )).toBe(true);
+    expect(logCalls.some(m => m.includes('reused bundled MarkItDown binary from the active slot'))).toBe(true);
+  });
+
+  it('reuses a fingerprint-compatible active-slot MarkItDown binary across CLI version bumps', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'release',
+          cliVersion: '9.0.0-beta.5',
+          buildFingerprint: buildFingerprintForTest(),
+        });
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    };
+    _autoUpdateIo.hasVerifiedBundledMarkItDownBinary = async (binPath: string, metadata?: any) => {
+      const normalized = normalizePathString(binPath);
+      if (!existsSyncImpl(normalized)) return false;
+      if (!existsSyncImpl(normalized + '.sha256')) return false;
+      if (!metadata) return true;
+      try {
+        const metaRaw = await readFileImpl(normalized + '.meta.json');
+        const meta = JSON.parse(metaRaw);
+        if (metadata.buildFingerprint && meta.buildFingerprint === metadata.buildFingerprint) return true;
+        if (metadata.cliVersion && meta.cliVersion !== metadata.cliVersion) return false;
+        return true;
+      } catch { return false; }
+    };
+    _autoUpdateIo.expectedBundledMarkItDownBuildMetadata = () => ({ cliVersion: '9.0.0-beta.6', buildFingerprint: buildFingerprintForTest() });
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.6', log);
+    expect(result).toBe('updated');
+    expect(copyFileCalls.length).toBeGreaterThanOrEqual(1);
+    expect(logCalls.some(m => m.includes('reused bundled MarkItDown binary from the active slot'))).toBe(true);
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {
     mockActiveSlot = 'b';
-    mockedReadFile.mockImplementation(async (path: any) => {
+    readFileImpl = async (path: any) => {
       const p = String(path);
       if (p.endsWith('.update-pending.json')) {
         return JSON.stringify({
@@ -719,28 +1777,29 @@ describe('performNpmUpdate', () => {
           version: '9.0.0-beta.4-dev.200.def5678',
           ref: 'npm:9.0.0-beta.4-dev.200.def5678',
           createdAt: new Date().toISOString(),
-        }) as any;
+        });
       }
-      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.200.def5678' }) as any;
+      if (p.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.200.def5678' });
       throw new Error(`Unexpected readFile: ${p}`);
-    });
-    const log = vi.fn();
+    };
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performNpmUpdate('9.0.0-beta.4-dev.200.def5678', log);
     expect(result).toBe('updated');
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('recovered pending'));
-    expect(mockedWriteFile).toHaveBeenCalledWith(
-      expect.stringContaining('.current-version'),
-      '9.0.0-beta.4-dev.200.def5678',
-    );
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(logCalls.some(m => m.includes('recovered pending'))).toBe(true);
+    expect(writeFileCalls.some(c =>
+      String(c[0]).includes('.current-version') && c[1] === '9.0.0-beta.4-dev.200.def5678'
+    )).toBe(true);
+    expect(swapSlotCalls.length).toBe(0);
   });
 
   it('returns failed when slot swap throws', async () => {
-    mockedSwapSlot.mockRejectedValueOnce(new Error('EPERM'));
-    const log = vi.fn();
+    swapSlotImpl = async () => { throw new Error('EPERM'); };
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
     const result = await performNpmUpdate('9.0.0-beta.5', log);
     expect(result).toBe('failed');
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
+    expect(logCalls.some(m => m.includes('symlink swap failed'))).toBe(true);
   });
 });
 
@@ -782,5 +1841,450 @@ describe('compareSemver', () => {
 
   it('strips v prefix', () => {
     expect(compareSemver('v9.0.0', '9.0.0')).toBe(0);
+  });
+});
+
+// ─── Hardening: incremental builds, configurable timeouts, fail-safe contract diff,
+//     persisted update status. See PR `autoupdater-hardening`.
+describe('autoupdater hardening', () => {
+  beforeEach(() => {
+    resetMocks();
+    mockActiveSlot = 'a';
+    installMocks();
+  });
+
+  afterEach(() => {
+    restoreIo();
+  });
+
+  it('does NOT run `git clean -fdx` by default — preserves node_modules/Hardhat cache for incremental rebuild', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {});
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean',
+    );
+    expect(cleanCall).toBeUndefined();
+  });
+
+  it('runs `git clean -fdx` only when forceClean=true is passed', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {}, { forceClean: true });
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean' && c.args[1] === '-fdx',
+    );
+    expect(cleanCall).toBeTruthy();
+  });
+
+  it('honours autoUpdate.buildTimeoutMs.install on pnpm install', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let installTimeout: number | undefined;
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('pnpm install')) installTimeout = opts?.timeout;
+      return { stdout: '', stderr: '' };
+    };
+    const auWithTimeout: AutoUpdateConfig = {
+      ...AU,
+      buildTimeoutMs: { install: 600_000 },
+    };
+    await performUpdate(auWithTimeout as any, () => {});
+    expect(installTimeout).toBe(600_000);
+  });
+
+  // ─── Contract build is OFF the node update path ─────────────────────
+  //
+  // The auto-updater intentionally never invokes `hardhat compile` on node
+  // hosts. The committed `packages/evm-module/abi/*.json` files are the
+  // runtime contract surface (consumed by `packages/chain` via require()),
+  // and the `abi-freshness` CI job blocks any PR that changes `.sol`
+  // sources without committing the regenerated ABIs. This removes the
+  // most failure-prone step from the update flow — `hardhat compile`
+  // routinely OOMs / times out on resource-constrained nodes (cold solc
+  // on ARM64), and any failure there used to abort the slot swap.
+  //
+  // The previous tests in this slot exercised:
+  //   - autoUpdate.buildTimeoutMs.contracts honouring (contracts no longer rebuilt)
+  //   - contract-diff fails closed (no diff is performed)
+  //   - hardhat clean ordering before rebuild (no rebuild)
+  //   - contract-diff retry via `git fetch --depth=1` (no diff)
+  //
+  // Replaced with one explicit assertion: hardhat is never invoked on the
+  // node update path, even when the diff between commits lists changed
+  // .sol sources.
+  it('never invokes hardhat / evm-module build on the auto-update path, even when contracts changed between commits', async () => {
+    mockGitUpdateReadFile();
+    makeFetchOk('bbb222');
+    const evmCommands: string[] = [];
+    execImpl = async (cmd: string) => {
+      if (
+        cmd.includes('@origintrail-official/dkg-evm-module') ||
+        cmd.includes('hardhat')
+      ) {
+        evmCommands.push(cmd);
+      }
+      return { stdout: '', stderr: '' };
+    };
+    // Even if the diff would have shown a .sol change, the new
+    // implementation must not consult it — and must not invoke any
+    // evm-module / hardhat command. Stub diff anyway to make this test
+    // a regression guard if the conditional is ever re-introduced.
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(evmCommands).toEqual([]);
+  });
+
+  it('atomic bookkeeping writes go through a temp path then rename to final', async () => {
+    // Reproduces the dkg-v9-relay-01 corruption scenario: a partial / retried
+    // writeFile to `.current-commit` left an 80-char doubled SHA on disk. With
+    // writeFileAtomic, the actual writeFile lands at a tmp path and only the
+    // rename produces the live file — so an interrupted write can never be
+    // observed by the daemon as a corrupted live file.
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const renameCalls: Array<[string, string]> = [];
+    _autoUpdateIo.rename = (async (from: any, to: any) => {
+      renameCalls.push([String(from), String(to)]);
+    }) as any;
+    await performUpdate(AU, () => {});
+    const commitRename = renameCalls.find(([, to]) => to.endsWith('/.current-commit'));
+    expect(commitRename).toBeTruthy();
+    expect(commitRename?.[0]).toMatch(/\.current-commit\.tmp\./);
+  });
+
+  it('self-heals pre-existing `.current-commit` corruption (>64 chars) by re-deriving from git HEAD', async () => {
+    // Exact dkg-v9-relay-01 reproduction: the file on disk contained the same
+    // 40-char SHA written twice end-to-end (80 chars total). The daemon should
+    // detect the malformed value, fall back to `git rev-parse HEAD`, and on
+    // the next swap rewrite the file (atomically) with the real SHA.
+    const corrupted = 'a'.repeat(40) + 'a'.repeat(40); // 80 chars
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return corrupted;
+      return '';
+    };
+    makeFetchOk('bbb222');
+    let revParseCalled = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('git rev-parse HEAD')) {
+        revParseCalled = true;
+        return { stdout: 'aaa111\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logCalls: string[] = [];
+    await performUpdate(AU, (m) => logCalls.push(m));
+    expect(revParseCalled).toBe(true);
+    expect(logCalls.some((m) => m.includes('malformed value') && m.includes('len=80'))).toBe(true);
+  });
+
+  // ─── Bot-review fixes (PR #303) ─────────────────────────────────────────
+
+  it('clears stale dist/ + tsconfig.tsbuildinfo + cli/network/ + cli/project.json (preserves node_modules + Hardhat caches)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    // Default readdir mock returns two packages: 'core' and 'cli'. Each must
+    // get its `dist/` and `tsconfig.tsbuildinfo` rm'd. Additionally, the
+    // packages/cli build script copies repo-root `network/*.json` into
+    // `packages/cli/network/` and `project.json` into `packages/cli/project.json`,
+    // so those must also be wiped — otherwise a deleted/renamed root network
+    // config can survive in the inactive slot and be loaded via candidateRoots().
+    await performUpdate(AU, () => {});
+    const rmTargets = rmCalls.map(args => String(args[0]));
+    const wipesDistCore = rmTargets.some(p => p.endsWith('/packages/core/dist'));
+    const wipesDistCli = rmTargets.some(p => p.endsWith('/packages/cli/dist'));
+    const wipesTsBuildInfoCore = rmTargets.some(p => p.endsWith('/packages/core/tsconfig.tsbuildinfo'));
+    const wipesTsBuildInfoCli = rmTargets.some(p => p.endsWith('/packages/cli/tsconfig.tsbuildinfo'));
+    const wipesCliNetworkDir = rmTargets.some(p => p.endsWith('/packages/cli/network'));
+    const wipesCliProjectJson = rmTargets.some(p => p.endsWith('/packages/cli/project.json'));
+    expect(wipesDistCore).toBe(true);
+    expect(wipesDistCli).toBe(true);
+    expect(wipesTsBuildInfoCore).toBe(true);
+    expect(wipesTsBuildInfoCli).toBe(true);
+    expect(wipesCliNetworkDir).toBe(true);
+    expect(wipesCliProjectJson).toBe(true);
+    // Sanity: no node_modules wipe and no Hardhat cache/artifacts wipe.
+    const touchesNodeModules = rmTargets.some(p => p.includes('node_modules'));
+    const touchesHardhatCache = rmTargets.some(p =>
+      p.endsWith('/cache') || p.endsWith('/artifacts'),
+    );
+    expect(touchesNodeModules).toBe(false);
+    expect(touchesHardhatCache).toBe(false);
+    // Sanity: we did NOT shell out to `find` (the legacy implementation).
+    const findCalls = getExecFileCalls().filter(c => c.file === 'find');
+    expect(findCalls.length).toBe(0);
+    // Regression: cli/network/ is rm'd recursively (so a stale per-network
+    // file, e.g. `packages/cli/network/devnet.json` left behind after the
+    // root `network/devnet.json` was deleted in a later commit, gets wiped
+    // along with the directory). `force: true` makes the rm a no-op when
+    // the dir is absent (fresh clone path).
+    const cliNetworkRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/network'));
+    expect(cliNetworkRmCall).toBeDefined();
+    expect(cliNetworkRmCall?.[1]).toMatchObject({ recursive: true, force: true });
+    const cliProjectRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/project.json'));
+    expect(cliProjectRmCall).toBeDefined();
+    expect(cliProjectRmCall?.[1]).toMatchObject({ force: true });
+  });
+
+  it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const sweepCalls: Array<{ cmd: string; env: any }> = [];
+    _autoUpdateIo.execSync = ((cmd: any, opts?: any) => {
+      sweepCalls.push({ cmd: String(cmd), env: opts?.env ?? null });
+      return '';
+    }) as any;
+    // Make pnpm install time out → triggers the sweep.
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm install')) {
+        const err: any = new Error('Command failed: pnpm install ETIMEDOUT');
+        err.killed = true;
+        err.signal = 'SIGTERM';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(sweepCalls.length).toBeGreaterThan(0);
+    for (const call of sweepCalls) {
+      // No host-wide command-line pattern matching.
+      expect(call.cmd).not.toMatch(/pkill\s+(-\S+\s+)*-f/);
+      // Scoping happens via env vars, not embedded in the script. EUID is
+      // resolved in Node and passed as DKG_AU_UID — we MUST NOT depend on
+      // bash-only `$EUID` because /bin/sh on Ubuntu/Debian is dash.
+      expect(call.cmd).toContain('$DKG_AU_SLOT');
+      expect(call.cmd).toContain('pgrep -u "$DKG_AU_UID"');
+      expect(call.cmd).not.toContain('$EUID');
+      expect(call.cmd).toContain('/proc/$pid/cwd');
+      expect(call.env?.DKG_AU_SLOT).toMatch(/\/releases\/[ab]$/);
+      expect(call.env?.DKG_AU_UID).toMatch(/^\d+$/);
+    }
+  });
+
+  it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    // readdir() must succeed and return entries — otherwise cleanGeneratedOutputs
+    // returns early ("nothing to pre-clean") on ENOENT and never reaches rm,
+    // which would silently bypass this regression test.
+    readdirImpl = async (path: any) => {
+      if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+      return [];
+    };
+    // Force the Node-based clean to throw on rm of dist (EACCES-ish), and
+    // also force the git clean -fdx fallback to fail. Update must abort.
+    _autoUpdateIo.rm = (async () => {
+      throw new Error('EACCES: simulated permission denied on dist');
+    }) as any;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'clean' && args[1] === '-fdx') {
+        throw new Error('EACCES: simulated permission denied on git clean');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logs: string[] = [];
+    const result = await performUpdate(AU, (m) => logs.push(m));
+    expect(result).toBe(false);
+    expect(logs.some(m => m.includes('pre-build clean failed') && m.includes('Aborting'))).toBe(true);
+    // No slot swap should have happened.
+    expect(swapSlotCalls.length).toBe(0);
+  });
+
+});
+
+// Post-hold-off revalidation mappers for the rollout gate. These guard the
+// exact seam behind the 🔴 review finding: after the jitter delay, the target
+// detected earlier must be RE-CONFIRMED so a withdrawn / rolled-back release is
+// never installed. (The gate orchestration itself is covered in
+// auto-update-jitter.test.ts; here we prove the real npm/git mappers.)
+describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
+  function makeRegistryResponse(distTags: Record<string, string>) {
+    return { ok: true, json: async () => ({ 'dist-tags': distTags }) } as any;
+  }
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the version when the channel target is still available and ahead', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+  });
+
+  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    // 9.1.0 pulled; latest rolled back to what the node already runs.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+  });
+
+  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
+    currentVersion('9.0.0');
+    // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+  });
+});
+
+describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSha(sha: string) {
+    execFileImpl = async (file: string, args: string[]) =>
+      file === 'git' && args[0] === 'ls-remote'
+        ? { stdout: `${sha}\trefs/heads/main\n`, stderr: '' }
+        : { stdout: '', stderr: '' };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the fresh remote commit when the ref is still ahead', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
+    readFileImpl = async () => 'aaa1111'; // current commit
+    remoteSha('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+  });
+
+  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
+    readFileImpl = async () => 'aaa1111';
+    remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+  });
+});
+
+// End-to-end polling wiring: prove the REAL npm/git runChecks route through the
+// gate and skip a target that was withdrawn during the hold-off — i.e. that the
+// production path uses the post-hold-off revalidation, not the pre-hold-off
+// detected target. (Guards against a `revalidate: () => detectedTarget` regression.)
+function freshLastCheck(): LastUpdateCheck {
+  return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
+}
+function noJitterGate(log: (m: string) => void) {
+  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+}
+
+describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+  // Successive fetches return successive dist-tag sets (detect, then revalidate).
+  function registrySequence(...tagSets: Record<string, string>[]) {
+    let i = 0;
+    fetchImpl = async () => {
+      const tags = tagSets[Math.min(i, tagSets.length - 1)];
+      i += 1;
+      return { ok: true, json: async () => ({ 'dist-tags': tags }) } as any;
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT install a version withdrawn during the hold-off (detect ahead, revalidate up-to-date)', async () => {
+    const logs: string[] = [];
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }, { latest: '9.0.0' }); // 9.1.0 detected, then rolled back
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+    });
+
+    await runCheck();
+
+    expect(mkdirCalls.length, 'the installer (performNpmUpdate) must not run').toBe(0);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0'); // detect recorded the then-available target
+  });
+
+  it('reaches the installer when the target is still available after the hold-off', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate(() => {}), log: () => {},
+      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
+    await runCheck().catch(() => {});
+    expect(mkdirCalls.length, 'installer entered → releases dir created').toBeGreaterThan(0);
+  });
+
+  it('version-check-only mode (no gate) records status but never installs', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' });
+    const lastUpdateCheck = freshLastCheck();
+    const runCheck = createNpmUpdateRunCheck({
+      gate: null, log: () => {},
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    await runCheck();
+    expect(mkdirCalls.length).toBe(0);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0');
+    expect(lastUpdateCheck.upToDate).toBe(false);
+  });
+});
+
+describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSequence(...shas: string[]) {
+    let i = 0;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'ls-remote') {
+        const sha = shas[Math.min(i, shas.length - 1)];
+        i += 1;
+        return { stdout: `${sha}\trefs/heads/main\n`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT build a commit the ref moved away from during the hold-off', async () => {
+    const logs: string[] = [];
+    readFileImpl = async () => 'aaa1111';   // current commit
+    remoteSequence('bbb2222', 'aaa1111');    // detect ahead, then ref rolled back to current
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createGitUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, au: gitAu, onRestart,
+    });
+
+    await runCheck();
+
+    // Direct signal, not a log substring: performUpdateWithStatus's first act is
+    // acquireUpdateLock -> openSync(".update.lock"). Zero openSync calls proves
+    // the updater was never entered (detect/revalidate never openSync).
+    expect(openSyncCalls.length, 'the updater (performUpdateWithStatus) must not be entered').toBe(0);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestCommit).toBe('bbb2222'); // detect recorded the then-available tip
   });
 });

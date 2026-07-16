@@ -1,0 +1,51 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "currentEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epochs",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epochLengthInSeconds",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "timeRemainingInCurrentEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "prorateActiveSink",
+    "outputs": [
+      {
+        "internalType": "uint40[3]",
+        "name": "starts",
+        "type": "uint40[3]"
+      },
+      {
+        "internalType": "uint40[3]",
+        "name": "ends",
+        "type": "uint40[3]"
+      },
+      {
+        "internalType": "uint96[3]",
+        "name": "amounts",
+        "type": "uint96[3]"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]

@@ -1,21 +1,64 @@
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
+import { decodeRdfStringLiteral } from './rdf-literal.js';
+export { decodeRdfStringLiteral } from './rdf-literal.js';
 
 export interface MemoryToolContext {
-  query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => Promise<any>;
-  writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ workspaceOperationId: string }>;
-  enshrineFromWorkspace: (
-    paranetId: string,
-    selection: 'all' | { rootEntities: string[] },
-    opts?: { clearWorkspaceAfter?: boolean },
+  query: (
+    sparql: string,
+    opts?: {
+      contextGraphId?: string;
+      graphSuffix?: '_shared_memory';
+      includeSharedMemory?: boolean;
+      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+      agentAddress?: string;
+      assertionName?: string;
+      subGraphName?: string;
+    },
   ) => Promise<any>;
-  createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
-  listParanets: () => Promise<any[]>;
+  /**
+   * Create a per-agent Working Memory assertion graph. Idempotent: "already
+   * exists" is resolved quietly, any other error surfaces.
+   */
+  createAssertion: (
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ) => Promise<{ assertionUri: string | null; alreadyExists: boolean }>;
+  /** Append quads into an existing Working Memory assertion graph. */
+  writeAssertion: (
+    contextGraphId: string,
+    name: string,
+    quads: any[],
+    opts?: { subGraphName?: string },
+  ) => Promise<{ written: number }>;
+  createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
+  listContextGraphs: () => Promise<any[]>;
+}
+
+/** Options passed to ChatMemoryManager at construction time. */
+export interface ChatMemoryManagerOptions {
+  /**
+   * The attached agent's address. Used as the `agentAddress` field on
+   * `view: 'working-memory'` queries so the query engine can route reads
+   * to the correct per-agent assertion graph. Defaults to `undefined`
+   * during tests / scripts; the daemon passes the node peer ID at runtime.
+   */
+  agentAddress?: string;
+  /**
+   * Target context graph for chat-turn persistence. Defaults to
+   * `'agent-context'`. Tests and scripts can override.
+   */
+  contextGraphId?: string;
+  /**
+   * Assertion name for chat-turn persistence. Defaults to `'chat-turns'`.
+   */
+  assertionName?: string;
 }
 
 export interface MemoryStats {
-  paranetId: string;
+  contextGraphId: string;
   initialized: boolean;
   messageCount: number;
   knowledgeTriples: number;
@@ -32,8 +75,8 @@ export interface MemoryEntity {
   sourceSession?: string;
 }
 
-export interface EnshrineResult {
-  kcId?: bigint;
+export interface PublishFromSwmResult {
+  kaId?: bigint;
   ual?: string;
   status: string;
   tripleCount: number;
@@ -41,13 +84,13 @@ export interface EnshrineResult {
 
 export interface SessionPublicationStatus {
   sessionId: string;
-  workspaceTripleCount: number;
+  sharedMemoryTripleCount: number;
   dataTripleCount: number;
-  scope: 'workspace_only' | 'enshrined' | 'enshrined_with_pending' | 'empty';
+  scope: 'shared_memory_only' | 'published' | 'published_with_pending' | 'empty';
   rootEntityCount: number;
 }
 
-export interface SessionPublishResult extends EnshrineResult {
+export interface SessionPublishResult extends PublishFromSwmResult {
   sessionId: string;
   rootEntityCount: number;
   publication: SessionPublicationStatus;
@@ -71,7 +114,10 @@ export interface SessionGraphDeltaResult {
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 
-export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
+type ChatTurnPersistenceDisplayState = 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+
+const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
 
 export interface ImportResultQuad {
@@ -91,7 +137,25 @@ export interface ImportResult {
   warnings?: string[];
 }
 
-const MEMORY_PARANET = 'agent-memory';
+/**
+ * Chat-turn persistence target.
+ *
+ * V10 architectural note: writes go through Working Memory assertion routes
+ * (`agent.assertion.create` + `agent.assertion.write`), not SWM via
+ * `agent.share`. The `'chat-turns'` assertion inside the `'agent-context'`
+ * context graph is the single canonical home for all chat-turn persistence
+ * in the adapter; reads use `view: 'working-memory'` to hit the matching
+ * per-agent WM assertion graph.
+ *
+ * Triple shapes (`schema:Message` / `schema:Conversation` / `dkg:ChatTurn` +
+ * custom predicates) are preserved from the pre-v1 adapter for raw
+ * persistence. `21_TRI_MODAL_MEMORY.md §3` defines a different target model
+ * (markdown Knowledge Assets with YAML frontmatter and structural + semantic
+ * extraction). v1 of the openclaw-dkg-primary-memory work intentionally
+ * defers that migration; follow-up work tracks it.
+ */
+const AGENT_CONTEXT_GRAPH = 'agent-context';
+const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -101,12 +165,158 @@ const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
+const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
+const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
+  skipped: 1,
+  pending: 2,
+  in_progress: 3,
+  failed: 4,
+  stored: 5,
+};
+
+interface ChatAttachmentRef {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
+
+interface ChatToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  result: unknown;
+}
 
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
+}
+
+function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {
+  const status = stripRdfLiteral(value).trim();
+  if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
+    return status;
+  }
+  return undefined;
+}
+
+function choosePersistenceStatus(
+  current: ChatTurnPersistenceDisplayState | undefined,
+  candidate: ChatTurnPersistenceDisplayState | undefined,
+): ChatTurnPersistenceDisplayState | undefined {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
+}
+
+function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  if (!fileName || !contextGraphId || !assertionUri || !fileHash) return null;
+
+  const normalized: ChatAttachmentRef = {
+    fileName,
+    contextGraphId,
+    assertionUri,
+    fileHash,
+  };
+  if (typeof record.id === 'string' && record.id.trim()) normalized.id = record.id.trim();
+  if (typeof record.assertionName === 'string' && record.assertionName.trim()) normalized.assertionName = record.assertionName.trim();
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
+    normalized.extractionStatus = record.extractionStatus;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) normalized.rootEntity = record.rootEntity.trim();
+  return normalized;
+}
+
+function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const refs = raw
+    .map((entry) => normalizeChatAttachmentRef(entry))
+    .filter((entry): entry is ChatAttachmentRef => entry != null);
+  return refs.length > 0 ? refs : undefined;
+}
+
+function normalizeChatToolCall(raw: unknown): ChatToolCall | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim() : 'unknown';
+  return {
+    name,
+    args: record.args && typeof record.args === 'object' && !Array.isArray(record.args)
+      ? record.args as Record<string, unknown>
+      : {},
+    result: record.result,
+  };
+}
+
+function normalizeChatToolCalls(raw: unknown): ChatToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw
+    .map((entry) => normalizeChatToolCall(entry))
+    .filter((entry): entry is ChatToolCall => entry != null);
+  return calls.length > 0 ? calls : undefined;
+}
+
+function parseNestedJsonLiteral(value: string): unknown {
+  let current: unknown = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== 'string') return current;
+    const trimmed = current.trim();
+    if (!trimmed) return undefined;
+    try {
+      current = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatAttachmentRefs(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
+}
+
+function parseToolCallsLiteral(value: string): ChatToolCall[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatToolCalls(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
 }
 
 function parseRdfInt(value: string): number {
@@ -137,17 +347,6 @@ function buildSessionRootPattern(sessionUri: string): string {
     }`,
     `{ ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }`,
   ];
-
-  if (sessionUri === OPENCLAW_LOCAL_SESSION_URI) {
-    clauses.push(
-      `{ ?s <${RDF_TYPE}> <${DKG_ONT}ImportedMemory> }`,
-      `{ ?s <${RDF_TYPE}> <${DKG_ONT}MemoryImport> }`,
-      `{
-      ?s <${DKG_ONT}extractedFrom> ?batch .
-      ?batch <${RDF_TYPE}> <${DKG_ONT}MemoryImport> .
-      }`,
-    );
-  }
 
   return `{
     ${clauses.join('\n    UNION ')}
@@ -246,32 +445,69 @@ export class ChatMemoryManager {
   private initialized = false;
   private knownSessions = new Set<string>();
   private readonly llmClient = new LlmClient();
+  private readonly agentContextGraph: string;
+  private readonly chatTurnsAssertion: string;
+  private readonly assertionEnsured = new Set<string>();
+  readonly agentAddress: string | undefined;
 
   constructor(
     private tools: MemoryToolContext,
     private llmConfig: LlmConfig,
-  ) {}
+    options?: ChatMemoryManagerOptions,
+  ) {
+    this.agentAddress = options?.agentAddress;
+    this.agentContextGraph = options?.contextGraphId ?? AGENT_CONTEXT_GRAPH;
+    this.chatTurnsAssertion = options?.assertionName ?? CHAT_TURNS_ASSERTION;
+  }
 
-  get paranetId(): string {
-    return MEMORY_PARANET;
+  get contextGraphId(): string {
+    return this.agentContextGraph;
   }
 
   updateConfig(llmConfig: LlmConfig): void {
     this.llmConfig = llmConfig;
   }
 
+  /**
+   * Build the read options block used for every WM query issued by this
+   * manager. Reads must match the layer writes land in — mixing SWM-writes
+   * with WM-reads produces silent empty results.
+   */
+  private wmReadOpts(overrides?: { assertionName?: string }): {
+    contextGraphId: string;
+    view: 'working-memory';
+    agentAddress?: string;
+    assertionName: string;
+  } {
+    return {
+      contextGraphId: this.agentContextGraph,
+      view: 'working-memory',
+      agentAddress: this.agentAddress,
+      assertionName: overrides?.assertionName ?? this.chatTurnsAssertion,
+    };
+  }
+
+  /**
+   * Lazy creation of the chat-turn context graph + assertion. Runs on the
+   * first `storeChatExchange` / `ensureInitialized` call and is idempotent
+   * thereafter.
+   */
   async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
+
+    // (1) Create the context graph. Uses the `#156` free-CG flow —
+    // `createContextGraph` defaults to unregistered, local-only, no chain
+    // cost. `private: true` prevents gossip subscription / broadcast.
     try {
-      const paranets = await this.tools.listParanets();
-      const exists = paranets.some(
-        (p: any) => p.id === MEMORY_PARANET || p.paranetId === MEMORY_PARANET,
+      const contextGraphs = await this.tools.listContextGraphs();
+      const exists = contextGraphs.some(
+        (p: any) => p.id === this.agentContextGraph || p.contextGraphId === this.agentContextGraph,
       );
       if (!exists) {
-        await this.tools.createParanet({
-          id: MEMORY_PARANET,
-          name: 'Agent Memory',
-          description: 'Local private memory for agent chat conversations and extracted knowledge.',
+        await this.tools.createContextGraph({
+          id: this.agentContextGraph,
+          name: 'Agent Context',
+          description: 'Chat-turn working memory for local agent integrations.',
           private: true,
         });
       }
@@ -279,12 +515,29 @@ export class ChatMemoryManager {
       if (!err.message?.includes('already exists')) throw err;
     }
 
-    // Pre-populate known sessions so subsequent writes to existing
-    // sessions don't re-declare the session entity (DKG Rule 4).
+    // (2) Create the chat-turns Working Memory assertion graph. Idempotent
+    // via `createAssertion`'s client-side "already exists" handling.
+    const assertionKey = `${this.agentContextGraph}::${this.chatTurnsAssertion}`;
+    if (!this.assertionEnsured.has(assertionKey)) {
+      try {
+        await this.tools.createAssertion(this.agentContextGraph, this.chatTurnsAssertion);
+        this.assertionEnsured.add(assertionKey);
+      } catch (err: any) {
+        if (err?.message?.includes('already exists')) {
+          this.assertionEnsured.add(assertionKey);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // (3) Pre-populate known sessions so subsequent writes to existing
+    // sessions don't re-declare the session entity (DKG Rule 4). Reads
+    // target the WM assertion to stay consistent with writes.
     try {
       const result = await this.tools.query(
         `SELECT ?sid WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> . ?s <${DKG_ONT}sessionId> ?sid }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       for (const b of result.bindings ?? []) {
         const sid = stripRdfLiteral(b.sid ?? '');
@@ -299,8 +552,13 @@ export class ChatMemoryManager {
     sessionId: string,
     userMessage: string,
     assistantReply: string,
-    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
-    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending' },
+    toolCalls?: ChatToolCall[],
+    opts?: {
+      turnId?: string;
+      persistenceState?: ChatTurnPersistenceState;
+      failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
+    },
   ): Promise<void> {
     await this.ensureInitialized();
     const userTs = new Date();
@@ -312,6 +570,9 @@ export class ChatMemoryManager {
     const assistantMsgUri = `${CHAT_NS}msg:${assistantMsgId}`;
     const turnId = opts?.turnId?.trim();
     const persistenceState = opts?.persistenceState ?? 'stored';
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
     const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
@@ -350,9 +611,22 @@ export class ChatMemoryManager {
         { subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+        ...(persistenceState === 'failed' && failureReason
+          ? [{ subject: turnUri, predicate: `${DKG_ONT}failureReason`, object: JSON.stringify(failureReason), graph: '' }]
+          : []),
         { subject: userMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
         { subject: assistantMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
       );
+    }
+
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: userMsgUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
     }
 
     if (toolCalls?.length) {
@@ -367,7 +641,7 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -375,6 +649,116 @@ export class ChatMemoryManager {
       this.extractAndWriteMentions(userMsgUri, userMessage, assistantMsgUri, assistantReply)
         .catch(() => {/* best-effort */});
     }
+  }
+
+  async hasChatTurn(sessionId: string, turnId: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return false;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+      } LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    return (result.bindings ?? []).length > 0;
+  }
+
+  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<ChatTurnPersistenceState | null> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return null;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?persistenceState ?transitionState WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
+        OPTIONAL {
+          ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+          ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+          ?transition <${DKG_ONT}persistenceState> ?transitionState .
+        }
+      }`,
+      this.wmReadOpts(),
+    );
+    const states = (result.bindings ?? [])
+      .flatMap((binding: Record<string, string>) => [
+        stripRdfLiteral(binding.transitionState ?? '').trim(),
+        stripRdfLiteral(binding.persistenceState ?? '').trim(),
+      ]);
+    if (states.includes('stored')) return 'stored';
+    if (states.includes('failed')) return 'failed';
+    if (states.includes('pending')) return 'pending';
+    return null;
+  }
+
+  async recordChatTurnPersistenceTransition(
+    sessionId: string,
+    turnId: string,
+    persistenceState: ChatTurnPersistenceState,
+    opts?: {
+      failureReason?: string | null;
+      assistantReply?: string;
+      toolCalls?: ChatToolCall[];
+      attachmentRefs?: ChatAttachmentRef[];
+    },
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return;
+    const transitionId = crypto.randomUUID().slice(0, 8);
+    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
+    const now = new Date().toISOString();
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
+      { subject: transitionUri, predicate: RDF_TYPE, object: CHAT_TURN_PERSISTENCE_TRANSITION_TYPE, graph: '' },
+      { subject: transitionUri, predicate: CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE, object: turnUri, graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(trimmedTurnId), graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+      { subject: transitionUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
+    ];
+    if (persistenceState === 'failed' && failureReason) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}failureReason`,
+        object: JSON.stringify(failureReason),
+        graph: '',
+      });
+    }
+    if (typeof opts?.assistantReply === 'string') {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}assistantReply`,
+        object: JSON.stringify(opts.assistantReply),
+        graph: '',
+      });
+    }
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
+    }
+    if (opts?.toolCalls?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}toolCalls`,
+        object: JSON.stringify(JSON.stringify(opts.toolCalls)),
+        graph: '',
+      });
+    }
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
   }
 
   private async extractAndWriteMentions(
@@ -422,7 +806,7 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+      await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     }
   }
 
@@ -497,13 +881,13 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
     return triples.length;
   }
 
   async recall(sparql: string): Promise<any> {
     await this.ensureInitialized();
-    return this.tools.query(sparql, { paranetId: MEMORY_PARANET, includeWorkspace: true });
+    return this.tools.query(sparql, this.wmReadOpts());
   }
 
   async semanticRecall(question: string): Promise<{ sparql: string; result: any }> {
@@ -530,7 +914,7 @@ export class ChatMemoryManager {
   async getStats(): Promise<MemoryStats> {
     await this.ensureInitialized();
     const base: MemoryStats = {
-      paranetId: MEMORY_PARANET,
+      contextGraphId: this.agentContextGraph,
       initialized: true,
       messageCount: 0,
       knowledgeTriples: 0,
@@ -541,19 +925,19 @@ export class ChatMemoryManager {
     try {
       const total = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       base.totalTriples = sumBindingValues(total.bindings, 'c');
 
       const sessions = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       base.sessionCount = sumBindingValues(sessions.bindings, 'c');
 
       const msgs = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Message> }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       base.messageCount = sumBindingValues(msgs.bindings, 'c');
 
@@ -565,13 +949,13 @@ export class ChatMemoryManager {
           UNION
           { ?s <${RDF_TYPE}> <${DKG_ONT}ToolInvocation> . ?s ?p ?o }
         }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       const chatTripleCount = sumBindingValues(chatRelatedTriples.bindings, 'c');
 
       const entities = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?e) AS ?c) WHERE { ?e <${RDF_TYPE}> ?t . FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:")) }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       base.entityCount = sumBindingValues(entities.bindings, 'c');
 
@@ -589,14 +973,14 @@ export class ChatMemoryManager {
           OPTIONAL { ?e <${SCHEMA}name> ?label }
           FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:"))
         } LIMIT ${limit}`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       const entities: MemoryEntity[] = [];
       for (const b of result.bindings ?? []) {
         const uri = b.e;
         const propsResult = await this.tools.query(
           `SELECT ?p ?o WHERE { <${uri}> ?p ?o } LIMIT 20`,
-          { paranetId: MEMORY_PARANET, includeWorkspace: true },
+          this.wmReadOpts(),
         );
         entities.push({
           uri,
@@ -616,52 +1000,126 @@ export class ChatMemoryManager {
 
   async getSession(
     sessionId: string,
+    opts: {
+      limit?: number;
+      order?: 'asc' | 'desc';
+    } = {},
   ): Promise<{
     session: string;
     messages: Array<{
+      uri: string;
       author: string;
       text: string;
       ts: string;
       turnId?: string;
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+      failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
+      toolCalls?: ChatToolCall[];
     }>;
   } | null> {
     await this.ensureInitialized();
     try {
+      const requestedLimit = typeof opts.limit === 'number' && Number.isInteger(opts.limit) && opts.limit > 0
+        ? opts.limit
+        : null;
+      const limit = requestedLimit != null
+        ? Math.min(requestedLimit, 500)
+        : 500;
+      const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?author ?text ?ts ?turnId ?persistenceState WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls WHERE {
+          {
+            SELECT ?m ?ts WHERE {
+              ?m <${SCHEMA}isPartOf> <${sessionUri}> .
+              ?m <${SCHEMA}dateCreated> ?ts
+            } ORDER BY ${order}(?ts) LIMIT ${limit}
+          }
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
+          OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
             ?turn <${DKG_ONT}turnId> ?turnId .
-            ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+            OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
+            OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
+            OPTIONAL {
+              ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+              ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+              ?transition <${DKG_ONT}persistenceState> ?transitionState .
+              OPTIONAL { ?transition <${DKG_ONT}failureReason> ?transitionFailureReason }
+              OPTIONAL { ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply }
+              OPTIONAL { ?transition <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?transitionAttachmentRefs }
+              OPTIONAL { ?transition <${DKG_ONT}toolCalls> ?transitionToolCalls }
+            }
           }
-        } ORDER BY ?ts LIMIT 500`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        } ORDER BY ${order}(?ts)`,
+        this.wmReadOpts(),
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
+      const messagesByUri = new Map<string, {
+        uri: string;
+        author: string;
+        text: string;
+        ts: string;
+        turnId?: string;
+        persistStatus?: ChatTurnPersistenceDisplayState;
+        failureReason?: string | null;
+        attachmentRefs?: ChatAttachmentRef[];
+        toolCalls?: ChatToolCall[];
+      }>();
+      for (const mb of bindings) {
+        const uri = String(mb.m ?? '').replace(/[<>]/g, '');
+        const key = uri || `${String(mb.author ?? '')}:${String(mb.ts ?? '')}:${String(mb.text ?? '')}`;
+        let message = messagesByUri.get(key);
+        if (!message) {
+          message = {
+            uri,
+            author: mb.author?.includes('user') ? 'user' : 'agent',
+            text: decodeRdfStringLiteral(mb.text ?? ''),
+            ts: stripRdfLiteral(mb.ts ?? ''),
+            turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+            attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
+          };
+          messagesByUri.set(key, message);
+        }
+        const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
+        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
+          // The transition `assistantReply` is written via `JSON.stringify`
+          // (see opts.assistantReply quad) exactly like the base
+          // `schema:text`, so it needs the same decode — otherwise a
+          // stored turn (the dominant path on reload) overwrites the
+          // correctly-decoded base text with a literal-`\n` string and
+          // markdown breaks after refresh again.
+          message.text = decodeRdfStringLiteral(transitionAssistantReply);
+        }
+        const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
+        if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
+          message.attachmentRefs = transitionAttachmentRefs;
+        }
+        const transitionToolCalls = parseToolCallsLiteral(String(mb.transitionToolCalls ?? ''));
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionToolCalls?.length) {
+          message.toolCalls = transitionToolCalls;
+        }
+        message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
+        const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
+        if (candidateStatus === 'failed' && candidateReason) {
+          message.failureReason = candidateReason;
+        }
+        if (message.persistStatus && message.persistStatus !== 'failed') {
+          message.failureReason = undefined;
+        }
+      }
       return {
         session: sessionId,
-        messages: bindings.map((mb: any) => ({
-          author: mb.author?.includes('user') ? 'user' : 'agent',
-          text: stripRdfLiteral(mb.text ?? ''),
-          ts: stripRdfLiteral(mb.ts ?? ''),
-          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
-          persistStatus: (() => {
-            const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
-            if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
-              return status;
-            }
-            return undefined;
-          })(),
-        })),
+        messages: [...messagesByUri.values()],
       };
     } catch {
       return null;
@@ -678,7 +1136,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}sessionId> ?sid .
           OPTIONAL { ?m <${SCHEMA}isPartOf> ?s . ?m <${SCHEMA}dateCreated> ?mts }
         } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${expandedLimit}`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
       const sessionBindings = sessionsResult.bindings ?? [];
       if (sessionBindings.length === 0) return [];
@@ -711,7 +1169,7 @@ export class ChatMemoryManager {
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
         } ORDER BY ?session ?ts`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        this.wmReadOpts(),
       );
 
       const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
@@ -723,7 +1181,7 @@ export class ChatMemoryManager {
         if (msgs.length >= 100) continue;
         msgs.push({
           author: row.author?.includes('user') ? 'user' : 'agent',
-          text: stripRdfLiteral(row.text ?? ''),
+          text: decodeRdfStringLiteral(row.text ?? ''),
           ts: stripRdfLiteral(row.ts ?? ''),
         });
       }
@@ -750,7 +1208,7 @@ export class ChatMemoryManager {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
       }`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const turnCount = sumBindingValues(countResult.bindings, 'c');
     if (turnCount === 0) {
@@ -779,7 +1237,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}turnId> ?tid .
         OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
       } LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
     const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
@@ -791,7 +1249,7 @@ export class ChatMemoryManager {
         ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
     if (!currentTurnId || currentTurnId !== turnId) {
@@ -835,7 +1293,7 @@ export class ChatMemoryManager {
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
       previousTurnQuery,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
@@ -850,7 +1308,7 @@ export class ChatMemoryManager {
               || (?ts = ${currentTsLiteral} && ?tid <= ${currentTurnIdLiteral})
             )
           }`,
-          { paranetId: MEMORY_PARANET, includeWorkspace: true },
+          this.wmReadOpts(),
         )
       : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
@@ -899,7 +1357,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
         <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
       } LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const turnMessages = (turnMessagesResult.bindings ?? [])[0];
     const userMsgUri = String(turnMessages?.user ?? '').replace(/[<>]/g, '');
@@ -936,7 +1394,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
         }
       } LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
     const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
     for (const b of relatedSubjectsResult.bindings ?? []) {
@@ -952,7 +1410,7 @@ export class ChatMemoryManager {
         VALUES ?s { ${values} }
         ?s ?p ?o .
       }`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      this.wmReadOpts(),
     );
 
     const quads = Array.isArray(deltaResult?.quads) ? deltaResult.quads : [];
@@ -978,6 +1436,13 @@ export class ChatMemoryManager {
     };
   }
 
+  // TODO(openclaw-dkg-primary-memory v1 follow-up): the publish-session flow
+  // assumes chat turns live in SWM so they can be promoted to VM on-chain.
+  // Under v1, chat turns are written through Working Memory assertion routes
+  // instead — they never reach SWM automatically. These methods remain
+  // compilable but will typically return an `empty` publication scope. A
+  // future version should reimplement session promotion via
+  // `agent.assertion.promote` against the `chat-turns` WM assertion.
   async getSessionPublicationStatus(sessionId: string): Promise<SessionPublicationStatus> {
     await this.ensureInitialized();
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
@@ -988,36 +1453,36 @@ export class ChatMemoryManager {
       }
       ?s ?p ?o
     }`;
-    const workspaceCountResult = await this.tools.query(countQuery, {
-      paranetId: MEMORY_PARANET,
-      graphSuffix: '_workspace',
+    const swmCountResult = await this.tools.query(countQuery, {
+      contextGraphId: this.agentContextGraph,
+      graphSuffix: '_shared_memory',
     });
     const dataCountResult = await this.tools.query(countQuery, {
-      paranetId: MEMORY_PARANET,
+      contextGraphId: this.agentContextGraph,
     });
 
     const rootEntityResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+      { contextGraphId: this.agentContextGraph, graphSuffix: '_shared_memory' },
     );
 
-    const workspaceTripleCount = sumBindingValues(workspaceCountResult.bindings, 'c');
+    const sharedMemoryTripleCount = sumBindingValues(swmCountResult.bindings, 'c');
     const dataTripleCount = sumBindingValues(dataCountResult.bindings, 'c');
     const rootEntityCount = (rootEntityResult.bindings ?? []).length;
     const scope: SessionPublicationStatus['scope'] =
       dataTripleCount > 0
         ? (
-          workspaceTripleCount > dataTripleCount
-            ? 'enshrined_with_pending'
-            : 'enshrined'
+          sharedMemoryTripleCount > dataTripleCount
+            ? 'published_with_pending'
+            : 'published'
         )
-        : workspaceTripleCount > 0
-          ? 'workspace_only'
+        : sharedMemoryTripleCount > 0
+          ? 'shared_memory_only'
           : 'empty';
 
     return {
       sessionId,
-      workspaceTripleCount,
+      sharedMemoryTripleCount,
       dataTripleCount,
       scope,
       rootEntityCount,
@@ -1030,7 +1495,7 @@ export class ChatMemoryManager {
     const rootPattern = buildSessionRootPattern(sessionUri);
     const result = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+      { contextGraphId: this.agentContextGraph, graphSuffix: '_shared_memory' },
     );
 
     const roots = new Set<string>();
@@ -1044,240 +1509,32 @@ export class ChatMemoryManager {
 
   async publishSession(
     sessionId: string,
-    opts?: { rootEntities?: string[]; clearWorkspaceAfter?: boolean },
+    opts?: { rootEntities?: string[]; clearSharedMemoryAfter?: boolean },
   ): Promise<SessionPublishResult> {
-    await this.ensureInitialized();
-    const sessionRoots = await this.getSessionRootEntities(sessionId);
-    if (sessionRoots.length === 0) {
-      throw new Error(`No workspace entities found for session ${sessionId}`);
-    }
-    const sessionRootSet = new Set(sessionRoots);
-    const requestedRoots = (opts?.rootEntities ?? [])
-      .map((r) => String(r).trim())
-      .filter((r) => isSafeIri(r));
-    const rootEntities = requestedRoots.length > 0
-      ? [...new Set(requestedRoots.filter((r) => sessionRootSet.has(r)))]
-      : sessionRoots;
-    if (rootEntities.length === 0) {
-      throw new Error(`Selected root entities are not part of session ${sessionId}`);
-    }
-    const enshrined = await this.enshrine(
-      { rootEntities },
-      { clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false },
+    void opts;
+    throw new Error(
+      `Session publication is not implemented in v1 for session ${sessionId}. ` +
+        'Chat turns live in Working Memory assertions and must be promoted through named knowledge-asset lifecycle routes.',
     );
-    const publication = await this.getSessionPublicationStatus(sessionId);
-    return {
-      ...enshrined,
-      sessionId,
-      rootEntityCount: rootEntities.length,
-      publication,
-    };
   }
 
-  async importMemories(
-    rawText: string,
-    source: ImportSource = 'other',
-    opts: { useLlm?: boolean } = {},
-  ): Promise<ImportResult> {
-    await this.ensureInitialized();
-    const batchId = crypto.randomUUID();
-    const batchUri = `${MEMORY_NS}import:${batchId}`;
-    const now = new Date().toISOString();
+  // importMemories / parseMemoriesWithLlm / parseMemoriesHeuristic /
+  // extractKnowledgeFromImport are retired as part of the openclaw-dkg-primary-memory
+  // work. /api/memory/import required LLM API keys on the node and wrote
+  // dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
+  // throwaway sidecar graph. v1 replaces it with the assertion-route write
+  // path inside the adapter (DkgMemoryPlugin.dkg_memory_import), which
+  // targets the 'memory' WM assertion of a resolved project context graph.
 
-    const llmEnabled = opts.useLlm === true && !!this.llmConfig?.apiKey;
-    const warnings: string[] = [];
-
-    let memories = llmEnabled
-      ? await this.parseMemoriesWithLlm(rawText)
-      : this.parseMemoriesHeuristic(rawText);
-
-    if (memories.length === 0 && llmEnabled) {
-      memories = this.parseMemoriesHeuristic(rawText);
-    }
-
-    if (memories.length === 0) {
-      return { batchId: null, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
-    }
-
-    const MAX_MEMORY_ITEMS = 5000;
-    if (memories.length > MAX_MEMORY_ITEMS) {
-      warnings.push(`Input contained ${memories.length} items; truncated to ${MAX_MEMORY_ITEMS}`);
-      memories = memories.slice(0, MAX_MEMORY_ITEMS);
-    }
-
-    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
-
-    quads.push(
-      { subject: batchUri, predicate: RDF_TYPE, object: `${DKG_ONT}MemoryImport`, graph: '' },
-      { subject: batchUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
-      { subject: batchUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
-      { subject: batchUri, predicate: `${DKG_ONT}itemCount`, object: `"${memories.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: '' },
-    );
-
-    for (const mem of memories) {
-      const memUri = `${MEMORY_NS}item:${crypto.randomUUID()}`;
-      quads.push(
-        { subject: memUri, predicate: RDF_TYPE, object: `${DKG_ONT}ImportedMemory`, graph: '' },
-        { subject: memUri, predicate: `${SCHEMA}text`, object: JSON.stringify(mem.text), graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}category`, object: `"${mem.category}"`, graph: '' },
-        { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}importBatch`, object: batchUri, graph: '' },
-        { subject: memUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
-      );
-    }
-
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
-
-    let entityCount = 0;
-    let extractionTripleCount = 0;
-    const allQuads = quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
-    if (llmEnabled) {
-      try {
-        const extraction = await this.extractKnowledgeFromImport(batchUri, memories);
-        entityCount = extraction.entityCount;
-        extractionTripleCount = extraction.tripleCount;
-        allQuads.push(...extraction.quads);
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        console.warn(`[ChatMemoryManager] Knowledge extraction failed for batch ${batchId}: ${msg}`);
-        warnings.push(`Knowledge extraction failed: ${msg}`);
-      }
-    }
-
-    const QUAD_PREVIEW_LIMIT = 500;
-    const result: ImportResult = {
-      batchId,
-      source,
-      memoryCount: memories.length,
-      tripleCount: quads.length + extractionTripleCount,
-      entityCount,
-      quads: allQuads.slice(0, QUAD_PREVIEW_LIMIT),
-      quadsTruncated: allQuads.length > QUAD_PREVIEW_LIMIT,
-    };
-    if (warnings.length > 0) result.warnings = warnings;
-    return result;
-  }
-
-  private async parseMemoriesWithLlm(
-    rawText: string,
-  ): Promise<Array<{ text: string; category: string }>> {
-    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    if (!apiKey) return this.parseMemoriesHeuristic(rawText);
-
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    try {
-      const body: Record<string, unknown> = {
-        model,
-        messages: [
-          { role: 'system', content: MEMORY_PARSE_PROMPT },
-          { role: 'user', content: rawText },
-        ],
-      };
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) return this.parseMemoriesHeuristic(rawText);
-      const data = (await res.json()) as any;
-      let output = data.choices?.[0]?.message?.content?.trim() ?? '';
-      output = output.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-      const parsed = JSON.parse(output);
-      if (!Array.isArray(parsed)) return this.parseMemoriesHeuristic(rawText);
-      const extractText = (m: any): string =>
-        (typeof m.text === 'string' && m.text.trim()) ||
-        (typeof m.memory === 'string' && m.memory.trim()) ||
-        (typeof m.content === 'string' && m.content.trim()) ||
-        '';
-      const results = parsed
-        .filter((m: any) => extractText(m).length > 0)
-        .map((m: any) => ({
-          text: extractText(m),
-          category: ['preference', 'fact', 'context', 'instruction', 'relationship'].includes(m.category)
-            ? m.category
-            : 'fact',
-        }));
-      if (results.length === 0) return this.parseMemoriesHeuristic(rawText);
-      return results;
-    } catch {
-      return this.parseMemoriesHeuristic(rawText);
-    }
-  }
-
-  parseMemoriesHeuristic(rawText: string): Array<{ text: string; category: string }> {
-    const lines = rawText
-      .split(/\n/)
-      .map(l => l.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s)\s*/, '').trim())
-      .filter(l =>
-        l.length > 3 &&
-        !l.match(/^(here are|last updated|memories|---)/i) &&
-        !l.match(/^```/),
-      );
-    return lines.map(text => ({ text, category: 'fact' }));
-  }
-
-  private async extractKnowledgeFromImport(
-    batchUri: string,
-    memories: Array<{ text: string; category: string }>,
-  ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
-    const empty = { entityCount: 0, tripleCount: 0, quads: [] };
-    const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
-    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-
-    const body: Record<string, unknown> = {
-      model,
-      messages: [
-        { role: 'system', content: MEMORY_KG_PROMPT },
-        { role: 'user', content: combined },
-      ],
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) return empty;
-    const data = (await res.json()) as any;
-    const output = data.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!output || output === 'NONE') return empty;
-
-    const triples = this.parseNTriples(output);
-    if (triples.length === 0) return empty;
-
-    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
-    for (const t of triples) {
-      quads.push({ ...t, graph: '' });
-    }
-    const rootEntities = new Set(triples.map(t => t.subject));
-    for (const entity of rootEntities) {
-      quads.push(
-        { subject: entity, predicate: `${DKG_ONT}extractedFrom`, object: batchUri, graph: '' },
-      );
-    }
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
-    return {
-      entityCount: rootEntities.size,
-      tripleCount: quads.length,
-      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
-    };
-  }
-
-  async enshrine(
+  async publishFromSwm(
     selection: 'all' | { rootEntities: string[] } = 'all',
-    opts?: { clearWorkspaceAfter?: boolean },
-  ): Promise<EnshrineResult> {
-    await this.ensureInitialized();
-    const result = await this.tools.enshrineFromWorkspace(MEMORY_PARANET, selection, {
-      clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false,
-    });
-    return {
-      kcId: result?.kcId,
-      ual: result?.ual,
-      status: result?.status ?? 'confirmed',
-      tripleCount: result?.publicQuads?.length ?? 0,
-    };
+    opts?: { clearSharedMemoryAfter?: boolean },
+  ): Promise<PublishFromSwmResult> {
+    void selection;
+    void opts;
+    throw new Error(
+      'publishFromSwm is retired in v1; use named knowledge-asset lifecycle share/publish routes.',
+    );
   }
 
   private parseNTriples(text: string): Array<{ subject: string; predicate: string; object: string }> {

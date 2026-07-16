@@ -1,0 +1,8 @@
+{
+  "source_basename": "acme-bikes-line-w18.json",
+  "source_hash": "sha256:542a500acf2c02c475429b8b8a30573f67df4aad3aa559918cddfec0957e0a57",
+  "source_max_event_time": "2026-05-12T10:15:00.000Z",
+  "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+  "records_in_trace": 7,
+  "events_emitted": 7
+}

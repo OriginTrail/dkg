@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { DKGNode } from '../src/node.js';
 import { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
-import { TypedEventBus } from '../src/event-bus.js';
+import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
@@ -212,9 +212,18 @@ describe('ProtocolRouter', () => {
 
     await connectNodes(node1, node2);
 
+    // When the receiver's `maxReadBytes` is exceeded, the libp2p stream
+    // must tear down with a size-limit error. A bare `rejects.toThrow()`
+    // would also accept unrelated setup failures (e.g. "peer not
+    // connected", "protocol not registered") which would HIDE a real
+    // regression where the limit was silently removed and the handler
+    // received the oversize payload. Pin the error vocabulary AND keep
+    // the strong behavioural invariant below (`handlerCalled === false`).
     await expect(
       router1.send(node2.peerId, '/test/big-request/1.0.0', new Uint8Array(tinyLimit + 100)),
-    ).rejects.toThrow();
+    ).rejects.toThrow(
+      /too large|exceed|max.*byte|size.*limit|reset|aborted|closed|stream/i,
+    );
     expect(handlerCalled).toBe(false);
   }, 15000);
 
@@ -251,7 +260,7 @@ describe('GossipSubManager', () => {
     const gossip1 = new GossipSubManager(node1, bus1);
     const gossip2 = new GossipSubManager(node2, bus2);
 
-    const topic = 'dkg/paranet/test/publish';
+    const topic = 'dkg/context-graph/test/finalization';
     gossip1.subscribe(topic);
     gossip2.subscribe(topic);
 
@@ -273,4 +282,85 @@ describe('GossipSubManager', () => {
     expect(received.length).toBe(1);
     expect(new TextDecoder().decode(received[0])).toBe('test-msg');
   }, 20000);
+
+  it('uses network-scoped wire topics while exposing logical topics', async () => {
+    const subscribed: string[] = [];
+    const published: Array<{ topic: string; data: Uint8Array }> = [];
+    const handlers: Array<(evt: { detail: { topic: string; data: Uint8Array; from: string } }) => void> = [];
+    const topics = new Set<string>();
+    const pubsub = {
+      addEventListener: (_event: string, handler: (evt: { detail: { topic: string; data: Uint8Array; from: string } }) => void) => {
+        handlers.push(handler);
+      },
+      subscribe: (topic: string) => {
+        subscribed.push(topic);
+        topics.add(topic);
+      },
+      unsubscribe: (topic: string) => {
+        topics.delete(topic);
+      },
+      publish: async (topic: string, data: Uint8Array) => {
+        published.push({ topic, data });
+      },
+      getTopics: () => [...topics],
+      getSubscribers: (topic: string) => topic.endsWith('/context-graph/test/finalization')
+        ? [{ toString: () => 'peer-a' }]
+        : [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const bus = new TypedEventBus();
+    const admissionChecks: Array<{ peerId: string; topic: string }> = [];
+    const manager = new GossipSubManager(node, bus, {
+      networkId: 'base-testnet',
+      chainId: 'base:84532',
+      isPeerAccepted: (peerId, topic) => {
+        admissionChecks.push({ peerId, topic });
+        return peerId === 'peer-a';
+      },
+    });
+    const logicalTopic = 'dkg/context-graph/test/finalization';
+    const wireTopic = 'dkg/network/base-testnet.base:84532/context-graph/test/finalization';
+
+    const events: unknown[] = [];
+    bus.on(DKGEvent.GOSSIP_MESSAGE, (evt) => events.push(evt));
+    const received: Array<{ topic: string; from: string; data: string }> = [];
+    manager.onMessage(logicalTopic, (topic, data, from) => {
+      received.push({ topic, from, data: new TextDecoder().decode(data) });
+    });
+
+    manager.subscribe(logicalTopic);
+    await manager.publish(logicalTopic, new TextEncoder().encode('hello'));
+    handlers[0]({
+      detail: {
+        topic: wireTopic,
+        from: 'peer-a',
+        data: new TextEncoder().encode('from-wire'),
+      },
+    });
+    handlers[0]({
+      detail: {
+        topic: wireTopic,
+        from: 'peer-b',
+        data: new TextEncoder().encode('rejected-wire'),
+      },
+    });
+    handlers[0]({
+      detail: {
+        topic: 'dkg/network/base-mainnet/context-graph/test/finalization',
+        from: 'peer-b',
+        data: new TextEncoder().encode('foreign-wire'),
+      },
+    });
+
+    expect(subscribed).toEqual([wireTopic]);
+    expect(published.map((entry) => entry.topic)).toEqual([wireTopic]);
+    expect(manager.subscribedTopics).toEqual([logicalTopic]);
+    expect(manager.getSubscribers(logicalTopic)).toEqual(['peer-a']);
+    expect(events).toEqual([{ topic: logicalTopic, from: 'peer-a', data: new TextEncoder().encode('from-wire') }]);
+    expect(received).toEqual([{ topic: logicalTopic, from: 'peer-a', data: 'from-wire' }]);
+    expect(admissionChecks).toEqual([
+      { peerId: 'peer-a', topic: logicalTopic },
+      { peerId: 'peer-b', topic: logicalTopic },
+    ]);
+  });
 });

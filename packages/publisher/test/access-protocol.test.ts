@@ -1,30 +1,70 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import {
   DKGNode,
   ProtocolRouter,
   TypedEventBus,
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
+  encodeAccessRequest,
+  decodeAccessResponse,
+  contextGraphDataUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
+import { computePrivateRootV10 } from '../src/merkle.js';
+import { createSubstrateClient, registerSubstrateHandler } from './_helpers/substrate.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { buildSeal } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
-const PARANET = 'test-access';
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+let CONTEXT_GRAPH = 'test-access';
+let GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 const ENTITY = 'did:dkg:agent:TestBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
+function trustedRootRegistration(contextGraphId: string): Quad {
+  return {
+    subject: contextGraphDataUri(contextGraphId),
+    predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    object: 'http://dkg.io/ontology/ContextGraph',
+    graph: contextGraphDataUri('ontology'),
+  };
+}
+
 describe('Access Protocol', () => {
   const nodes: DKGNode[] = [];
+
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    _provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise the
+    // off-chain access protocol + private-metadata mechanics, not curated-CG
+    // ciphertext semantics, so a curated CG would revert (CuratedCGRequiresCiphertextCommitment).
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
+    CONTEXT_GRAPH = String(cgId);
+    GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
 
   afterEach(async () => {
     for (const n of nodes) {
@@ -58,7 +98,12 @@ describe('Access Protocol', () => {
       allowedPeers?: string[];
     },
   ) {
-    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    // Production nodes learn this trusted root registration through the
+    // ontology/control plane. The isolated publisher store must model the same
+    // invariant or the hardened metadata resolver correctly hides unanchored
+    // `_meta` rows as attacker-authored aliases.
+    await store.insert([trustedRootRegistration(CONTEXT_GRAPH)]);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
@@ -67,12 +112,12 @@ describe('Access Protocol', () => {
       chain,
       eventBus: bus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const result = await publisher.publish({
-      paranetId: PARANET,
+    const publishArgs = {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"TestBot"'),
         q(ENTITY, 'http://schema.org/description', '"A test agent"'),
@@ -84,6 +129,18 @@ describe('Access Protocol', () => {
       publisherPeerId: options?.publisherPeerId,
       accessPolicy: options?.accessPolicy,
       allowedPeers: options?.allowedPeers,
+    };
+    const seal = await buildSeal({
+      quads: publishArgs.quads,
+      privateQuads: publishArgs.privateQuads,
+      author: _author,
+      contextGraphId: CONTEXT_GRAPH,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+    const result = await publisher.publish({
+      ...publishArgs,
+      precomputedAttestation: seal,
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     return { result, bus, keypair };
@@ -95,25 +152,101 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
+    // Folded public+private publishes now collect V10 ACKs and anchor on-chain.
+    // The owner / non-owner access-control behaviour this test validates is
+    // still local to nodeA's store + AccessHandler.
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     // accessClient is bound to nodeB (requester); nodeA.peerId is the remote provider target.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
     expect(accessResult.quads.length).toBe(0);
     expect(accessResult.rejectionReason).toContain('owner-only');
+  }, 20000);
+
+  it('publishes private data without leaking it to public storage and still serves it to the owner', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.kaManifest[0].privateTripleCount).toBe(2);
+    expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
+    expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
+    expect(result.publicQuads?.map((quad) => quad.predicate).sort()).toEqual([
+      'http://schema.org/description',
+      'http://schema.org/name',
+    ]);
+
+    const publicResult = await storeA.query(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${GRAPH}> {
+          ?s ?p ?o .
+          FILTER(?p IN (<http://ex.org/apiKey>, <http://ex.org/credentials>))
+        }
+      }
+    `);
+    expect(publicResult.type).toBe('bindings');
+    expect(publicResult.type === 'bindings' ? publicResult.bindings : []).toHaveLength(0);
+
+    const kcUal = result.ual;
+    const kaUal = `${result.ual}/1`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const privateRootHex = Array.from(result.kaManifest[0].privateMerkleRoot!)
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    // RFC ka-metadata-trim P3.1 (collapsed shape): private count + private
+    // merkle root now live on the bare UAL subject — the `<ual>/1` token row
+    // is no longer minted.
+    const metaResult = await storeA.query(`
+      SELECT ?policy ?publisher ?privateCount ?privateRoot WHERE {
+        GRAPH <${metaGraph}> {
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/accessPolicy> ?policy }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/publisherPeerId> ?publisher }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/privateTripleCount> ?privateCount }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot }
+        }
+      }
+    `);
+    expect(metaResult.type).toBe('bindings');
+    expect(metaResult.type === 'bindings' ? metaResult.bindings : []).toEqual([
+      {
+        policy: '"ownerOnly"',
+        publisher: `"${nodeB.peerId}"`,
+        privateCount: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        privateRoot: `"${privateRootHex}"`,
+      },
+    ]);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
+
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(true);
+    expect(accessResult.rejectionReason).toBeUndefined();
+    expect(accessResult.quads).toHaveLength(2);
+    expect(accessResult.quads.map((quad) => quad.predicate).sort()).toEqual([
+      'http://ex.org/apiKey',
+      'http://ex.org/credentials',
+    ]);
   }, 20000);
 
   it('denies access when KA does not exist', async () => {
@@ -123,11 +256,11 @@ describe('Access Protocol', () => {
     const bus = new TypedEventBus();
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const accessResult = await accessClient.requestAccess(
       nodeA.peerId,
@@ -146,14 +279,13 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
@@ -166,10 +298,9 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const kaUal = `${result.ual}/1`;
+    const kcUal = result.ual;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 
     await storeA.insert([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
@@ -178,11 +309,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
@@ -196,24 +327,31 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    const onChain = result.onChainResult!;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const kcUal = result.ual;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
-      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
+    // GH #748: `wasAttributedTo` may be either a peer-ID literal (legacy)
+    // or a `did:dkg:agent:0x…` URI (post-fix when authorAddress is known).
+    // Drop the quad by pattern to cover both shapes for this "owner identity
+    // missing" simulation.
+    await storeA.deleteByPattern({
+      graph: metaGraph,
+      subject: kcUal,
+      predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+    });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
@@ -231,30 +369,61 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
-    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    const kcUal = result.ual;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
-      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
+    // GH #748: `wasAttributedTo` may be either a peer-ID literal or an
+    // agent DID URI; drop by pattern to simulate the "owner identity missing"
+    // case regardless of which shape is stored.
+    await storeA.deleteByPattern({
+      graph: metaGraph,
+      subject: kcUal,
+      predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+    });
 
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
     expect(accessResult.rejectionReason).toContain('owner identity missing');
   }, 20000);
 
+  it('stores normalized allowList metadata for private publishing', async () => {
+    const storeA = new OxigraphStore();
+    const { result } = await publishWithPrivate(storeA, {
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'allowList',
+      allowedPeers: [' peer-a ', 'peer-b', 'peer-a'],
+    });
+
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const metaResult = await storeA.query(`
+      SELECT ?policy ?allowedPeer WHERE {
+        GRAPH <${metaGraph}> {
+          <${result.ual}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          <${result.ual}> <http://dkg.io/ontology/allowedPeer> ?allowedPeer .
+        }
+      }
+    `);
+
+    expect(metaResult.type).toBe('bindings');
+    const bindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
+    expect(bindings).toHaveLength(2);
+    expect(bindings.every((binding) => binding['policy'] === '"allowList"')).toBe(true);
+    expect(bindings.map((binding) => binding['allowedPeer']).sort()).toEqual(['"peer-a"', '"peer-b"']);
+  });
+
   it('rejects publish when allowList policy is set without allowed peers', async () => {
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({
@@ -262,13 +431,13 @@ describe('Access Protocol', () => {
       chain,
       eventBus: bus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     await expect(
       publisher.publish({
-        paranetId: PARANET,
+        contextGraphId: CONTEXT_GRAPH,
         quads: [q(ENTITY, 'http://schema.org/name', '"TestBot"')],
         privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
         publisherPeerId: '12D3KooWTestPublisher',
@@ -276,4 +445,101 @@ describe('Access Protocol', () => {
       }),
     ).rejects.toThrow('accessPolicy "allowList" requires non-empty "allowedPeers"');
   });
+});
+
+// Adversarial review F3 — collapsed multi-root pairing (RFC ka-metadata-trim
+// P3.1). On the collapsed shape ALL member `dkg:rootEntity` rows and ALL
+// per-root `dkg:privateMerkleRoot` rows sit on the same UAL subject with no
+// token row tying them together. The handler's meta query cross-products the
+// two patterns, so its old `LIMIT 1` could pair member root A with private
+// merkle root B — attesting B's root over A's served triples. The fix detects
+// the ambiguity and recomputes the root from the actually-served triples.
+describe('AccessHandler — collapsed multi-root private KA (review F3)', () => {
+  const CG = 'multi-root-access-cg';
+  const META = `did:dkg:context-graph:${CG}/_meta`;
+  const PRIVATE = `did:dkg:context-graph:${CG}/_private`;
+  const DKG_NS = 'http://dkg.io/ontology/';
+  const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000aa/77';
+  const ROOT_A = 'urn:test:multiroot:alpha';
+  const ROOT_B = 'urn:test:multiroot:beta';
+
+  async function requestPrivate(handler: AccessHandler, kaUal: string) {
+    const data = encodeAccessRequest({
+      kaUal,
+      requesterPeerId: 'requester-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+    const raw = await handler.handler(
+      data,
+      { toString: () => 'requester-peer', toBytes: () => new Uint8Array() } as never,
+    );
+    return decodeAccessResponse(raw);
+  }
+
+  it('serves a privateMerkleRoot that matches the SERVED triples, never an arbitrary meta pairing', async () => {
+    const store = new OxigraphStore();
+    // Collapsed-shape `_meta`: two member roots + two private merkle roots,
+    // all directly on the UAL subject. The literal meta root values are
+    // deliberately bogus so any blind meta pick is detectable.
+    await store.insert([
+      trustedRootRegistration(CG),
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_B, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${'aa'.repeat(32)}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${'bb'.repeat(32)}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: META },
+      // Public policy: keep the test focused on attestation, not signatures.
+      { subject: UAL, predicate: `${DKG_NS}accessPolicy`, object: '"public"', graph: META },
+    ]);
+    // Private payloads for BOTH member roots (whichever the handler picks).
+    await store.insert([
+      { subject: ROOT_A, predicate: 'http://ex.org/secretA', object: '"alpha-secret"', graph: PRIVATE },
+      { subject: ROOT_B, predicate: 'http://ex.org/secretB', object: '"beta-secret"', graph: PRIVATE },
+    ]);
+
+    const handler = new AccessHandler(store, new TypedEventBus());
+    const response = await requestPrivate(handler, UAL);
+
+    expect(response.granted).toBe(true);
+    const servedNquads = new TextDecoder().decode(response.nquads);
+    const servedRoot = servedNquads.includes('alpha-secret') ? ROOT_A : ROOT_B;
+    expect(servedNquads.includes('alpha-secret') || servedNquads.includes('beta-secret')).toBe(true);
+
+    // The attested root must be computed from the triples actually served —
+    // NOT either of the (ambiguous) meta-row values.
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
+    const servedQuads = await privateStore.getPrivateTriples(CG, servedRoot);
+    expect(servedQuads.length).toBeGreaterThan(0);
+    const expectedRoot = computePrivateRootV10(servedQuads)!;
+    const toHexStr = (bytes: Uint8Array) =>
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).toBe(toHexStr(expectedRoot));
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).not.toBe('aa'.repeat(32));
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).not.toBe('bb'.repeat(32));
+  }, 20000);
+
+  it('single-root collapsed KA keeps the cheap meta-row attestation path', async () => {
+    const store = new OxigraphStore();
+    const metaRootHex = 'cd'.repeat(32);
+    await store.insert([
+      trustedRootRegistration(CG),
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${metaRootHex}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}accessPolicy`, object: '"public"', graph: META },
+    ]);
+    await store.insert([
+      { subject: ROOT_A, predicate: 'http://ex.org/secretA', object: '"alpha-secret"', graph: PRIVATE },
+    ]);
+
+    const handler = new AccessHandler(store, new TypedEventBus());
+    const response = await requestPrivate(handler, UAL);
+
+    expect(response.granted).toBe(true);
+    const toHexStr = (bytes: Uint8Array) =>
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+    // Unambiguous 1:1 pairing — the stored meta root is authoritative.
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).toBe(metaRootHex);
+  }, 20000);
 });

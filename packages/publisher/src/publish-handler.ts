@@ -1,5 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
@@ -8,24 +8,35 @@ import {
   Logger,
   createOperationContext,
   assertSafeIri,
+  assertNoUserAuthoredTrustLevelQuads,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  validateSubGraphName,
   type PublishRequestMsg,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
+import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
   getConfirmedStatusQuad,
+  generateGraphKnowledgeAssetMetadata,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
   type KAMetadata,
 } from './metadata.js';
-import { autoPartition } from './auto-partition.js';
+import { insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
+import { skolemizeByEntity } from './auto-partition.js';
 import { PublishJournal, type JournalEntry } from './publish-journal.js';
 
 interface PendingPublish {
   ual: string;
-  paranetId: string;
+  contextGraphId: string;
   dataQuads: Quad[];
   metadataQuads: Quad[];
   timeout: ReturnType<typeof setTimeout>;
@@ -36,6 +47,112 @@ interface PendingPublish {
   expectedChainId: string;
   rootEntities: string[];
   createdAt: number;
+  restoredFromJournal: boolean;
+  graphScoped?: {
+    assertionVersion: string;
+    vmGraph: string;
+    swmGraph: string;
+    subGraphName?: string;
+  };
+}
+
+interface GraphScopedPublishRequest {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  subGraphName?: string;
+}
+
+function resolveGraphScopedPublishRequest(
+  request: PublishRequestMsg,
+): GraphScopedPublishRequest | undefined {
+  const privateMerkleRoot = request.privateMerkleRoot?.length
+    ? new Uint8Array(request.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (request.contentScopeVersion ?? 0) !== 0
+    || Boolean(request.assertionVersion)
+    || (request.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (request.privateTripleCount ?? 0) > 0
+    || Boolean(request.accessPolicy)
+    || (request.allowedPeers?.length ?? 0) > 0;
+  if (!hasGraphField) return undefined;
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `Graph-scoped publish requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!request.ual || !request.assertionVersion || request.kas.length !== 0) {
+    throw new Error('Graph-scoped publish requires a UAL, assertionVersion, and no legacy manifest');
+  }
+  const scope = createGraphKnowledgeAssetScope(request.ual, request.assertionVersion);
+  if (
+    scope.ual !== request.ual
+    || scope.assertionVersion !== '1'
+    || !request.chainId
+    || scope.chainId !== request.chainId
+  ) {
+    throw new Error('Graph-scoped publish has a non-canonical initial KA scope');
+  }
+  const kaNumber = BigInt(scope.kaNumber);
+  if (kaNumber >= (1n << 96n)) {
+    throw new Error('Graph-scoped publish KA number exceeds the 96-bit author namespace');
+  }
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | kaNumber;
+  const startKAId = protoToBigInt(request.startKAId);
+  const endKAId = protoToBigInt(request.endKAId);
+  if (startKAId !== packedKaId || endKAId !== packedKaId) {
+    throw new Error(
+      `Graph-scoped publish UAL-derived kaId ${packedKaId} does not match ` +
+        `published range ${startKAId}..${endKAId}`,
+    );
+  }
+  const publicTripleCount = request.publicTripleCount ?? 0;
+  const privateTripleCount = request.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('Graph-scoped publish has an invalid content envelope');
+  }
+  const accessPolicy = request.accessPolicy;
+  if (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+    throw new Error(`Graph-scoped publish has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
+  }
+  const rawAllowedPeers = request.allowedPeers ?? [];
+  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  if (
+    allowedPeers.length !== rawAllowedPeers.length
+    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error('Graph-scoped publish has an invalid access-policy peer envelope');
+  }
+  const subGraphName = request.subGraphName || undefined;
+  if (subGraphName) {
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) {
+      throw new Error(`Graph-scoped publish has invalid subGraphName: ${validation.reason}`);
+    }
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    accessPolicy,
+    allowedPeers,
+    ...(subGraphName ? { subGraphName } : {}),
+  };
 }
 
 /**
@@ -84,6 +201,13 @@ export class PublishHandler {
 
   get hasPendingPublishes(): boolean {
     return this.pendingPublishes.size > 0;
+  }
+
+  get hasRestoredPendingPublishes(): boolean {
+    for (const pending of this.pendingPublishes.values()) {
+      if (pending.restoredFromJournal) return true;
+    }
+    return false;
   }
 
   /**
@@ -135,7 +259,7 @@ export class PublishHandler {
     if (!pending) return false;
 
     // Dedup guard: if already confirmed (e.g. by FinalizationHandler), skip
-    if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+    if (await this.isPublishConfirmed(ual, pending.contextGraphId)) {
       this.log.info(opCtx, `Publish ${ual} already confirmed, skipping duplicate confirmation`);
       clearTimeout(pending.timeout);
       this.pendingPublishes.delete(ual);
@@ -175,12 +299,53 @@ export class PublishHandler {
     this.log.info(opCtx, `Confirmed publish for ${ual}`);
     clearTimeout(pending.timeout);
 
-    // Promote in graph: remove tentative status, add confirmed (clean model: either tentative or confirmed, never both)
+    // Promote in graph: remove tentative status, add confirmed (clean model:
+    // either tentative or confirmed, never both). Rootless receivers share the
+    // same per-UAL lock as gossip/finalization so a same-version retry cannot
+    // race this transition and immediately downgrade the confirmed metadata.
     try {
-      await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
-      await this.store.insert([getConfirmedStatusQuad(ual, pending.paranetId)]);
+      const promoteStatus = async () => {
+        await this.store.delete([getTentativeStatusQuad(ual, pending.contextGraphId)]);
+        await this.store.insert([getConfirmedStatusQuad(ual, pending.contextGraphId)]);
+      };
+      if (pending.graphScoped) {
+        await withMaterializationLock(
+          this.graphManager.metaGraphUri(pending.contextGraphId),
+          ual,
+          promoteStatus,
+        );
+      } else {
+        await promoteStatus();
+      }
     } catch (err) {
       this.log.error(opCtx, `Failed to promote tentative→confirmed in store: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // SWM cleanup (spec §9.0.5): delete published triples from _shared_memory
+    try {
+      if (pending.graphScoped) {
+        await this.store.dropGraph(pending.graphScoped.swmGraph);
+      } else {
+      const swmGraph = this.graphManager.sharedMemoryUri(pending.contextGraphId);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(pending.contextGraphId);
+      // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + the bucket.
+      const swmGraphs = await listGraphFamily(this.store, swmGraph);
+      const rootEntities = new Set(pending.dataQuads.map(q => q.subject));
+      for (const rootEntity of rootEntities) {
+        for (const g of swmGraphs) {
+          await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+          await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
+          await this.store.deleteByPattern({
+            graph: g, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+          });
+        }
+        await this.store.deleteByPattern({
+          graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
+      }
+      }
+    } catch (swmErr) {
+      this.log.warn(opCtx, `SWM cleanup after confirm failed: ${swmErr instanceof Error ? swmErr.message : String(swmErr)}`);
     }
 
     this.pendingPublishes.delete(ual);
@@ -195,21 +360,26 @@ export class PublishHandler {
     const ctx = createOperationContext('publish');
     try {
       const request = decodePublishRequest(data);
-      const paranetId = request.paranetId;
-      this.log.info(ctx, `Received publish request from ${fromPeerId} for paranet ${paranetId}`);
-      await this.graphManager.ensureParanet(paranetId);
+      const contextGraphId = request.contextGraphId;
+      this.log.info(ctx, `Received publish request from ${fromPeerId} for context graph ${contextGraphId}`);
+      await this.graphManager.ensureContextGraph(contextGraphId);
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      assertNoUserAuthoredTrustLevelQuads(quads);
+      const graphPublish = resolveGraphScopedPublishRequest(request);
+      if (graphPublish) {
+        return this.handleGraphScopedPublish(request, graphPublish, quads, fromPeerId, ctx);
+      }
 
       const manifest = request.kas.map((ka) => ({
-        tokenId: BigInt(typeof ka.tokenId === 'number' ? ka.tokenId : 0),
+        tokenId: protoToBigInt(ka.tokenId),
         rootEntity: ka.rootEntity,
         privateTripleCount: ka.privateTripleCount,
       }));
 
-      const existing = this.ownedEntities.get(paranetId) ?? new Set();
-      const validation = validatePublishRequest(quads, manifest, paranetId, existing);
+      const existing = this.ownedEntities.get(contextGraphId) ?? new Set();
+      const validation = validatePublishRequest(quads, manifest, contextGraphId, existing);
 
       if (!validation.valid) {
         return this.rejectAck(validation.errors.join('; '));
@@ -221,7 +391,7 @@ export class PublishHandler {
         .map(ka => new Uint8Array(ka.privateMerkleRoot));
       const computedMerkleRoot = computeFlatKCRoot(quads, privateRoots);
 
-      const partitioned = autoPartition(quads);
+      const partitioned = skolemizeByEntity(quads);
 
       // ── UAL consistency ──
       const startKAId = protoToBigInt(request.startKAId);
@@ -258,14 +428,14 @@ export class PublishHandler {
       }
 
       this.log.info(ctx, `Merkle verification passed, storing ${quads.length} triples as tentative`);
-      const dataGraph = this.graphManager.dataGraphUri(paranetId);
+      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const normalized = quads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
 
       const kaMetadata: KAMetadata[] = manifest.map((m, i) => ({
         rootEntity: m.rootEntity,
         kcUal: request.ual,
-        tokenId: m.tokenId,
+        tokenId: BigInt(i + 1),
         publicTripleCount: (partitioned.get(m.rootEntity) ?? []).length,
         privateTripleCount: m.privateTripleCount ?? 0,
         privateMerkleRoot: request.kas[i].privateMerkleRoot?.length
@@ -276,24 +446,38 @@ export class PublishHandler {
       const metadataQuads = generateTentativeMetadata(
         {
           ual: request.ual,
-          paranetId,
+          contextGraphId,
           merkleRoot: computedMerkleRoot,
-          kaCount: manifest.length,
           publisherPeerId: fromPeerId,
           timestamp: new Date(),
         },
         kaMetadata,
       );
-      await this.store.insert(metadataQuads);
+      // #1233 follow-up — bound agents/_meta: this direct-protocol receive path
+      // is load-bearing (the `metadataQuads` we insert are the SAME object the
+      // tentative lifecycle expires/pends on below), so it cannot be skipped for
+      // the agents CG. INSERT then PRUNE (insert-first) via the helper: the
+      // just-inserted UAL is `recordUal` so the prune protects it, and a
+      // post-insert prune failure is swallowed (warned) inside the helper so it
+      // can never abort this ACK / orphan the pending publish below. The agents
+      // system CG (never confirms on-chain) keeps at most one live record per
+      // agent; no-op prune for every other CG (so it just inserts).
+      await insertBoundedAgentRegistryMeta({
+        store: this.store,
+        contextGraphId,
+        metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
+        recordUal: request.ual,
+        metadataQuads,
+      });
 
       // ── Tentative lifecycle timeout ──
       const timeout = setTimeout(
-        () => this.expireTentativePublish(request.ual, paranetId, normalized, metadataQuads),
+        () => this.expireTentativePublish(request.ual, contextGraphId, normalized, metadataQuads),
         PublishHandler.TENTATIVE_TIMEOUT_MS,
       );
       this.pendingPublishes.set(request.ual, {
         ual: request.ual,
-        paranetId,
+        contextGraphId,
         dataQuads: normalized,
         metadataQuads,
         timeout,
@@ -304,20 +488,24 @@ export class PublishHandler {
         expectedChainId: request.chainId ?? '',
         rootEntities: manifest.map(m => m.rootEntity),
         createdAt: Date.now(),
+        restoredFromJournal: false,
       });
       this.persistJournal();
 
       // Track owned entities
-      if (!this.ownedEntities.has(paranetId)) {
-        this.ownedEntities.set(paranetId, new Set());
+      if (!this.ownedEntities.has(contextGraphId)) {
+        this.ownedEntities.set(contextGraphId, new Set());
       }
       for (const m of manifest) {
-        this.ownedEntities.get(paranetId)!.add(m.rootEntity);
+        this.ownedEntities.get(contextGraphId)!.add(m.rootEntity);
       }
 
       this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
         ual: request.ual,
         from: fromPeerId,
+        contextGraphId,
+        subGraphName: request.subGraphName || undefined,
+        tripleCount: normalized.length,
       });
 
       const publicByteSize = request.nquads.length;
@@ -337,6 +525,192 @@ export class PublishHandler {
       this.log.error(ctx, `Publish handling failed: ${err instanceof Error ? err.message : String(err)}`);
       return this.rejectAck(err instanceof Error ? err.message : 'Unknown error');
     }
+  }
+
+  private async handleGraphScopedPublish(
+    request: PublishRequestMsg,
+    graphPublish: GraphScopedPublishRequest,
+    quads: Quad[],
+    fromPeerId: string,
+    ctx: OperationContext,
+  ): Promise<Uint8Array> {
+    if (graphPublish.subGraphName) {
+      await this.graphManager.ensureSubGraph(request.contextGraphId, graphPublish.subGraphName);
+    }
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      request.contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      graphPublish.scope,
+      graphPublish.subGraphName,
+    );
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      request.contextGraphId,
+      MemoryLayer.SharedWorkingMemory,
+      graphPublish.scope,
+      graphPublish.subGraphName,
+    );
+    if (quads.some((quad) => quad.graph !== vmGraph)) {
+      return this.rejectAck(
+        `Graph-scoped publish payload must target only its UAL-derived VM graph ${vmGraph}`,
+      );
+    }
+    if (quads.length !== graphPublish.publicTripleCount) {
+      return this.rejectAck(
+        `Graph-scoped publish public triple count mismatch ` +
+          `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
+      );
+    }
+    const normalized = quads.map((quad) => ({ ...quad, graph: vmGraph }));
+    const computedMerkleRoot = computeFlatKCRoot(
+      normalized,
+      graphPublish.privateMerkleRoot ? [graphPublish.privateMerkleRoot] : [],
+    );
+    const metadataQuads = generateGraphKnowledgeAssetMetadata(
+      {
+        ual: graphPublish.scope.ual,
+        contextGraphId: request.contextGraphId,
+        merkleRoot: computedMerkleRoot,
+        publisherPeerId: fromPeerId,
+        accessPolicy: graphPublish.accessPolicy,
+        ...(graphPublish.accessPolicy === 'allowList'
+          ? { allowedPeers: graphPublish.allowedPeers }
+          : {}),
+        timestamp: new Date(),
+        subGraphName: graphPublish.subGraphName,
+        authorAddress: graphPublish.scope.agentAddress,
+        assertionVersion: graphPublish.scope.assertionVersion,
+        publicTripleCount: graphPublish.publicTripleCount,
+        privateTripleCount: graphPublish.privateTripleCount,
+        ...(graphPublish.privateMerkleRoot
+          ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
+          : {}),
+        assertionGraph: vmGraph,
+      },
+      'tentative',
+    );
+    const metaGraph = this.graphManager.metaGraphUri(request.contextGraphId);
+    const applyOutcome = await withMaterializationLock(
+      metaGraph,
+      graphPublish.scope.ual,
+      async () => {
+        if (await this.isPublishConfirmed(graphPublish.scope.ual, request.contextGraphId)) {
+          return 'confirmed' as const;
+        }
+        const existingPending = this.pendingPublishes.get(graphPublish.scope.ual);
+        if (existingPending) {
+          const exactReplay =
+            ethers.hexlify(existingPending.expectedMerkleRoot) === ethers.hexlify(computedMerkleRoot)
+            && existingPending.expectedPublisherAddress.toLowerCase()
+              === (request.publisherAddress ?? '').toLowerCase()
+            && existingPending.expectedStartKAId === protoToBigInt(request.startKAId)
+            && existingPending.expectedEndKAId === protoToBigInt(request.endKAId)
+            && existingPending.expectedChainId === request.chainId;
+          return exactReplay ? 'replay' as const : 'conflict' as const;
+        }
+        if (!(await shouldApplyMaterialization(
+          this.store,
+          metaGraph,
+          graphPublish.scope.ual,
+          { blockNumber: 0, txIndex: 0 },
+          BigInt(graphPublish.scope.assertionVersion),
+        ))) {
+          return 'stale' as const;
+        }
+        const replaced = await tryReplaceGraphAtomically(
+          this.store,
+          vmGraph,
+          normalized,
+          { source: 'publisher.publishHandler.graphScopedReplace' },
+        );
+        if (!replaced) {
+          throw Object.assign(
+            new Error('Graph-scoped publish requires atomic TripleStore.replaceGraph support'),
+            { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
+        }
+        await this.store.deleteByPattern({ graph: metaGraph, subject: graphPublish.scope.ual });
+        await this.store.insert(metadataQuads);
+        await writeMaterializedVersion(
+          this.store,
+          metaGraph,
+          graphPublish.scope.ual,
+          { blockNumber: 0, txIndex: 0 },
+        );
+        const timeout = setTimeout(
+          () => this.expireTentativePublish(
+            graphPublish.scope.ual,
+            request.contextGraphId,
+            normalized,
+            metadataQuads,
+          ),
+          PublishHandler.TENTATIVE_TIMEOUT_MS,
+        );
+        const startKAId = protoToBigInt(request.startKAId);
+        const endKAId = protoToBigInt(request.endKAId);
+        this.pendingPublishes.set(graphPublish.scope.ual, {
+          ual: graphPublish.scope.ual,
+          contextGraphId: request.contextGraphId,
+          dataQuads: normalized,
+          metadataQuads,
+          timeout,
+          expectedPublisherAddress: request.publisherAddress ?? '',
+          expectedMerkleRoot: computedMerkleRoot,
+          expectedStartKAId: startKAId,
+          expectedEndKAId: endKAId,
+          expectedChainId: request.chainId,
+          rootEntities: [],
+          createdAt: Date.now(),
+          restoredFromJournal: false,
+          graphScoped: {
+            assertionVersion: graphPublish.scope.assertionVersion,
+            vmGraph,
+            swmGraph,
+            subGraphName: graphPublish.subGraphName,
+          },
+        });
+        this.persistJournal();
+        return 'applied' as const;
+      },
+    );
+    if (applyOutcome === 'confirmed') {
+      return this.rejectAck(`Graph-scoped KA ${graphPublish.scope.ual} is already confirmed`);
+    }
+    if (applyOutcome === 'conflict') {
+      return this.rejectAck(
+        `Graph-scoped KA ${graphPublish.scope.ual} already has a conflicting tentative publish`,
+      );
+    }
+    if (applyOutcome === 'stale') {
+      return this.rejectAck(`A newer assertion is already materialized for ${graphPublish.scope.ual}`);
+    }
+    if (applyOutcome === 'applied') {
+      this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
+        ual: graphPublish.scope.ual,
+        from: fromPeerId,
+        contextGraphId: request.contextGraphId,
+        subGraphName: graphPublish.subGraphName,
+        tripleCount: normalized.length,
+      });
+    }
+    const publicByteSize = request.nquads.length;
+    const { signatureR, signatureVs } = await this.signMerkleRootAndByteSize(
+      computedMerkleRoot,
+      publicByteSize,
+    );
+    this.log.info(
+      ctx,
+      `${applyOutcome === 'replay' ? 'Replayed' : 'Stored'} graph-scoped publish ` +
+        `${graphPublish.scope.ual} as tentative and sending ACK`,
+    );
+    return encodePublishAck({
+      merkleRoot: computedMerkleRoot,
+      identityId: this.nodeIdentityId ? Number(this.nodeIdentityId) : 0,
+      signatureR,
+      signatureVs,
+      accepted: true,
+      rejectionReason: '',
+      publicByteSize,
+    });
   }
 
   /**
@@ -368,7 +742,7 @@ export class PublishHandler {
 
   private async expireTentativePublish(
     ual: string,
-    paranetId: string,
+    contextGraphId: string,
     dataQuads: Quad[],
     metadataQuads: Quad[],
   ): Promise<void> {
@@ -376,7 +750,7 @@ export class PublishHandler {
     this.pendingPublishes.delete(ual);
     this.persistJournal();
     try {
-      if (await this.isPublishConfirmed(ual, paranetId)) {
+      if (await this.isPublishConfirmed(ual, contextGraphId)) {
         this.log.info(ctx, `Publish already confirmed, skipping cleanup: ${ual}`);
         return;
       }
@@ -384,7 +758,7 @@ export class PublishHandler {
       await this.store.delete(dataQuads);
       await this.store.delete(metadataQuads);
 
-      const owned = this.ownedEntities.get(paranetId);
+      const owned = this.ownedEntities.get(contextGraphId);
       if (owned) {
         const subjects = new Set(dataQuads.map((q) => q.subject));
         for (const s of subjects) owned.delete(s);
@@ -404,13 +778,20 @@ export class PublishHandler {
     for (const p of this.pendingPublishes.values()) {
       entries.push({
         ual: p.ual,
-        paranetId: p.paranetId,
+        contextGraphId: p.contextGraphId,
         expectedPublisherAddress: p.expectedPublisherAddress,
         expectedMerkleRoot: ethers.hexlify(p.expectedMerkleRoot),
         expectedStartKAId: p.expectedStartKAId.toString(),
         expectedEndKAId: p.expectedEndKAId.toString(),
         expectedChainId: p.expectedChainId,
         rootEntities: p.rootEntities,
+        ...(p.graphScoped
+          ? {
+              contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+              assertionVersion: p.graphScoped.assertionVersion,
+              subGraphName: p.graphScoped.subGraphName,
+            }
+          : {}),
         createdAt: p.createdAt,
       });
     }
@@ -471,7 +852,7 @@ export class PublishHandler {
 
       this.pendingPublishes.set(entry.ual, {
         ual: entry.ual,
-        paranetId: entry.paranetId,
+        contextGraphId: entry.contextGraphId,
         dataQuads: [],
         metadataQuads: [],
         timeout,
@@ -482,6 +863,31 @@ export class PublishHandler {
         expectedChainId: entry.expectedChainId,
         rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
+        restoredFromJournal: true,
+        ...(entry.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+          && entry.assertionVersion
+          ? (() => {
+              const scope = createGraphKnowledgeAssetScope(entry.ual, entry.assertionVersion!);
+              return {
+                graphScoped: {
+                  assertionVersion: scope.assertionVersion,
+                  vmGraph: knowledgeAssetLayerGraphUri(
+                    entry.contextGraphId,
+                    MemoryLayer.VerifiableMemory,
+                    scope,
+                    entry.subGraphName,
+                  ),
+                  swmGraph: knowledgeAssetLayerGraphUri(
+                    entry.contextGraphId,
+                    MemoryLayer.SharedWorkingMemory,
+                    scope,
+                    entry.subGraphName,
+                  ),
+                  subGraphName: entry.subGraphName,
+                },
+              };
+            })()
+          : {}),
       });
       restored++;
     }
@@ -504,18 +910,23 @@ export class PublishHandler {
 
     if (pending) {
       try {
-        if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+        if (await this.isPublishConfirmed(ual, pending.contextGraphId)) {
           this.log.info(ctx, `Restored publish already confirmed, skipping cleanup: ${ual}`);
           return;
         }
-        const dataGraph = this.graphManager.dataGraphUri(pending.paranetId);
-        const metaGraph = this.graphManager.metaGraphUri(pending.paranetId);
-        for (const rootEntity of pending.rootEntities) {
-          await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
-          await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+        const metaGraph = this.graphManager.metaGraphUri(pending.contextGraphId);
+        if (pending.graphScoped) {
+          await this.store.dropGraph(pending.graphScoped.vmGraph);
+          await this.store.dropGraph(pending.graphScoped.swmGraph);
+        } else {
+          const dataGraph = this.graphManager.dataGraphUri(pending.contextGraphId);
+          for (const rootEntity of pending.rootEntities) {
+            await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+            await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+          }
         }
         await this.store.deleteBySubjectPrefix(metaGraph, ual);
-        await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
+        await this.store.delete([getTentativeStatusQuad(ual, pending.contextGraphId)]);
         this.log.info(ctx, `Restored tentative publish expired, data removed: ${ual} (${pending.rootEntities.length} root entities)`);
       } catch (err) {
         this.log.error(ctx, `Failed to clean up expired restored publish: ${ual} — ${err instanceof Error ? err.message : String(err)}`);
@@ -525,8 +936,8 @@ export class PublishHandler {
     }
   }
 
-  private async isPublishConfirmed(ual: string, paranetId: string): Promise<boolean> {
-    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+  private async isPublishConfirmed(ual: string, contextGraphId: string): Promise<boolean> {
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const DKG_STATUS = 'http://dkg.io/ontology/status';
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <${DKG_STATUS}> ?status } } LIMIT 1`,
@@ -546,6 +957,20 @@ export class PublishHandler {
       rejectionReason: reason,
     });
   }
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
 }
 
 // ── Helpers ──
@@ -588,7 +1013,9 @@ function verifyUALConsistency(
   return errors;
 }
 
-function protoToBigInt(val: number | { low: number; high: number; unsigned: boolean }): bigint {
+function protoToBigInt(val: string | number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
+  if (typeof val === 'string') return BigInt(val);
+  if (typeof val === 'bigint') return val;
   if (typeof val === 'number') return BigInt(val);
   const lo = BigInt(val.low >>> 0);
   const hi = BigInt(val.high >>> 0);
@@ -598,7 +1025,7 @@ function protoToBigInt(val: number | { low: number; high: number; unsigned: bool
 /**
  * Minimal N-Triples/N-Quads parser for incoming publish data.
  * Accepts both N-Triples (<s> <p> <o> .) and N-Quads (<s> <p> <o> <g> .).
- * The graph component is ignored; the handler derives it from paranetId.
+ * The graph component is ignored; the handler derives it from the context graph ID.
  * Exported for tests that verify receiver recomputes the same merkle root.
  */
 export function parseSimpleNQuads(text: string): Quad[] {

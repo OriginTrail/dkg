@@ -48,7 +48,6 @@ config.abiExporter = {
     'ERC20Burnable.sol',
     'ERC165.sol',
     'ERC721.sol',
-    'ERC1155Delta.sol',
     'IERC20Metadata.sol',
     'IERC721.sol',
     'IERC721Metadata.sol',
@@ -57,17 +56,14 @@ config.abiExporter = {
     'IERC1155.sol',
     'IERC1155MetadataURI.sol',
     'IERC1155Receiver.sol',
-    'IERC1155Delta.sol',
-    'IERC1155DeltaQueryable.sol',
     'IERC4906.sol',
     'Ownable.sol',
     'IdentityLib.sol',
-    'ParanetLib.sol',
     'Permissions.sol',
     'ProfileLib.sol',
     'ShardingTableLib.sol',
     'TokenLib.sol',
-    'KnowledgeCollectionLib.sol',
+    'KnowledgeAssetLib.sol',
     'KnowledgeAssetsLib.sol',
     'StakingLib.sol',
     'IOldHub',
@@ -92,6 +88,16 @@ config.contractSizer = {
   strict: false,
   only: [],
   except: [],
+};
+
+// Pin deploy roots to deploy/active/ so hardhat-deploy's recursive scan
+// does NOT discover scripts under deploy/archive/ (V8/V9 legacy stack
+// archived per PRD §4.1). Also pinned in hardhat.node.config.ts; restated
+// here so a paths.deploy grep across both configs surfaces the explicit
+// single-root form.
+config.paths = {
+  ...(config.paths ?? {}),
+  deploy: ['deploy/active'],
 };
 
 export default config;

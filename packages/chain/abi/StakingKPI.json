@@ -52,10 +52,23 @@
   },
   {
     "inputs": [],
-    "name": "delegatorsInfo",
+    "name": "chronos",
     "outputs": [
       {
-        "internalType": "contract DelegatorsInfo",
+        "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
         "name": "",
         "type": "address"
       }

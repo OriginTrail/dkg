@@ -1,0 +1,235 @@
+import type {
+  BenchmarkClient,
+  BenchmarkPayload,
+} from '../../packages/cli/src/benchmark/publish-get/types.ts';
+
+type Quad = BenchmarkPayload['quads'][number];
+type MemoryView = 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+
+interface MemoryRecord {
+  contextGraphId: string;
+  rootEntity: string;
+  marker: string;
+  quads: Quad[];
+  shareOperationId?: string;
+  assertionName?: string;
+  kaId?: string;
+}
+
+interface PublisherJob {
+  contextGraphId: string;
+  assertionName: string;
+  jobId: string;
+  roots: string[];
+  status: 'queued' | 'finalized' | 'failed';
+  error?: string;
+}
+
+export class LayeredDkgBenchmarkClient implements BenchmarkClient {
+  readonly workingMemory = new Map<string, MemoryRecord>();
+  readonly sharedWorkingMemory = new Map<string, MemoryRecord>();
+  readonly verifiableMemory = new Map<string, MemoryRecord>();
+  readonly knowledgeAssets = new Map<string, { contextGraphId: string; name: string; roots: string[] }>();
+  readonly publisherJobs = new Map<string, PublisherJob>();
+
+  private shareSequence = 0;
+  private draftSequence = 0;
+  private kcSequence = 0;
+  private jobSequence = 0;
+
+  async status(): Promise<unknown> {
+    return {
+      ok: true,
+      memoryLayers: {
+        workingMemory: this.workingMemory.size,
+        sharedWorkingMemory: this.sharedWorkingMemory.size,
+        verifiableMemory: this.verifiableMemory.size,
+      },
+      publisherJobs: this.publisherJobs.size,
+    };
+  }
+
+  clear(): void {
+    this.workingMemory.clear();
+    this.sharedWorkingMemory.clear();
+    this.verifiableMemory.clear();
+    this.knowledgeAssets.clear();
+    this.publisherJobs.clear();
+  }
+
+  async createKnowledgeAsset(
+    contextGraphId: string,
+    name: string,
+    options: { quads: Quad[]; finalize: true; alsoShareSwm: true; subGraphName?: string },
+  ) {
+    const roots = uniqueSubjects(options.quads);
+    await this.writeWorkingMemory(contextGraphId, options.quads, { assertionName: name });
+    const shared = await this.liftWorkingMemoryToSharedMemory(contextGraphId, roots);
+    this.knowledgeAssets.set(assetKey(contextGraphId, name), { contextGraphId, name, roots });
+    return {
+      assertionUri: `urn:benchmark:assertion:${encodeURIComponent(contextGraphId)}:${encodeURIComponent(name)}`,
+      promotedCount: roots.length,
+      publishReady: true,
+      shareOperationId: shared.shareOperationId,
+    };
+  }
+
+  async writeWorkingMemory(contextGraphId: string, quads: Quad[], ids: Pick<MemoryRecord, 'assertionName'> = {}) {
+    const shareOperationId = `draft-${++this.draftSequence}`;
+    for (const rootEntity of uniqueSubjects(quads)) {
+      const record = createMemoryRecord(contextGraphId, rootEntity, quads, { shareOperationId, ...ids });
+      this.workingMemory.set(rootEntity, record);
+    }
+    return { shareOperationId };
+  }
+
+  async liftWorkingMemoryToSharedMemory(contextGraphId: string, rootEntities: string[]) {
+    const shareOperationId = `share-${++this.shareSequence}`;
+    for (const rootEntity of rootEntities) {
+      const record = this.workingMemory.get(rootEntity);
+      if (!record) throw new Error(`Root ${rootEntity} is missing from working memory`);
+      if (record.contextGraphId !== contextGraphId) {
+        throw new Error(`Root ${rootEntity} belongs to ${record.contextGraphId}, not ${contextGraphId}`);
+      }
+      this.sharedWorkingMemory.set(rootEntity, { ...record, shareOperationId });
+    }
+    return { shareOperationId };
+  }
+
+  async publishAssertion(
+    contextGraphId: string,
+    _name: string,
+    quads: Quad[],
+    options?: { clearAfter?: boolean },
+  ) {
+    // Named-KA one-shot: stage the quads (create → write → share) then publish
+    // its roots to verifiable memory. Mirrors the create → /vm/publish flow the
+    // real benchmark client (ApiClient.publishAssertion) drives.
+    await this.createKnowledgeAsset(contextGraphId, _name, {
+      quads,
+      finalize: true,
+      alsoShareSwm: true,
+    });
+    const roots = uniqueSubjects(quads);
+    const kaId = `kc-${++this.kcSequence}`;
+    for (const rootEntity of roots) {
+      this.promoteSharedRoot(contextGraphId, rootEntity, kaId);
+      if (options?.clearAfter) this.sharedWorkingMemory.delete(rootEntity);
+    }
+    return {
+      kaId,
+      status: 'finalized',
+      kas: roots.map((rootEntity, index) => ({ tokenId: String(index + 1), rootEntity })),
+    };
+  }
+
+  async knowledgeAssetPublishAsync(contextGraphId: string, name: string) {
+    const asset = this.knowledgeAssets.get(assetKey(contextGraphId, name));
+    if (!asset) {
+      throw new Error(`Knowledge asset ${name} is missing from context graph ${contextGraphId}`);
+    }
+    for (const rootEntity of asset.roots) {
+      if (!this.sharedWorkingMemory.has(rootEntity)) {
+        throw new Error(`Root ${rootEntity} is missing from shared working memory`);
+      }
+    }
+
+    const jobId = `job-${++this.jobSequence}`;
+    this.publisherJobs.set(jobId, {
+      contextGraphId,
+      assertionName: name,
+      jobId,
+      roots: [...asset.roots],
+      status: 'queued',
+    });
+    return { jobId };
+  }
+
+  async publisherJob(jobId: string) {
+    const job = this.publisherJobs.get(jobId);
+    if (!job) return { job: null };
+
+    if (job.status === 'queued') {
+      try {
+        const kaId = `kc-${++this.kcSequence}`;
+        for (const rootEntity of job.roots) {
+          this.promoteSharedRoot(job.contextGraphId, rootEntity, kaId);
+        }
+        job.status = 'finalized';
+      } catch (error) {
+        job.status = 'failed';
+        job.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    return { job: { status: job.status, error: job.error } };
+  }
+
+  async query(
+    sparql: string,
+    _contextGraphId?: string,
+    opts?: { view?: MemoryView },
+  ) {
+    const rootEntity = rootFromSparql(sparql);
+    const view = opts?.view ?? 'verifiable-memory';
+    const record = this.layer(view).get(rootEntity);
+
+    return {
+      result: {
+        type: 'bindings' as const,
+        bindings: record ? [{ value: record.marker }] : [],
+      },
+    };
+  }
+
+  private promoteSharedRoot(contextGraphId: string, rootEntity: string, kaId: string): void {
+    const staged = this.sharedWorkingMemory.get(rootEntity);
+    if (!staged) throw new Error(`Root ${rootEntity} is missing from shared working memory`);
+    if (staged.contextGraphId !== contextGraphId) {
+      throw new Error(`Root ${rootEntity} belongs to ${staged.contextGraphId}, not ${contextGraphId}`);
+    }
+    this.verifiableMemory.set(rootEntity, { ...staged, kaId });
+  }
+
+  private layer(view: MemoryView): Map<string, MemoryRecord> {
+    if (view === 'working-memory') return this.workingMemory;
+    if (view === 'shared-working-memory') return this.sharedWorkingMemory;
+    return this.verifiableMemory;
+  }
+}
+
+function createMemoryRecord(
+  contextGraphId: string,
+  rootEntity: string,
+  quads: Quad[],
+  ids: Pick<MemoryRecord, 'shareOperationId'>,
+): MemoryRecord {
+  const rootQuads = quads.filter((quad) => quad.subject === rootEntity);
+  return {
+    contextGraphId,
+    rootEntity,
+    marker: markerFromQuads(rootQuads),
+    quads: rootQuads,
+    ...ids,
+  };
+}
+
+function uniqueSubjects(quads: Quad[]): string[] {
+  return [...new Set(quads.map((quad) => quad.subject))];
+}
+
+function assetKey(contextGraphId: string, name: string): string {
+  return `${contextGraphId}\0${name}`;
+}
+
+function markerFromQuads(quads: Quad[]): string {
+  const markerQuad = quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
+  if (!markerQuad) throw new Error('Benchmark payload is missing a marker quad');
+  return String(markerQuad.object).replace(/^"|"$/g, '');
+}
+
+function rootFromSparql(sparql: string): string {
+  const rootEntity = sparql.match(/<([^>]+)>/)?.[1];
+  if (!rootEntity) throw new Error(`Unable to find root entity in SPARQL: ${sparql}`);
+  return rootEntity;
+}

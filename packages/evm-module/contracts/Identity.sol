@@ -14,7 +14,16 @@ contract Identity is INamed, IVersioned, ContractStatus, IInitializable {
     event IdentityDeleted(uint72 indexed identityId);
 
     string private constant _NAME = "Identity";
-    string private constant _VERSION = "1.0.0";
+    // Version history:
+    //   1.0.0 — initial release.
+    //   1.1.0 — `addOperationalWallets` now disambiguates same-identity
+    //           collisions (primary added by `createIdentity` OR intra-
+    //           array duplicate within the same call) from cross-identity
+    //           collisions via the new `OperationalWalletDuplicate(wallet)`
+    //           error. `OperationalKeyTaken(key)` remains reserved for
+    //           the cross-identity case. Dropped the dead `KeyIsEmpty()`
+    //           pre-check (impossible after the zero-address check).
+    string private constant _VERSION = "10.0.2";
 
     IdentityStorage public identityStorage;
 
@@ -140,20 +149,42 @@ contract Identity is INamed, IVersioned, ContractStatus, IInitializable {
 
         bytes32 operationalKey;
         bytes32 attachedKey;
+        uint72 existingId;
 
         for (uint256 i; i < operationalWallets.length; ) {
+            if (operationalWallets[i] == address(0)) {
+                revert IdentityLib.OperationalAddressZero();
+            }
+
             operationalKey = keccak256(abi.encodePacked(operationalWallets[i]));
 
-            if (operationalKey == bytes32(0)) {
-                revert IdentityLib.KeyIsEmpty();
+            existingId = ids.identityIds(operationalKey);
+            // Same-identity collision: either the wallet was attached as
+            // the primary op key by `createIdentity` (the createProfile
+            // entrypoint passes `msg.sender` to that, then the same
+            // address inside `operationalWallets` reaches us here), or
+            // it was added by an earlier iteration of this same loop
+            // (intra-array duplicate). Both surface as
+            // `OperationalWalletDuplicate(wallet)` so callers don't
+            // confuse them with the cross-identity collision below.
+            if (existingId == identityId) {
+                revert IdentityLib.OperationalWalletDuplicate(operationalWallets[i]);
             }
-            if (ids.identityIds(operationalKey) != 0) {
+            if (existingId != 0) {
                 revert IdentityLib.OperationalKeyTaken(operationalKey);
             }
 
             ids.setOperationalKeyIdentityId(operationalKey, identityId);
 
             (, , attachedKey) = ids.getKey(identityId, operationalKey);
+            // Defensive: the key is already attached with some purpose
+            // (admin OR operational). On the createProfile path this
+            // fires when an op-wallet entry equals `adminWallet` — the
+            // key was attached as `ADMIN_KEY` by `createIdentity` and
+            // would now be attached again as `OPERATIONAL_KEY`. The
+            // surfaced error is `KeyAlreadyAttached(key)`; admin/
+            // operational wallet reuse is a deliberate operator choice
+            // and stays un-policed beyond this attachment check.
             if (attachedKey == operationalKey) {
                 revert IdentityLib.KeyAlreadyAttached(operationalKey);
             }

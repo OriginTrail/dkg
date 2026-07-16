@@ -1,0 +1,166 @@
+---
+description: Annotate every substantive chat turn into the DKG project's sub-graphs via the V10 MCP tools (knowledge_asset_create → write → share) so shared project memory grows organically and stays navigable, with every annotation linked back to its chat:Turn by the predicted turn URI.
+alwaysApply: true
+---
+
+# DKG annotation protocol (V10)
+
+This repository is bound to a DKG V10 context graph (`dkg-code-project`). Use the `dkg` MCP server to keep the graph rich and convergent. The full canonical instructions live in [`AGENTS.md`](mdc:AGENTS.md); this file is the Cursor-specific mirror.
+
+## Session context — read this every turn
+
+Your incoming prompt is prefixed with a block injected by [`packages/mcp-dkg/hooks/inject-session-context.mjs`](mdc:packages/mcp-dkg/hooks/inject-session-context.mjs):
+
+```
+<dkg-session-context>
+  <session-id>{sessionKey}</session-id>
+  <next-turn-index>{N}</next-turn-index>
+  <turn-uri>urn:dkg:chat:session:{sessionKey}#turn:{N}</turn-uri>
+  <agent-uri>{your agent URI}</agent-uri>
+</dkg-session-context>
+```
+
+**Parse it once and hold `<turn-uri>` + `<agent-uri>` in working memory.** The capture hook at [`packages/mcp-dkg/hooks/capture-chat.mjs`](mdc:packages/mcp-dkg/hooks/capture-chat.mjs) will write `chat:Turn` at exactly this URI after your response, so any `<turn-uri> chat:proposes <X>` edge you author during the turn JOINs cleanly once the post-response write lands.
+
+If the block is missing, fall back: annotations still stand on `dcterms:created` + `prov:wasAttributedTo` even without the turn-URI edge.
+
+(V9 sourced the session id from a session-start `additionalContext` payload. That path is retired in V10 — use the `<dkg-session-context>` block instead.)
+
+Hook ordering is documented in the installed [`.cursor/hooks.json`](mdc:.cursor/hooks.json) — capture-chat runs first (stashes prompt + writes state file with `pendingTurnIndex`), inject-session-context runs second (reads state, prepends block), inject-inbox runs third (prepends its own notice on top). Don't re-order without understanding the dependencies.
+
+## After every substantive turn
+
+Author one per-turn assertion. **Over-eagerness is not a failure mode; under-coverage is.** Skip only one-line acknowledgements.
+
+The V9 sugared `dkg_annotate_turn` is **gone** — V10 uses an explicit three-step write (create → write → share):
+
+```js
+dkg_knowledge_asset_create({ name: `turn-anno-${sessionKey}-${N}`, subGraphName: "decisions" });
+dkg_knowledge_asset_write({
+  name: `turn-anno-${sessionKey}-${N}`,
+  subGraphName: "decisions",
+  quads: [
+    // For each topic / Decision / Finding / Task / Question / code-ref:
+    //   <entity> rdf:type <type>
+    //   <entity> rdfs:label "label"
+    //   <entity> dcterms:created "<iso ts>"^^xsd:dateTime
+    //   <entity> prov:wasAttributedTo <agent-uri>
+    //   <turn-uri> chat:proposes <entity>    // the linking edge
+    // And for each file touched:
+    //   <turn-uri> chat:mentions <file-uri>
+    //   <file-uri> code:touchedInTurnBy <agent-uri>
+  ],
+});
+dkg_knowledge_asset_share({
+  name: `turn-anno-${sessionKey}-${N}`,
+  entities: "all", // full share — preferred; pass an explicit array only for a subset (see Query gotcha (3))
+});
+```
+
+**Object encoding rule**: `dkg_knowledge_asset_write`'s `object` field is EITHER a bare URI OR a literal wrapped in double quotes. Literals without quotes fail on embedded spaces.
+
+## Look-before-mint (the convergence rule)
+
+Before minting any new `urn:dkg:<type>:<slug>` URI:
+
+1. Compute the normalised slug: `lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars`.
+2. Call `dkg_memory_search` with the **unnormalised label**.
+3. If any returned hit's normalised slug matches yours, **REUSE** that URI (prefer VM > SWM > WM hits).
+4. Otherwise mint fresh per §URI patterns below.
+
+**Never fabricate URIs** outside this protocol.
+
+## Sub-graph routing
+
+| Entity type | Sub-graph |
+|---|---|
+| `chat:Turn` (hook-owned, do NOT write) | `chat` |
+| Topic / mentions on a turn | `chat` |
+| `Finding`, `Decision`, `Question` | `decisions` |
+| `Task` | `tasks` |
+| `code:File` / `code:Package` / `code:Repository` | `code` |
+| `urn:dkg:github:repo|pr|issue:*` | `github` |
+| `Concept`, agent profile, ontology refs | `meta` |
+
+If a turn produces entities for multiple sub-graphs, create one assertion per sub-graph (suffix the name: `turn-anno-<sessionKey>-<N>-decisions`, `-code`).
+
+## URI patterns
+
+```
+urn:dkg:concept:<slug>                       free-text concept (skos:Concept)
+urn:dkg:topic:<slug>                         broad topical bucket
+urn:dkg:question:<slug>                      open question
+urn:dkg:finding:<slug>                       preserved claim/observation
+urn:dkg:decision:<slug>                      architectural decision
+urn:dkg:task:<slug>                          work item
+urn:dkg:agent:<slug>                         agent identity
+urn:dkg:github:repo:<owner>/<name>           GitHub repository
+urn:dkg:github:pr:<owner>/<name>/<num>       GitHub PR
+urn:dkg:github:issue:<owner>/<name>/<num>    GitHub issue
+urn:dkg:code:repo:<owner>/<name>             scanner-owned repo node
+urn:dkg:code:file:<owner>/<name>/<relpath>   scanner-owned file node
+urn:dkg:code:package:<owner>/<name>/<pkg>    scanner-owned package node
+```
+
+## Code graph: two layers
+
+**Layer 1** — `.dkg/scripts/scan-code.mjs` (operator-installed) owns `code:File`/`code:Package` triples. Run `node .dkg/scripts/scan-code.mjs <repo>` or `--all` when fresh structural data is needed; the daily launchd template at `.dkg/scripts/com.dkg.scan-code.plist` covers steady state.
+
+**Layer 2** — you, on every turn that touches a file. Emit in the per-turn assertion (subGraphName `code`):
+
+- `<turn-uri> chat:mentions <file-uri>` for every file touched.
+- `<file-uri> code:touchedInTurnBy <agent-uri>` for non-trivial touches (skip incidental Reads).
+- `<file-uri> dcterms:modified "<iso ts>"^^xsd:dateTime` for Edit/Write.
+- Optional `<file-uri> schema:description "<one line on why>"`.
+
+File URI MUST match the scanner pattern. `dkg_memory_search` the path first — if it's in the graph, reuse the URI. If not, mint per the pattern and the next scan reconciles.
+
+## V10 MCP tool surface (cheat sheet)
+
+The authoritative reference is [`packages/cli/skills/dkg-node/SKILL.md`](mdc:packages/cli/skills/dkg-node/SKILL.md). Quick map:
+
+**Read**: `dkg_memory_search` (was `dkg_search`), `dkg_query` (was `dkg_sparql`), `dkg_get_entity`, `dkg_list_context_graphs` (was `dkg_list_projects`), `dkg_sub_graph_list` (was `dkg_list_subgraphs`), `dkg_list_activity`, `dkg_get_agent`, `dkg_knowledge_asset_query`, `dkg_knowledge_asset_history`, `dkg_status`.
+
+**Write (auto-shared via `autoShare: true`)**: `dkg_knowledge_asset_create` (pass `quads`+`alsoShareSwm:true` for a create→write→seal→share one-shot) + `dkg_knowledge_asset_write` + `dkg_knowledge_asset_share`, `dkg_knowledge_asset_discard`, `dkg_sub_graph_create`. (There is no loose-SWM `dkg_share` tool — author a named knowledge asset.)
+
+**Inter-agent**: `dkg_send_message`, `dkg_check_inbox` / `dkg_read_messages`, `dkg_subscribe`.
+
+**HUMAN-GATED**: `dkg_knowledge_asset_publish` (the sealed named KA → VM, on-chain, costs TRAC). Don't call without explicit operator instruction.
+
+**Retired (do not call)**: `dkg_publish`, `dkg_shared_memory_publish`, `dkg_share`, `dkg_annotate_turn`, `dkg_propose_decision`, `dkg_add_task`, `dkg_comment`, `dkg_request_vm_publish`, `dkg_set_session_privacy`, `dkg_get_chat`, `dkg_get_ontology`, `dkg_search`, `dkg_sparql`, `dkg_list_projects`, `dkg_list_subgraphs`.
+
+## Query gotchas
+
+Things that consistently bite agents writing SPARQL via `dkg_query`:
+
+**(1) Wrap patterns in `GRAPH ?g { ... }`.** Sub-graph data lives in named graphs, not the default graph. `SELECT ?s WHERE { ?s a code:File }` returns 0 rows; `SELECT ?s WHERE { GRAPH ?g { ?s a code:File } }` returns the real count.
+
+**(2) `view` + `subGraphName` are mutually exclusive in V10.** The daemon returns HTTP 400 if you pass both. Two workarounds:
+- Scoped query: omit `view`, pass `subGraphName: "<name>"` (legacy data-path query — works fine).
+- Cross-subgraph view: pass `view: "shared-working-memory"` alone, then filter in SPARQL via `GRAPH <did:dkg:context-graph:<cg>/<sub>/_shared_memory> { ... }`.
+
+**(3) `dkg_knowledge_asset_share`: prefer `entities: "all"` for a full share.** The MCP now **accepts** `entities: "all"` (or omit `entities` entirely) to share the WHOLE assertion — prefer that over enumerating an explicit array. A large explicit array can hit the share body-size limits for big assets; `"all"` cannot. Pass an **explicit array only for a selective subset** of roots — and note (CONTRACT §5) a subset share is SWM-only and is **NOT** VM-publishable as a subset: to publish on-chain, share the full set (or `"all"`). The daemon REST still rejects an **empty** array, so never send `[]` — use `"all"` / omit for "everything". Roots you leave out of a subset share stay in WM, invisible to peers.
+
+**(4) `code:` URI segments are percent-encoded.** Files like `gnosis+base wallets.zip` or `@scope/pkg` would break IRI parsing. The scanner applies `encodeURIComponent` per path segment. When constructing a file URI by hand, do the same: `urn:dkg:code:file:<owner>/<name>/${pathSegments.map(encodeURIComponent).join('/')}`.
+
+## Things to NOT do
+
+- **Don't fabricate URIs.** Look-before-mint or skip the edge.
+- **Don't skip turns to "save tokens".** A three-step annotation is cheap. Coverage wins.
+- **Don't publish to VM via MCP.** `dkg_knowledge_asset_publish` is operator-gated.
+- **Don't normalise slugs in your `dkg_memory_search` query.** Pass the unnormalised label.
+- **Don't try to compute the turn URI yourself.** The `<dkg-session-context>` block gives it to you. Reading capture-chat's session state files is brittle and unnecessary.
+- **Don't write `chat:Turn` entities yourself.** The capture hook owns them. You write annotations that LINK to them.
+- **Don't call any V9-retired tool** (`dkg_annotate_turn`, `dkg_search`, `dkg_sparql`, etc.) — they no longer exist.
+
+## Per-turn cheat sheet
+
+```
+1. Read <dkg-session-context> → grab <turn-uri>, <agent-uri>.
+2. dkg_memory_search "<label>" → reuse or mint URIs.
+3. dkg_knowledge_asset_create({ name: turn-anno-<sessionKey>-<N>, subGraphName: <route> }).
+4. dkg_knowledge_asset_write({ name, quads: [topics, mentions, durable artifacts, code-refs] }).
+5. dkg_knowledge_asset_share({ name, entities: "all" }).  // full share; explicit array only for a subset (gotcha 3)
+```
+
+That's it. The graph grows; teammates' agents see your work via auto-recall; humans ratify on-chain when worthwhile.

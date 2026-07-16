@@ -1,0 +1,38 @@
+{
+  "networkName": "DKG V10 Base Mainnet",
+  "genesisId": "base-mainnet",
+  "networkId": "562ea760dbe27fb4233d58dfc958bbddf844b82596ec3d51dff98718e6bf61ca",
+  "genesisVersion": 1,
+  "relays": [
+    "/ip4/178.104.98.10/tcp/9090/p2p/12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy",
+    "/ip4/168.119.127.54/tcp/9090/p2p/12D3KooWMasqzRrim48ZJM64UyTfHufDTmSG3n3jqwsS5phz8m91",
+    "/ip4/178.156.237.133/tcp/9090/p2p/12D3KooWDgTunUpkGaE7dYCaDP1CCBT6Dm2HPMXSZhJn2KXYLH15",
+    "/ip4/178.105.211.42/tcp/9090/p2p/12D3KooWCodgXHMwybaEe93rbKgWMfGXQvUb6cpT3VCrjCbbnyEu"
+  ],
+  "defaultContextGraphs": [],
+  "defaultNodeRole": "edge",
+  "chain": {
+    "name": "base",
+    "type": "evm",
+    "chainId": "base:8453",
+    "rpcUrl": "https://mainnet.base.org",
+    "rpcUrls": [
+      "https://base-rpc.publicnode.com",
+      "https://base.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://mainnet.base.org",
+      "https://base-rpc.publicnode.com",
+      "https://base.drpc.org"
+    ],
+    "hubAddress": "0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13"
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "repo": "OriginTrail/dkg",
+    "branch": "main",
+    "checkIntervalMinutes": 5,
+    "channel": "mainnet",
+    "allowPrerelease": false
+  }
+}

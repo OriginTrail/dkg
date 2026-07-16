@@ -1,20 +1,62 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
+import { DKGPublisher, UpdateHandler, autoPartition, computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot, computeFlatKCRootV10 as computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import type { V10ACKProvider } from '../src/publisher.js';
 
-const PARANET = 'test-update';
-const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
+// RC11 / PR1: in-memory 3-of-N ACK provider for Hardhat publishes.
+let _ackProvider: V10ACKProvider | undefined;
+function getAckProvider(): V10ACKProvider {
+  if (!_ackProvider) {
+    if (!_kav10Address) {
+      throw new Error('getAckProvider() called before _kav10Address was initialized');
+    }
+    _ackProvider = makeHardhatReceiverACKProvider(
+      getSharedContext(),
+      _kav10Address,
+      [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+    );
+  }
+  return _ackProvider;
+}
+
+let CONTEXT_GRAPH: string = 'test-update';
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+let DATA_GRAPH: string;
 const ENTITY_A = 'urn:test:entity:a';
 const ENTITY_B = 'urn:test:entity:b';
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+/**
+ * rc.17 uniform per-KA layout: a confirmed publish (and any subsequent update,
+ * which targets batchId === the original kaId) writes/replaces a KA's public
+ * quads in the PER-KA verifiable-memory graph
+ *   did:dkg:context-graph:{cg}/_verifiable_memory/{author}/{number}
+ * where author = kaId >> 96 and number = kaId & (2^96 - 1). Assertions that
+ * checked the monolithic root data graph must now read this per-KA graph.
+ */
+function vmGraphFor(contextGraphId: string, kaId: bigint): string {
+  return contextGraphLayerUri(
+    contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    '0x' + (kaId >> 96n).toString(16).padStart(40, '0'),
+    kaId & ((1n << 96n) - 1n),
+  );
 }
 
 function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
@@ -38,7 +80,7 @@ function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; 
 
 /** Build a gossip message that matches an on-chain update (same quads → same merkle root). */
 function buildGossipMessage(opts: {
-  paranetId: string;
+  contextGraphId: string;
   batchId: bigint;
   quads: Quad[];
   manifest: { rootEntity: string; privateTripleCount: number }[];
@@ -49,9 +91,9 @@ function buildGossipMessage(opts: {
 }) {
   const gossipRoot = computeGossipMerkleRoot(opts.quads, opts.manifest);
   return encodeKAUpdateRequest({
-    paranetId: opts.paranetId,
+    contextGraphId: opts.contextGraphId,
     batchId: opts.batchId,
-    nquads: quadsToNQuads(opts.quads, `did:dkg:paranet:${opts.paranetId}`),
+    nquads: quadsToNQuads(opts.quads, `did:dkg:context-graph:${opts.contextGraphId}`),
     manifest: opts.manifest,
     publisherPeerId: opts.publisherPeerId,
     publisherAddress: opts.publisherAddress,
@@ -65,7 +107,7 @@ function buildGossipMessage(opts: {
 describe('KAUpdateRequest encode/decode', () => {
   it('round-trips a KAUpdateRequest message', () => {
     const original = {
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: 42n,
       nquads: new TextEncoder().encode('<urn:a> <urn:b> "c" .'),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -81,7 +123,7 @@ describe('KAUpdateRequest encode/decode', () => {
     expect(encoded).toBeInstanceOf(Uint8Array);
 
     const decoded = decodeKAUpdateRequest(encoded);
-    expect(decoded.paranetId).toBe(PARANET);
+    expect(decoded.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(decoded.batchId).toBe(42n);
     expect(decoded.publisherPeerId).toBe('12D3KooWTest');
     expect(decoded.publisherAddress).toBe('0xABCDEF');
@@ -95,7 +137,7 @@ describe('KAUpdateRequest encode/decode', () => {
     const largeBatchId = (1n << 53n) + 7n;
     const largeBlock = (1n << 60n) + 42n;
     const original = {
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: largeBatchId,
       nquads: new Uint8Array(),
       manifest: [],
@@ -115,14 +157,37 @@ describe('KAUpdateRequest encode/decode', () => {
 
 describe('UpdateHandler', () => {
   let store: OxigraphStore;
-  let chain: MockChainAdapter;
+  let chain: EVMChainAdapter;
   let publisher: DKGPublisher;
   let handler: UpdateHandler;
-  const wallet = ethers.Wallet.createRandom();
+  const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise KA
+    // update lifecycle / gossip / ordering / replay mechanics, not curated /
+    // ciphertext semantics, so they must not require a ciphertext commitment.
+    const cgId = await createTestContextGraph(chain, undefined, 0);
+    CONTEXT_GRAPH = String(cgId);
+    DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _provider = createProvider();
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
     publisher = new DKGPublisher({
@@ -130,15 +195,25 @@ describe('UpdateHandler', () => {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      // OT-RFC-43 Option-1: real EVM adapter requires a packed reservedKaId per mint.
+      kaAllocator: makeTestKaAllocator(),
+    });
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
     handler = new UpdateHandler(store, chain, eventBus);
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('applies a verified KA update: deletes old triples, inserts new ones', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"Will be replaced"'),
@@ -147,16 +222,16 @@ describe('UpdateHandler', () => {
     expect(original.status).toBe('confirmed');
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
     expect(updateResult.onChainResult).toBeDefined();
 
     // Gossip must send the SAME quads as the publisher's update to match the on-chain merkle root
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -167,8 +242,11 @@ describe('UpdateHandler', () => {
 
     await handler.handle(message, '12D3KooWPeerA');
 
+    // rc.17: the update replaces data in the per-KA verifiable-memory graph
+    // (keyed by batchId === original.kaId), not the monolithic root graph.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -177,7 +255,7 @@ describe('UpdateHandler', () => {
     }
 
     const descResult = await store.query(
-      `ASK { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/description> ?o } }`,
+      `ASK { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/description> ?o } }`,
     );
     expect(descResult.type).toBe('boolean');
     if (descResult.type === 'boolean') {
@@ -185,21 +263,166 @@ describe('UpdateHandler', () => {
     }
   });
 
+  // Regression test for https://github.com/OriginTrail/dkg-v9/issues/31
+  //
+  // Summary: the `update` protocol does not carry `privateMerkleRoot`
+  // through the receive-side root reconstruction. Specifically,
+  // `packages/publisher/src/update-handler.ts` computes:
+  //
+  //     const computedRoot = computeFlatKCRoot(quads, []);   // ← empty!
+  //
+  // while `packages/publisher/src/dkg-publisher.ts#update()` signs and
+  // submits:
+  //
+  //     const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
+  //
+  // When `updatePrivateRoots` is non-empty (i.e. the update touches a KA
+  // with private quads), the two roots diverge. The on-chain tx stores
+  // the root that includes private commitments, so chain verification
+  // returns *that* root as `verifiedMerkleRoot`. The handler then
+  // compares `computedRoot` (no private) against `verifiedMerkleRoot`
+  // (with private) and silently rejects the update with
+  // `"merkle root mismatch for batchId=... (tampered payload)"`.
+  //
+  // Observable symptom: peers silently miss updates to KAs that have
+  // private commitments. The publisher succeeds, but every other node's
+  // data graph stays stale forever.
+  //
+  // This test reproduces the exact scenario the issue describes:
+  //   1. publish a KC with private quads (so privateMerkleRoot ≠ undefined)
+  //   2. update that KC with new public + new private quads
+  //   3. hand the update's gossip message to UpdateHandler on a fresh store
+  //   4. assert the update actually took effect on the receiver
+  //
+  // If the bug is still present, step 4 fails because the receiver's
+  // data graph still holds the original quads, not the updated ones.
+  // RC11 / PR1: This regression test depends on a private-data publish
+  // confirming on-chain so `original.kaId` is a real batchId the
+  // subsequent `update(original.kaId, ...)` can target. With the
+  // self-signed ACK fallback deleted and `dkg-publisher.ts:1937`
+  // intentionally skipping peer ACK collection for private-data
+  // publishes (StorageACKHandler cannot recompute private merkle roots
+  // from SWM data alone), a private-data publish in Hardhat now goes
+  // `tentative` with `kaId === 0n` and `update(0n, ...)` cannot
+  // exercise the issue #31 receive-side recomputation path. Restoring
+  // this regression coverage requires teaching the ACK collector to
+  // include `privateRoots` in `PublishIntentMsg` so cores can verify
+  // composite roots without seeing the private data itself — out of
+  // scope for PR1; PR3 / PR5 may revisit when the ACK provider gets
+  // typed errors.
+  it.skip('issue #31 — a valid update carrying privateMerkleRoot must apply on the receiver (skipped under RC11 / PR1: see comment above)', async () => {
+    // Step 1. Publish with private quads. The manifest will have a
+    // non-undefined privateMerkleRoot, so the on-chain root factors in
+    // the private commitment.
+    const original = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original-pub"')],
+      privateQuads: [q(ENTITY_A, 'http://schema.org/ssn', '"before-update-private"')],
+      publisherPeerId: '12D3KooWPeerA',
+    });
+    expect(original.status).toBe('confirmed');
+    expect(
+      original.kaManifest[0]?.privateMerkleRoot,
+      'precondition: publish with privateQuads must produce a privateMerkleRoot in the manifest',
+    ).toBeDefined();
+
+    // Step 2. Update with new public and new private quads. The
+    // publisher's `update()` computes the new kcMerkleRoot with the
+    // private root included and signs that over to the chain.
+    const updatePublic = [q(ENTITY_A, 'http://schema.org/name', '"UPDATED-pub"')];
+    const updatePrivate = [q(ENTITY_A, 'http://schema.org/ssn', '"after-update-private"')];
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: updatePublic,
+      privateQuads: updatePrivate,
+      publisherPeerId: '12D3KooWPeerA',
+    });
+    expect(updateResult.status).toBe('confirmed');
+    const updatedPrivateRoot = updateResult.kaManifest[0]?.privateMerkleRoot;
+    expect(
+      updatedPrivateRoot,
+      'precondition: publisher.update must retain a privateMerkleRoot in its returned manifest',
+    ).toBeDefined();
+
+    // Step 3. Simulate the gossip the publisher node broadcasts (see
+    // dkg-agent.ts `update()` which serializes `result.kaManifest`
+    // including `privateMerkleRoot` and sets `newMerkleRoot` to the
+    // publisher's computed `result.merkleRoot`). We replay that exact
+    // message shape against a freshly constructed handler+store that
+    // has NO prior knowledge of the update — the only path by which
+    // this receiver learns about the update is the gossip payload, so
+    // any bug in the receive-side root recomputation is observable
+    // here as "the update never landed".
+    const receiverStore = new OxigraphStore();
+    const receiverEventBus = new TypedEventBus();
+    const receiverHandler = new UpdateHandler(receiverStore, chain, receiverEventBus);
+
+    // The receiver must know the original quads to detect whether the
+    // update actually replaced them or was silently dropped. In the
+    // real wire protocol the receiver would have already synced the
+    // original KC via the sync protocol before the update arrived.
+    const dataGraph = DATA_GRAPH;
+    await receiverStore.insert([
+      { subject: ENTITY_A, predicate: 'http://schema.org/name', object: '"Original-pub"', graph: dataGraph },
+    ]);
+
+    const message = encodeKAUpdateRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
+      nquads: quadsToNQuads(updatePublic, dataGraph),
+      manifest: [{
+        rootEntity: ENTITY_A,
+        privateMerkleRoot: updatedPrivateRoot!,
+        privateTripleCount: updatePrivate.length,
+      }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: updateResult.merkleRoot,
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await receiverHandler.handle(message, '12D3KooWPeerA');
+
+    // Step 4. The update must be visible on the receiver. If issue #31
+    // is still open, receiverStore still contains "Original-pub", not
+    // "UPDATED-pub", because the handler recomputed the root with an
+    // empty private root list and bailed out at the merkle mismatch.
+    const nameResult = await receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(nameResult.type).toBe('bindings');
+    if (nameResult.type === 'bindings') {
+      expect(
+        nameResult.bindings.length,
+        'receiver should have exactly one name after update',
+      ).toBe(1);
+      expect(
+        nameResult.bindings[0]['o'],
+        'Bug https://github.com/OriginTrail/dkg-v9/issues/31: ' +
+          'update handler rejects valid updates that carry private commitments. ' +
+          'Fix in packages/publisher/src/update-handler.ts — pass the manifest private roots ' +
+          'to computeFlatKCRoot instead of `[]`.',
+      ).toBe('"UPDATED-pub"');
+    }
+  });
+
   it('rejects update when chain verification fails (wrong publisher)', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWAttacker',
@@ -210,8 +433,11 @@ describe('UpdateHandler', () => {
 
     await handler.handle(message, '12D3KooWAttacker');
 
+    // The rejected gossip must not change the local data; publisher.update()
+    // already wrote "Updated" into the per-KA verifiable-memory graph.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -221,13 +447,13 @@ describe('UpdateHandler', () => {
 
   it('rejects gossip with tampered quads (payload root != on-chain root)', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Legit update"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -235,8 +461,8 @@ describe('UpdateHandler', () => {
     // The on-chain merkle root matches the legit update, not the tampered payload.
     const tamperedQuads = [q(ENTITY_A, 'http://schema.org/name', '"Tampered content"')];
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: tamperedQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -247,8 +473,11 @@ describe('UpdateHandler', () => {
 
     await handler.handle(message, '12D3KooWPeerA');
 
+    // The tampered gossip must be rejected; the per-KA verifiable-memory graph
+    // still holds the legit update written by publisher.update().
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -258,13 +487,13 @@ describe('UpdateHandler', () => {
 
   it('rejects update with unauthenticated extra roots in payload', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -276,8 +505,8 @@ describe('UpdateHandler', () => {
     const gossipRoot = computeGossipMerkleRoot(quadsWithExtra, manifestOnlyA);
 
     const message = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(quadsWithExtra, DATA_GRAPH),
       manifest: manifestOnlyA,
       publisherPeerId: '12D3KooWPeerA',
@@ -290,8 +519,11 @@ describe('UpdateHandler', () => {
 
     await handler.handle(message, '12D3KooWPeerA');
 
+    // The whole update is rejected (unauthenticated root), so the injected
+    // entity must not appear in the KA's per-KA verifiable-memory graph.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const injectedResult = await store.query(
-      `ASK { GRAPH <${DATA_GRAPH}> { <urn:test:injected> <http://schema.org/name> ?o } }`,
+      `ASK { GRAPH <${vmGraph}> { <urn:test:injected> <http://schema.org/name> ?o } }`,
     );
     expect(injectedResult.type).toBe('boolean');
     if (injectedResult.type === 'boolean') {
@@ -301,13 +533,13 @@ describe('UpdateHandler', () => {
 
   it('uses chain-verified block number for ordering, not gossip-supplied value', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
-    const update1 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update1 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
     const chainBlock1 = update1.onChainResult!.blockNumber;
@@ -315,8 +547,8 @@ describe('UpdateHandler', () => {
     // Send gossip for update1 with a forged high block number.
     // The handler should use the chain-verified block (chainBlock1), not 999999.
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       nquads: quadsToNQuads(update1Quads, DATA_GRAPH),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -329,9 +561,12 @@ describe('UpdateHandler', () => {
 
     await handler.handle(msg1, '12D3KooWPeerA');
 
+    // rc.17: updates land in the per-KA verifiable-memory graph (keyed by
+    // batchId === original.kaId), not the monolithic root graph.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     // Verify update1 was applied
     let result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -340,8 +575,8 @@ describe('UpdateHandler', () => {
 
     // Now do update2 — its chain block will be chainBlock1 + N (strictly higher)
     const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
-    const update2 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update2 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
     expect(update2.onChainResult!.blockNumber).toBeGreaterThan(chainBlock1);
@@ -349,8 +584,8 @@ describe('UpdateHandler', () => {
     // If the handler had stored 999999 (gossip value), this would be rejected.
     // Since it stored chainBlock1 (chain-verified), update2's higher block passes.
     const msg2 = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: update2Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -362,7 +597,7 @@ describe('UpdateHandler', () => {
     await handler.handle(msg2, '12D3KooWPeerA');
 
     result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -372,27 +607,27 @@ describe('UpdateHandler', () => {
 
   it('rejects stale update with lower chain-verified block number', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     // Do two updates: update1 at block B1, update2 at block B2 > B1
     const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
-    const update1 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update1 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
 
     const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
-    const update2 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const update2 = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
 
     // Apply update2's gossip first (newer block)
     const msg2 = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: update2Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -404,8 +639,8 @@ describe('UpdateHandler', () => {
 
     // Now try to apply update1's gossip (older block) — should be rejected
     const msg1 = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: update1Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -415,8 +650,11 @@ describe('UpdateHandler', () => {
     });
     await handler.handle(msg1, '12D3KooWPeerA');
 
+    // The stale (lower-block) update is rejected; the per-KA verifiable-memory
+    // graph still holds Update 2.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -427,19 +665,19 @@ describe('UpdateHandler', () => {
 
   it('rejects replayed update (same chain block height)', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -453,8 +691,10 @@ describe('UpdateHandler', () => {
     // Replay same message — should be rejected (same block height)
     await handler.handle(message, '12D3KooWPeerA');
 
+    // Replay rejected: per-KA verifiable-memory graph holds a single "Updated".
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -465,12 +705,12 @@ describe('UpdateHandler', () => {
 
   it('publisher.update() returns onChainResult with txHash and blockNumber', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
-    const result = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const result = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
@@ -479,25 +719,28 @@ describe('UpdateHandler', () => {
     expect(result.onChainResult!.txHash).toBeTruthy();
     expect(result.onChainResult!.blockNumber).toBeGreaterThan(0);
     expect(result.onChainResult!.publisherAddress).toBe(wallet.address);
-    expect(result.onChainResult!.batchId).toBe(original.kcId);
+    expect(result.onChainResult!.batchId).toBe(original.kaId);
   });
 
   it('publisher.update() locally replaces triples in the data graph', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"OldDesc"'),
       ],
     });
 
-    await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
+    // rc.17: publisher.update() replaces triples in the per-KA verifiable-memory
+    // graph (keyed by batchId === original.kaId), not the monolithic root graph.
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     const nameResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
     );
     expect(nameResult.type).toBe('bindings');
     if (nameResult.type === 'bindings') {
@@ -506,7 +749,7 @@ describe('UpdateHandler', () => {
     }
 
     const descResult = await store.query(
-      `ASK { GRAPH <${DATA_GRAPH}> { <${ENTITY_A}> <http://schema.org/description> ?o } }`,
+      `ASK { GRAPH <${vmGraph}> { <${ENTITY_A}> <http://schema.org/description> ?o } }`,
     );
     expect(descResult.type).toBe('boolean');
     if (descResult.type === 'boolean') {
@@ -515,20 +758,19 @@ describe('UpdateHandler', () => {
   });
 
   it('handles multi-entity updates', async () => {
+    // Greenfield: one KA per publish — seed with a single entity, then
+    // expand to multiple entities in the same KA via update.
     const original = await publisher.publish({
-      paranetId: PARANET,
-      quads: [
-        q(ENTITY_A, 'http://schema.org/name', '"A"'),
-        q(ENTITY_B, 'http://schema.org/name', '"B"'),
-      ],
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"A"')],
     });
 
     const updateQuads = [
       q(ENTITY_A, 'http://schema.org/name', '"A-updated"'),
       q(ENTITY_B, 'http://schema.org/name', '"B-updated"'),
     ];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -538,8 +780,8 @@ describe('UpdateHandler', () => {
     ];
 
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: gossipManifest,
       publisherPeerId: '12D3KooWPeerA',
@@ -550,9 +792,12 @@ describe('UpdateHandler', () => {
 
     await handler.handle(message, '12D3KooWPeerA');
 
+    // Both entities belong to the same KA, so both land in that KA's per-KA
+    // verifiable-memory graph (keyed by batchId === original.kaId).
+    const vmGraph = vmGraphFor(CONTEXT_GRAPH, original.kaId);
     for (const [entity, expected] of [[ENTITY_A, 'A-updated'], [ENTITY_B, 'B-updated']] as const) {
       const result = await store.query(
-        `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${entity}> <http://schema.org/name> ?o } }`,
+        `SELECT ?o WHERE { GRAPH <${vmGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
       );
       expect(result.type).toBe('bindings');
       if (result.type === 'bindings') {
@@ -564,19 +809,19 @@ describe('UpdateHandler', () => {
 
   it('verifyKAUpdate returns on-chain merkle root and block number', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const verification = await chain.verifyKAUpdate(
       updateResult.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       wallet.address,
     );
 
@@ -588,18 +833,18 @@ describe('UpdateHandler', () => {
 
   it('verifyKAUpdate rejects wrong publisher', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
-    await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
     const verification = await chain.verifyKAUpdate(
       '0xfaketx',
-      original.kcId,
+      original.kaId,
       '0xWrongPublisher',
     );
 
@@ -607,22 +852,22 @@ describe('UpdateHandler', () => {
     expect(verification.onChainMerkleRoot).toBeUndefined();
   });
 
-  it('rejects cross-paranet replay (batch bound to different paranet)', async () => {
+  it('rejects cross-contextGraph replay (batch bound to different contextGraph)', async () => {
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
-    // First, apply on the correct paranet to bind the batch
+    // First, apply on the correct contextGraph to bind the batch
     const legitMsg = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -632,10 +877,10 @@ describe('UpdateHandler', () => {
     });
     await handler.handle(legitMsg, '12D3KooWPeerA');
 
-    // Now attempt to replay the same batch on a different paranet
-    const crossParanetMsg = buildGossipMessage({
-      paranetId: 'other-paranet',
-      batchId: original.kcId,
+    // Now attempt to replay the same batch on a different contextGraph
+    const crossContextGraphMsg = buildGossipMessage({
+      contextGraphId: 'other-contextGraph',
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -643,10 +888,10 @@ describe('UpdateHandler', () => {
       txHash: updateResult.onChainResult!.txHash,
       blockNumber: updateResult.onChainResult!.blockNumber,
     });
-    await handler.handle(crossParanetMsg, '12D3KooWPeerA');
+    await handler.handle(crossContextGraphMsg, '12D3KooWPeerA');
 
-    // The other paranet's graph should be empty
-    const otherGraph = 'did:dkg:paranet:other-paranet';
+    // The other contextGraph's graph should be empty
+    const otherGraph = 'did:dkg:context-graph:other-contextGraph';
     const result = await store.query(
       `ASK { GRAPH <${otherGraph}> { <${ENTITY_A}> ?p ?o } }`,
     );
@@ -659,7 +904,7 @@ describe('UpdateHandler', () => {
   it('publisher.update() returns failed status when chain tx fails', async () => {
     // Attempt to update a non-existent batch (batchId=999 doesn't exist in mock)
     const result = await publisher.update(999n, {
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Should fail"')],
     });
 
@@ -668,11 +913,11 @@ describe('UpdateHandler', () => {
   });
 
   it('publisher.update() updates the merkle root in _meta graph', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"Will be updated"'),
@@ -682,7 +927,7 @@ describe('UpdateHandler', () => {
     const originalRootHex = toHex(original.merkleRoot);
 
     const oldRootResult = await store.query(
-      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kaId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(oldRootResult.type).toBe('bindings');
     if (oldRootResult.type === 'bindings') {
@@ -690,8 +935,8 @@ describe('UpdateHandler', () => {
       expect(oldRootResult.bindings[0]['root']).toContain(originalRootHex);
     }
 
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
     expect(updateResult.status).toBe('confirmed');
@@ -699,7 +944,7 @@ describe('UpdateHandler', () => {
     expect(updatedRootHex).not.toBe(originalRootHex);
 
     const newRootResult = await store.query(
-      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kaId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(newRootResult.type).toBe('bindings');
     if (newRootResult.type === 'bindings') {
@@ -710,11 +955,11 @@ describe('UpdateHandler', () => {
   });
 
   it('UpdateHandler.handle() updates the merkle root in _meta graph on gossip receiver', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
     expect(original.status).toBe('confirmed');
@@ -733,7 +978,7 @@ describe('UpdateHandler', () => {
     const receiverHandler = new UpdateHandler(receiverStore, chain, new TypedEventBus());
 
     const preResult = await receiverStore.query(
-      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kaId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(preResult.type).toBe('bindings');
     if (preResult.type === 'bindings') {
@@ -742,14 +987,14 @@ describe('UpdateHandler', () => {
     }
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via gossip"')];
-    const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      paranetId: PARANET,
-      batchId: original.kcId,
+      contextGraphId: CONTEXT_GRAPH,
+      batchId: original.kaId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerA',
@@ -761,7 +1006,7 @@ describe('UpdateHandler', () => {
     await receiverHandler.handle(message, '12D3KooWPeerA');
 
     const newRootResult = await receiverStore.query(
-      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kaId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(newRootResult.type).toBe('bindings');
     if (newRootResult.type === 'bindings') {
@@ -772,12 +1017,12 @@ describe('UpdateHandler', () => {
     }
   });
 
-  it('updateMetaMerkleRoot fails loudly for unsafe paranetId values', async () => {
+  it('updateMetaMerkleRoot fails loudly for unsafe contextGraphId values', async () => {
     const DKG = 'http://dkg.io/ontology/';
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"SafeData"')],
     });
     const originalRootHex = toHex(original.merkleRoot);
@@ -788,12 +1033,12 @@ describe('UpdateHandler', () => {
 
     for (const bad of maliciousIds) {
       await expect(
-        updateMetaMerkleRoot(store, gm, bad, original.kcId, fakeRoot),
-      ).rejects.toThrow('Unsafe paranetId for SPARQL graph IRI');
+        updateMetaMerkleRoot(store, gm, bad, original.kaId, fakeRoot),
+      ).rejects.toThrow('Unsafe contextGraphId for SPARQL graph IRI');
     }
 
     const rootAfter = await store.query(
-      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kaId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
     );
     expect(rootAfter.type).toBe('bindings');
     if (rootAfter.type === 'bindings') {
@@ -803,16 +1048,16 @@ describe('UpdateHandler', () => {
   });
 
   it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
-    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"BigIntTest"')],
     });
 
-    const ual = await resolveUalByBatchId(store, META_GRAPH, original.kcId);
+    const ual = await resolveUalByBatchId(store, META_GRAPH, original.kaId);
     expect(ual).toBeDefined();
     expect(ual).toContain('did:dkg:');
 

@@ -2,21 +2,36 @@
  * Full-network E2E tests.
  *
  * Spins up a relay + 3 agent nodes locally, then runs through the
- * complete lifecycle: bootstrap → discover → create paranet → publish
+ * complete lifecycle: bootstrap → discover → create contextGraph → publish
  * KAs → replicate via GossipSub → query from every node → chat via relay.
  *
  * GossipSub propagation uses direct TCP connections (how it works in
  * real deployments after DCUtR hole-punching). The relay is used for
  * encrypted chat to validate the circuit-relay path separately.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-const CUSTOM_CHAIN_ID = 'evm:84532';
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  for (const key of [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP]) {
+    const w = new ethers.Wallet(key);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, w.address, ethers.parseEther('50000000'));
+  }
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('Network E2E (3 nodes + relay)', () => {
   let relay: DKGNode;
@@ -52,8 +67,8 @@ describe('Network E2E (3 nodes + relay)', () => {
     relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
     expect(relayAddr).toBeDefined();
 
-    // Use a distinct chainId so we can assert broadcast UAL/chainId come from the adapter (not hardcoded)
     nodeA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'NodeA',
       framework: 'OpenClaw',
       listenPort: 0,
@@ -63,10 +78,11 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     nodeB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'NodeB',
       framework: 'ElizaOS',
       listenPort: 0,
@@ -76,16 +92,21 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      // A-12: each node needs its own EVM key so its agent profile DID
+      // (`did:dkg:agent:0x<addr>`, per spec §03) is unique. Sharing
+      // CORE_OP across all 3 nodes collides their root entities and
+      // discovery dedups them down to a single agent.
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
 
     nodeC = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'NodeC',
       framework: 'DKG',
       listenPort: 0,
       relayPeers: [relayAddr],
       skills: [],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP),
     });
 
     await nodeA.start();
@@ -147,58 +168,58 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(skills[0].agentName).toBe('NodeA');
   }, 20000);
 
-  // ── Step 4: System paranets present from genesis ──────────────────
+  // ── Step 4: System contextGraphs present from genesis ──────────────────
 
-  it('system paranets are present from genesis on all nodes', async () => {
+  it('system contextGraphs are present from genesis on all nodes', async () => {
     for (const node of [nodeA, nodeB, nodeC]) {
-      const paranets = await node.listParanets();
-      const ids = paranets.map(p => p.id);
+      const contextGraphs = await node.listContextGraphs();
+      const ids = contextGraphs.map(p => p.id);
       expect(ids).toContain('agents');
       expect(ids).toContain('ontology');
 
-      const agents = paranets.find(p => p.id === 'agents')!;
+      const agents = contextGraphs.find(p => p.id === 'agents')!;
       expect(agents.isSystem).toBe(true);
       expect(agents.name).toBe('Agent Registry');
 
-      const ontology = paranets.find(p => p.id === 'ontology')!;
+      const ontology = contextGraphs.find(p => p.id === 'ontology')!;
       expect(ontology.isSystem).toBe(true);
     }
   }, 10000);
 
-  // ── Step 5: Create a paranet ──────────────────────────────────────
+  // ── Step 5: Create a contextGraph ──────────────────────────────────────
 
-  it('a node creates a paranet and other nodes learn about it', async () => {
-    await nodeA.createParanet({
+  it('a node creates a contextGraph and other nodes learn about it', async () => {
+    await nodeA.createContextGraph({
       id: 'memes',
-      name: 'Memes Paranet',
+      name: 'Memes ContextGraph',
       description: 'Rare knowledge memes',
     });
 
-    const existsA = await nodeA.paranetExists('memes');
+    const existsA = await nodeA.contextGraphExists('memes');
     expect(existsA).toBe(true);
 
-    const paranetsA = await nodeA.listParanets();
-    const memes = paranetsA.find(p => p.id === 'memes')!;
+    const contextGraphsA = await nodeA.listContextGraphs();
+    const memes = contextGraphsA.find(p => p.id === 'memes')!;
     expect(memes).toBeDefined();
-    expect(memes.name).toBe('Memes Paranet');
+    expect(memes.name).toBe('Memes ContextGraph');
     expect(memes.isSystem).toBe(false);
     expect(memes.creator).toContain(nodeA.peerId);
 
     // Wait for GossipSub propagation of the ontology broadcast
     await sleep(2000);
 
-    // B and C should have received the paranet definition via ontology GossipSub
+    // B and C should have received the contextGraph definition via ontology GossipSub
     // and can also subscribe to the memes topic
-    nodeB.subscribeToParanet('memes');
-    nodeC.subscribeToParanet('memes');
+    nodeB.subscribeToContextGraph('memes');
+    nodeC.subscribeToContextGraph('memes');
     await sleep(500);
   }, 15000);
 
-  // ── Step 6: Reject publishing to non-existent paranet ─────────────
+  // ── Step 6: Reject publishing to non-existent contextGraph ─────────────
 
-  it('rejects publishing to a non-existent paranet', async () => {
+  it('rejects publishing to a non-existent contextGraph', async () => {
     await expect(
-      nodeA.publish('nonexistent-paranet', [
+      nodeA.publish('nonexistent-contextGraph', [
         { subject: 'did:dkg:entity:x', predicate: 'http://schema.org/name', object: '"X"', graph: '' },
       ]),
     ).rejects.toThrow('does not exist');
@@ -213,7 +234,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:pepe-001', predicate: 'http://schema.org/description', object: '"The rarest of all pepes"', graph: '' },
       { subject: 'did:dkg:entity:pepe-001', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://schema.org/CreativeWork', graph: '' },
     ]);
-    expect(resultA.kcId).toBeDefined();
+    expect(resultA.kaId).toBeDefined();
     expect(resultA.kaManifest.length).toBe(1);
     expect(resultA.kaManifest[0].rootEntity).toBe('did:dkg:entity:pepe-001');
 
@@ -243,15 +264,16 @@ describe('Network E2E (3 nodes + relay)', () => {
     );
     expect(qrC.bindings.length).toBe(1);
 
-    // Assert broadcast PublishRequest used the chain adapter's chainId (not hardcoded mock:31337)
-    const metaGraph = 'did:dkg:paranet:memes/_meta';
+    // Assert broadcast PublishRequest used the chain adapter's chainId
+    const metaGraph = 'did:dkg:context-graph:memes/_meta';
     const ualResult = await nodeB.store.query(
       `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
     expect(ualResult.type).toBe('bindings');
-    if (ualResult.type === 'bindings' && ualResult.bindings.length > 0) {
+    if (ualResult.type === 'bindings') {
+      expect(ualResult.bindings.length).toBeGreaterThan(0);
       const ual = String(ualResult.bindings[0]['ual'] ?? '');
-      expect(ual.startsWith(`did:dkg:${CUSTOM_CHAIN_ID}/`)).toBe(true);
+      expect(ual.startsWith('did:dkg:evm:31337/')).toBe(true);
     }
   }, 15000);
 
@@ -263,14 +285,14 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:wojak-001', predicate: 'http://schema.org/name', object: '"Classic Wojak"', graph: '' },
       { subject: 'did:dkg:entity:wojak-001', predicate: 'http://schema.org/description', object: '"Feels bad man"', graph: '' },
     ]);
-    expect(resultB.kcId).toBeDefined();
+    expect(resultB.kaId).toBeDefined();
 
     // NodeC publishes too
     const resultC = await nodeC.publish('memes', [
       { subject: 'did:dkg:entity:doge-001', predicate: 'http://schema.org/name', object: '"Doge"', graph: '' },
       { subject: 'did:dkg:entity:doge-001', predicate: 'http://schema.org/description', object: '"Much knowledge. Very DKG. Wow."', graph: '' },
     ]);
-    expect(resultC.kcId).toBeDefined();
+    expect(resultC.kaId).toBeDefined();
 
     await sleep(3000);
 
@@ -338,9 +360,9 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(receivedOnB).toContain('Hey B, check out my rare pepe');
 
     // B → C
-    const r2 = await nodeB.sendChat(nodeC.peerId, 'C, join the memes paranet!');
+    const r2 = await nodeB.sendChat(nodeC.peerId, 'C, join the memes contextGraph!');
     expect(r2.delivered).toBe(true);
-    expect(receivedOnC).toContain('C, join the memes paranet!');
+    expect(receivedOnC).toContain('C, join the memes contextGraph!');
 
     // C → A (completes the triangle)
     const r3 = await nodeC.sendChat(nodeA.peerId, 'Much knowledge. Very DKG.');
@@ -348,16 +370,16 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(receivedOnA).toContain('Much knowledge. Very DKG.');
 
     // Verify message isolation
-    expect(receivedOnA).not.toContain('C, join the memes paranet!');
+    expect(receivedOnA).not.toContain('C, join the memes contextGraph!');
     expect(receivedOnC).not.toContain('Hey B, check out my rare pepe');
   }, 15000);
 
-  // ── Step 11: Second paranet doesn't interfere ─────────────────────
+  // ── Step 11: Second contextGraph doesn't interfere ─────────────────────
 
-  it('creating a second paranet keeps data isolated', async () => {
-    await nodeB.createParanet({
+  it('creating a second contextGraph keeps data isolated', async () => {
+    await nodeB.createContextGraph({
       id: 'science',
-      name: 'Science Paranet',
+      name: 'Science ContextGraph',
       description: 'Peer-reviewed knowledge',
     });
 
@@ -365,14 +387,14 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:paper-001', predicate: 'http://schema.org/name', object: '"Attention Is All You Need"', graph: '' },
     ]);
 
-    // Science data should not appear in the memes paranet
+    // Science data should not appear in the memes contextGraph
     const memesResult = await nodeB.query(
       'SELECT ?s WHERE { <did:dkg:entity:paper-001> <http://schema.org/name> ?name }',
       'memes',
     );
     expect(memesResult.bindings.length).toBe(0);
 
-    // But should be in the science paranet
+    // But should be in the science contextGraph
     const scienceResult = await nodeB.query(
       'SELECT ?name WHERE { <did:dkg:entity:paper-001> <http://schema.org/name> ?name }',
       'science',

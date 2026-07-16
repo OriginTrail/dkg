@@ -12,7 +12,7 @@ import {
 
 describe('dkgPlugin', () => {
   it('has name and description', () => {
-    expect(dkgPlugin.name).toBe('dkg-v9');
+    expect(dkgPlugin.name).toBe('dkg');
     expect(typeof dkgPlugin.description).toBe('string');
     expect(dkgPlugin.description.length).toBeGreaterThan(0);
   });

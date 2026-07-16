@@ -1,0 +1,79 @@
+[
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-001",
+    "unit_name": "WC-FrameWelding",
+    "process_name": "FrameWelding",
+    "ended": "2026-05-12T08:12:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-002",
+    "unit_name": "WC-Painting",
+    "process_name": "Painting",
+    "ended": "2026-05-12T08:42:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-003",
+    "unit_name": "WC-WheelAssembly",
+    "process_name": "WheelAssembly",
+    "ended": "2026-05-12T09:05:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-004",
+    "unit_name": "WC-DrivetrainInstallation",
+    "process_name": "DrivetrainInstallation",
+    "ended": "2026-05-12T09:30:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-005",
+    "unit_name": "WC-PaintInspection",
+    "process_name": "PaintInspection",
+    "ended": "2026-05-12T09:45:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-006",
+    "unit_name": "WC-FunctionalTest",
+    "process_name": "FunctionalTest",
+    "ended": "2026-05-12T10:00:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  },
+  {
+    "trace_id": "7c4f8d2a-9e3b-4a6d-b517-8f9e0a1b2c3d",
+    "unit_id": "cycle-W18-007",
+    "unit_name": "WC-Packing",
+    "process_name": "Packing",
+    "ended": "2026-05-12T10:15:00.000Z",
+    "product_id": "MODEL-RoadBike-2026",
+    "items": {
+      "BIKE-2026-W18-0001": { "status": "Passed" }
+    }
+  }
+]

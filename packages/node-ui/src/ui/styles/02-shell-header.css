@@ -1,0 +1,503 @@
+/* ══════════════════════════════════════════
+   V10 APP SHELL
+   ══════════════════════════════════════════ */
+.v10-app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* ── Demo/mock-data fallback banner (GH #904) ── */
+.v10-mock-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #7c2d12;
+  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
+  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
+  z-index: 30;
+}
+.v10-mock-banner strong {
+  font-weight: 700;
+}
+.v10-mock-banner-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.25);
+}
+.v10-mock-banner-reload {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #7c2d12;
+  background: rgba(251, 191, 36, 0.35);
+  border: 1px solid rgba(251, 191, 36, 0.6);
+}
+.v10-mock-banner-reload:hover {
+  background: rgba(251, 191, 36, 0.55);
+}
+
+/* ── Inline stale-refresh banner for an open project (GH #905) ── */
+.v10-stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: #7c2d12;
+  background: var(--amber-dim, rgba(251, 191, 36, 0.16));
+  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+}
+.v10-stale-banner .v10-retry-btn {
+  margin-left: auto;
+}
+
+/* ── Retry control for failed view fetches (GH #905) ── */
+.v10-retry-btn {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-primary, #e5e7eb);
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+}
+.v10-retry-btn:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.12));
+}
+
+/* ── Header ── */
+.v10-header {
+  height: var(--header-h);
+  min-height: var(--header-h);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 2px;
+  z-index: 100;
+}
+.v10-header-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  user-select: none;
+}
+.v10-header-logo-ot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-default);
+}
+.v10-header-logo-ot-by {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.v10-header-ot-wordmark {
+  display: block;
+  color: var(--text-secondary);
+  opacity: 0.9;
+}
+.v10-header-ot-wordmark svg {
+  display: block;
+  stroke: none;
+  fill: currentColor;
+}
+.v10-header-logo-text {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+}
+.v10-header-logo-version { color: var(--text-tertiary); font-weight: 300; }
+.v10-header-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border-default);
+  margin: 0 12px 0 16px;
+}
+.v10-header-agent-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.v10-header-agent-switcher:hover { background: var(--bg-hover); }
+.v10-header-agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green);
+}
+.v10-header-agent-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.v10-header-agent-addr {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+.v10-header-spacer { flex: 1; }
+.v10-header-meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+}
+.v10-header-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.v10-header-status-dot.online { background: var(--accent-green); }
+.v10-header-status-dot.offline { background: var(--accent-amber); }
+.v10-header-meta-sep { color: var(--text-ghost); }
+.v10-header-actions { display: flex; align-items: center; gap: 4px; }
+.v10-header-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  transition: all 0.15s;
+  position: relative;
+}
+.v10-header-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.v10-header-icon-btn.active-toggle { color: var(--text-secondary); }
+.v10-header-notif-wrap { position: relative; }
+.v10-header-notif-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--accent-red);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+}
+/* ── Notifications pane (redesign) ─────────────────────────────────────────
+   Bell dropdown surface + the two sections (pinned "Needs your action" +
+   "Activity") + the three row kinds. Reuses design tokens for dark/light,
+   the .v10-po-join-* accent palette for actions, and the activity glyph
+   colours from the per-CG feed. ~380px (wider than the old 320px to fit the
+   two-column join rows + the activity pill). */
+.v10-notif-pane {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  width: 380px;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  overflow: hidden;
+}
+.v10-notif-pane:focus { outline: none; }
+.v10-notif-pane-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.v10-notif-pane-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-notif-pane-markread {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.v10-notif-pane-markread:hover { color: var(--text-primary); }
+/* Body scrolls under the sticky titlebar; the pinned action section sits
+   first in the same scroll container (never a nested scrollbar). */
+.v10-notif-pane-body { overflow-y: auto; padding: 6px 0; }
+
+/* States */
+.v10-notif-pane-state,
+.v10-notif-pane-error {
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.v10-notif-pane-error { color: var(--text-secondary); }
+.v10-notif-pane-error-inline {
+  padding: 8px 14px;
+  text-align: left;
+  font-size: 11px;
+}
+.v10-notif-pane-empty { padding: 24px 16px; text-align: center; }
+.v10-notif-pane-empty-lead { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+.v10-notif-pane-empty-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+.v10-notif-retry {
+  font-family: var(--font-sans);
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.v10-notif-retry:hover { color: var(--text-primary); }
+
+/* Sections */
+.v10-notif-section { padding: 4px 0; }
+.v10-notif-section + .v10-notif-section { border-top: 1px solid var(--border-subtle); }
+.v10-notif-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 4px;
+}
+.v10-notif-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-notif-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--text-warning);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.v10-notif-section-rows { display: flex; flex-direction: column; }
+.v10-notif-section-empty { padding: 6px 14px 10px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+
+/* Rows (shared) */
+.v10-notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 14px;
+  font-family: var(--font-sans);
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-primary);
+}
+button.v10-notif-row { cursor: pointer; transition: background 0.1s; }
+button.v10-notif-row:hover { background: var(--bg-hover); }
+.v10-notif-row[aria-disabled="true"] { opacity: 0.78; }
+.v10-notif-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.v10-notif-row-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-notif-row-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.35; }
+.v10-notif-row-sub { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+.v10-notif-actor { font-weight: 600; color: var(--text-primary); }
+.v10-notif-cg-name { font-weight: 600; color: var(--text-primary); }
+.v10-notif-cg-link {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.v10-notif-cg-link:hover { color: var(--text-secondary); }
+.v10-notif-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-notif-dot { color: var(--text-tertiary); }
+.v10-notif-time { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+/* Unread accent rail — colour-not-alone is covered by the row's text + glyph;
+   this is a supplementary scan cue. */
+.v10-notif-unread { box-shadow: inset 2px 0 0 var(--accent-red); }
+
+/* Self-authored activity — the operator's OWN agent. The row text leads with
+   "You …" for the explicit signal; this faint tint is a supplementary scan cue
+   so own-agent activity is distinguishable at a glance (colour-not-alone). */
+.v10-notif-by-self { background: rgba(110, 168, 254, 0.07); }
+
+/* Glyph cell */
+.v10-notif-glyph {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.v10-notif-glyph-join { color: var(--text-warning); }
+.v10-notif-glyph-created { color: var(--text-tertiary); }
+.v10-notif-glyph-promoted { color: var(--text-warning); }
+.v10-notif-glyph-published { color: var(--text-success); }
+.v10-notif-glyph-approved { color: var(--text-success); }
+.v10-notif-glyph-rejected { color: var(--text-danger); }
+
+/* Join request actions */
+.v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.v10-notif-btn {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.v10-notif-btn:disabled { opacity: 0.5; cursor: default; }
+.v10-notif-btn-approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
+.v10-notif-btn-approve:hover:not(:disabled) { background: rgba(34, 197, 94, 0.2); }
+.v10-notif-btn-ghost { background: none; color: var(--text-secondary); border: 1px solid var(--border-default); }
+.v10-notif-btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.v10-notif-btn-deny { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); }
+.v10-notif-btn-deny:hover:not(:disabled) { background: rgba(239, 68, 68, 0.2); }
+.v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
+.v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
+
+/* Terminal confirmation line (post approve/deny) + inline errors */
+.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: 12px; }
+.v10-notif-row-terminal .v10-notif-glyph { color: var(--text-success); }
+.v10-notif-terminal-text { color: var(--text-secondary); }
+.v10-notif-row-error { font-size: 11px; color: var(--text-danger); margin-top: 3px; }
+
+/* ── Body ── */
+.v10-app-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Resize handles ── */
+.v10-resize-handle-h {
+  width: 1px;
+  flex-shrink: 0;
+  background: var(--border-subtle);
+  cursor: col-resize;
+  transition: background 0.15s, width 0.1s;
+}
+.v10-resize-handle-h:hover,
+.v10-resize-handle-h.active { background: var(--accent-green); width: 3px; }
+/* Vertical twin for the bottom panel (drag the top edge up/down). */
+.v10-resize-handle-v {
+  height: 1px;
+  flex-shrink: 0;
+  background: var(--border-subtle);
+  cursor: row-resize;
+  transition: background 0.15s, height 0.1s;
+}
+.v10-resize-handle-v:hover,
+.v10-resize-handle-v.active { background: var(--accent-green); height: 3px; }
+
+/* ── Responsive: narrow / split-screen viewports (F8) ──
+   The shell is a fixed three-column desktop layout (left tree · center ·
+   right panel) whose side-panel widths are inline-styled from the layout
+   store, so at narrow widths the center could be squeezed to nothing and
+   the header controls could clip. These rules are purely presentational —
+   no behavioural or store changes — and only engage below desktop widths.
+
+   IMPORTANT: App.tsx conditionally renders each side panel from layout
+   state (`leftCollapsed` / `rightCollapsed`) and the header's "Toggle
+   sidebar" / "Toggle agent panel" buttons flip that state. So we must NOT
+   force the panels to `display:none` here — that would mount-but-hide them,
+   making those toggles dead and locking the operator out of the sidebar /
+   agent panel entirely on narrow screens (Codex). Instead, when a panel
+   IS open we lift it out of the flex flow and float it over the center as
+   a drawer: the center reclaims the full width, while the panel stays fully
+   reachable (and dismissable) via its existing toggle.
+     · ≤ 860px  float the side rails as overlay drawers; center goes full-width
+     · ≤ 600px  let the header scroll horizontally instead of clipping */
+@media (max-width: 860px) {
+  .v10-app-body { position: relative; }
+  .v10-app-body > .v10-panel-left,
+  .v10-app-body > .v10-panel-right {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 40;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+  }
+  .v10-app-body > .v10-panel-left { left: 0; }
+  .v10-app-body > .v10-panel-right { right: 0; }
+  /* The drag-to-resize handles are pointless at this width and, with the
+     panels floated, would otherwise sit in the flow as orphan slivers.
+     Hiding the handle does not remove access to anything — the panel is
+     still toggled from the header. */
+  .v10-app-body > .v10-resize-handle-h {
+    display: none !important;
+  }
+  .v10-center-region {
+    flex: 1 1 100% !important;
+    min-width: 0;
+  }
+}
+@media (max-width: 600px) {
+  .v10-header {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .v10-header::-webkit-scrollbar { display: none; }
+}

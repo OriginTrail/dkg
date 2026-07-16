@@ -11,6 +11,11 @@
     "type": "constructor"
   },
   {
+    "inputs": [],
+    "name": "ChallengeDrawPaused",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -24,6 +29,16 @@
       }
     ],
     "name": "MerkleRootMismatchError",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NoEligibleContextGraph",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NoEligibleKnowledgeAsset",
     "type": "error"
   },
   {
@@ -52,6 +67,75 @@
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "knowledgeAssetId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "chunkId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "activeProofPeriodStartBlock",
+        "type": "uint256"
+      }
+    ],
+    "name": "ChallengeGenerated",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_CG_RETRIES",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_KA_RETRIES",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [],
@@ -100,6 +184,19 @@
   },
   {
     "inputs": [],
+    "name": "cgWeightTreeStorage",
+    "outputs": [
+      {
+        "internalType": "contract CGWeightTreeStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "chronos",
     "outputs": [
       {
@@ -113,22 +210,48 @@
   },
   {
     "inputs": [],
-    "name": "createChallenge",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
+    "name": "contextGraphStorage",
     "outputs": [
       {
-        "internalType": "contract DelegatorsInfo",
+        "internalType": "contract ContextGraphStorage",
         "name": "",
         "type": "address"
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "contextGraphValueStorage",
+    "outputs": [
+      {
+        "internalType": "contract ContextGraphValueStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "createChallenge",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -254,10 +377,10 @@
   },
   {
     "inputs": [],
-    "name": "knowledgeCollectionStorage",
+    "name": "knowledgeAssetStorage",
     "outputs": [
       {
-        "internalType": "contract KnowledgeCollectionStorage",
+        "internalType": "contract DKGKnowledgeAssets",
         "name": "",
         "type": "address"
       }
@@ -292,6 +415,35 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "seed",
+        "type": "bytes32"
+      }
+    ],
+    "name": "previewChallengeForSeed",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "cgId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "kaId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "chunkId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "profileStorage",
     "outputs": [
@@ -302,6 +454,35 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "cgId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "startIndex",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxScan",
+        "type": "uint256"
+      }
+    ],
+    "name": "pruneExpiredKnowledgeAssets",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "removed",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -358,19 +539,6 @@
   },
   {
     "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "status",
     "outputs": [
       {
@@ -385,9 +553,9 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "chunk",
-        "type": "string"
+        "internalType": "bytes",
+        "name": "content",
+        "type": "bytes"
       },
       {
         "internalType": "bytes32[]",

@@ -1,0 +1,56 @@
+policy: context_corroboration
+version: 0.1.0
+kind: canonical_policy
+description: Deterministic corroboration and promotion for context-governed claims.
+rules:
+  - name: corroborated
+    params: [C]
+    all:
+      - atom: {pred: claim, args: ["$C"]}
+      - count_distinct:
+          vars: [E]
+          where:
+            - atom: {pred: supports, args: ["$E", "$C"]}
+            - atom: {pred: evidence_view, args: ["$E", "accepted"]}
+            - atom: {pred: independent, args: ["$E"]}
+          op: ">="
+          value: 2
+      - exists:
+          vars: [E]
+          where:
+            - atom: {pred: supports, args: ["$E", "$C"]}
+            - atom: {pred: evidence_view, args: ["$E", "accepted"]}
+            - atom: {pred: authority_class, args: ["$E", "vendor"]}
+      - not_exists:
+          vars: [C2]
+          where:
+            - atom: {pred: contradicts, args: ["$C2", "$C"]}
+            - atom: {pred: accepted_status, args: ["$C2", "accepted"]}
+  - name: disputed
+    params: [C]
+    all:
+      - atom: {pred: claim, args: ["$C"]}
+      - exists:
+          vars: [C2]
+          where:
+            - atom: {pred: contradicts, args: ["$C2", "$C"]}
+            - atom: {pred: accepted_status, args: ["$C2", "accepted"]}
+  - name: promotable
+    params: [C]
+    all:
+      - atom: {pred: corroborated, args: ["$C"]}
+      - exists:
+          vars: [E]
+          where:
+            - atom: {pred: claim_epoch, args: ["$C", "$E"]}
+            - atom: {pred: quorum_epoch, args: ["incident_review", "$E"]}
+      - atom: {pred: quorum_reached, args: ["incident_review", 3, 4]}
+decisions:
+  - name: propose_accept
+    params: [C]
+    all:
+      - atom: {pred: promotable, args: ["$C"]}
+  - name: propose_reject
+    params: [C]
+    all:
+      - atom: {pred: disputed, args: ["$C"]}

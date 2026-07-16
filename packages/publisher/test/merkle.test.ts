@@ -25,16 +25,18 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { MerkleTree, hashTriple, sha256 } from '@origintrail-official/dkg-core';
+import { MerkleTree, hashTriple, sha256, compareBytes } from '@origintrail-official/dkg-core';
 import {
   computeTripleHash,
   computePublicRoot,
   computePrivateRoot,
   computeKARoot,
   computeKCRoot,
+  computeFlatKCRoot,
 } from '../src/merkle.js';
+import { ProofIndex } from '../src/proof-index.js';
 
-const GRAPH = 'did:dkg:paranet:test';
+const GRAPH = 'did:dkg:context-graph:test';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -402,6 +404,70 @@ describe('Merkle / triple hashing (robust)', () => {
       const rootWithout = computePublicRoot([normal]);
       expect(rootWithSynthetic).not.toEqual(rootWithout);
       expect(rootWithSynthetic).toHaveLength(32);
+    });
+  });
+
+  describe('round-trip proof verification', () => {
+    it('computeFlatKCRoot and MerkleTree produce identical roots for the same quads', () => {
+      const quads = [
+        q('urn:a', 'urn:p', '"v1"'),
+        q('urn:b', 'urn:p', '"v2"'),
+        q('urn:c', 'urn:p', '"v3"'),
+      ];
+      const rootFromFlat = computeFlatKCRoot(quads, []);
+      const hashes = quads.map(computeTripleHash);
+      const rootFromTree = new MerkleTree(hashes).root;
+      expect(hex(rootFromFlat)).toBe(hex(rootFromTree));
+    });
+
+    it('ProofIndex generates proofs verifiable against computeFlatKCRoot', () => {
+      const quads = [
+        q('urn:entity:1', 'urn:prop:a', '"alpha"'),
+        q('urn:entity:2', 'urn:prop:b', '"beta"'),
+        q('urn:entity:3', 'urn:prop:c', '"gamma"'),
+        q('urn:entity:4', 'urn:prop:d', '"delta"'),
+        q('urn:entity:5', 'urn:prop:e', '"epsilon"'),
+      ];
+
+      const root = computeFlatKCRoot(quads, []);
+      const proofIdx = new ProofIndex();
+      proofIdx.storeBatch('ctx-graph-1', 'batch-1', quads);
+
+      for (const quad of quads) {
+        const proof = proofIdx.generateProof('ctx-graph-1', quad.subject, quad.predicate, quad.object);
+        expect(proof).toBeDefined();
+        const tripleHash = computeTripleHash(quad);
+        const ok = MerkleTree.verify(
+          root,
+          tripleHash,
+          proof!.siblings.map(h => Buffer.from(h.slice(2), 'hex')),
+          proof!.leafIndex,
+        );
+        expect(ok).toBe(true);
+      }
+    });
+
+    it('proof fails against a tampered root', () => {
+      const quads = [
+        q('urn:x', 'urn:p', '"one"'),
+        q('urn:y', 'urn:p', '"two"'),
+      ];
+
+      const proofIdx = new ProofIndex();
+      proofIdx.storeBatch('ctx', 'b1', quads);
+
+      const proof = proofIdx.generateProof('ctx', quads[0].subject, quads[0].predicate, quads[0].object);
+      expect(proof).toBeDefined();
+
+      const fakeRoot = sha256(new TextEncoder().encode('tampered'));
+      const tripleHash = computeTripleHash(quads[0]);
+      const ok = MerkleTree.verify(
+        fakeRoot,
+        tripleHash,
+        proof!.siblings.map(h => Buffer.from(h.slice(2), 'hex')),
+        proof!.leafIndex,
+      );
+      expect(ok).toBe(false);
     });
   });
 });

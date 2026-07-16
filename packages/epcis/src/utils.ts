@@ -16,7 +16,7 @@ export function encodePageToken(offset: number): string {
   return btoa(`offset:${offset}`);
 }
 
-const FILTER_KEYS = ['eventID', 'epc', 'bizStep', 'bizLocation', 'from', 'to', 'parentID', 'childEPC', 'inputEPC', 'outputEPC', 'eventType', 'action', 'disposition', 'readPoint'] as const;
+const FILTER_KEYS = ['eventID', 'epc', 'bizStep', 'bizLocation', 'from', 'to', 'parentID', 'childEPC', 'inputEPC', 'outputEPC', 'configurationId', 'shipmentId', 'eventType', 'action', 'disposition', 'readPoint'] as const;
 
 /** Maps EPCIS 2.0 standard parameter names to internal canonical names. */
 const STANDARD_TO_CANONICAL: Record<string, keyof EpcisQueryParams> = {
@@ -28,6 +28,8 @@ const STANDARD_TO_CANONICAL: Record<string, keyof EpcisQueryParams> = {
   MATCH_parentID: 'parentID',
   MATCH_inputEPC: 'inputEPC',
   MATCH_outputEPC: 'outputEPC',
+  EQ_configurationId: 'configurationId',
+  EQ_shipmentId: 'shipmentId',
   EQ_action: 'action',
   EQ_disposition: 'disposition',
   EQ_readPoint: 'readPoint',
@@ -50,7 +52,7 @@ function resolveParam(sp: URLSearchParams, canonical: string): string | undefine
 
 /** Parse URLSearchParams into typed EpcisQueryParams. */
 export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
-  const params: EpcisQueryParams = {};
+  const params: EpcisQueryParams = { finalized: true };
 
   for (const key of FILTER_KEYS) {
     const val = resolveParam(sp, key);
@@ -59,8 +61,15 @@ export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
     }
   }
 
-  // MATCH_anyEPC (standard name) or epc+fullTrace=true (backward compat)
-  const anyEpcStandard = sp.get('MATCH_anyEPC');
+  // MATCH_anyEPC (standard EPCIS name), `anyEPC` (canonical alias —
+  // matches the api-client's `EpcisEventQuery.anyEPC` field; accepting
+  // both mirrors the FILTER_KEYS dual-name resolution above), or
+  // epc+fullTrace=true (backward compat). Without the `anyEPC` alias
+  // here, `dkg epcis query --any-epc <urn>` (which the api-client
+  // serializes as `?anyEPC=<urn>`) was silently dropped — the server
+  // returned an unfiltered eventList and the user never saw the filter
+  // failed to apply.
+  const anyEpcStandard = sp.get('MATCH_anyEPC') ?? sp.get('anyEPC');
   if (anyEpcStandard != null && anyEpcStandard !== '') {
     params.anyEPC = anyEpcStandard;
     delete params.epc;
@@ -97,6 +106,10 @@ export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
     if (offset != null && /^\d+$/.test(offset)) {
       params.offset = Number.parseInt(offset, 10);
     }
+  }
+
+  if (sp.get('finalized') === 'false') {
+    params.finalized = false;
   }
 
   return params;

@@ -1,0 +1,235 @@
+/**
+ * `ensureDkgNodeConfig` — write/merge `~/.dkg/config.json` with the
+ * agent-agnostic field-level merge that adapter setup paths share.
+ *
+ * Moved here from the agent-agnostic chunk of OpenClaw's `writeDkgConfig`
+ * (`packages/adapter-openclaw/src/setup.ts:504-538`) in S1 of issue #386
+ * because adapter-hermes also needs to bootstrap a missing `~/.dkg/config.json`
+ * during fresh setup (issue #386 acceptance criterion: "Fresh user flow:
+ * install package → `dkg hermes setup` → ...").
+ *
+ * **Ordering invariant — load-bearing.** Adapter-side wrappers
+ * (`writeDkgConfig` in adapter-openclaw, the future Hermes equivalent in
+ * adapter-hermes) MUST run their adapter-specific migrations + cleanups
+ * + `pruneNetworkPinnedDefaults`-equivalents on the loaded `existing`
+ * BEFORE invoking this helper. The `existing` parameter passed in is
+ * assumed to be post-migration. The order must not change — see
+ * execution-plan.md §3.S1 step 4 + risk-register §8.
+ *
+ * Field-level merge contract:
+ *   - `name`: explicit override > existing > supplied agentName
+ *   - `apiPort`: explicit override > existing > supplied apiPort
+ *   - `nodeRole`: existing > network.defaultNodeRole
+ *   - `contextGraphs`: existing > network defaults
+ *   - `auth`: existing > { enabled: true }
+ *   - `logging.kaPublishLifecycleDebug`: existing > false
+ *   - `relay`: preserved from existing if present (never pinned new)
+ *   - `autoUpdate`: only mirrors `enabled` from network when existing
+ *     is absent; never pins repo/branch/checkIntervalMinutes
+ *
+ * Logging: keeps the `[setup] ...` console.log prefix verbatim so
+ * user-visible output is unchanged from pre-extraction.
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
+import { resolveDkgConfigHome } from './dkg-home.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Read the persisted `networkConfig` selector from a node's home directory,
+ * honoring BOTH `config.json` and `config.yaml`. A present, parseable
+ * `config.json` is authoritative (its `networkConfig`, or `undefined` if
+ * unset — `config.yaml` is not consulted); `config.yaml` is read only when
+ * `config.json` is absent. Returns `undefined` when no config exists or
+ * `networkConfig` is unset/blank.
+ *
+ * NOTE: on a CORRUPT `config.json` this falls through to `config.yaml`
+ * (best-effort), whereas the daemon's `loadConfig` re-throws and refuses to
+ * boot — harmless divergence since a corrupt config.json makes the node
+ * unbootable, so the resolved name is moot.
+ *
+ * Setup flows use this (not a json-only read) so a YAML-only node's network
+ * is correctly identified and not mis-resolved to the legacy testnet fallback
+ * (which would misfire the testnet faucet against a mainnet node).
+ */
+export function readPersistedNetworkConfigName(home: string): string | undefined {
+  const pick = (obj: unknown): string | undefined => {
+    if (obj && typeof obj === 'object') {
+      const nc = (obj as Record<string, unknown>).networkConfig;
+      if (typeof nc === 'string' && nc.trim()) return nc.trim();
+    }
+    return undefined;
+  };
+  const jsonPath = join(home, 'config.json');
+  if (existsSync(jsonPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(jsonPath, 'utf-8'));
+      if (raw && typeof raw === 'object') return pick(raw);
+    } catch { /* corrupt JSON — fall through to YAML */ }
+  }
+  const yamlPath = join(home, 'config.yaml');
+  if (existsSync(yamlPath)) {
+    try {
+      const raw = yaml.load(readFileSync(yamlPath, 'utf-8'));
+      if (raw && typeof raw === 'object') return pick(raw);
+    } catch { /* corrupt YAML */ }
+  }
+  return undefined;
+}
+
+function log(msg: string): void {
+  console.log(`[setup] ${msg}`);
+}
+
+function dkgDir(): string {
+  return resolveDkgConfigHome({ startDir: __dirname });
+}
+
+/**
+ * The fields of `network/<env>.json` that `ensureDkgNodeConfig` actually
+ * reads. Adapters can pass their full `NetworkConfig` shape — the helper
+ * only consumes this subset.
+ */
+export interface DkgNodeNetworkConfig {
+  networkName: string;
+  defaultNodeRole: string;
+  defaultContextGraphs?: string[];
+  autoUpdate?: {
+    enabled: boolean;
+    [key: string]: unknown;
+  };
+}
+
+/**
+ * Caller-explicit-override flags. Mirrors OpenClaw's
+ * `DkgConfigOverrides`: when the user passes `--name` or `--port`, the
+ * incoming value wins over any preserved value in the existing config.
+ */
+export interface DkgNodeConfigOverrides {
+  /** True when the user explicitly passed --name. */
+  nameExplicit?: boolean;
+  /** True when the user explicitly passed --port. */
+  portExplicit?: boolean;
+}
+
+export interface EnsureDkgNodeConfigOptions {
+  /** Discovered or operator-supplied agent name. */
+  agentName: string;
+  /** Loaded `network/<env>.json` slice. */
+  network: DkgNodeNetworkConfig;
+  /**
+   * The network overlay name to persist as `config.networkConfig` (e.g.
+   * `'mainnet-gnosis'`). Callers resolve this via `resolveSetupNetworkName`
+   * and MUST load `network` from the SAME name so the persisted selector and
+   * the network slice agree. Persisting it explicitly is what makes setup
+   * default new nodes onto mainnet without relying on (or mutating) the
+   * `project.json#defaultNetwork` runtime fallback.
+   */
+  networkConfigName: string;
+  /** Daemon API port to use when no existing config has one. */
+  apiPort: number;
+  /**
+   * The existing `~/.dkg/config.json` parsed into a plain object,
+   * **post-adapter-specific migration + prune**. The helper reads
+   * `existing.{name,apiPort,nodeRole,contextGraphs,auth,relay,autoUpdate}`
+   * to decide what to keep. Pass `{}` for a fresh setup.
+   *
+   * Adapter wrappers that own legacy migrations (e.g. OpenClaw's
+   * `migrateLegacyOpenClawTransport`, `delete existing.openclawAdapter`,
+   * `delete existing.openclawChannel`) MUST run those mutations on this
+   * object BEFORE calling this helper. The ordering is load-bearing —
+   * see the module-level docstring + execution-plan.md §3.S1 step 4.
+   */
+  existing: Record<string, any>;
+  overrides?: DkgNodeConfigOverrides;
+}
+
+/**
+ * Merge the post-migration `existing` with network defaults + overrides
+ * and write to `~/.dkg/config.json`. Returns nothing; caller logs as
+ * needed (this helper logs once via `[setup]` prefix to mirror pre-
+ * extraction output).
+ */
+export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
+  const { agentName, network, networkConfigName, apiPort, existing, overrides } = opts;
+
+  const dir = dkgDir();
+  const configPath = join(dir, 'config.json');
+  // A pre-existing config gates the store-default seeding below (issue #960):
+  // we only adopt the new default on a genuinely fresh install. Check BOTH
+  // `config.json` and `config.yaml` — `loadConfig` / `resolveDkgConfigHome`
+  // both treat a YAML-only config as a valid existing node, so a YAML node must
+  // not be misread as fresh and silently flipped onto a new backend.
+  const configExisted = existsSync(configPath) || existsSync(join(dir, 'config.yaml'));
+  mkdirSync(dir, { recursive: true });
+
+  // Explicit CLI overrides (--name, --port) take precedence over existing
+  // config. Auto-detected values only fill in when no existing value is
+  // present.
+  //
+  // We intentionally do NOT persist `chain` or `autoUpdate` from
+  // `network/<env>.json` into the user's config when they're absent —
+  // the daemon already does field-level merging at runtime via
+  // `resolveChainConfig` (cli/src/config.ts) and `resolveAutoUpdateConfig`
+  // (same file). Pinning the network defaults here would cement them and
+  // break future hub rotations / branch rotations / RPC swaps in
+  // `network/<env>.json`. The `...existing` spread below still preserves
+  // any chain/autoUpdate the operator added manually (e.g. private RPC
+  // override).
+  const config: Record<string, any> = {
+    ...existing,
+    name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
+    // Persist the selected network EXPLICITLY. Unlike `chain`/`autoUpdate`
+    // (deliberately left to the runtime resolver above), the network
+    // selector is pinned so a node never silently follows a change to the
+    // `project.json#defaultNetwork` runtime fallback — switching networks is
+    // a deliberate, money-bearing act, not an implicit default drift.
+    networkConfig: networkConfigName,
+    apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
+    nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
+    contextGraphs: existing.contextGraphs ?? network.defaultContextGraphs,
+    auth: existing.auth ?? { enabled: true },
+    logging: existing.logging ?? { kaPublishLifecycleDebug: false },
+  };
+
+  // Preserve an existing relay override but never pin a new one — the
+  // daemon reads the full relay list from network config (testnet.json)
+  // automatically, which is better than hard-coding a single relay into
+  // the user's config.
+  if (existing.relay) {
+    config.relay = existing.relay;
+  }
+
+  // Persist only the `enabled` flag mirrored from the network default.
+  // `repo`/`branch`/`checkIntervalMinutes`/etc. are intentionally omitted
+  // (see big comment above on the resolver contract), but the `enabled`
+  // flag has to stay because several consumers — `/api/status`,
+  // `/api/info`, the telemetry log pusher in `lifecycle.ts`, and
+  // `resolveAutoUpdateEnabled` itself — read `config.autoUpdate?.enabled`
+  // directly without falling back to `network.autoUpdate.enabled`.
+  // Dropping the whole block would make those report auto-update as
+  // disabled on fresh testnet installs even though the updater is in fact
+  // running.
+  if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
+    config.autoUpdate = { enabled: network.autoUpdate.enabled };
+  }
+
+  // issue #960: on a FRESH install (no config yet) with no explicit store
+  // backend, adopt the `oxigraph-server` default — the same recommended choice
+  // the `dkg init` store-wizard offers — so the OpenClaw / Hermes / MCP setups
+  // (and any other caller of this helper) bootstrap a node with MVCC concurrent
+  // reads out of the box, matching a wizard-driven install. We seed ONLY on a
+  // fresh config: an existing node is never rewritten onto a new backend here
+  // (that would force a store reset on its next boot), and an explicit existing
+  // `store` block is preserved by the `...existing` spread above.
+  if (!configExisted && config.store === undefined) {
+    config.store = { backend: 'oxigraph-server' };
+  }
+
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  log(`Wrote ${configPath} (${network.networkName}, ${config.nodeRole}, port ${config.apiPort})`);
+}

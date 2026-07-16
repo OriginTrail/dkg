@@ -1,0 +1,19 @@
+policy: owner_assertion
+version: 0.1.0
+kind: canonical_policy
+description: Deterministic owner-scope assertion adjudication.
+rules:
+  - name: owner_asserted
+    params: [C]
+    all:
+      - atom: {pred: claim, args: ["$C"]}
+      - exists:
+          vars: [A]
+          where:
+            - atom: {pred: owner_of, args: ["$C", "$A"]}
+            - atom: {pred: signed_by, args: ["$C", "$A"]}
+decisions:
+  - name: propose_accept
+    params: [C]
+    all:
+      - atom: {pred: owner_asserted, args: ["$C"]}

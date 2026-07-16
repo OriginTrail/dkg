@@ -28,13 +28,13 @@ afterEach(() => {
 describe('OperationTracker', () => {
   it('tracks start → complete lifecycle', () => {
     const c = ctx('publish', 'op-1');
-    tracker.start(c, { peerId: 'peer-abc', paranetId: 'testing' });
+    tracker.start(c, { peerId: 'peer-abc', contextGraphId: 'testing' });
 
     let op = db.getOperation('op-1').operation;
     expect(op).toBeDefined();
     expect(op!.status).toBe('in_progress');
     expect(op!.peer_id).toBe('peer-abc');
-    expect(op!.paranet_id).toBe('testing');
+    expect(op!.contextGraph_id).toBe('testing');
 
     tracker.complete(c, { tripleCount: 50 });
 
@@ -65,21 +65,29 @@ describe('OperationTracker', () => {
 
   it('stores details as JSON', () => {
     const c = ctx('publish', 'op-4');
-    tracker.start(c, { details: { quads: 100, paranet: 'testing' } });
+    tracker.start(c, { details: { quads: 100, contextGraph: 'testing' } });
 
     const op = db.getOperation('op-4').operation;
     const details = JSON.parse(op!.details!);
     expect(details.quads).toBe(100);
   });
 
-  it('is a no-op when db is null', () => {
+  it('is a no-op when db is null — every lifecycle method stays silent', () => {
     const nullTracker = new OperationTracker(null);
     const c = ctx('publish', 'op-5');
 
-    // These should not throw
-    nullTracker.start(c);
-    nullTracker.complete(c);
-    nullTracker.fail(c, new Error('test'));
+    // This is the "metrics disabled" mode: if the caller passes `null`
+    // (e.g. a cli one-shot that skipped DashboardDB), every write path
+    // must silently skip instead of throwing. Without explicit
+    // `.not.toThrow()` assertions, a regression that starts throwing
+    // (e.g. a new `db.prepareStatement(...)` call forgetting the null
+    // guard) would still look like a passing test because the test
+    // runner only treats uncaught exceptions as failures — and these
+    // calls would throw from inside vitest's `it` wrapper. Asserting
+    // via .not.toThrow() makes the contract explicit and fails loudly.
+    expect(() => nullTracker.start(c)).not.toThrow();
+    expect(() => nullTracker.complete(c)).not.toThrow();
+    expect(() => nullTracker.fail(c, new Error('test'))).not.toThrow();
   });
 
   it('never throws even if DB is broken', () => {
@@ -93,7 +101,7 @@ describe('OperationTracker', () => {
 
   it('tracks phase lifecycle (startPhase → completePhase)', async () => {
     const c = ctx('publish', 'op-phases');
-    tracker.start(c, { paranetId: 'testing' });
+    tracker.start(c, { contextGraphId: 'testing' });
 
     tracker.startPhase(c, 'prepare');
     await new Promise(r => setTimeout(r, 10));
@@ -143,20 +151,26 @@ describe('OperationTracker', () => {
     expect(operation!.chain_id).toBe(84532);
   });
 
-  it('phase/cost methods are no-ops when db is null', () => {
+  it('phase/cost methods are no-ops when db is null — none of them throw', () => {
+    // Sister contract to the lifecycle no-op test above: phase tracking
+    // and chain metadata setters also live behind the null-DB guard, and
+    // a regression in any of them (forgetting `if (!this.db) return`)
+    // would otherwise only show up as a runtime crash in cli one-shot
+    // mode. Each call gets its own .not.toThrow() assertion so a new
+    // failure pinpoints the specific setter.
     const nullTracker = new OperationTracker(null);
     const c = ctx('publish', 'op-null');
-    nullTracker.startPhase(c, 'prepare');
-    nullTracker.completePhase(c, 'prepare');
-    nullTracker.setCost(c, { gasUsed: 100n });
-    nullTracker.setTxHash(c, '0xabc');
+    expect(() => nullTracker.startPhase(c, 'prepare')).not.toThrow();
+    expect(() => nullTracker.completePhase(c, 'prepare')).not.toThrow();
+    expect(() => nullTracker.setCost(c, { gasUsed: 100n })).not.toThrow();
+    expect(() => nullTracker.setTxHash(c, '0xabc')).not.toThrow();
   });
 
   // --- Nested phase cleanup on fail() ---------------------------------
 
   it('fail() cleans up ALL active phases, not just one', async () => {
     const c = ctx('publish', 'op-nested-fail');
-    tracker.start(c, { paranetId: 'testing' });
+    tracker.start(c, { contextGraphId: 'testing' });
 
     // Start nested phases: prepare > prepare:merkle (both active)
     tracker.startPhase(c, 'prepare');

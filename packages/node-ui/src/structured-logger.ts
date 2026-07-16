@@ -2,9 +2,11 @@ import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 
 /**
- * Drop-in replacement for Logger that also writes structured log
- * entries to the dashboard SQLite database. Existing stdout/stderr
- * output is preserved — the DB write is a side-effect.
+ * Deprecated compatibility shim for external callers that imported
+ * StructuredLogger from @origintrail-official/dkg-node-ui.
+ *
+ * The dashboard no longer depends on the DB-backed free-text log search,
+ * but structured log rows are still retained for operation correlation.
  */
 export class StructuredLogger extends Logger {
   constructor(
@@ -36,11 +38,11 @@ export class StructuredLogger extends Logger {
         level,
         operation_name: ctx.operationName,
         operation_id: ctx.operationId,
-        module: (this as any).moduleName ?? 'unknown',
+        module: (this as unknown as { moduleName?: string }).moduleName ?? 'unknown',
         message,
       });
     } catch {
-      // DB write failures must never break the node
+      // DB write failures must never break the node.
     }
   }
 }

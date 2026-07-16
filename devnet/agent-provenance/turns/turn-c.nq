@@ -1,0 +1,2 @@
+<urn:experiment:agent-provenance:turn-c> <https://schema.org/name> "Mode (c): same-operator edge + core, no PCA" <urn:dkg:context-graph:test/_meta> .
+<urn:experiment:agent-provenance:turn-c> <https://schema.org/text> "Edge pays full TRAC from its own wallet; core 3 still gets attribution credit." <urn:dkg:context-graph:test/_meta> .

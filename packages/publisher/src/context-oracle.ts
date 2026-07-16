@@ -3,6 +3,14 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri, assertSafeIri } from '@origintrail-official/dkg-core';
 import { ProofIndex, type TripleProof } from './proof-index.js';
 
+/**
+ * Minimal chain context the oracle needs — currently just the chain id used to
+ * stamp `VerificationInfo`. Accepting either a full {@link ChainAdapter} or a
+ * thin `{ chainId }` value lets callers wire in real adapters in production
+ * while tests pass in a literal id (no need to mock an adapter).
+ */
+export type ChainContext = Pick<ChainAdapter, 'chainId'>;
+
 export interface VerificationInfo {
   chainId: string;
   knowledgeAssetsStorageAddress?: string;
@@ -21,7 +29,7 @@ export interface ProvedTriple {
 
 export interface EntityLookupResult {
   contextGraphId: string;
-  paranetId: string;
+  rootContextGraphId: string;
   entity: string;
   triples: ProvedTriple[];
   verification: VerificationInfo;
@@ -29,7 +37,7 @@ export interface EntityLookupResult {
 
 export interface QueryWithProofsResult {
   contextGraphId: string;
-  paranetId: string;
+  rootContextGraphId: string;
   bindings: Array<Record<string, string>>;
   provenanceTriples: ProvedTriple[];
   verification: VerificationInfo;
@@ -50,10 +58,10 @@ export interface TripleExistenceResult {
  */
 export class ContextOracle {
   private readonly store: TripleStore;
-  private readonly chain: ChainAdapter;
+  private readonly chain: ChainContext;
   readonly proofIndex: ProofIndex;
 
-  constructor(store: TripleStore, chain: ChainAdapter, proofIndex?: ProofIndex) {
+  constructor(store: TripleStore, chain: ChainContext, proofIndex?: ProofIndex) {
     this.store = store;
     this.chain = chain;
     this.proofIndex = proofIndex ?? new ProofIndex();
@@ -63,11 +71,11 @@ export class ContextOracle {
    * Lookup all triples about an entity in a context graph, with Merkle proofs.
    */
   async entityLookup(
-    paranetId: string,
     contextGraphId: string,
+    cgId: string,
     entityUri: string,
   ): Promise<EntityLookupResult> {
-    const graphUri = contextGraphDataUri(paranetId, contextGraphId);
+    const graphUri = contextGraphDataUri(contextGraphId, cgId);
     assertSafeIri(entityUri);
 
     const result = await this.store.query(`
@@ -88,15 +96,15 @@ export class ContextOracle {
         }))
       : [];
 
-    const provedTriples = this.attachProofs(contextGraphId, quads);
+    const provedTriples = this.attachProofs(cgId, quads);
     const batchIds = uniqueBatchIds(provedTriples);
 
     return {
-      contextGraphId,
-      paranetId,
+      contextGraphId: cgId,
+      rootContextGraphId: contextGraphId,
       entity: entityUri,
       triples: provedTriples,
-      verification: this.buildVerification(contextGraphId, batchIds),
+      verification: this.buildVerification(cgId, batchIds),
     };
   }
 
@@ -105,11 +113,11 @@ export class ContextOracle {
    * to every triple that contributed to the result.
    */
   async queryWithProofs(
-    paranetId: string,
     contextGraphId: string,
+    cgId: string,
     sparql: string,
   ): Promise<QueryWithProofsResult> {
-    const graphUri = contextGraphDataUri(paranetId, contextGraphId);
+    const graphUri = contextGraphDataUri(contextGraphId, cgId);
 
     // Execute the user's SELECT query, scoped to the context graph
     const wrappedSparql = wrapWithGraph(sparql, graphUri);
@@ -119,15 +127,15 @@ export class ContextOracle {
     // Extract provenance: fetch triples for subjects found in the bindings
     const quads = await this.fetchProvenanceTriples(bindings, graphUri);
 
-    const provedTriples = this.attachProofs(contextGraphId, quads);
+    const provedTriples = this.attachProofs(cgId, quads);
     const batchIds = uniqueBatchIds(provedTriples);
 
     return {
-      contextGraphId,
-      paranetId,
+      contextGraphId: cgId,
+      rootContextGraphId: contextGraphId,
       bindings,
       provenanceTriples: provedTriples,
-      verification: this.buildVerification(contextGraphId, batchIds),
+      verification: this.buildVerification(cgId, batchIds),
     };
   }
 
@@ -135,13 +143,13 @@ export class ContextOracle {
    * Prove that a specific triple exists in a context graph.
    */
   async proveTriple(
-    paranetId: string,
     contextGraphId: string,
+    cgId: string,
     subject: string,
     predicate: string,
     object: string,
   ): Promise<TripleExistenceResult> {
-    const graphUri = contextGraphDataUri(paranetId, contextGraphId);
+    const graphUri = contextGraphDataUri(contextGraphId, cgId);
 
     // Check existence in the triple store
     const s = formatSparqlTerm(subject);
@@ -156,7 +164,7 @@ export class ContextOracle {
       return { exists: false };
     }
 
-    const proof = this.proofIndex.generateProof(contextGraphId, subject, predicate, object);
+    const proof = this.proofIndex.generateProof(cgId, subject, predicate, object);
     if (!proof) {
       return { exists: true, triple: { subject, predicate, object } };
     }
@@ -165,7 +173,7 @@ export class ContextOracle {
       exists: true,
       triple: { subject, predicate, object },
       proof,
-      verification: this.buildVerification(contextGraphId, [proof.batchId]),
+      verification: this.buildVerification(cgId, [proof.batchId]),
     };
   }
 
@@ -271,4 +279,3 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   const after = sparql.slice(braceEnd);
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
-

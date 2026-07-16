@@ -1,0 +1,12 @@
+{
+  "base": {
+    "blockchainId": "base:8453",
+    "blockNumber": 44454645,
+    "blockDate": "2026-04-09T01:37:17.000Z",
+    "currentEpoch": 16,
+    "lastKnowledgeCollectionId": 1459706,
+    "totalKCsWithFutureEpochs": 972282,
+    "maxFutureEpoch": 72,
+    "epochsCapped": 25
+  }
+}

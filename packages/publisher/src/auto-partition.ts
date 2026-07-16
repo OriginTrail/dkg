@@ -1,17 +1,36 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { skolemize, isSkolemizedUri, rootEntityFromSkolemized, isBlankNode } from './skolemize.js';
 
+// The graph-scoped (rootless) KA canonicalization lives in its own module —
+// it is a protocol-level boundary, not a variant of the legacy root-entity
+// partitioning below. Re-exported here for callers that predate the split.
+export {
+  KNOWLEDGE_ASSET_SKOLEM_PREFIX,
+  KNOWLEDGE_ASSET_PRIVATE_SKOLEM_PREFIX,
+  assertNoUserAuthoredKnowledgeAssetSkolemTerms,
+  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAssetParts,
+  type SkolemizeKnowledgeAssetOptions,
+  type SkolemizedKnowledgeAssetParts,
+} from './ka-skolemization.js';
+
 /**
- * Auto-partitions quads into Knowledge Assets.
+ * Skolemizes blank nodes under their parent entity and INDEXES the result by
+ * entity. It does NOT partition into Knowledge Assets — the name `autoPartition`
+ * was a misnomer that led readers (and patches) to treat the entity index as a
+ * list of KAs (OT-RFC-44 §4 / OT-RFC-43 §10.4). Under Design B one file = one KA
+ * whose member entities are exactly the keys of this map.
  *
  * 1. Identifies root entities (non-blank, non-skolemized subjects)
- * 2. Skolemizes blank nodes under their parent root entity
- * 3. Groups triples: each rootEntity defines a KA, skolemized children belong
- *    to the KA whose rootEntity is their URI prefix
+ * 2. Skolemizes blank nodes under their parent entity (`<entity>/.well-known/genid/N`)
+ * 3. Groups triples by entity: skolemized children belong to the entity whose
+ *    URI is their prefix
  *
- * Returns a Map of rootEntity → Quad[].
+ * The skolemization is load-bearing for consensus (canonical subject hashes for
+ * the flat Merkle, validation, the SWM gather, and the RS prover); the grouping
+ * is just an index. Returns a Map of entity → Quad[].
  */
-export function autoPartition(quads: Quad[]): Map<string, Quad[]> {
+export function skolemizeByEntity(quads: Quad[]): Map<string, Quad[]> {
   // Phase 1: Find root entities (non-blank, non-skolemized unique subjects)
   const rootEntities = new Set<string>();
   for (const q of quads) {
@@ -78,3 +97,11 @@ export function autoPartition(quads: Quad[]): Map<string, Quad[]> {
 
   return rootQuadsMap;
 }
+
+/**
+ * @deprecated Misnomer — this skolemizes and indexes by entity; it does not
+ * partition into Knowledge Assets (OT-RFC-44 §4). Use {@link skolemizeByEntity}.
+ * Kept as an alias for one release so external consumers (test fixtures,
+ * scripts) can migrate; will be removed once no callers reference it.
+ */
+export const autoPartition = skolemizeByEntity;

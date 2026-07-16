@@ -1,0 +1,996 @@
+name: Dependabot advisory gate
+
+# Second layer of Dependabot supply-chain protection, paired with the
+# `cooldown:` block in `.github/dependabot.yml`.
+#
+# The cooldown layer already prevents Dependabot from proposing version
+# updates younger than seven days (fourteen for majors). That removes
+# us from the first-mover blast radius of "publish-and-detect-quickly"
+# attacks: by the time a version is old enough for Dependabot to
+# propose it, the security-research community has had a week to flag
+# malware or compromise reports against it in GHSA / OSV.
+#
+# This workflow consumes those public signals. For every package
+# Dependabot bumps in a PR it queries:
+#
+#   1. The GitHub Advisory Database (GHSA) via GraphQL — the closest
+#      thing the npm ecosystem has to an authoritative recall list,
+#      fed by maintainer disclosures, Snyk, GitHub's own scanning,
+#      and the CVE pipeline.
+#
+#   2. OSV.dev — Google's open-source vulnerability database, which
+#      aggregates GHSA, Sonatype, Phylum, and several other feeds.
+#      Used as a second opinion so a missed-in-one-DB advisory still
+#      blocks the merge.
+#
+# Both DBs are queried for the OLD and NEW versions of each bumped
+# package. The verdict comes from the DIFF — advisories that match
+# the new version but did NOT already match the old version. This
+# filters out long-standing baseline CVEs (e.g. lodash's permanent
+# ReDoS finding that spans every published version) and surfaces
+# only the freshly-introduced threats this PR would actually be
+# carrying onto main.
+#
+# A non-empty diff triggers the compromise response: the PR is
+# auto-closed, labels and a request-changes review are applied, and
+# a Teams notification is fired so reviewers get an immediate signal.
+# The compromise response is best-effort layered: visibility actions
+# (comment + labels) happen before potentially-fragile network calls
+# (Teams), so even a partial-failure run leaves an unambiguous in-PR
+# trail.
+#
+# Trigger rationale: `pull_request_target` because we need write
+# access to the target repo (label, comment, review, close). We never
+# check out the PR's code — every value we read either comes from
+# trusted sources (Dependabot-signed commit metadata via
+# `dependabot/fetch-metadata`, advisory database APIs) or from
+# integer / opaque-id workflow context (`github.event.pull_request.number`).
+# The standard `pull_request_target` security pitfall (PR-controlled
+# code running with privileges) does not apply here because PR code
+# is never executed.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# Default to read-only at the workflow level. The advisory-check job
+# narrows to the minimum write scopes it actually needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-advisory-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  advisory-check:
+    name: Advisory check
+    # Skip every PR that is NOT authored by Dependabot. Human-authored
+    # PRs are out of scope for this gate — they go through normal review.
+    # `if:` at the job level (rather than the workflow level) keeps the
+    # check name visible in the PR check list even when skipped, so a
+    # missing entry in the list is itself a signal.
+    #
+    # Three-clause actor verification (closes zizmor `bot-conditions`):
+    #
+    #   * `github.event.pull_request.user.login == 'dependabot[bot]'`
+    #     — checks the PR-author login from the immutable PR object on
+    #     GitHub's side, NOT the easier-to-spoof `github.actor` workflow
+    #     context which can flip identity on a `synchronize` event from
+    #     a different user.
+    #   * `github.event.pull_request.user.id == 49699333` — Dependabot's
+    #     numeric user ID is a stable, public identifier that cannot be
+    #     reassigned even if the login string ever changes. Belt-and-
+    #     braces against an unlikely future Dependabot rename.
+    #   * `github.event.pull_request.user.type == 'Bot'` — third
+    #     redundant guard. A human account cannot have this type.
+    if: |
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.user.id == 49699333 &&
+      github.event.pull_request.user.type == 'Bot'
+    runs-on: ubuntu-latest
+    # 10 min ceiling — worst-case is a `transitive` group bump with
+    # ~30 packages * (1 GHSA + 2 OSV + 1 node-filter) = ~120 ops.
+    # Each individual call is sub-second under normal conditions;
+    # 10 minutes gives headroom for OSV.dev rate limiting, transient
+    # 5xx retries, or a slow npm registry. A timeout means "the gate
+    # couldn't certify in time" → the job's required `Final gate` step
+    # never gets to run → check is red → reviewer is forced to
+    # manually intervene. That's the right failure mode.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # pull-requests: write — comment, label, close, request-changes review.
+      pull-requests: write
+      # issues: write — labels are an issues-level resource on GitHub.
+      issues: write
+    outputs:
+      compromised: ${{ steps.classify.outputs.compromised }}
+      inconclusive: ${{ steps.classify.outputs.inconclusive }}
+      package_list: ${{ steps.classify.outputs.package_list }}
+      advisory_summary: ${{ steps.classify.outputs.advisory_summary }}
+
+    steps:
+      - name: Fetch Dependabot PR metadata
+        # The action reads the structured metadata Dependabot emits in
+        # its commit messages — package names, old + new versions,
+        # update type, ecosystem. We never parse the PR title/body
+        # ourselves (those are easier to spoof than commit-message
+        # metadata, even on a same-repo Dependabot PR).
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Vendor minimal semver range-check helper
+        # Why a vendored helper and not `npm install semver`:
+        #   This job runs under `pull_request_target` with write
+        #   permissions on the PR. Doing `npm install <anything>` from
+        #   that context means a compromise of the target package's
+        #   tarball or `postinstall` script would run attacker code on
+        #   our runner with `GITHUB_TOKEN` already in `process.env` and
+        #   `pull-requests: write` scope — i.e. the supply-chain hole
+        #   this entire workflow exists to *close*. Keeping the helper
+        #   in-tree eliminates the runtime hop.
+        #
+        # Scope: parses the subset of range syntax actually emitted by
+        # GHSA and OSV (AND-conjunctions of `>=, <=, >, <, =, ==, bare
+        # version` comparators, optionally with a `v` prefix and a
+        # stripped pre-release/build suffix). Anything outside that
+        # subset returns `null` from `validRange()` so the caller falls
+        # through to its conservative "treat as match" branch — false
+        # positives are acceptable, false negatives are not. Verified
+        # to match canonical `semver@7.6.3` on every GHSA range shape
+        # we have seen in practice.
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/semver-mini"
+          # shellcheck disable=SC2016
+          # The heredoc body is JS, not shell. The `'$1'` inside `.replace(...)`
+          # is a regex backreference, not a positional parameter — and the
+          # `'SEMVER_EOF'` marker quotes the heredoc so nothing expands anyway.
+          cat > "${RUNNER_TEMP}/semver-mini/index.js" <<'SEMVER_EOF'
+          'use strict';
+
+          function parseVersion(v) {
+            if (v == null) return null;
+            const s = String(v).trim().replace(/^v/, '');
+            if (!s) return null;
+            // Pre-release (`-rc.1`) and build-metadata (`+sha.abc`) suffixes
+            // have specific semver-ordering semantics (e.g. `1.2.3-rc.1` MUST
+            // compare < `1.2.3`). Implementing them precisely here is risky;
+            // returning null lets the caller fall through to its conservative
+            // "treat as match" branch instead of stripping the suffix and
+            // mis-ordering a vulnerable prerelease past a `< 1.2.3` upper
+            // bound.
+            if (/[-+]/.test(s)) return null;
+            const parts = s.split('.');
+            if (parts.length === 0 || parts.length > 3) return null;
+            const nums = parts.map(p => (/^\d+$/.test(p) ? parseInt(p, 10) : NaN));
+            if (nums.some(n => Number.isNaN(n))) return null;
+            while (nums.length < 3) nums.push(0);
+            return nums;
+          }
+
+          function cmp(a, b) {
+            for (let i = 0; i < 3; i++) {
+              if (a[i] < b[i]) return -1;
+              if (a[i] > b[i]) return 1;
+            }
+            return 0;
+          }
+
+          const TOKEN_RE = /^(>=|<=|>|<|=|==)?\s*(.+)$/;
+
+          function validRange(range) {
+            if (range == null) return null;
+            const r = String(range).trim();
+            if (!r) return [];
+            if (r === '*' || r === 'x' || r === 'X') return [];
+            // GHSA emits ranges with a SPACE between operator and version
+            // (e.g. ">= 4.0.0, <= 4.17.23"). Collapse the inter-op space
+            // so a whitespace split produces one token per comparator.
+            const glued = r
+              .replace(/,/g, ' ')
+              .replace(/(>=|<=|==|>|<|=)\s+/g, '$1');
+            const tokens = glued.split(/\s+/).filter(Boolean);
+            const comparators = [];
+            for (const t of tokens) {
+              if (/^[\^~]/.test(t) || /^[<>=!]?\d+\.x/i.test(t) || t === '||' || t === '-') return null;
+              const m = t.match(TOKEN_RE);
+              if (!m) return null;
+              const op = m[1] || '=';
+              const ver = parseVersion(m[2]);
+              if (!ver) return null;
+              comparators.push({ op, ver });
+            }
+            return comparators;
+          }
+
+          function satisfies(version, parsed) {
+            const v = parseVersion(version);
+            if (!v) return false;
+            if (!Array.isArray(parsed)) return false;
+            for (const c of parsed) {
+              const r = cmp(v, c.ver);
+              switch (c.op) {
+                case '>':  if (!(r > 0))  return false; break;
+                case '>=': if (!(r >= 0)) return false; break;
+                case '<':  if (!(r < 0))  return false; break;
+                case '<=': if (!(r <= 0)) return false; break;
+                case '=':
+                case '==': if (r !== 0)   return false; break;
+                default: return false;
+              }
+            }
+            return true;
+          }
+
+          module.exports = { validRange, satisfies };
+          SEMVER_EOF
+          # Smoke-test the helper before any real input touches it.
+          # shellcheck disable=SC2016
+          # Same rationale as the heredoc above — `process.env.RUNNER_TEMP`
+          # is a Node.js property access, not a shell variable; the
+          # single-quoted JS body is intentional.
+          node -e '
+            const m = require(process.env.RUNNER_TEMP + "/semver-mini/index.js");
+            const ok = (
+              m.satisfies("4.17.23", m.validRange(">= 4.0.0, <= 4.17.23")) === true &&
+              m.satisfies("4.17.24", m.validRange(">= 4.0.0, <= 4.17.23")) === false &&
+              m.satisfies("1.10.0", m.validRange(">= 1.10.0")) === true &&
+              m.satisfies("1.9.0",  m.validRange(">= 1.10.0")) === false &&
+              m.validRange("^1.2.3") === null &&
+              // Pre-release versions are intentionally rejected by parseVersion
+              // so the caller falls through to conservative-match. satisfies()
+              // returns false on a null-parsed version, but the matches()
+              // wrapper in the classify step short-circuits on `[-+]` first.
+              m.satisfies("1.2.3-rc.1", m.validRange("< 1.2.3")) === false &&
+              m.validRange(">= 1.0.0-beta") === null
+            );
+            if (!ok) { console.error("semver-mini smoke-test FAILED"); process.exit(1); }
+            console.log("semver-mini smoke-test OK");
+          '
+
+      - name: Query advisory databases and classify
+        # Walks every package in the Dependabot bump. For each one,
+        # queries GHSA (via the same `GITHUB_TOKEN` that runs the rest
+        # of CI — no extra secret needed) and OSV.dev (no auth
+        # required) — each TWICE, once for the new version and once
+        # for the old. The verdict is the DIFF: advisories that hit
+        # the new version but not the old (i.e. freshly introduced by
+        # this bump). Baseline CVEs that affect both versions are
+        # filtered out so the gate doesn't burn reviewers with noise.
+        #
+        # Outputs:
+        #   * compromised   — 'true' if any package has at least one
+        #                     FRESH advisory (new ∩ ¬old).
+        #   * inconclusive  — 'true' if either DB could not be reached
+        #                     for one or more packages OR a package
+        #                     had no `newVersion` in metadata. Fails
+        #                     closed: reviewer must manually verify.
+        #   * package_list  — human-readable list of (pkg, old, new)
+        #                     rows for the comment/Teams card.
+        #   * advisory_summary — markdown table of every FRESH hit
+        #                     (severity, GHSA id, source, summary).
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPS_JSON: ${{ steps.meta.outputs.updated-dependencies-json }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEPS_JSON:-}" ] || [ "${DEPS_JSON}" = "null" ] || [ "${DEPS_JSON}" = "[]" ]; then
+            echo "::warning title=Missing Dependabot metadata::No updated-dependencies-json metadata was available; failing closed for manual review."
+            {
+              echo 'compromised=false'
+              echo 'inconclusive=true'
+              echo 'package_list=- Dependabot metadata was missing or empty; the advisory gate could not identify the bumped package set.'
+              echo 'advisory_summary='
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Only the npm ecosystem advisory pipeline is in scope here.
+          # GHSA covers npm + GitHub Actions but each side spells the
+          # ecosystem identifier differently:
+          #   * GHSA's `SecurityAdvisoryEcosystem` GraphQL enum uses
+          #     `ACTIONS` (not `GITHUB_ACTIONS` — verified against the
+          #     live schema; the enum has no `GITHUB_*` prefix on any
+          #     ecosystem value).
+          #   * OSV's REST API uses `GitHub Actions` (with a space).
+          #   * The value Dependabot emits in commit metadata is
+          #     `github_actions`.
+          # We handle the two ecosystems we actually receive — `npm`
+          # and (optionally) `github_actions` — and pass through
+          # everything else with no advisory check and a note in the
+          # summary.
+          jq_filter='[ .[] | { name: .dependencyName, oldVersion: (.prevVersion // .previousVersion // ""), newVersion: (.newVersion // ""), ecosystem: (.packageEcosystem // .ecosystem // "") } ]'
+          DEPS=$(echo "${DEPS_JSON}" | jq -c "${jq_filter}")
+          COUNT=$(echo "${DEPS}" | jq 'length')
+          echo "Auditing ${COUNT} package bump(s)..."
+
+          COMPROMISED=false
+          INCONCLUSIVE=false
+          PACKAGE_LIST=''
+          ADVISORY_TABLE='| Severity | Package | New version | Source | Advisory | Summary |'$'\n''|----------|---------|-------------|--------|----------|---------|'$'\n'
+          ANY_ADVISORY=false
+
+          # Map Dependabot ecosystem names to GHSA + OSV identifiers.
+          ghsa_ecosystem() {
+            case "$1" in
+              npm) echo 'NPM' ;;
+              github_actions|github-actions) echo 'ACTIONS' ;;
+              *) echo '' ;;
+            esac
+          }
+          osv_ecosystem() {
+            case "$1" in
+              npm) echo 'npm' ;;
+              github_actions|github-actions) echo 'GitHub Actions' ;;
+              *) echo '' ;;
+            esac
+          }
+
+          # Severity normalisation — GHSA returns CRITICAL/HIGH/MODERATE/LOW;
+          # OSV returns a free-form CVSS score string. For v1 we collapse
+          # both into a single text field for the report. The compromise
+          # verdict itself does NOT depend on severity: any FRESH advisory
+          # (matches new ∧ ¬matches old) regardless of severity blocks the
+          # PR. A moderate-severity CVE freshly introduced by a bump is
+          # also a legitimate reason to refuse the merge until a human
+          # reviews it. Pre-existing baseline advisories (matchesOld ==
+          # true) are subtracted out so the gate doesn't repeatedly close
+          # routine bumps of packages with permanent unfixable CVEs.
+          for i in $(seq 0 $((COUNT - 1))); do
+            ENTRY=$(echo "${DEPS}" | jq -c ".[$i]")
+            NAME=$(echo "${ENTRY}" | jq -r '.name')
+            OLD=$(echo "${ENTRY}" | jq -r '.oldVersion')
+            NEW=$(echo "${ENTRY}" | jq -r '.newVersion')
+            ECO=$(echo "${ENTRY}" | jq -r '.ecosystem')
+
+            PACKAGE_LIST+="- \`${NAME}\` ${OLD:-?} → ${NEW:-?} (\`${ECO}\`)"$'\n'
+
+            # Defensive: the fresh-vs-baseline diff requires BOTH versions.
+            # Missing NEW → can't even know what to query for.
+            # Missing OLD → every advisory would compute as matchesOld=false
+            #               and the diff would (incorrectly) treat every
+            #               baseline CVE as fresh, auto-closing a safe
+            #               upgrade as "compromised". This is the failure
+            #               mode that motivates failing closed here rather
+            #               than letting either case fall through.
+            if [ -z "${NEW}" ] || [ -z "${OLD}" ]; then
+              INCONCLUSIVE=true
+              if [ -z "${NEW}" ]; then
+                echo "::warning title=Missing newVersion::${NAME} has no newVersion in Dependabot metadata; manual review required."
+              fi
+              if [ -z "${OLD}" ]; then
+                echo "::warning title=Missing oldVersion::${NAME} has no previousVersion in Dependabot metadata; cannot compute fresh-vs-baseline diff. Manual review required."
+              fi
+              continue
+            fi
+
+            GHSA_ECO=$(ghsa_ecosystem "${ECO}")
+            OSV_ECO=$(osv_ecosystem "${ECO}")
+
+            if [ -z "${GHSA_ECO}" ] && [ -z "${OSV_ECO}" ]; then
+              echo "::notice title=Ecosystem out of scope::No advisory database mapping for ecosystem '${ECO}' (${NAME}); skipping."
+              continue
+            fi
+
+            # --- GHSA query (GraphQL, paginated) -----------------------
+            # The advisory list for a single package can in principle
+            # exceed one page (100 nodes). A naive single-page query
+            # would silently drop anything past the first 100 — the
+            # exact false-negative class this gate exists to prevent.
+            # We loop on `pageInfo.hasNextPage` and accumulate, with a
+            # hard 10-page (= 1000 advisory) safety ceiling so a
+            # pathological response cannot wedge the workflow. Any API
+            # failure mid-pagination drops the package to inconclusive
+            # so reviewers see a red check rather than a silent miss.
+            GHSA_HITS='[]'
+            GHSA_OK=true
+            if [ -n "${GHSA_ECO}" ]; then
+              GHSA_CURSOR=''
+              GHSA_PAGE=0
+              GHSA_ACC='[]'
+              while :; do
+                GHSA_PAGE=$((GHSA_PAGE + 1))
+                if [ "${GHSA_PAGE}" -gt 10 ]; then
+                  echo "::warning title=GHSA pagination ceiling::Package ${NAME} returned >10 pages of advisories; flagging inconclusive."
+                  GHSA_OK=false
+                  break
+                fi
+                # Both query strings contain `$name`, `$eco`, `$cursor` —
+                # those are GraphQL variables passed via `-f` flags below,
+                # NOT shell variables. Single-quoting prevents shell
+                # interpolation, which is exactly what we want. The
+                # SC2016 disables silence shellcheck's warning about
+                # single-quoted `$`-prefixed tokens inside the query.
+                if [ -z "${GHSA_CURSOR}" ]; then
+                  # shellcheck disable=SC2016
+                  GHSA_RAW=$(
+                    gh api graphql \
+                      -f query='query($name: String!, $eco: SecurityAdvisoryEcosystem!) { securityVulnerabilities(ecosystem: $eco, package: $name, first: 100) { pageInfo { hasNextPage endCursor } nodes { advisory { ghsaId summary severity permalink publishedAt withdrawnAt } vulnerableVersionRange firstPatchedVersion { identifier } } } }' \
+                      -f name="${NAME}" \
+                      -f eco="${GHSA_ECO}" \
+                      2>/dev/null
+                  ) || { GHSA_OK=false; break; }
+                else
+                  # shellcheck disable=SC2016
+                  GHSA_RAW=$(
+                    gh api graphql \
+                      -f query='query($name: String!, $eco: SecurityAdvisoryEcosystem!, $cursor: String!) { securityVulnerabilities(ecosystem: $eco, package: $name, first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { advisory { ghsaId summary severity permalink publishedAt withdrawnAt } vulnerableVersionRange firstPatchedVersion { identifier } } } }' \
+                      -f name="${NAME}" \
+                      -f eco="${GHSA_ECO}" \
+                      -f cursor="${GHSA_CURSOR}" \
+                      2>/dev/null
+                  ) || { GHSA_OK=false; break; }
+                fi
+                if [ -z "${GHSA_RAW}" ]; then GHSA_OK=false; break; fi
+                PAGE_HITS=$(echo "${GHSA_RAW}" | jq -c '[.data.securityVulnerabilities.nodes[] | select(.advisory.withdrawnAt == null) | { severity: .advisory.severity, ghsaId: .advisory.ghsaId, summary: .advisory.summary, permalink: .advisory.permalink, range: .vulnerableVersionRange }]') || { GHSA_OK=false; break; }
+                GHSA_ACC=$(jq -nc --argjson a "${GHSA_ACC}" --argjson b "${PAGE_HITS}" '$a + $b') || { GHSA_OK=false; break; }
+                HAS_NEXT=$(echo "${GHSA_RAW}" | jq -r '.data.securityVulnerabilities.pageInfo.hasNextPage // false')
+                if [ "${HAS_NEXT}" != 'true' ]; then break; fi
+                GHSA_CURSOR=$(echo "${GHSA_RAW}" | jq -r '.data.securityVulnerabilities.pageInfo.endCursor // empty')
+                if [ -z "${GHSA_CURSOR}" ]; then break; fi
+              done
+              if [ "${GHSA_OK}" = 'true' ]; then GHSA_HITS="${GHSA_ACC}"; fi
+            fi
+
+            # --- OSV query (REST) -------------------------------------
+            # OSV does server-side range matching, so we query TWICE:
+            # once for the NEW version (to find advisories matching it)
+            # and once for the OLD version (to subtract the baseline of
+            # pre-existing advisories we already accepted by virtue of
+            # already shipping `${NAME}@${OLD}`). The set difference is
+            # what we treat as "fresh to this bump" — the only category
+            # that justifies auto-closing a Dependabot PR.
+            osv_query() {
+              local ver="$1"
+              [ -z "${OSV_ECO}" ] && { echo '[]'; return; }
+              [ -z "${ver}" ] && { echo '[]'; return; }
+              local payload
+              payload=$(jq -nc --arg name "${NAME}" --arg eco "${OSV_ECO}" --arg ver "${ver}" '{package:{name:$name,ecosystem:$eco},version:$ver}')
+              local raw
+              if ! raw=$(curl --fail --silent --show-error --max-time 10 \
+                            --proto '=https' --tlsv1.2 \
+                            -X POST 'https://api.osv.dev/v1/query' \
+                            -H 'Content-Type: application/json' \
+                            -d "${payload}" 2>/dev/null); then
+                echo 'OSV_ERROR'
+                return
+              fi
+              [ -z "${raw}" ] && { echo '[]'; return; }
+              echo "${raw}" | jq -c '[.vulns // [] | .[] | { severity: (.severity[0].score // "UNKNOWN"), ghsaId: (.aliases // [] | map(select(startswith("GHSA-")))[0] // .id), summary: .summary, permalink: ("https://osv.dev/vulnerability/" + .id) }]'
+            }
+            OSV_HITS_NEW=$(osv_query "${NEW}")
+            OSV_HITS_OLD=$(osv_query "${OLD}")
+            OSV_OK=true
+            if [ "${OSV_HITS_NEW}" = 'OSV_ERROR' ] || [ "${OSV_HITS_OLD}" = 'OSV_ERROR' ]; then
+              OSV_OK=false
+              OSV_HITS_NEW='[]'
+              OSV_HITS_OLD='[]'
+            fi
+
+            if [ "${GHSA_OK}" = 'false' ] || [ "${OSV_OK}" = 'false' ]; then
+              INCONCLUSIVE=true
+              echo "::warning title=Advisory API error::Could not query GHSA (${GHSA_OK}) / OSV (${OSV_OK}) for ${NAME}@${NEW}. Manual review required."
+            fi
+
+            # GHSA returns ALL vulnerabilities for the package. Filter
+            # client-side TWICE — against NEW and against OLD — so we
+            # can subtract the pre-existing baseline. Two real-world
+            # wrinkles make naive `semver --range` insufficient:
+            #
+            #   1. GHSA emits ranges with COMMA separators (e.g.
+            #      `>= 4.0.0, <= 4.17.23`), which npm's `semver` does
+            #      NOT accept. The script normalises `,` → ` ` before
+            #      passing to `validRange`.
+            #   2. The `semver` CLI returns identical `rc=1 + empty
+            #      output` for out-of-range AND parse-error — making
+            #      it impossible to distinguish silently-dropped hits
+            #      from genuinely-excluded ones. Using
+            #      `semver.validRange()` in the JS API lets us tell
+            #      them apart and **conservatively keep** unparseable
+            #      hits rather than dropping them — false negatives
+            #      defeat the entire point of this gate, false
+            #      positives just need a human reopening the PR.
+            #
+            # Range matching uses the in-repo vendored helper written to
+            # disk by the previous step (no `require("semver")` — see the
+            # "Vendor minimal semver range-check helper" step for the
+            # supply-chain rationale).
+            if [ "${GHSA_HITS}" != '[]' ]; then
+              # shellcheck disable=SC2016
+              # The single-quoted body is JS executed by `node -e`, not
+              # shell. `process.env.X` is a Node.js property access; the
+              # actual values come in via the inline env-var assignments
+              # on the lines above (NEW_VER=, OLD_VER=, etc.). Single
+              # quotes are correct here.
+              FILTERED_GHSA=$(
+                NEW_VER="${NEW}" \
+                OLD_VER="${OLD}" \
+                GHSA_INPUT="${GHSA_HITS}" \
+                SEMVER_MINI="${RUNNER_TEMP}/semver-mini/index.js" \
+                node -e '
+                  const semver = require(process.env.SEMVER_MINI);
+                  const hits = JSON.parse(process.env.GHSA_INPUT);
+                  const newVer = process.env.NEW_VER || "";
+                  const oldVer = process.env.OLD_VER || "";
+                  // Tri-state matches(): true (definitely in range), false
+                  // (definitely out), or null (cannot tell — unparseable
+                  // range, prerelease version, or any other error).
+                  function matches(version, raw) {
+                    const r = (raw || "").trim();
+                    if (!r) return true;
+                    if (/[-+]/.test(version || "")) return null;
+                    const parsed = semver.validRange(r);
+                    if (parsed === null) return null;
+                    try {
+                      return semver.satisfies(version, parsed);
+                    } catch (_) { return null; }
+                  }
+                  // Coerce null → conservative defaults (matchesNew=true,
+                  // matchesOld=false) so the advisory surfaces in the
+                  // FRESH filter rather than slipping past it as if it
+                  // were a baseline. AND set inconclusive=true so the
+                  // gate flips to red regardless of whether the FRESH
+                  // filter catches it. Without `inconclusive`, a `||`
+                  // disjoint range like `>=1.0.0 <2.0.0 || >=3.0.0 <4.0.0`
+                  // against a 2.5.0 → 3.1.0 bump (genuinely vulnerable)
+                  // would compute matchesNew=null, matchesOld=null →
+                  // coerced (true, false) → in FRESH (correct!), but
+                  // the *same* coercion would also flag (true, false)
+                  // on a baseline that affects neither version, causing
+                  // a false positive. The inconclusive flag tells the
+                  // downstream filter to surface either case as
+                  // "manual review" rather than auto-closing the PR.
+                  const tagged = hits.map(h => {
+                    const mNew = newVer ? matches(newVer, h.range) : false;
+                    const mOld = oldVer ? matches(oldVer, h.range) : false;
+                    return Object.assign({}, h, {
+                      matchesNew:  mNew === null ? true  : mNew,
+                      matchesOld:  mOld === null ? false : mOld,
+                      inconclusive: (mNew === null) || (mOld === null),
+                      source: "GHSA"
+                    });
+                  });
+                  process.stdout.write(JSON.stringify(tagged));
+                ' 2>/dev/null || true
+              )
+              # Conservative fallback: node failure (helper missing, OOM,
+              # parse error) → treat every GHSA hit as inconclusive AND
+              # surface them in FRESH so the package goes red. Better to
+              # over-report than to silently drop the entire GHSA set.
+              if [ -z "${FILTERED_GHSA}" ]; then
+                echo "::warning title=GHSA filter degraded::semver-mini filtering failed for ${NAME}; treating every GHSA hit as inconclusive (conservative)."
+                FILTERED_GHSA=$(echo "${GHSA_HITS}" | jq -c '[.[] | . + {matchesNew:true,matchesOld:false,inconclusive:true,source:"GHSA"}]')
+              fi
+            else
+              FILTERED_GHSA='[]'
+            fi
+
+            # OSV does server-side range matching, so each query already
+            # returns only matches. Tag the two result sets accordingly.
+            # `inconclusive: false` — OSV is authoritative for the rows
+            # it returns; nothing about its API is ambiguous.
+            OSV_NEW_TAGGED=$(echo "${OSV_HITS_NEW}" | jq -c '[.[] | . + {matchesNew:true,matchesOld:false,inconclusive:false,source:"OSV"}]')
+            OSV_OLD_TAGGED=$(echo "${OSV_HITS_OLD}" | jq -c '[.[] | . + {matchesNew:false,matchesOld:true,inconclusive:false,source:"OSV"}]')
+
+            # Merge across (OSV-new + OSV-old + GHSA) by ghsaId using
+            # group_by + any/all so we can preserve a tri-state
+            # `inconclusive` aggregate alongside the boolean matches:
+            #   * matchesNew/matchesOld → ANY source saw a match
+            #   * inconclusive          → ALL sources were inconclusive
+            # The `all` semantics mean a single authoritative source
+            # (OSV with inconclusive=false) deflags the hit, while
+            # GHSA-only inconclusive hits stay flagged. Other metadata
+            # (severity, summary, permalink) is picked from the first
+            # row of the group — they're stable per ghsaId.
+            ALL_HITS=$(jq -nc --argjson g "${FILTERED_GHSA}" --argjson on "${OSV_NEW_TAGGED}" --argjson oo "${OSV_OLD_TAGGED}" '
+              ($g + $on + $oo) | group_by(.ghsaId) | map({
+                ghsaId:      .[0].ghsaId,
+                severity:    .[0].severity,
+                summary:     .[0].summary,
+                permalink:   .[0].permalink,
+                range:       .[0].range,
+                source:      ([.[].source] | unique | join(",")),
+                matchesNew:  any(.[]; .matchesNew  == true),
+                matchesOld:  any(.[]; .matchesOld  == true),
+                inconclusive: all(.[]; .inconclusive == true)
+              })
+            ')
+
+            # FRESH = the gate's verdict. Two cases land in the bucket:
+            #   1. Clear fresh — matchesNew=true and matchesOld=false
+            #      under reliable data → known introduced-by-this-PR
+            #      threat. Triggers COMPROMISED (auto-close + Teams).
+            #   2. Inconclusive — at least one source could not
+            #      determine the range membership on at least one side
+            #      AND no source contradicted with reliable data. The
+            #      hit surfaces in the FRESH set with `inconclusive:
+            #      true`, which the downstream logic translates into
+            #      INCONCLUSIVE (red check, no auto-close — reviewer
+            #      manually verifies whether the bump introduces the
+            #      advisory or just inherits it as baseline).
+            # A long-standing CVE that affects both old and new with
+            # reliable data is filtered out — it is a pre-existing
+            # baseline, not a fresh threat introduced by this PR.
+            COMBINED=$(echo "${ALL_HITS}" | jq -c '[.[] | select((.matchesNew == true and .matchesOld == false) or .inconclusive == true)]')
+            CLEAR_FRESH_COUNT=$(echo "${COMBINED}" | jq '[.[] | select(.inconclusive == false)] | length')
+            INCONCLUSIVE_COUNT=$(echo "${COMBINED}" | jq '[.[] | select(.inconclusive == true)] | length')
+            HIT_COUNT=$(echo "${COMBINED}" | jq 'length')
+            if [ "${CLEAR_FRESH_COUNT:-0}" -gt 0 ]; then
+              COMPROMISED=true
+              echo "::error title=Compromised dependency::${NAME}@${NEW} matches ${CLEAR_FRESH_COUNT} fresh advisor(y|ies)"
+            fi
+            if [ "${INCONCLUSIVE_COUNT:-0}" -gt 0 ]; then
+              INCONCLUSIVE=true
+              echo "::warning title=Advisory match inconclusive::${NAME}@${NEW} has ${INCONCLUSIVE_COUNT} advisor(y|ies) where semver-mini could not reliably determine fresh-vs-baseline; manual review required."
+            fi
+            if [ "${HIT_COUNT:-0}" -gt 0 ]; then
+              ANY_ADVISORY=true
+              # Advisory table row severity prefix is `INCONCLUSIVE` for
+              # the uncertain hits so reviewers can immediately tell which
+              # rows need manual semver verification vs which are
+              # confirmed fresh compromises.
+              ROWS=$(
+                echo "${COMBINED}" | jq -r --arg name "${NAME}" --arg ver "${NEW}" '
+                  .[] |
+                  "| " + (if .inconclusive == true then "INCONCLUSIVE" else (.severity // "UNKNOWN") end) +
+                  " | `" + $name + "` " +
+                  " | `" + $ver + "`" +
+                  " | " + (.source // "?") +
+                  " | [" + (.ghsaId // "?") + "](" + (.permalink // "#") + ")" +
+                  " | " + ((.summary // "") | gsub("\\|"; "\\|") | gsub("\n"; " ") | .[0:200]) +
+                  " |"
+                '
+              )
+              ADVISORY_TABLE+="${ROWS}"$'\n'
+            fi
+          done
+
+          # Final output assembly. Always emit the four named outputs
+          # even when empty so downstream `if:` conditions evaluate
+          # against a well-defined falsy state.
+          {
+            echo "compromised=${COMPROMISED}"
+            echo "inconclusive=${INCONCLUSIVE}"
+            echo "package_list<<PKG_EOF"
+            printf '%s' "${PACKAGE_LIST}"
+            echo
+            echo 'PKG_EOF'
+            echo "advisory_summary<<ADV_EOF"
+            if [ "${ANY_ADVISORY}" = 'true' ]; then
+              printf '%s' "${ADVISORY_TABLE}"
+              echo
+            fi
+            echo 'ADV_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo '## Dependabot advisory gate'
+            echo
+            echo "**Packages audited:** ${COUNT}"
+            echo "**Compromised:** ${COMPROMISED}"
+            echo "**Inconclusive:** ${INCONCLUSIVE}"
+            echo
+            echo '### Packages'
+            echo
+            printf '%s' "${PACKAGE_LIST}"
+            echo
+            if [ "${ANY_ADVISORY}" = 'true' ]; then
+              echo '### Advisories matched'
+              echo
+              printf '%s' "${ADVISORY_TABLE}"
+              echo
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ──────────────────────────────────────────────────────────────────────
+      # COMPROMISE RESPONSE — split into independent steps so a transient
+      # failure in any one of them does not abort the others. The previous
+      # revision bundled comment + labels + review into a single `set -euo
+      # pipefail` shell block; a single `gh pr comment` network blip would
+      # then short-circuit the labels, review, close, AND Teams alert,
+      # leaving a compromised PR open without the merge-block badge. With
+      # the response split, each step has its own error boundary and the
+      # auto-close + dynamic check-name backstop always run.
+      # All compromise-response steps carry `continue-on-error: true` so
+      # the workflow drives to completion no matter which individual call
+      # fails. The final `Final gate` step at the end of the job still
+      # exits non-zero on `compromised == true`, so the overall check is
+      # red whether or not every individual response action succeeded.
+      # ──────────────────────────────────────────────────────────────────────
+
+      - name: Post compromise comment
+        # Visible in-PR record first. Even if every other step in the
+        # response failed, this comment alone tells reviewers why the
+        # gate fired and what advisories matched.
+        if: steps.classify.outputs.compromised == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PKG_LIST: ${{ steps.classify.outputs.package_list }}
+          ADV_TABLE: ${{ steps.classify.outputs.advisory_summary }}
+        run: |
+          set -euo pipefail
+          # One block-redirect so the heredoc literal sections and the
+          # printf'd dynamic content land in a single file open
+          # (matches the SC2129 shellcheck guidance).
+          {
+            cat <<'MARKER_EOF'
+          # 🚨 DO NOT MERGE — COMPROMISED DEPENDENCY DETECTED 🚨
+
+          The Dependabot advisory gate matched one or more public security
+          advisories against the version(s) this PR is bumping to. This PR
+          has been **automatically closed**, labelled, and a request-changes
+          review has been left from `github-actions[bot]`.
+
+          ## Packages bumped in this PR
+
+          MARKER_EOF
+            printf '%s\n' "${PKG_LIST}"
+            cat <<'MARKER_EOF'
+
+          ## Advisories matched
+
+          MARKER_EOF
+            printf '%s\n' "${ADV_TABLE}"
+            cat <<'MARKER_EOF'
+
+          ## What to do
+
+          - **Do not reopen** this PR unless you have verified the advisory
+            was retracted (e.g. published in error and unpublished by the
+            advisory author).
+          - Dependabot will re-evaluate on its next scheduled run. If the
+            upstream maintainer publishes a clean replacement version, a
+            fresh PR will land bumping to that version.
+          - If you believe this is a false positive, comment on this PR
+            with the specific advisory ID and reasoning so a reviewer can
+            adjudicate.
+
+          ---
+
+          _Generated by [`dependabot-advisory.yml`](../blob/main/.github/workflows/dependabot-advisory.yml).
+          Paired with the `cooldown:` block in [`.github/dependabot.yml`](../blob/main/.github/dependabot.yml)._
+          MARKER_EOF
+          } > /tmp/comment.md
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body-file /tmp/comment.md
+
+      - name: Apply compromise labels
+        # Visual signal in the PR list view. `gh label create` returns
+        # non-zero on already-exists so each create is allowed to fail
+        # silently; the `gh pr edit --add-label` call is what matters
+        # and it carries its own error tolerance via continue-on-error.
+        if: steps.classify.outputs.compromised == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          for lbl in compromised do-not-merge security; do
+            gh label create "${lbl}" --repo "${REPO}" --color D00000 --description 'Applied automatically by dependabot-advisory.yml' >/dev/null 2>&1 || true
+          done
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-label 'compromised,do-not-merge,security'
+
+      - name: Post request-changes review
+        # Flips GitHub's merge button to "Changes requested — merging is
+        # blocked" even on repos without a branch-protection ruleset
+        # naming this check as required.
+        if: steps.classify.outputs.compromised == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr review "${PR_NUMBER}" --repo "${REPO}" --request-changes --body 'Compromised dependency detected by automated advisory gate. See pinned comment for advisory IDs and remediation steps. Do not merge.'
+
+      - name: Send Teams notification
+        # Best-effort. Only fires on confirmed compromise (per spec —
+        # no inconclusive or success notifications). The webhook URL
+        # is a long random Power Automate URL stored as the repo secret
+        # `V10_TEAMS_HOOK` (matches the existing `V<version>_TEAMS_HOOK`
+        # naming convention used for V9 channel notifications); the
+        # workflow is a no-op if the secret is unset, so the rest of
+        # the compromise response still runs even when the Teams side
+        # has been retired or temporarily disabled.
+        if: steps.classify.outputs.compromised == 'true'
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.V10_TEAMS_HOOK }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          PKG_LIST: ${{ steps.classify.outputs.package_list }}
+          ADV_TABLE: ${{ steps.classify.outputs.advisory_summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "::notice title=Teams webhook not configured::Set V10_TEAMS_HOOK repository secret to enable Teams alerts."
+            exit 0
+          fi
+
+          # Adaptive Card 1.4 payload — supported by both classic
+          # Office 365 connector webhooks and Power Automate HTTP
+          # triggers. Red attention header so the alert stands out in
+          # a busy channel. Action buttons let an on-call reviewer
+          # jump directly to the PR, the workflow run, and the
+          # repository.
+          PAYLOAD=$(
+            jq -nc \
+              --arg pr "${PR_NUMBER}" \
+              --arg repo "${REPO}" \
+              --arg pr_url "${PR_URL}" \
+              --arg run_url "${RUN_URL}" \
+              --arg pkgs "${PKG_LIST}" \
+              --arg adv "${ADV_TABLE}" \
+              '
+              {
+                type: "message",
+                attachments: [{
+                  contentType: "application/vnd.microsoft.card.adaptive",
+                  content: {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    type: "AdaptiveCard",
+                    version: "1.4",
+                    body: [
+                      { type: "TextBlock", size: "Large", weight: "Bolder", color: "Attention",
+                        text: "🚨 COMPROMISED DEPENDENCY DETECTED — Auto-closed PR" },
+                      { type: "FactSet", facts: [
+                          { title: "Repository", value: $repo },
+                          { title: "Pull Request", value: ("#" + $pr) }
+                        ] },
+                      { type: "TextBlock", weight: "Bolder", text: "Packages bumped" },
+                      { type: "TextBlock", wrap: true, text: $pkgs },
+                      { type: "TextBlock", weight: "Bolder", text: "Advisories matched" },
+                      { type: "TextBlock", wrap: true, text: $adv },
+                      { type: "TextBlock", wrap: true, isSubtle: true,
+                        text: "The PR has been automatically closed. Do not reopen unless the advisory is retracted." }
+                    ],
+                    actions: [
+                      { type: "Action.OpenUrl", title: "View pull request", url: $pr_url },
+                      { type: "Action.OpenUrl", title: "View workflow run",  url: $run_url }
+                    ]
+                  }
+                }]
+              }'
+          )
+          curl --fail --silent --show-error --max-time 10 \
+            --proto '=https' --tlsv1.2 \
+            -X POST "${TEAMS_WEBHOOK_URL}" \
+            -H 'Content-Type: application/json' \
+            -d "${PAYLOAD}"
+        continue-on-error: true
+
+      - name: Auto-close the pull request
+        # Last action of the compromise response. By this point the
+        # PR has a visible red comment, three labels, and a
+        # request-changes review. Closing it now ensures the merge
+        # button is disabled.
+        #
+        # We retry up to three times with exponential backoff (5s,
+        # 15s) to absorb transient `gh pr close` failures — GitHub
+        # API blips, 5xx responses during rolling deploys, etc.
+        # `continue-on-error: true` is kept so a hard close failure
+        # after retries does not skip the dependent `do-not-merge`
+        # job that runs `if: always() && compromised == 'true'` and
+        # emits the `🚨 DO NOT MERGE COMPROMISED` failing check; that
+        # check, plus the request-changes review and the three red
+        # labels, remains visible even on a close-step failure. This
+        # workflow runs without branch protection (the user picked
+        # the no-admin-rights option), so structural merge blocking
+        # comes from the failing-check job, not from the close.
+        if: steps.classify.outputs.compromised == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          closed=false
+          for attempt in 1 2 3; do
+            if gh pr close "${PR_NUMBER}" --repo "${REPO}" --comment 'Automatically closed by the Dependabot advisory gate. See the pinned comment for details. Do not reopen without a security review.'; then
+              closed=true
+              break
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              sleep $(( attempt * 10 - 5 ))
+            fi
+          done
+          if [ "${closed}" != 'true' ]; then
+            echo "::warning title=Auto-close failed::gh pr close failed after 3 attempts for PR ${PR_NUMBER}. The request-changes review and the DO NOT MERGE failing-check job still block the PR; manual close recommended."
+            exit 1
+          fi
+
+      - name: Post inconclusive notice
+        # Fires only when no compromise was confirmed but at least one
+        # API call failed. Reviewers see a red check and a clear note
+        # that the gate could NOT certify the PR — manual review is
+        # required. No Teams notification per spec (we do not want
+        # transient API noise to wake on-call).
+        if: steps.classify.outputs.inconclusive == 'true' && steps.classify.outputs.compromised != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PKG_LIST: ${{ steps.classify.outputs.package_list }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/inconclusive.md <<'MARKER_EOF'
+          ## ⚠️ Advisory gate inconclusive
+
+          The advisory gate could not complete its check for one or more
+          packages in this PR. This is typically a transient API failure
+          (GHSA or OSV.dev rate-limit, timeout, or 5xx). The gate is
+          **failing closed** so this PR cannot be silently merged on the
+          back of an incomplete audit.
+
+          ### Packages affected
+
+          MARKER_EOF
+          printf '%s\n' "${PKG_LIST}" >> /tmp/inconclusive.md
+          cat >> /tmp/inconclusive.md <<'MARKER_EOF'
+
+          ### What to do
+
+          - Re-run this workflow (`Re-run all jobs` on the workflow page)
+            once GHSA / OSV are responding again.
+          - If repeated runs stay inconclusive, manually verify each
+            bumped version at <https://github.com/advisories> and
+            <https://osv.dev>. If clean on both, merge can proceed.
+          - Check the workflow run logs for the underlying API error to
+            distinguish a transient failure from a structural change in
+            the advisory APIs.
+          MARKER_EOF
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body-file /tmp/inconclusive.md
+
+      - name: Final gate
+        # Surface the verdict as an exit code so the check is RED for
+        # compromised + inconclusive runs. Clean runs exit 0 silently.
+        # Both outputs are routed via `env:` so the `${{ ... }}` template
+        # is consumed by the workflow parser into an env var, not
+        # interpolated into the shell — closes the template-injection
+        # class structurally (zizmor's auditor mode flags any
+        # `${{ ... }}` that ends up in a `run:` block otherwise).
+        env:
+          COMPROMISED: ${{ steps.classify.outputs.compromised }}
+          INCONCLUSIVE: ${{ steps.classify.outputs.inconclusive }}
+        run: |
+          set -euo pipefail
+          if [ "${COMPROMISED}" = "true" ]; then
+            echo "::error title=Compromised dependency::At least one bumped package matches a public security advisory."
+            exit 1
+          fi
+          if [ "${INCONCLUSIVE}" = "true" ]; then
+            echo "::error title=Advisory gate inconclusive::At least one advisory API call failed; manual review required."
+            exit 1
+          fi
+          echo 'All bumped packages cleared GHSA + OSV. ✓'
+
+  do-not-merge:
+    # Second job that ONLY runs (and only appears in the PR check
+    # list) when the advisory check confirms a compromise. The job
+    # name is the user-visible failure signal — it shows up as a
+    # distinct red check next to the regular "Advisory check" entry,
+    # specifically because the name itself is the alert. This is the
+    # "dynamic check name" outcome the spec asked for, expressed via
+    # conditional job execution instead of the Checks API (simpler,
+    # no extra credentials).
+    name: '🚨 DO NOT MERGE — COMPROMISED DEPENDENCY DETECTED'
+    needs: advisory-check
+    if: always() && needs.advisory-check.outputs.compromised == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Fail check with unmissable name
+        run: |
+          echo "::error title=DO NOT MERGE — COMPROMISED DEPENDENCY DETECTED::See 'Advisory check' job for advisory IDs and the auto-posted PR comment for next steps."
+          exit 1

@@ -1,18 +1,106 @@
 export { DkgNodePlugin } from './DkgNodePlugin.js';
 export { DkgDaemonClient, type DkgClientOptions } from './dkg-client.js';
+export {
+  DkgPublisherExtension,
+  DkgPublisherExtension as DkgPublisherFacade,
+  DkgPublisherExtension as GenericDkgPublisher,
+  DkgPublisherExtension as DkgPublisherAbstraction,
+  createDkgPublisherExtension,
+  createDkgPublisherExtension as createDkgPublisher,
+  escapeDkgRdfLiteral,
+  isDkgRdfTerm,
+  normalizeDkgPublisherObject,
+  normalizeDkgPublisherQuads,
+} from '@origintrail-official/dkg-core';
+export type {
+  DkgPublisherClient,
+  DkgPublisherQuad,
+  DkgPublisherQuadInput,
+  LocalWorkspaceCreateRequest,
+  LocalWorkspaceDiscardRequest,
+  LocalWorkspacePromoteRequest,
+  LocalWorkspaceWriteRequest,
+} from '@origintrail-official/dkg-core';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
-export { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
-export { DkgGamePlugin, parseActionResponse, type ConsultAgentFn } from './DkgGamePlugin.js';
-export { WriteCapture } from './write-capture.js';
+export {
+  mergeOpenClawConfig,
+  openclawConfigPath,
+  removeCanonicalNodeSkill,
+  resolveWorkspaceDirFromConfig,
+  runSetup,
+  unmergeOpenClawConfig,
+  verifyMemorySlotInvariants,
+  verifySkillRemoved,
+  verifyUnmergeInvariants,
+  // Re-exports for non-OpenClaw consumers (e.g. `dkg mcp setup` bundles
+  // these into a parallel two-command UX). Each one is the same
+  // primitive `runSetup` itself uses, so a re-implementation in another
+  // setup verb stays byte-aligned with OpenClaw setup behaviour
+  // (network defaults, config-merge semantics, daemon start + readiness
+  // probe, faucet retry/back-off, manual-curl fallback).
+  loadNetworkConfig,
+  writeDkgConfig,
+  startDaemon,
+  readWalletsWithRetry,
+  logManualFundingInstructions,
+  type AdapterEntryConfig,
+  type SetupOptions,
+  type UnmergeResult,
+} from './setup.js';
+// Codex Bug B24: the `DkgMemoryPlugin` class no longer exposes the legacy
+// `OpenClawMemorySearchManager` surface (see the breaking-change JSDoc on
+// the class). Both explicit tool surfaces that previously shipped alongside
+// it — `dkg_memory_import` (writes) and the `dkg_memory_search` legacy-
+// gateway compat tool — have also been retired; reads and writes flow
+// through the memory slot via `api.registerMemoryCapability`. Programmatic
+// search remains available to external consumers via `DkgMemorySearchManager`
+// (the standalone search implementation that used to be backed by methods
+// on `DkgMemoryPlugin`) and `buildDkgMemoryRuntime` (the factory used with
+// `api.registerMemoryCapability`), along with the resolver interface they
+// depend on. Re-export them from the barrel so the migration path documented
+// on `DkgMemoryPlugin` is actually reachable from
+// `@origintrail-official/dkg-adapter-openclaw`.
+export {
+  DkgMemoryPlugin,
+  DkgMemorySearchManager,
+  buildDkgMemoryRuntime,
+  AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
+  PROJECT_MEMORY_ASSERTION,
+} from './DkgMemoryPlugin.js';
+export {
+  extractAdapterPluginConfigOverlay,
+  isObjectRecord,
+  isPartialAdapterConfigOverlay,
+  isStateMetadataOnlyAdapterConfig,
+  looksLikeAdapterPluginConfig,
+  mergeAdapterPluginConfigs,
+  resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
+  scrubStaleWorkspaceAliases,
+} from './openclaw-config.js';
+export {
+  canonicalPathForCompare,
+  sameResolvedPath,
+} from './state-dir-path.js';
+export type {
+  DkgMemorySession,
+  DkgMemorySessionResolver,
+} from './DkgMemoryPlugin.js';
 export type {
   ChannelInboundMessage,
   ChannelOutboundReply,
   DkgOpenClawConfig,
   JSONSchemaObject,
+  MemoryLayer,
+  MemoryPluginCapability,
+  MemoryPluginRuntime,
+  MemoryProviderStatus,
+  MemorySearchManager,
   MemorySearchOptions,
   MemorySearchResult,
+  MemorySource,
   OpenClawChannelAdapter,
-  OpenClawMemorySearchManager,
   OpenClawPluginApi,
   OpenClawTool,
   OpenClawToolResult,

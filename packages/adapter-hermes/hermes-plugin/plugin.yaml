@@ -1,0 +1,12 @@
+name: dkg
+version: 1.0.0
+description: >
+  DKG (Decentralized Knowledge Graph) memory provider. Stores all persistent
+  memory in DKG Working Memory assertions — verifiable, sharable, and
+  queryable via SPARQL. Connects to a running DKG V10 node via HTTP.
+  Agent knowledge can be promoted to Shared Working Memory (team-visible)
+  or published to Verifiable Memory (chain-anchored, costs TRAC).
+pip_dependencies: []
+hooks:
+  - on_session_end
+  - on_memory_write

@@ -1,0 +1,5522 @@
+[
+  {
+    "epochNum": 16,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 110879.97995560229,
+    "onChainEpochPool": 110879.97995560229,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 14578.75487997249
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 10968.91400185233
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 9360.495441358062
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 8325.983384847968
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 8288.855347415976
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 8259.766661229722
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 6443.869914214782
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 6443.1863031232515
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 6300.343188237347
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 6291.040857202499
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 5318.733704767815
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 5292.908661696405
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 5282.026038959907
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 970.8283265517676
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 894.9402793447287
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 893.1443928941576
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 890.9379947853423
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 889.7689209935531
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 880.9333809476958
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 878.61101050989
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 875.3205336638476
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 861.4371966366356
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 860.8556317349352
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 389.80221659231927
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 389.74904533975354
+      },
+      {
+        "publisherEVMpubKey": "0x53e660f903ec72b0c1290bd580dfb2e1adb62e20",
+        "tracAmount": 4.7456392632688535
+      },
+      {
+        "publisherEVMpubKey": "0x3261cb952e231611f24a6c0283cdd867b7501221",
+        "tracAmount": 4.736691128920454
+      },
+      {
+        "publisherEVMpubKey": "0x8cfcf4e2eb8116b8cef567e98ad5b829e518015d",
+        "tracAmount": 4.729661725305567
+      },
+      {
+        "publisherEVMpubKey": "0xa74a7a2e0e3bcf29eb320feb1848ea16ece838f0",
+        "tracAmount": 4.711120122658156
+      },
+      {
+        "publisherEVMpubKey": "0xccb46a23006edf123c7a102e5021094fd705b470",
+        "tracAmount": 4.532825149132983
+      },
+      {
+        "publisherEVMpubKey": "0x24fada8c64173404c135649cc7afaa908ea93ebe",
+        "tracAmount": 4.058273486147549
+      },
+      {
+        "publisherEVMpubKey": "0x522cdf114a48a95f4ac07dae2703f2d97ea93b7c",
+        "tracAmount": 3.675320990647945
+      },
+      {
+        "publisherEVMpubKey": "0x771fd565c77e1f64364f426d15d79eb7bb1547d6",
+        "tracAmount": 3.6640340026615026
+      },
+      {
+        "publisherEVMpubKey": "0x11a3de7705c2d597d268be10770477927e0fbec8",
+        "tracAmount": 3.643260457301824
+      },
+      {
+        "publisherEVMpubKey": "0xf14a7794fde266a3d58b36f87200997230c30a54",
+        "tracAmount": 3.6373471455864452
+      },
+      {
+        "publisherEVMpubKey": "0x065e9a77a67c6b21f92c7fe4ac3d2bd1b13722c8",
+        "tracAmount": 3.54687323760364
+      },
+      {
+        "publisherEVMpubKey": "0x0d3a8615beacddeed5dad9ec9f676896e0f7c144",
+        "tracAmount": 3.0915940198758927
+      }
+    ]
+  },
+  {
+    "epochNum": 17,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 99170.35169720642,
+    "onChainEpochPool": 99170.35169720642,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 13039.146014755275
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 9810.527200092141
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 8371.967828198316
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 7446.706798026903
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 7413.499716537241
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 7387.482979876073
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 5763.3564322396805
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 5762.745014809787
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 5634.987037703083
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 5626.667091751621
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 4757.041733745006
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 4733.943978812036
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 4724.21062997306
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 868.302705504635
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 800.428916799499
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 798.8226873342458
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 796.8492988422668
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 795.80368664845
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 787.90123560063
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 785.8241221922344
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 782.8811405448334
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 770.4639718524261
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 769.9438238882988
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 348.6366332974592
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 348.58907726598045
+      },
+      {
+        "publisherEVMpubKey": "0x53e660f903ec72b0c1290bd580dfb2e1adb62e20",
+        "tracAmount": 4.244469695565318
+      },
+      {
+        "publisherEVMpubKey": "0x3261cb952e231611f24a6c0283cdd867b7501221",
+        "tracAmount": 4.236466540886539
+      },
+      {
+        "publisherEVMpubKey": "0x8cfcf4e2eb8116b8cef567e98ad5b829e518015d",
+        "tracAmount": 4.230179486821512
+      },
+      {
+        "publisherEVMpubKey": "0xa74a7a2e0e3bcf29eb320feb1848ea16ece838f0",
+        "tracAmount": 4.213595994866428
+      },
+      {
+        "publisherEVMpubKey": "0xccb46a23006edf123c7a102e5021094fd705b470",
+        "tracAmount": 4.054130099964432
+      },
+      {
+        "publisherEVMpubKey": "0x24fada8c64173404c135649cc7afaa908ea93ebe",
+        "tracAmount": 3.629694098662811
+      },
+      {
+        "publisherEVMpubKey": "0x522cdf114a48a95f4ac07dae2703f2d97ea93b7c",
+        "tracAmount": 3.287183812520757
+      },
+      {
+        "publisherEVMpubKey": "0x771fd565c77e1f64364f426d15d79eb7bb1547d6",
+        "tracAmount": 3.2770888019637043
+      },
+      {
+        "publisherEVMpubKey": "0x11a3de7705c2d597d268be10770477927e0fbec8",
+        "tracAmount": 3.258509074585127
+      },
+      {
+        "publisherEVMpubKey": "0xf14a7794fde266a3d58b36f87200997230c30a54",
+        "tracAmount": 3.253220246045077
+      },
+      {
+        "publisherEVMpubKey": "0x065e9a77a67c6b21f92c7fe4ac3d2bd1b13722c8",
+        "tracAmount": 3.1723009558570006
+      },
+      {
+        "publisherEVMpubKey": "0x0d3a8615beacddeed5dad9ec9f676896e0f7c144",
+        "tracAmount": 2.7651021075115336
+      }
+    ]
+  },
+  {
+    "epochNum": 18,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 88917.433556781,
+    "onChainEpochPool": 88917.433556781,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 12313.41869631787
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 8930.333953832243
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 7356.683773390807
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 6599.149355974624
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 6544.716915143598
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 6518.001270836312
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 5028.634105775246
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 4887.142459685753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 4876.950567387186
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 4867.802195028255
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 4089.8516970590786
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 4088.4598698227774
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 4061.67964437272
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 878.3178869338482
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 809.661228033951
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 808.0364719887281
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 806.0403220292882
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 804.9826495300512
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 796.9890499916442
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 794.8879787313356
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 791.9110521302281
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 779.3506612682902
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 778.8245138109012
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 352.6578797052022
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 352.6097751527063
+      },
+      {
+        "publisherEVMpubKey": "0x0d3a8615beacddeed5dad9ec9f676896e0f7c144",
+        "tracAmount": 0.0312215785664972
+      },
+      {
+        "publisherEVMpubKey": "0xf14a7794fde266a3d58b36f87200997230c30a54",
+        "tracAmount": 0.030691582634041228
+      },
+      {
+        "publisherEVMpubKey": "0x522cdf114a48a95f4ac07dae2703f2d97ea93b7c",
+        "tracAmount": 0.030691582634041228
+      },
+      {
+        "publisherEVMpubKey": "0x065e9a77a67c6b21f92c7fe4ac3d2bd1b13722c8",
+        "tracAmount": 0.030691582634041228
+      },
+      {
+        "publisherEVMpubKey": "0x771fd565c77e1f64364f426d15d79eb7bb1547d6",
+        "tracAmount": 0.030113405253180167
+      },
+      {
+        "publisherEVMpubKey": "0x8cfcf4e2eb8116b8cef567e98ad5b829e518015d",
+        "tracAmount": 0.02890886904305296
+      },
+      {
+        "publisherEVMpubKey": "0x11a3de7705c2d597d268be10770477927e0fbec8",
+        "tracAmount": 0.028330691662191904
+      },
+      {
+        "publisherEVMpubKey": "0xa74a7a2e0e3bcf29eb320feb1848ea16ece838f0",
+        "tracAmount": 0.027752514281330843
+      },
+      {
+        "publisherEVMpubKey": "0x53e660f903ec72b0c1290bd580dfb2e1adb62e20",
+        "tracAmount": 0.027174336900469782
+      },
+      {
+        "publisherEVMpubKey": "0x3261cb952e231611f24a6c0283cdd867b7501221",
+        "tracAmount": 0.026017982138747665
+      },
+      {
+        "publisherEVMpubKey": "0x24fada8c64173404c135649cc7afaa908ea93ebe",
+        "tracAmount": 0.024283449996164486
+      },
+      {
+        "publisherEVMpubKey": "0xccb46a23006edf123c7a102e5021094fd705b470",
+        "tracAmount": 0.02370527261530343
+      }
+    ]
+  },
+  {
+    "epochNum": 19,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 76149.49347918436,
+    "onChainEpochPool": 76149.49347918436,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 11267.121868324219
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 7584.690104706986
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 5848.930500938948
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5684.768896033297
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5625.710071086977
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5609.478547903225
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4472.929452894031
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3814.5134983359476
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3808.3225237062143
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3805.7401406875106
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 3226.7245688613243
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 3225.349310877571
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 3207.2943048454636
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 899.7534631433128
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 829.4212206466003
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 827.756812007997
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 825.7119454902158
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 824.6284602188614
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 816.4397748070564
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 814.2874263568012
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 811.2378470886158
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 798.3709166246192
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 797.8319284018444
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 361.26458687665536
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 361.2153083200586
+      }
+    ]
+  },
+  {
+    "epochNum": 20,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 72744.62649400957,
+    "onChainEpochPool": 72744.62649400957,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 10773.832378757255
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 7212.689489528496
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 5453.428981508012
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5391.0135717732655
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5334.098754842788
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5324.24367362771
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4506.262416615227
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3527.183978758216
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3520.916277026688
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3520.0115628843773
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 3056.3057805453036
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 3048.893776720411
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 3040.9958336128893
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 21,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 72744.62649400957,
+    "onChainEpochPool": 72744.62649400957,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 10773.832378757255
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 7212.689489528496
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 5453.428981508012
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5391.0135717732655
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5334.098754842788
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5324.24367362771
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4506.262416615227
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3527.183978758216
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3520.916277026688
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3520.0115628843773
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 3056.3057805453036
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 3048.893776720411
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 3040.9958336128893
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 22,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 72495.64027400548,
+    "onChainEpochPool": 72495.64027400548,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 10736.956310678666
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 7188.00230122863
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 5434.763291221207
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5372.561513443746
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5315.841501350583
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5306.0201515537265
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4490.83863482494
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3515.1113316300825
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3508.8650826358557
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3507.963465098275
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 3045.8448288551144
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 3038.4581944204297
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 3030.5872839487865
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 903.3559899960386
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 832.7421439239182
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 831.0710711522383
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 829.018017184403
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 827.9301937416
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 819.7087216162196
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 817.5477553685275
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 814.4859658764829
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 801.5675174529479
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 801.0263711728547
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 362.7110557467115
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 362.66157988348505
+      }
+    ]
+  },
+  {
+    "epochNum": 23,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 71549.81554558256,
+    "onChainEpochPool": 71549.81554558256,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 10609.164976742493
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 7077.275048689313
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5352.678405358687
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 5331.945042250996
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5296.280162286095
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5286.349645911563
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4446.863898325263
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3403.7056538678808
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3396.54385288229
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3396.2844687658226
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 3000.977388937048
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2994.1876332209417
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2986.0244010852784
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 900.1161847512194
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 829.7555889053606
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 828.0905092863139
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 826.0448184124156
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 824.9608963508338
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 816.7689097979264
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 814.6156936618855
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 811.5648850032716
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 798.6927674364763
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 798.1535619289865
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 361.4102250733385
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 361.36092665085846
+      }
+    ]
+  },
+  {
+    "epochNum": 24,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 68022.71121235202,
+    "onChainEpochPool": 68022.71121235202,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 10202.53184749791
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 6659.533653224035
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 5107.819828469497
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 5054.02374832009
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 5044.208904256118
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 4949.2554501745
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 4134.723112047205
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 3183.2379593372984
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 3173.9937656078746
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 3173.3515256730234
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2856.409052020786
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2844.174449887012
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2837.9197422234756
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 883.0593637014655
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 814.0320713920036
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 812.3985443275902
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 810.3916184306473
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 809.3282362337513
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 801.291484361702
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 799.1790707608627
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 796.1860736361691
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 783.5578772537584
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 783.0288894626103
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 354.5616541454299
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 354.513289907208
+      }
+    ]
+  },
+  {
+    "epochNum": 25,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 62554.63757130167,
+    "onChainEpochPool": 62554.63757130167,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9558.294314911036
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 6102.439211359866
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 4721.071774555395
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 4668.656553138845
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 4666.022869675982
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 4448.382421439167
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3770.015065919838
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2832.2877812671436
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2821.1918589918664
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2821.1261967044193
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2560.1456939718996
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2548.692286629417
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2542.2717398483524
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 852.2089841262632
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 785.5932150465297
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 784.0167565463094
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 782.0799441980643
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 781.0537121020067
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 773.2977305337397
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 771.2591157782381
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 768.3706813830277
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 756.1836610616629
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 755.6731538787483
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 342.17476141451715
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 342.1280868193343
+      }
+    ]
+  },
+  {
+    "epochNum": 26,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57509.63248171061,
+    "onChainEpochPool": 57509.63248171061,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9350.627997830155
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5680.812968316582
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3961.3799613761616
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3954.8020361393096
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3954.31578273607
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3944.2355083560833
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3420.4257207300097
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2416.3271254872816
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2412.8783370439783
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2407.666155390531
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2372.34941656279
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2370.975177663817
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2355.6582205822037
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 893.6592426685074
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 823.8033753232337
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 822.1502400763086
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 820.1192238718758
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 819.0430772753866
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 810.9098555615195
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 808.7720854224705
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 805.7431615995565
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 792.9633815765346
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 792.4280440349714
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 358.81766543389216
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 358.7687206513801
+      }
+    ]
+  },
+  {
+    "epochNum": 27,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 28,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 29,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 30,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 31,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 32,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 33,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 34,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 35,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 36,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 37,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 38,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 39,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 40,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 41,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 42,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 43,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 44,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 45,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 46,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 47,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 48,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 57399.05884107224,
+    "onChainEpochPool": 57399.05884107224,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9322.810344319609
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5655.795369753873
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3944.99056752544
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3937.746543087759
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3934.856501624408
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3896.272718951135
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3391.7571201536753
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2399.775601420777
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2395.821425926032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2390.1463332000967
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2371.1744374754276
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2369.1579067543385
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2354.0039530707363
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 835.6021961680264
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 833.925384098215
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 830.7737193465583
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 822.5240105815727
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 820.3556224969877
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 817.2833172913195
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 804.3205004667449
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 803.7774956201747
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 363.9567865849072
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 363.90714079686705
+      }
+    ]
+  },
+  {
+    "epochNum": 49,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 56981.67240271051,
+    "onChainEpochPool": 56981.67240271051,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 9255.0180375518
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 5614.668348977791
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3916.3039375423737
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3909.112589187202
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3906.243563122665
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3867.9403485972625
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 3367.0934156826884
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 2382.325249248318
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 2378.399827173224
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 2372.766001791877
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 2353.932063241861
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 2351.9301960464904
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 2336.8864367612427
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 899.8671069766923
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 829.5259811291788
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 827.861362266569
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 825.8162374708489
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 824.7326153493187
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 816.5428956613052
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 814.3902753575494
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 811.340310910654
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 798.471755282252
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 797.932698982287
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 361.3102165899031
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 361.26093180915245
+      }
+    ]
+  },
+  {
+    "epochNum": 50,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 45551.57695504494,
+    "onChainEpochPool": 45551.57695504494,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 7338.396312442335
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 4481.741237792881
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 3150.972929755618
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 3149.921632359446
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 3144.281388117953
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 3100.0822748710398
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 2403.2933534820145
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 1914.0656347998333
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 1911.705335350144
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 1905.4259815175951
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 1886.8050743865822
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 1884.0128986953725
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 1881.0898395174052
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 755.8329260063992
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 693.6347581458539
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 679.1158103241506
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 676.8583203501695
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 673.4075729775021
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 672.3094404208255
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 666.1744703595261
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 664.2505840894416
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 656.426736875053
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 654.8571978033424
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 303.4783203918417
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 303.43692421261306
+      }
+    ]
+  },
+  {
+    "epochNum": 51,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 25275.897558039032,
+    "onChainEpochPool": 25275.897558039032,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 3871.6104577070696
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 2660.7061303392297
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 1795.140412678959
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 1791.1423804992885
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 1789.295680797187
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1730.8089433130517
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 1090.3366301960673
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 1087.1331589271715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 1087.0396078236552
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 1042.5740824814584
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 1039.2053447782125
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 1033.1163969816746
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 953.0893440176864
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 601.299440363844
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 551.8179713256909
+      },
+      {
+        "publisherEVMpubKey": "0xad702cd853d8e84dce4a8af699f8c85bb64b8dbb",
+        "tracAmount": 341.9150882297252
+      },
+      {
+        "publisherEVMpubKey": "0x7b8873d1aa4d1655685e86f10fa49d2b0332d454",
+        "tracAmount": 340.98243860686307
+      },
+      {
+        "publisherEVMpubKey": "0x24a02308c1e555be7e879a9f402c780fd7524181",
+        "tracAmount": 334.3917339073469
+      },
+      {
+        "publisherEVMpubKey": "0x0bbb3ee2252b9f0093240d55bcaf5b23458ab8a6",
+        "tracAmount": 333.9742991901109
+      },
+      {
+        "publisherEVMpubKey": "0x8ce51e326a9d216a515f5b0a8ce8984b2f75024a",
+        "tracAmount": 333.0832405345974
+      },
+      {
+        "publisherEVMpubKey": "0xc2bad9ec4a8ce32855acfb1eb4ae0ca65d38a7eb",
+        "tracAmount": 329.5405482588095
+      },
+      {
+        "publisherEVMpubKey": "0x23fe98a99420ff70f8a57c9074cc219a20918ca5",
+        "tracAmount": 328.1046941504862
+      },
+      {
+        "publisherEVMpubKey": "0x75224608a8cfd0d7594a4d7b8640e7200ea5f4c8",
+        "tracAmount": 326.7608754692465
+      },
+      {
+        "publisherEVMpubKey": "0x1df0249ce985ad8645c0c3c05081bcfc5f68f56a",
+        "tracAmount": 241.43079500168378
+      },
+      {
+        "publisherEVMpubKey": "0x8aa7b8cc3a34774062932b34752339adc7f3457b",
+        "tracAmount": 241.39786245991834
+      }
+    ]
+  },
+  {
+    "epochNum": 52,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 53,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 54,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 55,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 56,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 57,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 58,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 59,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 60,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 61,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 62,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 63,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 64,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 65,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 66,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 67,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 68,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11288.056345279358,
+    "onChainEpochPool": 11288.056345279358,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1442.2115394981372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1175.2768049504332
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 988.9465571667408
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 906.4585654394316
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 831.8652789181275
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 802.0355209326909
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 738.3929831467518
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 726.7951335755298
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 722.7461995546856
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 500.56543619838715
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 500.31796065418035
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 497.9561583919501
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 485.32196769325634
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 484.70772506862585
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 484.45851409043007
+      }
+    ]
+  },
+  {
+    "epochNum": 69,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 11104.355387176476,
+    "onChainEpochPool": 11104.355387176476,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1418.7411001692587
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1156.1504408978851
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 972.8525171914663
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 891.7069286776763
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 818.3275675464362
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 788.983256741124
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 726.3764327051667
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 714.9673256431065
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 710.9842836621469
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 492.4192729077259
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 492.17582476143303
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 489.85245828700806
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 477.423875433032
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 476.81962894548667
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 476.57447360752366
+      }
+    ]
+  },
+  {
+    "epochNum": 70,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 9591.91003649693,
+    "onChainEpochPool": 9591.91003649693,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 1303.0889672011372
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 1061.9040244756623
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 893.5480770345017
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 724.6673667543182
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 667.164090319297
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 656.6850243809001
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 653.0266697588567
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 482.50586135304115
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 480.8842105874737
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 452.27851768494713
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 452.05491480667575
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 449.9209432038041
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 438.5055065233348
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 437.95051665851986
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 437.7253457544614
+      }
+    ]
+  },
+  {
+    "epochNum": 71,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 6424.354049113503,
+    "onChainEpochPool": 6424.354049113503,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 900.5228991556559
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 673.3463261621424
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 545.5565927842458
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 491.25315616456635
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 484.98329276294714
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 482.98732751999796
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 479.06967824015726
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 362.9019350205107
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 362.51551391023384
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 362.32417364842524
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 342.37530676427514
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 341.4501002478492
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 341.4064466748503
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 126.9865150128516
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 126.67478504479357
+      }
+    ]
+  },
+  {
+    "epochNum": 72,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 4405.188642648703,
+    "onChainEpochPool": 4405.188642648703,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 576.9330060518241
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 461.5868991086262
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 362.9301703275303
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 361.8048860424743
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 361.30139821665983
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 355.14017098105757
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 350.77069933249925
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 274.5166104540744
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 274.3721752476027
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 273.71753871288126
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 249.23884061848494
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 245.6695665616889
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 244.48403962771684
+      },
+      {
+        "publisherEVMpubKey": "0x9751bff60232b8e20dc59c555a3a80c2b9353911",
+        "tracAmount": 6.361491720263304
+      },
+      {
+        "publisherEVMpubKey": "0x3728f20e7f4f355cfb6ef12449d4c8ab96ac84b1",
+        "tracAmount": 6.361149645319124
+      }
+    ]
+  },
+  {
+    "epochNum": 73,
+    "blockchainId": "gnosis:100",
+    "totalTRACAllocated": 596.2610461403025,
+    "onChainEpochPool": 596.2610461403025,
+    "publishers": [
+      {
+        "publisherEVMpubKey": "0xee322a06ed6522f560567a7dfffeb510e7a6650f",
+        "tracAmount": 83.960438926322
+      },
+      {
+        "publisherEVMpubKey": "0xf707fbbc7beb511259d125335553535175c05a07",
+        "tracAmount": 83.87975040353759
+      },
+      {
+        "publisherEVMpubKey": "0xb8e9bb58591c5f3922b3c4cbee7a2b69b4e9ba38",
+        "tracAmount": 67.5033084264456
+      },
+      {
+        "publisherEVMpubKey": "0xa4fa1201a7e1f1510270f19d020fc788b452eb4b",
+        "tracAmount": 52.72505074751577
+      },
+      {
+        "publisherEVMpubKey": "0x5ee3583ce2ae32c5fb6d361cba4a980bec0a1177",
+        "tracAmount": 45.742793078256454
+      },
+      {
+        "publisherEVMpubKey": "0x340c9738ae1b61412e08bc89ed2fa5e15cd7b1fd",
+        "tracAmount": 45.49180768635115
+      },
+      {
+        "publisherEVMpubKey": "0xa3c90287161c0c72b0dd98bf4b811ca7385ae995",
+        "tracAmount": 44.35977931399242
+      },
+      {
+        "publisherEVMpubKey": "0x67be45a88ca887ca3cf0936313d588c893257214",
+        "tracAmount": 32.47463445588297
+      },
+      {
+        "publisherEVMpubKey": "0xd69c394761e7c5771472a1fb89f589c345cba8c2",
+        "tracAmount": 32.25688777425051
+      },
+      {
+        "publisherEVMpubKey": "0xbe189db25c1d5defcfe3739aef477c3ce37aef7a",
+        "tracAmount": 31.692779346836097
+      },
+      {
+        "publisherEVMpubKey": "0x39813e4c1fbaf193bb72801b50334cc50c202bdb",
+        "tracAmount": 25.539447681843797
+      },
+      {
+        "publisherEVMpubKey": "0xd22db9d87e132470b3a3ae9e4c3606efedc520a4",
+        "tracAmount": 25.534664487638192
+      },
+      {
+        "publisherEVMpubKey": "0x5ab38d57aed6bc6f895fa00b951095a8bb322c9c",
+        "tracAmount": 25.099703811429933
+      }
+    ]
+  }
+]

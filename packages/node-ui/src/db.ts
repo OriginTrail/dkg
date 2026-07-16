@@ -1,29 +1,257 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
+import {
+  RESPONSE_CACHE_BYTES,
+  type IdempotencyCheckResult,
+  type KaNumberStore,
+  type MessageDirection,
+  type MessageIdempotencyStore,
+  type ProtocolOutboxEntry,
+  type ProtocolOutboxStore,
+  type ContextGraphJoinPolicyRecord,
+  parseContextGraphJoinPolicyRecord,
+} from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 6;
-const DEFAULT_RETENTION_DAYS = 90;
+export {
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+} from './chain-cursor-stores.js';
+
+const SCHEMA_VERSION = 29;
+// Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
+// a production incident in which the `logs` table + its FTS5 shadow tables
+// grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
+// hash mismatch on boot). 90 days had been chosen for "metrics history",
+// but logs were the dominant grower (~1M rows/12d) and pruning was a no-op
+// on any DB younger than 90 days. 14 days is still long enough for a useful
+// operator-driven post-mortem, but the mainnet sync storm proved that time
+// retention alone cannot bound worst-case growth. Operators who want longer
+// retention can override via `setRetentionDays()`; the setting is persisted
+// in the `settings` table and re-read on next boot. Time alone is not a hard
+// size bound during a log storm, so routine info/debug rows also have a count
+// ceiling. Warning/error rows keep the full operator-selected time window.
+const DEFAULT_RETENTION_DAYS = 14;
+const LEGACY_IMPLICIT_RETENTION_DAYS = 90;
+const DEFAULT_ROUTINE_LOG_ROW_CAP = 1_000_000;
+const DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS = 25_000;
+const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
+// SQLite reports reusable-but-not-yet-reclaimed pages via freelist_count.
+// With the default 4 KiB page size this is roughly 4 MiB, large enough
+// to avoid VACUUM churn on idle nodes but small enough to retry a failed
+// V15 FTS-drop reclamation immediately on the next prune.
+const VACUUM_FREE_PAGE_THRESHOLD = 1_000;
+
+/**
+ * Rolling window for `assertion_activity` digest collapse (V16
+ * notifications-pane redesign). Atomic activity rows are persisted at
+ * write time; the scoped read path (A4) collapses them into one digest per
+ * `(contextGraphId, kind, windowBucket)` where `windowBucket = floor(ts /
+ * ACTIVITY_DIGEST_WINDOW_MS)`. This constant is the single source of truth
+ * for the window so digest COLLAPSE (A4) and digest READ-MARKING
+ * (`resolveActivityDigestRowIds`, CR-3) agree on the same bucket boundaries
+ * — a mismatch would mark the wrong rows read. 24h per the implementation
+ * plan (daemon-tunable in future; a constant for now).
+ */
+export const ACTIVITY_DIGEST_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Notification `type` used for collapsed assertion-lifecycle activity. */
+export const ASSERTION_ACTIVITY_TYPE = 'assertion_activity';
+
+export type AssertionActivityKind = 'created' | 'promoted' | 'published';
+
+/**
+ * Build the stable digest id for an activity digest row. Mirror of the
+ * parse in `parseActivityDigestKey`. Shape: `activity:<cgId>:<kind>:<bucket>`
+ * where `bucket = floor(ts / ACTIVITY_DIGEST_WINDOW_MS)`. The cgId can
+ * itself contain `:` (wallet-scoped ids are `0x…/…`, but URIs use `:`), so
+ * the parser splits on the FIRST and LAST two delimiters, not a naive
+ * `split(':')`.
+ */
+export function buildActivityDigestKey(
+  contextGraphId: string,
+  kind: AssertionActivityKind,
+  ts: number,
+): string {
+  const bucket = Math.floor(ts / ACTIVITY_DIGEST_WINDOW_MS);
+  return `activity:${contextGraphId}:${kind}:${bucket}`;
+}
+
+/**
+ * Parse a digest key back into its parts. Returns null if the key is not a
+ * well-formed activity digest key. Tolerant of `:` inside `contextGraphId`
+ * by anchoring on the `activity:` prefix and the trailing `:<kind>:<bucket>`.
+ */
+export function parseActivityDigestKey(digestKey: string): {
+  contextGraphId: string;
+  kind: AssertionActivityKind;
+  windowBucket: number;
+} | null {
+  if (!digestKey.startsWith('activity:')) return null;
+  const lastColon = digestKey.lastIndexOf(':');
+  if (lastColon <= 'activity:'.length) return null;
+  const secondLastColon = digestKey.lastIndexOf(':', lastColon - 1);
+  if (secondLastColon < 'activity:'.length) return null;
+  const bucketStr = digestKey.slice(lastColon + 1);
+  const kind = digestKey.slice(secondLastColon + 1, lastColon);
+  const contextGraphId = digestKey.slice('activity:'.length, secondLastColon);
+  const windowBucket = Number(bucketStr);
+  if (!contextGraphId) return null;
+  if (kind !== 'created' && kind !== 'promoted' && kind !== 'published') return null;
+  if (!Number.isInteger(windowBucket) || windowBucket < 0) return null;
+  return { contextGraphId, kind, windowBucket };
+}
 
 export interface DashboardDBOptions {
   /** Directory to store the SQLite database file. */
   dataDir: string;
-  /** Days to retain data before pruning. Default: 90 */
+  /** Days to retain data before pruning. Default: 14 */
   retentionDays?: number;
+  /**
+   * TTL (ms) for the in-process memo over polled replication rollups. `<= 0`
+   * disables caching. When omitted, falls back to the
+   * `DKG_DASHBOARD_CACHE_TTL_MS` env var, then a 2000ms default.
+   */
+  cacheTtlMs?: number;
+  /** Maximum retained info/debug/unknown log rows. Warning/error rows are time-bound only. */
+  routineLogRowCap?: number;
+  /** Maximum oldest routine rows removed by one bounded catch-up tick. */
+  logVolumePruneBatchRows?: number;
 }
+
+export interface LogVolumePruneResult {
+  deleted: number;
+  status: 'more' | 'reclaim-pending' | 'done' | 'done-compacted';
+}
+
+export type StoredContextGraphJoinPolicy = ContextGraphJoinPolicyRecord;
+
+export interface ContextGraphJoinPolicyAuditInput {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: string;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservationInput {
+  contextGraphId: string;
+  timestamp: number;
+  contextGraphLimit: number;
+  nodeLimit: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  policyVersion: number;
+  policyEpoch: number;
+}
+
+export interface ContextGraphJoinPolicyRateReservationResult {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+export interface ContextGraphAutomaticApprovalCommitInput {
+  contextGraphId: string;
+  timestamp: number;
+  actor: string;
+  agentAddress: string;
+  requestDigest: string;
+  policyEpoch: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphAutomaticApprovalRepairInput {
+  contextGraphId: string;
+  requestDigest: string;
+  policyEpoch: number;
+}
+
+export interface ContextGraphAutomaticApprovalRepairRecord {
+  policyEpoch: number;
+  actor: string;
+  agentAddress: string;
+}
+
+type ContextGraphAutomaticApprovalLedgerState = 'reserved' | 'committed';
+
+interface ContextGraphAutomaticApprovalLedgerRow {
+  context_graph_id: string;
+  request_digest: string;
+  policy_epoch: number;
+  reserved_at: number;
+  state: ContextGraphAutomaticApprovalLedgerState;
+  committed_at: number | null;
+  actor: string;
+  agent_address: string;
+  policy_version: number;
+  repair_pending: number;
+}
+
+/**
+ * Resolve the replication-rollup memo TTL: an explicit option (any finite
+ * number, incl. `<= 0` to disable) wins; otherwise a STRICT parse of
+ * `DKG_DASHBOARD_CACHE_TTL_MS` — empty / malformed falls back to the default so
+ * an empty env var in a deploy file doesn't silently disable the memo; otherwise
+ * 2000ms.
+ */
+function resolveCacheTtlMs(optValue: number | undefined): number {
+  if (typeof optValue === 'number' && Number.isFinite(optValue)) return optValue;
+  const raw = process.env.DKG_DASHBOARD_CACHE_TTL_MS;
+  if (raw === undefined || !/^-?\d+$/.test(raw.trim())) return 2000;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) ? n : 2000;
+}
+
+/**
+ * A rollup is only memoized when its smallest relevant time window is at least
+ * this many multiples of the TTL — so a cached moving-window result can never
+ * represent a meaningfully different window than the live request.
+ */
+const MEMO_WINDOW_SAFETY_FACTOR = 10;
 
 export class DashboardDB {
   readonly db: Database.Database;
   readonly dataDir: string;
   private retentionDays: number;
+  private readonly explicitRetentionDays: boolean;
+  private readonly routineLogRowCap: number;
+  private readonly logVolumePruneBatchRows: number;
 
   constructor(opts: DashboardDBOptions) {
     this.dataDir = opts.dataDir;
+    this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
+    this.routineLogRowCap = Math.max(
+      0,
+      Math.floor(opts.routineLogRowCap ?? DEFAULT_ROUTINE_LOG_ROW_CAP),
+    );
+    this.logVolumePruneBatchRows = Math.max(
+      1,
+      Math.floor(opts.logVolumePruneBatchRows ?? DEFAULT_LOG_VOLUME_PRUNE_BATCH_ROWS),
+    );
+    this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
+    // frames but leaves the -wal file at its high-water mark, so a node
+    // that once took a heavy write burst (e.g. the pre-rc.14 sync-page
+    // idempotency firehose) keeps a multi-GB -wal on disk forever. With
+    // journal_size_limit set, checkpoints truncate the file back to this
+    // cap. Per-connection setting (not persisted), so it is re-applied on
+    // every open. 64 MiB leaves headroom above the ~4 MiB default
+    // autocheckpoint while bounding the worst case.
+    this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
+    this.loadRetentionSetting();
     this.prune();
   }
 
@@ -35,7 +263,50 @@ export class DashboardDB {
 
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version >= SCHEMA_VERSION) return;
+    const upgradedExistingDb = version > 0 && version < SCHEMA_VERSION;
+    const ensureJoinPolicyAuditCapTrigger = () => this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND event_type NOT IN (
+            'join_admission_committed',
+            'join_policy_changed'
+          );
+      END;
+    `);
+    const ensureJoinApprovalRepairMarker = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'context_graph_join_approval_ledger'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = this.db.pragma(
+        'table_info(context_graph_join_approval_ledger)',
+      ) as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'repair_pending')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_join_approval_ledger
+          ADD COLUMN repair_pending INTEGER NOT NULL DEFAULT 0
+            CHECK (repair_pending IN (0, 1));
+        `);
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_repair
+          ON context_graph_join_approval_ledger(
+            context_graph_id, request_digest, repair_pending, reserved_at DESC
+          );
+      `);
+    };
+    if (version > SCHEMA_VERSION) return;
+    if (version === SCHEMA_VERSION) {
+      // Repair restored/development databases that carry the current version
+      // but lost an idempotent schema adjunct.
+      ensureJoinApprovalRepairMarker();
+      ensureJoinPolicyAuditCapTrigger();
+      return;
+    }
 
     if (version < 1) {
       this.db.exec(`
@@ -53,7 +324,7 @@ export class DashboardDB {
           direct_peers INTEGER,
           relayed_peers INTEGER,
           mesh_peers INTEGER,
-          paranet_count INTEGER,
+          contextGraph_count INTEGER,
           total_triples INTEGER,
           total_kcs INTEGER,
           total_kas INTEGER,
@@ -61,7 +332,12 @@ export class DashboardDB {
           confirmed_kcs INTEGER,
           tentative_kcs INTEGER,
           rpc_latency_ms INTEGER,
-          rpc_healthy INTEGER
+          rpc_healthy INTEGER,
+          relay_capacity INTEGER,
+          relay_reservation_count INTEGER,
+          relay_active_circuits INTEGER,
+          relay_bytes_in INTEGER,
+          relay_bytes_out INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON metric_snapshots(ts);
 
@@ -73,7 +349,7 @@ export class DashboardDB {
           duration_ms INTEGER,
           status TEXT DEFAULT 'in_progress',
           peer_id TEXT,
-          paranet_id TEXT,
+          contextGraph_id TEXT,
           triple_count INTEGER,
           error_message TEXT,
           details TEXT
@@ -95,16 +371,15 @@ export class DashboardDB {
         CREATE INDEX IF NOT EXISTS idx_logs_operation_id ON logs(operation_id);
         CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
-          message, content=logs, content_rowid=id
-        );
-
-        CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
-          INSERT INTO logs_fts(rowid, message) VALUES (new.id, new.message);
-        END;
-        CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
-          INSERT INTO logs_fts(logs_fts, rowid, message) VALUES('delete', old.id, old.message);
-        END;
+        -- NOTE: Earlier schema versions (V1..V14) also created an FTS5
+        -- virtual table "logs_fts" plus AFTER INSERT/DELETE triggers to
+        -- keep it in sync with "logs". That fed a free-text search path
+        -- behind /api/logs?q=... The FTS5 index turned out to dominate
+        -- on-disk size (multi-GB shadow tables on long-lived nodes) and
+        -- the corresponding HTTP route had no production consumer
+        -- (the dashboard log viewer is file-backed via /api/node-log).
+        -- V15 drops it for fresh installs; the migration below cleans
+        -- it up for in-place upgrades.
 
         CREATE TABLE IF NOT EXISTS query_history (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,6 +425,12 @@ export class DashboardDB {
     }
 
     if (version < 3) {
+      // The `message_id` column landed in V11 (chat receiver-side dedup
+      // after the May 2026 soak postmortem's seq=13 duplicate finding).
+      // We add it to the fresh-install CREATE so new nodes get the
+      // column + the partial unique index in one step; the V11 block
+      // below idempotently adds the column to nodes that upgraded
+      // through versions 3..10 first.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS chat_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,7 +439,8 @@ export class DashboardDB {
           peer TEXT NOT NULL,
           peer_name TEXT,
           text TEXT NOT NULL,
-          delivered INTEGER
+          delivered INTEGER,
+          message_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_messages(ts);
         CREATE INDEX IF NOT EXISTS idx_chat_peer ON chat_messages(peer);
@@ -190,6 +472,11 @@ export class DashboardDB {
     }
 
     if (version < 5) {
+      // `context_graph_id` landed in V16 (notifications-pane redesign — the
+      // scoping key for the redesigned bell pane). We add it to the
+      // fresh-install CREATE so new nodes get the column + its index in one
+      // step; the V16 block below idempotently adds it to nodes that upgraded
+      // through versions 5..15 first (same pattern as `message_id` in V3/V11).
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS notifications (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,10 +487,12 @@ export class DashboardDB {
           source TEXT,
           peer TEXT,
           read INTEGER NOT NULL DEFAULT 0,
-          meta TEXT
+          meta TEXT,
+          context_graph_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_notif_ts ON notifications(ts);
         CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read);
+        CREATE INDEX IF NOT EXISTS idx_notif_cg ON notifications(context_graph_id);
       `);
     }
 
@@ -216,8 +505,677 @@ export class DashboardDB {
       `);
     }
 
-    this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    if (version < 7) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_subscriptions (
+          context_graph_id TEXT PRIMARY KEY,
+          name TEXT,
+          subscribed INTEGER NOT NULL,
+          synced INTEGER NOT NULL,
+          meta_synced INTEGER,
+          on_chain_id TEXT,
+          sync_scoped INTEGER NOT NULL DEFAULT 1,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_subs_sync_scoped
+          ON context_graph_subscriptions(sync_scoped);
+      `);
+    }
 
+    if (version < 8) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_memberships (
+          context_graph_id TEXT NOT NULL,
+          principal_type TEXT NOT NULL,
+          principal_id TEXT NOT NULL,
+          role TEXT,
+          status TEXT NOT NULL,
+          source TEXT,
+          display_name TEXT,
+          metadata TEXT,
+          first_seen_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (context_graph_id, principal_type, principal_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_members_context
+          ON context_graph_memberships(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_cg_members_principal
+          ON context_graph_memberships(principal_type, principal_id);
+        CREATE INDEX IF NOT EXISTS idx_cg_members_status
+          ON context_graph_memberships(status);
+      `);
+    }
+
+    if (version < 9) {
+      const columns = this.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'shared_memory_synced')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_subscriptions
+            ADD COLUMN shared_memory_synced INTEGER;
+        `);
+      }
+    }
+
+    if (version < 10) {
+      // The V1 CREATE statement above already lists the relay_* columns,
+      // which covers fresh installs. For nodes upgrading from a pre-V10
+      // schema the table already exists, so `CREATE TABLE IF NOT EXISTS`
+      // is a no-op and the new columns wouldn't be added — `insertSnapshot()`
+      // would then fail with `no such column: relay_capacity` on the next
+      // metric tick. This block uses the same defensive idempotent
+      // PRAGMA-then-ALTER pattern as `version < 9` to add any missing
+      // relay_* columns. Not "V9 backward compat" in the data-preservation
+      // sense — just making the schema bump safe to apply to whatever
+      // table happens to already exist.
+      const cols = new Set(
+        (this.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      const relayCols = [
+        'relay_capacity',
+        'relay_reservation_count',
+        'relay_active_circuits',
+        'relay_bytes_in',
+        'relay_bytes_out',
+      ];
+      for (const col of relayCols) {
+        if (!cols.has(col)) {
+          this.db.exec(`ALTER TABLE metric_snapshots ADD COLUMN ${col} INTEGER;`);
+        }
+      }
+    }
+
+    if (version < 11) {
+      // Chat receiver-side dedup by `messageId` — addresses the seq=13
+      // duplicate finding from the May 2026 Miles↔Lex soak postmortem
+      // (same encrypted payload arrived twice on the receiver, 1s apart,
+      // both stored because the schema had no idempotency key).
+      //
+      // The V3 CREATE above already declares `message_id` so fresh
+      // installs get it. This block uses the same defensive
+      // PRAGMA-then-ALTER pattern as V9/V10 to add the column for
+      // nodes upgrading through versions 3..10 first, then creates
+      // the partial unique index that powers `INSERT OR IGNORE` dedup
+      // semantics in `insertChatMessage`.
+      //
+      // The index is keyed by `(peer, direction, message_id)`:
+      //   - Per-direction keying — Codex review of PR #534 flagged
+      //     that omitting `direction` lets an outbound row collide
+      //     with a legitimate inbound row carrying the same
+      //     `messageId` from the same peer. Negligible probability
+      //     with v4 UUIDs but real for any future caller that
+      //     supplies its own deterministic ids (the MCP layer, an
+      //     external bridge, etc.) — and the failure mode would be
+      //     a SILENTLY dropped inbound message, which is exactly the
+      //     class this PR is trying to close. Including `direction`
+      //     makes inbound + outbound dedup live in independent
+      //     namespaces.
+      //   - Per-sender keying — two different senders that happen to
+      //     pick the same UUID (vanishingly unlikely with v4 UUIDs
+      //     but non-zero in theory, and any future migration to a
+      //     smaller id space would make it real) must not collide.
+      //   - Predicate `WHERE message_id IS NOT NULL` keeps the legacy
+      //     null-id rows (pre-V11 messages, plus any future sender
+      //     that omits the field) outside the uniqueness constraint
+      //     so an old persistent row can't block a new identical-text
+      //     resend.
+      const chatCols = new Set(
+        (this.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!chatCols.has('message_id')) {
+        this.db.exec(`ALTER TABLE chat_messages ADD COLUMN message_id TEXT;`);
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msgid
+          ON chat_messages(peer, direction, message_id)
+          WHERE message_id IS NOT NULL;
+      `);
+    }
+
+    if (version < 12) {
+      // Universal Messenger substrate (rc.9 plan PR-1).
+      //
+      // Two new tables back the substrate's `MessageIdempotencyStore`
+      // and `ProtocolOutboxStore` ports — protocol-agnostic
+      // counterparts to the chat-specific `idx_chat_msgid` (V11) and
+      // the in-memory `MessageOutbox` (rc.8). Adding them at V12
+      // before any caller migrates onto Messenger (PR-3+) so the
+      // tables are present + tested by the time the substrate
+      // actually wires them.
+      //
+      // The substrate's design constraint: adding a new short-message
+      // protocol requires no new storage. A single
+      // `message_idempotency` row + a single `protocol_outbox` row
+      // describes any peer-to-peer short message regardless of the
+      // protocol prefix (`/dkg/10.0.1/message`, `/dkg/10.0.1/skill_request`,
+      // `/dkg/10.0.1/swm-sender-key`, etc.) — the `protocol` column
+      // partitions the namespace.
+      //
+      // `message_idempotency` design:
+      //   - PRIMARY KEY = (peer_id, protocol, message_id, direction).
+      //     `direction` separates inbound vs outbound so a sender's
+      //     "did I deliver this" cache lives in a distinct namespace
+      //     from a receiver's "did I process this" dedup table — the
+      //     Codex #534 lesson generalised.
+      //   - `response_blob BLOB` holds responses up to
+      //     `RESPONSE_CACHE_BYTES` (256 KiB) for idempotent re-delivery.
+      //     Larger responses store `response_blob = NULL` with the
+      //     actual size in `response_size` (mark-only); duplicate
+      //     receives in that case surface `RESPONSE_GONE` to the
+      //     sender's caller.
+      //   - `ts` is the record-time wall-clock, used by the periodic
+      //     prune (24h TTL default).
+      //
+      // `protocol_outbox` design:
+      //   - PRIMARY KEY = (peer_id, protocol, message_id). One in-
+      //     flight retry slot per `(peer, protocol, message)` tuple.
+      //   - `payload BLOB` stores the envelope-wrapped wire bytes
+      //     (i.e. the `ReliableEnvelope` proto output, not the raw
+      //     application payload), so retries replay byte-identical
+      //     frames without re-encoding.
+      //   - `idx_outbox_next_attempt` indexes the sole automatic retry query
+      //     (`SELECT ... WHERE next_attempt_at <= ?`). The peer-scoped query is
+      //     retained only for diagnostics/DHT bookkeeping and MUST NOT become a
+      //     connection-triggered drain; it uses the PK prefix at expected queue
+      //     sizes (~tens of entries per peer).
+      //
+      // No data migration: pure additive. The chat-specific
+      // `idx_chat_msgid` from V11 stays in place — PR-3 will drop
+      // it (V13) once chat migrates onto the substrate and
+      // `message_id` is enforced via `message_idempotency` instead.
+      // V13 will also preserve `chat_messages.message_id` as
+      // nullable + unwritten for rollback safety.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS message_idempotency (
+          peer_id TEXT NOT NULL,
+          protocol TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+          response_blob BLOB,
+          response_size INTEGER NOT NULL DEFAULT 0,
+          ts INTEGER NOT NULL,
+          PRIMARY KEY (peer_id, protocol, message_id, direction)
+        );
+        CREATE INDEX IF NOT EXISTS idx_idem_ts ON message_idempotency(ts);
+
+        CREATE TABLE IF NOT EXISTS protocol_outbox (
+          peer_id TEXT NOT NULL,
+          protocol TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          payload BLOB NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          first_failure_at INTEGER NOT NULL,
+          last_attempt_at INTEGER NOT NULL,
+          next_attempt_at INTEGER NOT NULL,
+          last_error TEXT,
+          PRIMARY KEY (peer_id, protocol, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_outbox_next_attempt
+          ON protocol_outbox(next_attempt_at);
+      `);
+    }
+
+    if (version < 13) {
+      // PR-3 chat-substrate cutover: the receiver-side dedup that
+      // V11 added via the partial unique index
+      // `idx_chat_msgid(peer, direction, message_id)` is now
+      // owned by `message_idempotency` (V12) — every inbound chat
+      // travels through `Messenger.register` which gates on the
+      // idempotency cache before invoking the application handler,
+      // so the SQL index is no longer the source of truth.
+      //
+      // We DROP the index (lets the column hold non-unique values
+      // again — important for rolling forward without conflicts on
+      // any old non-substrate retries that may still be sitting in
+      // pre-cutover daemons) but we KEEP the `chat_messages.message_id`
+      // column itself, nullable + unwritten by the new code path.
+      // This is the rollback-safety constraint from the rc.9 plan:
+      // if PR-3 lands and a hot rollback to rc.8 is needed, the
+      // V11 schema is still structurally compatible — only the
+      // uniqueness contract changes between V12 and V13, not the
+      // shape. Dropping the column entirely would require a full
+      // table rebuild on downgrade.
+      //
+      // No data migration. No new tables. Pure DROP INDEX.
+      this.db.exec(`
+        DROP INDEX IF EXISTS idx_chat_msgid;
+      `);
+    }
+
+    if (version < 14) {
+      // Rename legacy "paranet_*" columns to "contextGraph_*" so INSERT
+      // statements using the new names succeed on databases created before
+      // the v10 terminology rename. Column existence is checked via
+      // pragma to avoid errors when the DB was already created at v14+.
+      const snapshotCols = this.db.pragma('table_info(metric_snapshots)') as { name: string }[];
+      if (snapshotCols.some(c => c.name === 'paranet_count')) {
+        this.db.exec(`ALTER TABLE metric_snapshots RENAME COLUMN paranet_count TO contextGraph_count`);
+      }
+      const opsCols = this.db.pragma('table_info(operations)') as { name: string }[];
+      if (opsCols.some(c => c.name === 'paranet_id')) {
+        this.db.exec(`ALTER TABLE operations RENAME COLUMN paranet_id TO contextGraph_id`);
+      }
+    }
+
+    if (version < 15) {
+      // Drop FTS5 free-text-search infrastructure on `logs`.
+      //
+      // Production incident (rc.10/rc.11 boundary, May 2026): a 12-day-old
+      // testnet edge node accumulated a 9 GB node-ui.db with the FTS5
+      // shadow tables (`logs_fts_data`, `_idx`, `_docsize`, `_config`)
+      // accounting for ~7 GB. SQLite eventually returned
+      // "database disk image is malformed" on boot and the daemon refused
+      // to start. Root causes were structural, not operational:
+      //   1. /api/logs?q= (the only consumer of FTS5 here) has no
+      //      production UI wiring — the dashboard's log viewer is
+      //      file-backed via /api/node-log.
+      //   2. prune() ran on a 90-day cutoff and never deleted anything
+      //      on this 12-day-old DB, so the index grew unbounded.
+      //   3. FTS5 fragments aggressively without periodic `optimize`,
+      //      which we never called.
+      //
+      // V15 deletes the dead infrastructure: triggers first, then the
+      // virtual table (which drops its 4 shadow tables atomically), then
+      // a one-shot VACUUM to actually reclaim disk on existing nodes.
+      // The base `logs` table is preserved — it still backs the
+      // operation-correlated log views (`getOperation`,
+      // `getFailedOperations`). Substring/text search moves to
+      // /api/node-log, which already supports `?q=`.
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS logs_ai;
+        DROP TRIGGER IF EXISTS logs_ad;
+        DROP TABLE   IF EXISTS logs_fts;
+      `);
+      // VACUUM cannot run inside a transaction; better-sqlite3 wraps
+      // multi-statement exec() in implicit BEGIN/COMMIT, so we issue
+      // it as its own call. Skipped on fresh installs where the
+      // virtual table never existed: VACUUM on an empty DB is cheap
+      // but unnecessary, and is harmless if it runs anyway.
+      try {
+        this.db.exec(`VACUUM`);
+      } catch {
+        // VACUUM can fail if a connection elsewhere holds the DB open
+        // (it requires an exclusive lock). prune() also checks the
+        // freelist size, so the next boot retries as long as dropping
+        // FTS left meaningful reclaimable space behind. We never block
+        // startup on disk reclamation.
+      }
+    }
+
+    if (version < 16) {
+      // Notifications-pane redesign: add `context_graph_id` — the scoping
+      // key the redesigned bell pane filters/aggregates on. The V5 CREATE
+      // above already lists the column for fresh installs; this block adds
+      // it (idempotently) to nodes that upgraded through versions 5..15
+      // first, using the same defensive PRAGMA-then-ALTER pattern as
+      // V9/V10/V11. Additive + nullable: existing rows keep NULL (legacy
+      // node/global-scope notifications), which the scoped read path treats
+      // as out-of-scope and ages out via prune(). No data migration.
+      const cols = new Set(
+        (this.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!cols.has('context_graph_id')) {
+        this.db.exec(`ALTER TABLE notifications ADD COLUMN context_graph_id TEXT;`);
+      }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_cg ON notifications(context_graph_id);`);
+    }
+
+    if (version < 17) {
+      // Phase B (chain-driven VM reconciliation): persist two fields on the
+      // subscription row.
+      //   * `on_chain_hash` — the curator-committed wire id. The type already
+      //     declared `onChainHash` (and the V8 host-recovery path needs it to
+      //     resume on the right topic after restart), but no column existed,
+      //     so it was silently dropped on persist. This adds the column and
+      //     folds in that fix.
+      //   * `last_reconciled_ordinal` — the per-CG registration-ordinal
+      //     watermark: the count of registered KAs this node has promoted to
+      //     VM contiguously. The sweep resumes from here, so it MUST survive
+      //     restarts. NULL == "never reconciled" (sweep starts at 0).
+      // Same defensive PRAGMA-then-ALTER pattern as V9/V10/V16 — additive +
+      // nullable, no data migration, safe on whatever table already exists.
+      const cols = new Set(
+        (this.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!cols.has('on_chain_hash')) {
+        this.db.exec(`ALTER TABLE context_graph_subscriptions ADD COLUMN on_chain_hash TEXT;`);
+      }
+      if (!cols.has('last_reconciled_ordinal')) {
+        this.db.exec(`ALTER TABLE context_graph_subscriptions ADD COLUMN last_reconciled_ordinal INTEGER;`);
+      }
+    }
+
+    if (version < 18) {
+      // Phase F (Replication observability): persist the chain-driven VM
+      // reconciliation telemetry the agent emits via `onReplicationEvent`, so
+      // the /ui/observability Replication tab can aggregate efficiently without
+      // re-parsing the daemon log. One row per decision point (sweep / fetch /
+      // promote / already / defer / cursor-advance / core-fill). Pruned by `ts`
+      // like the other event tables.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS replication_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          on_chain_cg_id TEXT,
+          action TEXT NOT NULL,
+          ual TEXT,
+          ordinal INTEGER,
+          ka_id TEXT,
+          from_watermark INTEGER,
+          to_watermark INTEGER,
+          head INTEGER,
+          reconciled INTEGER,
+          pending INTEGER,
+          detail TEXT
+        );
+      `);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_repl_ts ON replication_events(ts);`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_repl_cg ON replication_events(context_graph_id, ts);`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_repl_action ON replication_events(action, ts);`);
+    }
+
+    if (version < 19) {
+      // Phase D (Cores fill their own gaps): persist `core_hosted` on the
+      // subscription row. Set when a Core signs a StorageACK for a PUBLIC CG,
+      // it marks the CG as one this node hosts so the chain-driven VM
+      // reconciler runs for it across restarts even without a member
+      // subscription. Without persistence a Core that ACKed a CG, went down
+      // during the next publish, and restarted would forget it hosts the CG
+      // and never fill the gap — defeating the phase. Same additive + nullable
+      // PRAGMA-then-ALTER pattern as V17.
+      const cols = new Set(
+        (this.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!cols.has('core_hosted')) {
+        this.db.exec(`ALTER TABLE context_graph_subscriptions ADD COLUMN core_hosted INTEGER;`);
+      }
+    }
+
+    if (version < 20) {
+      // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
+      // Per-author durable KA-number sequence. The allocation namespace is
+      // the *attested author* address (locked design decision); a KA's full
+      // id is packed off-chain as `(uint160(author) << 96) | uint96(number)`.
+      // This table owns only the `number` half: one strictly-monotonic,
+      // never-reclaimed counter per author address.
+      //   - `author_address` is stored lowercase (the `SqliteKaNumberStore`
+      //     lowercases before every read/write) so checksum-cased and
+      //     lower-cased inputs map to the same sequence.
+      //   - `next_number` is the NEXT number to hand out for that author;
+      //     `allocate()` returns `next_number` then increments, so the first
+      //     call for an author returns 0.
+      // INTEGER (SQLite's signed 64-bit) is sufficient: at 1000 allocations/s
+      // for a million years a single author consumes ~2^55 numbers, far under
+      // the 2^63 INTEGER max and under the uint96 on-chain field. Like
+      // `protocol_outbox`, this state is durable and is NEVER pruned —
+      // reclaiming a number could mint a duplicate kaId.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ka_numbers (
+          author_address TEXT PRIMARY KEY,
+          next_number INTEGER NOT NULL
+        );
+      `);
+    }
+
+    if (version < 21) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS sync_checkpoints (
+          key TEXT PRIMARY KEY,
+          offset INTEGER NOT NULL CHECK (offset >= 0),
+          updated_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
+          ON sync_checkpoints(expires_at);
+      `);
+    }
+
+    if (version < 22) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_cursors (
+          namespace TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value INTEGER NOT NULL CHECK (value > 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (namespace, scope, key)
+        );
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_runtime_cursors_namespace_scope
+          ON runtime_cursors(namespace, scope);
+      `);
+    }
+
+    if (version < 23) {
+      // OT-RFC-59 SC5: durable per-(peer, contextGraph) changelog cursor. NEVER
+      // pruned (see SqliteChangelogCursorStore) — a TTL would defeat the O(delta)
+      // cross-restart catch-up this table exists for.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_cursors (
+          peer_id TEXT NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          era TEXT NOT NULL,
+          seq INTEGER NOT NULL CHECK (seq >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (peer_id, context_graph_id)
+        );
+      `);
+    }
+
+    if (version < 24) {
+      // OT-RFC-59 §6 P0 durable era guard: the write-side ChangelogStore's
+      // restore-detection needs the (era, highSeq) high-water in a store that a
+      // `store.nq` restore does NOT roll back with the RDF store. node-ui.db
+      // survives such a restore, so a rollback under the same era rotates the era
+      // (forcing peers to full-resync instead of silently skipping). Single row.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_era (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          era TEXT NOT NULL,
+          high_seq INTEGER NOT NULL CHECK (high_seq >= 0),
+          updated_at INTEGER NOT NULL
+        );
+      `);
+    }
+
+    if (version < 25) {
+      // Durable security audit for private-CG open enrollment. V25/V26 also
+      // used this table as admission state; V27 projects those legacy rows into
+      // the typed operational ledger below.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_policy_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor TEXT,
+          agent_address TEXT,
+          outcome TEXT NOT NULL,
+          reason TEXT,
+          request_digest TEXT,
+          policy_version INTEGER,
+          details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_ts
+          ON context_graph_join_policy_audit(ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_cg_ts
+          ON context_graph_join_policy_audit(context_graph_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_policy_audit_event_ts
+          ON context_graph_join_policy_audit(event_type, ts);
+      `);
+    }
+
+    if (version < 26) {
+      // Bound flood-generated decision noise without letting that same flood
+      // erase the two records needed to reconstruct a private-CG admission:
+      // who changed the policy, and who was automatically admitted under it.
+      // V26 additionally retained live reservations because they still enforced
+      // the rolling one-hour ceilings. V27 removes that dependency below.
+      //
+      // V25 already installed this trigger, so DROP before CREATE is required:
+      // CREATE TRIGGER IF NOT EXISTS would silently preserve the old predicate
+      // on an upgraded database.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    if (version < 27) {
+      // Operational admission state is deliberately separate from the audit
+      // stream. Audit retention and event naming must never alter rate-limit,
+      // epoch, or commit-idempotency behaviour.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_join_approval_ledger (
+          context_graph_id TEXT NOT NULL,
+          request_digest TEXT NOT NULL,
+          policy_epoch INTEGER NOT NULL,
+          reserved_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'committed')),
+          committed_at INTEGER,
+          actor TEXT NOT NULL,
+          agent_address TEXT NOT NULL,
+          policy_version INTEGER NOT NULL,
+          PRIMARY KEY (context_graph_id, request_digest, policy_epoch),
+          CHECK (length(context_graph_id) > 0),
+          CHECK (length(request_digest) > 0),
+          CHECK (typeof(policy_epoch) = 'integer'),
+          CHECK (typeof(reserved_at) = 'integer'),
+          CHECK (committed_at IS NULL OR typeof(committed_at) = 'integer'),
+          CHECK (typeof(policy_version) = 'integer'),
+          CHECK (
+            (state = 'reserved' AND committed_at IS NULL)
+            OR (state = 'committed' AND committed_at IS NOT NULL)
+          )
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_reserved_at
+          ON context_graph_join_approval_ledger(reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_cg_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, reserved_at);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_digest_reserved_at
+          ON context_graph_join_approval_ledger(context_graph_id, request_digest, reserved_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cg_join_approval_ledger_committed_at
+          ON context_graph_join_approval_ledger(committed_at);
+      `);
+
+      // Best-effort one-time projection for V25/V26 databases. Invalid legacy
+      // JSON cannot abort startup; only rows with a typed numeric epoch can be
+      // authoritative operational state. For duplicate audit reservations,
+      // retain the newest row for each (CG, digest, epoch).
+      this.db.exec(`
+        WITH raw_reservations AS (
+          SELECT
+            id,
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            ts AS reserved_at,
+            COALESCE(actor, '') AS actor,
+            COALESCE(agent_address, '') AS agent_address,
+            COALESCE(policy_version, 1) AS policy_version
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_auto_reservation'
+            AND outcome = 'reserved'
+            AND request_digest IS NOT NULL
+        ),
+        ranked_reservations AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY context_graph_id, request_digest, policy_epoch
+            ORDER BY reserved_at DESC, id DESC
+          ) AS rank
+          FROM raw_reservations
+          WHERE policy_epoch IS NOT NULL
+        ),
+        raw_commits AS (
+          SELECT
+            context_graph_id,
+            request_digest,
+            CASE
+              WHEN json_valid(details)
+                AND json_type(details, '$.policyEpoch') IN ('integer', 'real')
+                THEN CAST(json_extract(details, '$.policyEpoch') AS INTEGER)
+              ELSE NULL
+            END AS policy_epoch,
+            MIN(ts) AS committed_at
+          FROM context_graph_join_policy_audit
+          WHERE event_type = 'join_admission_committed'
+            AND outcome = 'approved'
+            AND request_digest IS NOT NULL
+          GROUP BY context_graph_id, request_digest, policy_epoch
+        )
+        INSERT OR IGNORE INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        )
+        SELECT
+          reservation.context_graph_id,
+          reservation.request_digest,
+          reservation.policy_epoch,
+          reservation.reserved_at,
+          CASE WHEN commit_row.committed_at IS NULL THEN 'reserved' ELSE 'committed' END,
+          commit_row.committed_at,
+          reservation.actor,
+          reservation.agent_address,
+          reservation.policy_version
+        FROM ranked_reservations AS reservation
+        LEFT JOIN raw_commits AS commit_row
+          ON commit_row.context_graph_id = reservation.context_graph_id
+         AND commit_row.request_digest = reservation.request_digest
+         AND commit_row.policy_epoch = reservation.policy_epoch
+        WHERE reservation.rank = 1;
+      `);
+
+      // V26's trigger protected live reservation audit rows because they were
+      // operational state. The ledger makes that coupling obsolete, so replace
+      // the trigger while preserving the flood-resistant proof exemptions.
+      this.db.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    }
+
+    if (version < 28) {
+      // A reservation alone does not prove that admission crossed its
+      // membership boundary. Persist that distinction so an exact retry can
+      // finish moderation/audit after delegation expiry or daemon restart.
+      ensureJoinApprovalRepairMarker();
+    }
+
+    // Keep this repair outside the version gate. Restored/development DBs can
+    // carry the current user_version while missing a trigger; recreating it is
+    // idempotent and keeps the audit bound fail-closed on every open.
+    ensureJoinPolicyAuditCapTrigger();
+
+    if (version < 29) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
+          cache_key TEXT PRIMARY KEY,
+          context_graph_id TEXT NOT NULL,
+          failures INTEGER NOT NULL,
+          next_retry_at INTEGER NOT NULL,
+          swm_gen TEXT NOT NULL,
+          candidate_namespaces TEXT NOT NULL,
+          peer_topology_key TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_cg
+          ON vm_reconcile_negative_cache(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_retry
+          ON vm_reconcile_negative_cache(next_retry_at);
+      `);
+    }
+    this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    if (upgradedExistingDb && !this.explicitRetentionDays) {
+      this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
+    }
+  }
+
+  private loadRetentionSetting(): void {
     const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
     if (savedRetention) {
       const days = Number(savedRetention.value);
@@ -229,14 +1187,188 @@ export class DashboardDB {
 
   prune(): void {
     const cutoff = Date.now() - this.retentionDays * 86_400_000;
+    // Count total rows actually deleted across all DELETE statements.
+    // SQLite's per-statement change count is exposed via better-sqlite3's
+    // `Database.run().changes`, but `exec()` returns nothing — for a
+    // proper accounting we'd switch each statement to `prepare/run`. For
+    // the VACUUM gating decision below we only need to know whether
+    // *something* substantial was deleted, so we sample the only table
+    // that actually grows fast in practice: `logs`.
+    const logsDeleted = this.db.prepare(
+      `DELETE FROM logs WHERE ts < ?`,
+    ).run(cutoff).changes;
     this.db.exec(`DELETE FROM metric_snapshots WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM operation_phases WHERE started_at < ${cutoff}`);
     this.db.exec(`DELETE FROM operations WHERE started_at < ${cutoff}`);
-    this.db.exec(`DELETE FROM logs WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM query_history WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM replication_events WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM context_graph_join_policy_audit WHERE ts < ${cutoff}`);
+    // The admission ledger has its own typed lifetime. It intentionally does
+    // not depend on whether the corresponding audit rows still exist. Preserve
+    // the historical retention envelope for durable commit idempotency while
+    // allowing fully expired reservation/commit state to age out.
+    this.db.prepare(`
+      DELETE FROM context_graph_join_approval_ledger
+      WHERE reserved_at < ?
+        AND (committed_at IS NULL OR committed_at < ?)
+    `).run(cutoff, cutoff);
+    this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
+    // Reconcile negatives are accelerators, never historical records. Once the
+    // retry window elapses they must not survive indefinitely or accumulate one
+    // row per previously-seen KA across restarts.
+    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
+    // Universal Messenger idempotency table. Shorter TTL than the
+    // operator retention: no realistic dedup window extends beyond
+    // a day. The protocol_outbox table is intentionally not pruned
+    // here; its max-age is store policy and must be applied by
+    // SqliteProtocolOutboxStore.dropExpired().
+    const messengerCutoff = Date.now() - 24 * 60 * 60 * 1000;
+    this.db.exec(`DELETE FROM message_idempotency WHERE ts < ${messengerCutoff}`);
+
+    // Avoid rebuilding an oversized DB at startup while millions of routine
+    // rows are still live. The daemon trims that backlog in bounded batches;
+    // the final batch performs one compacting VACUUM. Databases already under
+    // the cap retain the established time-prune reclamation behaviour.
+    if (!this.hasRoutineLogOverflow()) {
+      this.reclaimFreePagesIfNeeded(logsDeleted > LOGS_VACUUM_DELETE_THRESHOLD);
+    }
+
+    // Return the WAL file itself to the OS. journal_size_limit bounds it
+    // in steady state, but a TRUNCATE checkpoint here shrinks it promptly
+    // on the prune cadence (~6h) and immediately after the VACUUM above,
+    // which rewrites the whole DB through the WAL and momentarily grows
+    // it. Runs unconditionally — independent of the VACUUM gate — because
+    // an idle node still wants its -wal reclaimed.
+    this.truncateWal('prune');
+  }
+
+  /**
+   * Remove one bounded batch of the oldest routine (non-warning/error) logs.
+   * A count cap complements time retention: a high-rate sync storm can create
+   * millions of rows inside a single day, long before a 14-day cutoff applies.
+   *
+   * Deletion is deliberately incremental so an upgrade does not block node
+   * startup on a multi-GB transaction. Once the backlog reaches the cap, one
+   * VACUUM returns the accumulated free pages to the OS and the file shrinks.
+   */
+  pruneLogVolumeBatch(): LogVolumePruneResult {
+    const overflowCutoff = this.routineLogOverflowCutoff();
+    if (overflowCutoff === null) {
+      const reclaim = this.reclaimFreePagesIfNeeded(false);
+      if (!reclaim.reclaimPending) this.truncateWal('log-volume prune');
+      return {
+        deleted: 0,
+        status: reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+      };
+    }
+
+    const deleted = this.db.prepare(`
+      DELETE FROM logs
+      WHERE id IN (
+        SELECT id
+        FROM logs
+        WHERE id <= @cutoff
+          AND level NOT IN ('warn', 'error')
+        ORDER BY id ASC
+        LIMIT @batchRows
+      )
+    `).run({
+      cutoff: overflowCutoff,
+      batchRows: this.logVolumePruneBatchRows,
+    }).changes;
+
+    // If the batch filled, conservatively schedule another tick. An exact-size
+    // final batch costs one extra cheap probe before compaction, which is safer
+    // than running a second million-row count after every deletion.
+    const hasMore = deleted === this.logVolumePruneBatchRows;
+    const reclaim = hasMore
+      ? { compacted: false, reclaimPending: false }
+      : this.reclaimFreePagesIfNeeded(deleted > LOGS_VACUUM_DELETE_THRESHOLD);
+    if (!hasMore && !reclaim.reclaimPending) this.truncateWal('log-volume prune');
+    return {
+      deleted,
+      status: hasMore
+        ? 'more'
+        : reclaim.reclaimPending
+          ? 'reclaim-pending'
+          : reclaim.compacted
+            ? 'done-compacted'
+            : 'done',
+    };
+  }
+
+  private routineLogOverflowCutoff(): number | null {
+    const row = this.db.prepare(`
+      SELECT id
+      FROM logs
+      WHERE level NOT IN ('warn', 'error')
+      ORDER BY id DESC
+      LIMIT 1 OFFSET ?
+    `).get(this.routineLogRowCap) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  private hasRoutineLogOverflow(): boolean {
+    return this.routineLogOverflowCutoff() !== null;
+  }
+
+  private reclaimFreePagesIfNeeded(force: boolean): {
+    compacted: boolean;
+    reclaimPending: boolean;
+  } {
+    // DELETE / DROP only marks pages reusable; VACUUM is what returns them to
+    // the OS. A failed exclusive-lock/disk attempt remains pending for a later
+    // background retry and never prevents the node from running.
+    const freePages = Number(this.db.pragma('freelist_count', { simple: true }) ?? 0);
+    if (!force && freePages <= VACUUM_FREE_PAGE_THRESHOLD) {
+      return { compacted: false, reclaimPending: false };
+    }
+    try {
+      this.db.exec(`VACUUM`);
+      return { compacted: true, reclaimPending: false };
+    } catch {
+      return { compacted: false, reclaimPending: true };
+    }
+  }
+
+  private truncateWal(reason: string): void {
+    try {
+      // wal_checkpoint signals reader contention through its result row
+      // (`busy = 1`), NOT by throwing — so a busy checkpoint leaves the
+      // WAL un-truncated while looking like success. With better-sqlite3's
+      // single synchronous connection this should not happen, but surface
+      // it if it ever does so a silently-failing reclaim is observable
+      // rather than indistinguishable from a real one.
+      const [checkpoint] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+        busy: number;
+        log: number;
+        checkpointed: number;
+      }>;
+      if (checkpoint?.busy) {
+        console.warn(
+          `[DashboardDB] wal_checkpoint(TRUNCATE) busy — WAL not reclaimed during ${reason} ` +
+            `(log=${checkpoint.log}, checkpointed=${checkpoint.checkpointed}); retried next prune`,
+        );
+      }
+    } catch (err) {
+      // Reaching here means the pragma threw, which is distinct from the
+      // handled busy case above: contention surfaces as busy>0, not an
+      // exception. Log it (don't swallow) so that if a future SQLite /
+      // better-sqlite3 change turns lock or I/O errors into throws, the
+      // stalled WAL reclaim is visible in the daemon log instead of only
+      // showing up later as unexplained disk growth. Never block prune.
+      console.warn(
+        `[DashboardDB] wal_checkpoint(TRUNCATE) failed — WAL not reclaimed during ${reason}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // --- Prepared statements (lazy-initialized) ---
@@ -248,6 +1380,50 @@ export class DashboardDB {
     return this._stmts[key];
   }
 
+  // --- Short-TTL memo for polled, scan-heavy read rollups ---
+  // The replication summary/per-cg/timeline endpoints scan `replication_events`
+  // synchronously on the daemon's event loop and are polled by the dashboard on
+  // a few-second cadence. A short memo collapses repeated identical scans (extra
+  // browser tabs, a runaway poller) into one, with no visible staleness on
+  // window-based analytics. TTL resolved in the constructor from
+  // `cacheTtlMs` / DKG_DASHBOARD_CACHE_TTL_MS (<=0 disables; default 2000).
+  private _memo = new Map<string, { at: number; value: unknown }>();
+  private readonly _memoTtlMs: number;
+
+  /**
+   * Memoize a rollup for up to `_memoTtlMs`. `minWindowMs` is the smallest time
+   * window the result depends on; caching is bypassed unless that window is at
+   * least MEMO_WINDOW_SAFETY_FACTOR x the TTL. These rollups are computed over a
+   * moving `Date.now()` window, so a cached value can represent a slightly older
+   * window than the live request; requiring a 10x margin keeps that drift a
+   * negligible fraction of the window. A 1x guard is technically sufficient for
+   * `periodMs` (only the window cutoff drives staleness, not `bucketMs`), but per
+   * review (zsculac) we apply the conservative 10x margin to the smallest
+   * relevant window so the cache is used only where staleness is unambiguously
+   * acceptable. Default dashboard windows (1h/24h) are far above the 2s TTL, so
+   * they always cache.
+   *
+   * Returned values are structuredClone'd so a caller that sorts/pushes/annotates
+   * the summary or rows cannot mutate the cached instance and poison later reads
+   * (these methods previously returned a fresh result object on every call).
+   */
+  private memoized<T>(key: string, minWindowMs: number, fn: () => T): T {
+    // `< F*ttl` bypasses, so a window of exactly F*ttl IS cached — matching the
+    // ">= 10x cacheable" contract documented above.
+    if (!(this._memoTtlMs > 0) || minWindowMs < this._memoTtlMs * MEMO_WINDOW_SAFETY_FACTOR) {
+      return fn();
+    }
+    const now = Date.now();
+    const hit = this._memo.get(key);
+    if (hit && now - hit.at < this._memoTtlMs) return structuredClone(hit.value) as T;
+    const value = fn();
+    // Bound the map: keys are few in practice, but per-CG timeline variants can
+    // accumulate. Entries are short-lived, so a rare full clear is safe.
+    if (this._memo.size > 256) this._memo.clear();
+    this._memo.set(key, { at: now, value });
+    return structuredClone(value) as T;
+  }
+
   // --- Metric snapshots ---
 
   insertSnapshot(snap: MetricSnapshotRow): void {
@@ -255,15 +1431,19 @@ export class DashboardDB {
       INSERT INTO metric_snapshots (
         ts, cpu_percent, mem_used_bytes, mem_total_bytes,
         disk_used_bytes, disk_total_bytes, heap_used_bytes, uptime_seconds,
-        peer_count, direct_peers, relayed_peers, mesh_peers, paranet_count,
+        peer_count, direct_peers, relayed_peers, mesh_peers, contextGraph_count,
         total_triples, total_kcs, total_kas, store_bytes,
-        confirmed_kcs, tentative_kcs, rpc_latency_ms, rpc_healthy
+        confirmed_kcs, tentative_kcs, rpc_latency_ms, rpc_healthy,
+        relay_capacity, relay_reservation_count, relay_active_circuits,
+        relay_bytes_in, relay_bytes_out
       ) VALUES (
         @ts, @cpu_percent, @mem_used_bytes, @mem_total_bytes,
         @disk_used_bytes, @disk_total_bytes, @heap_used_bytes, @uptime_seconds,
-        @peer_count, @direct_peers, @relayed_peers, @mesh_peers, @paranet_count,
+        @peer_count, @direct_peers, @relayed_peers, @mesh_peers, @contextGraph_count,
         @total_triples, @total_kcs, @total_kas, @store_bytes,
-        @confirmed_kcs, @tentative_kcs, @rpc_latency_ms, @rpc_healthy
+        @confirmed_kcs, @tentative_kcs, @rpc_latency_ms, @rpc_healthy,
+        @relay_capacity, @relay_reservation_count, @relay_active_circuits,
+        @relay_bytes_in, @relay_bytes_out
       )
     `).run(snap);
   }
@@ -272,6 +1452,722 @@ export class DashboardDB {
     return this.db.prepare(
       'SELECT * FROM metric_snapshots ORDER BY ts DESC LIMIT 1',
     ).get() as MetricSnapshotRow | undefined;
+  }
+
+  upsertContextGraphSubscription(record: {
+    context_graph_id: string;
+    name?: string | null;
+    subscribed: number;
+    synced: number;
+    shared_memory_synced?: number | null;
+    meta_synced?: number | null;
+    on_chain_id?: string | null;
+    on_chain_hash?: string | null;
+    last_reconciled_ordinal?: number | null;
+    core_hosted?: number | null;
+    sync_scoped: number;
+    updated_at: number;
+  }): void {
+    this.stmt('upsertContextGraphSubscription', `
+      INSERT INTO context_graph_subscriptions (
+        context_graph_id, name, subscribed, synced, shared_memory_synced, meta_synced,
+        on_chain_id, on_chain_hash, last_reconciled_ordinal, core_hosted, sync_scoped, updated_at
+      ) VALUES (
+        @context_graph_id, @name, @subscribed, @synced, @shared_memory_synced, @meta_synced,
+        @on_chain_id, @on_chain_hash, @last_reconciled_ordinal, @core_hosted, @sync_scoped, @updated_at
+      )
+      ON CONFLICT(context_graph_id) DO UPDATE SET
+        name = excluded.name,
+        subscribed = excluded.subscribed,
+        synced = excluded.synced,
+        shared_memory_synced = excluded.shared_memory_synced,
+        meta_synced = excluded.meta_synced,
+        on_chain_id = excluded.on_chain_id,
+        on_chain_hash = excluded.on_chain_hash,
+        last_reconciled_ordinal = excluded.last_reconciled_ordinal,
+        core_hosted = excluded.core_hosted,
+        sync_scoped = excluded.sync_scoped,
+        updated_at = excluded.updated_at
+    `).run({
+      context_graph_id: record.context_graph_id,
+      name: record.name ?? null,
+      subscribed: record.subscribed,
+      synced: record.synced,
+      shared_memory_synced: record.shared_memory_synced ?? null,
+      meta_synced: record.meta_synced ?? null,
+      on_chain_id: record.on_chain_id ?? null,
+      on_chain_hash: record.on_chain_hash ?? null,
+      last_reconciled_ordinal: record.last_reconciled_ordinal ?? null,
+      core_hosted: record.core_hosted ?? null,
+      sync_scoped: record.sync_scoped,
+      updated_at: record.updated_at,
+    });
+  }
+
+  listContextGraphSubscriptions(): ContextGraphSubscriptionRow[] {
+    return this.db.prepare(
+      'SELECT * FROM context_graph_subscriptions ORDER BY context_graph_id ASC',
+    ).all() as ContextGraphSubscriptionRow[];
+  }
+
+  getContextGraphSubscription(contextGraphId: string): ContextGraphSubscriptionRow | undefined {
+    return this.stmt(
+      'getContextGraphSubscription',
+      'SELECT * FROM context_graph_subscriptions WHERE context_graph_id = ?',
+    ).get(contextGraphId) as ContextGraphSubscriptionRow | undefined;
+  }
+
+  deleteContextGraphSubscription(contextGraphId: string): void {
+    const remove = this.db.transaction(() => {
+      this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+      this.stmt('deleteContextGraphReadinessProvenance', 'DELETE FROM settings WHERE key = ?')
+        .run(this.contextGraphReadinessProvenanceKey(contextGraphId));
+    });
+    remove();
+  }
+
+  /**
+   * CLI-owned, durable provenance for context-graph readiness flags.
+   *
+   * Subscription rows predate per-plane proof and can therefore contain the
+   * v10.0.6 false-ready shape (`synced=1`, `shared_memory_synced=1`) after an
+   * unrelated peer returned an empty response.  Keep the proof out of the
+   * agent-owned subscription upsert so older/custom agent stores remain
+   * source-compatible and routine subscription persistence cannot overwrite a
+   * proof established by the daemon's catch-up classifier.
+   */
+  getContextGraphReadinessProvenance(contextGraphId: string): ContextGraphReadinessProvenance | null {
+    const row = this.stmt(
+      'getContextGraphReadinessProvenance',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphReadinessProvenanceKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Partial<ContextGraphReadinessProvenance>;
+      if (!Number.isInteger(parsed.version) || (parsed.version ?? 0) < 1) return null;
+      return {
+        version: parsed.version!,
+        durableVerified: parsed.durableVerified === true,
+        sharedMemoryVerified: parsed.sharedMemoryVerified === true,
+        updatedAt: typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt)
+          ? parsed.updatedAt
+          : 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  setContextGraphReadinessProvenance(
+    contextGraphId: string,
+    provenance: Omit<ContextGraphReadinessProvenance, 'updatedAt'> & { updatedAt?: number },
+  ): void {
+    const record: ContextGraphReadinessProvenance = {
+      version: provenance.version,
+      durableVerified: provenance.durableVerified,
+      sharedMemoryVerified: provenance.sharedMemoryVerified,
+      updatedAt: provenance.updatedAt ?? Date.now(),
+    };
+    this.stmt(
+      'setContextGraphReadinessProvenance',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphReadinessProvenanceKey(contextGraphId), JSON.stringify(record));
+  }
+
+  private contextGraphReadinessProvenanceKey(contextGraphId: string): string {
+    return `contextGraphReadiness:${contextGraphId}`;
+  }
+
+  // --- Private context-graph join policy + audit ---
+
+  getContextGraphJoinPolicy(contextGraphId: string): StoredContextGraphJoinPolicy | null {
+    const row = this.stmt(
+      'getContextGraphJoinPolicy',
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(this.contextGraphJoinPolicyKey(contextGraphId)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      return parseContextGraphJoinPolicyRecord(JSON.parse(row.value), contextGraphId);
+    } catch {
+      // Corrupt policy state is indistinguishable from no policy. The agent's
+      // default is manual, so this is intentionally fail-closed.
+      return null;
+    }
+  }
+
+  setContextGraphJoinPolicy(record: StoredContextGraphJoinPolicy): void {
+    this.stmt(
+      'setContextGraphJoinPolicy',
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    ).run(this.contextGraphJoinPolicyKey(record.contextGraphId), JSON.stringify(record));
+  }
+
+  setContextGraphJoinPolicyWithAudit(
+    record: StoredContextGraphJoinPolicy,
+    event: ContextGraphJoinPolicyAuditInput,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.setContextGraphJoinPolicy(record);
+      this.appendContextGraphJoinPolicyAudit(event);
+    });
+    transition();
+  }
+
+  appendContextGraphJoinPolicyAudit(event: ContextGraphJoinPolicyAuditInput): void {
+    this.stmt('appendContextGraphJoinPolicyAudit', `
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, actor, agent_address, outcome,
+        reason, request_digest, policy_version, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.timestamp,
+      event.contextGraphId,
+      event.eventType,
+      event.actor ?? null,
+      event.agentAddress ?? null,
+      event.outcome,
+      event.reason ?? null,
+      event.requestDigest ?? null,
+      event.policyVersion ?? null,
+      event.details ? JSON.stringify(event.details) : null,
+    );
+  }
+
+  reserveContextGraphAutomaticApproval(
+    input: ContextGraphJoinPolicyRateReservationInput,
+  ): ContextGraphJoinPolicyRateReservationResult {
+    const reserve = this.db.transaction((): ContextGraphJoinPolicyRateReservationResult => {
+      const since = input.timestamp - 60 * 60 * 1000;
+      const cgRow = this.stmt('countContextGraphAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND reserved_at >= ?
+      `).get(input.contextGraphId, since) as { count: number };
+      const nodeRow = this.stmt('countNodeAutomaticApprovalReservations', `
+        SELECT COUNT(*) AS count
+        FROM context_graph_join_approval_ledger
+        WHERE reserved_at >= ?
+      `).get(since) as { count: number };
+      const contextGraphCount = Number(cgRow?.count ?? 0);
+      const nodeCount = Number(nodeRow?.count ?? 0);
+      const existing = this.stmt('findContextGraphAutomaticApprovalReservation', `
+        SELECT 1 AS found
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+          AND reserved_at >= ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        since,
+      ) as { found: number } | undefined;
+      if (existing) {
+        return {
+          allowed: true,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+        };
+      }
+      if (contextGraphCount >= input.contextGraphLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'context-graph-rate-limit',
+        };
+      }
+      if (nodeCount >= input.nodeLimit) {
+        return {
+          allowed: false,
+          contextGraphApprovalsLastHour: contextGraphCount,
+          nodeApprovalsLastHour: nodeCount,
+          reason: 'node-rate-limit',
+        };
+      }
+
+      // The typed ledger row and its audit projection share one transaction:
+      // failures cannot consume quota without an audit event or emit an audit
+      // reservation without durable operational state. An expired replay of
+      // the same digest+epoch refreshes its reservation timestamp and consumes
+      // the rolling-window quota again, matching the former append-only model.
+      this.stmt('upsertContextGraphAutomaticApprovalReservation', `
+        INSERT INTO context_graph_join_approval_ledger (
+          context_graph_id, request_digest, policy_epoch, reserved_at,
+          state, committed_at, actor, agent_address, policy_version
+        ) VALUES (?, ?, ?, ?, 'reserved', NULL, ?, ?, ?)
+        ON CONFLICT(context_graph_id, request_digest, policy_epoch) DO UPDATE SET
+          reserved_at = excluded.reserved_at,
+          actor = excluded.actor,
+          agent_address = excluded.agent_address,
+          policy_version = excluded.policy_version
+      `).run(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+        input.timestamp,
+        input.actor,
+        input.agentAddress,
+        input.policyVersion,
+      );
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_auto_reservation',
+        actor: input.actor,
+        agentAddress: input.agentAddress,
+        outcome: 'reserved',
+        requestDigest: input.requestDigest,
+        policyVersion: input.policyVersion,
+        details: {
+          contextGraphLimit: input.contextGraphLimit,
+          nodeLimit: input.nodeLimit,
+          policyEpoch: input.policyEpoch,
+        },
+      });
+      return {
+        allowed: true,
+        contextGraphApprovalsLastHour: contextGraphCount + 1,
+        nodeApprovalsLastHour: nodeCount + 1,
+      };
+    });
+    return reserve();
+  }
+
+  markContextGraphAutomaticApprovalRepairPending(
+    input: ContextGraphAutomaticApprovalRepairInput,
+  ): boolean {
+    const marked = this.stmt('markContextGraphAutomaticApprovalRepairPending', `
+      UPDATE context_graph_join_approval_ledger
+      SET repair_pending = 1
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND policy_epoch = ?
+        AND state = 'reserved'
+    `).run(input.contextGraphId, input.requestDigest, input.policyEpoch);
+    return marked.changes === 1;
+  }
+
+  getContextGraphAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): ContextGraphAutomaticApprovalRepairRecord | null {
+    const repair = this.stmt('getContextGraphAutomaticApprovalRepair', `
+      SELECT policy_epoch, actor, agent_address
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND request_digest = ?
+        AND state = 'reserved'
+        AND repair_pending = 1
+      ORDER BY reserved_at DESC
+      LIMIT 1
+    `).get(contextGraphId, requestDigest) as Pick<
+      ContextGraphAutomaticApprovalLedgerRow,
+      'policy_epoch' | 'actor' | 'agent_address'
+    > | undefined;
+    return repair
+      ? {
+          policyEpoch: repair.policy_epoch,
+          actor: repair.actor,
+          agentAddress: repair.agent_address,
+        }
+      : null;
+  }
+
+  commitContextGraphAutomaticApproval(
+    input: ContextGraphAutomaticApprovalCommitInput,
+  ): boolean {
+    const commit = this.db.transaction((): boolean => {
+      const reservation = this.stmt('findExactContextGraphAutomaticApprovalReservation', `
+        SELECT context_graph_id, request_digest, policy_epoch, reserved_at,
+               state, committed_at, actor, agent_address, policy_version
+        FROM context_graph_join_approval_ledger
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+        LIMIT 1
+      `).get(
+        input.contextGraphId,
+        input.requestDigest,
+        input.policyEpoch,
+      ) as ContextGraphAutomaticApprovalLedgerRow | undefined;
+      if (!reservation) return false;
+      if (reservation.state === 'committed') return true;
+
+      const updated = this.stmt('commitContextGraphAutomaticApprovalReservation', `
+        UPDATE context_graph_join_approval_ledger
+        SET state = 'committed', committed_at = ?, repair_pending = 0
+        WHERE context_graph_id = ?
+          AND request_digest = ?
+          AND policy_epoch = ?
+          AND state = 'reserved'
+      `).run(
+        input.timestamp,
+        reservation.context_graph_id,
+        reservation.request_digest,
+        reservation.policy_epoch,
+      );
+      if (updated.changes !== 1) return false;
+
+      this.appendContextGraphJoinPolicyAudit({
+        timestamp: input.timestamp,
+        contextGraphId: input.contextGraphId,
+        eventType: 'join_admission_committed',
+        actor: reservation.actor || input.actor,
+        agentAddress: reservation.agent_address || input.agentAddress,
+        outcome: 'approved',
+        requestDigest: input.requestDigest,
+        policyVersion: reservation.policy_version,
+        details: {
+          ...input.details,
+          policyEpoch: reservation.policy_epoch,
+        },
+      });
+      return true;
+    });
+    return commit();
+  }
+
+  getContextGraphAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): { contextGraphApprovalsLastHour: number; nodeApprovalsLastHour: number } {
+    const since = timestamp - 60 * 60 * 1000;
+    const contextGraphApprovalsLastHour = Number((this.stmt('getContextGraphAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ?
+        AND reserved_at >= ?
+    `).get(contextGraphId, since) as { count: number } | undefined)?.count ?? 0);
+    const nodeApprovalsLastHour = Number((this.stmt('getNodeAutomaticApprovalUsage', `
+      SELECT COUNT(*) AS count
+      FROM context_graph_join_approval_ledger
+      WHERE reserved_at >= ?
+    `).get(since) as { count: number } | undefined)?.count ?? 0);
+    return { contextGraphApprovalsLastHour, nodeApprovalsLastHour };
+  }
+
+  listContextGraphJoinPolicyAudit(contextGraphId: string): Array<Record<string, unknown>> {
+    return this.stmt('listContextGraphJoinPolicyAudit', `
+      SELECT id, ts, context_graph_id, event_type, actor, agent_address,
+             outcome, reason, request_digest, policy_version, details
+      FROM context_graph_join_policy_audit
+      WHERE context_graph_id = ?
+      ORDER BY id ASC
+    `).all(contextGraphId) as Array<Record<string, unknown>>;
+  }
+
+  private contextGraphJoinPolicyKey(contextGraphId: string): string {
+    return `contextGraphJoinPolicy:${contextGraphId}`;
+  }
+
+  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
+    this.stmt('upsertVmReconcileNegative', `
+      INSERT INTO vm_reconcile_negative_cache (
+        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
+        candidate_namespaces, peer_topology_key, updated_at
+      ) VALUES (
+        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
+        @candidate_namespaces, @peer_topology_key, @updated_at
+      )
+      ON CONFLICT(cache_key) DO UPDATE SET
+        context_graph_id = excluded.context_graph_id,
+        failures = excluded.failures,
+        next_retry_at = excluded.next_retry_at,
+        swm_gen = excluded.swm_gen,
+        candidate_namespaces = excluded.candidate_namespaces,
+        peer_topology_key = excluded.peer_topology_key,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
+    return this.stmt(
+      'getVmReconcileNegative',
+      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
+  }
+
+  deleteVmReconcileNegative(cacheKey: string): void {
+    this.stmt(
+      'deleteVmReconcileNegative',
+      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).run(cacheKey);
+  }
+
+  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
+    this.stmt(
+      'deleteVmReconcileNegativesForContextGraph',
+      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
+    ).run(contextGraphId);
+  }
+
+  // --- Phase F: chain-driven VM reconciliation telemetry ---
+
+  /**
+   * Persist one {@link ReplicationEvent} (best-effort sink target). `ordinal`,
+   * watermarks etc. are nullable per the event shape. Number-typed fields are
+   * coerced defensively so a malformed event can never abort the insert.
+   */
+  insertReplicationEvent(ev: ReplicationEventRow): void {
+    this.stmt('insertReplicationEvent', `
+      INSERT INTO replication_events (
+        ts, context_graph_id, on_chain_cg_id, action, ual, ordinal, ka_id,
+        from_watermark, to_watermark, head, reconciled, pending, detail
+      ) VALUES (
+        @ts, @context_graph_id, @on_chain_cg_id, @action, @ual, @ordinal, @ka_id,
+        @from_watermark, @to_watermark, @head, @reconciled, @pending, @detail
+      )
+    `).run({
+      ts: ev.ts,
+      context_graph_id: ev.context_graph_id,
+      on_chain_cg_id: ev.on_chain_cg_id ?? null,
+      action: ev.action,
+      ual: ev.ual ?? null,
+      ordinal: ev.ordinal ?? null,
+      ka_id: ev.ka_id ?? null,
+      from_watermark: ev.from_watermark ?? null,
+      to_watermark: ev.to_watermark ?? null,
+      head: ev.head ?? null,
+      reconciled: ev.reconciled ?? null,
+      pending: ev.pending ?? null,
+      detail: ev.detail ?? null,
+    });
+  }
+
+  /**
+   * Network-wide replication KPIs over the trailing `periodMs`:
+   *  - promotion latency (P50/P95) — fetch→promote delta per UAL.
+   *  - reconcile success rate — promote / (promote + fetch).
+   *  - raw action counts.
+   */
+  getReplicationSummary(periodMs = 86_400_000): ReplicationSummary {
+    return this.memoized(`replicationSummary:${periodMs}`, periodMs, () => this._computeReplicationSummary(periodMs));
+  }
+
+  private _computeReplicationSummary(periodMs: number): ReplicationSummary {
+    const cutoff = Date.now() - periodMs;
+    const rows = this.db.prepare(
+      `SELECT action, COUNT(*) AS n FROM replication_events WHERE ts >= ? GROUP BY action`,
+    ).all(cutoff) as Array<{ action: string; n: number }>;
+    const counts: Record<string, number> = {};
+    for (const r of rows) counts[r.action] = r.n;
+
+    const promotes = counts['promote'] ?? 0;
+    const fetches = counts['fetch'] ?? 0;
+    const defers = counts['defer'] ?? 0;
+    // Success rate: of the publishes the engine TRIED to land this window
+    // (anything that produced a promote or a defer), how many promoted.
+    const attempts = promotes + defers;
+    const successRate = attempts > 0 ? promotes / attempts : null;
+
+    // Promotion latency: pair each `promote` with the most-recent prior
+    // `fetch` for the SAME VERSION within the window. The pairing key is the
+    // per-CG registration `ordinal` (+ CG), NOT the UAL: every update of a KA
+    // reuses the same UAL, so keying on UAL would let a later fast-path
+    // promote (no fetch) mispair with an older fetch for a different version
+    // and inflate the reported latency. fetch/promote for one version always
+    // share the same ordinal, so this pairs them exactly; a fast-path promote
+    // with no fetch for its ordinal correctly contributes a 0ms latency.
+    const latencyRows = this.db.prepare(`
+      SELECT p.ts AS promote_ts,
+             (SELECT MAX(f.ts) FROM replication_events f
+                WHERE f.action = 'fetch'
+                  AND f.context_graph_id = p.context_graph_id
+                  AND f.ordinal = p.ordinal
+                  AND f.ts <= p.ts AND f.ts >= ?) AS fetch_ts
+      FROM replication_events p
+      WHERE p.action = 'promote' AND p.ts >= ? AND p.ordinal IS NOT NULL
+    `).all(cutoff, cutoff) as Array<{ promote_ts: number; fetch_ts: number | null }>;
+    const latencies = latencyRows
+      .map((r) => (r.fetch_ts != null ? r.promote_ts - r.fetch_ts : 0))
+      .filter((d) => d >= 0)
+      .sort((a, b) => a - b);
+    const pct = (p: number): number | null => {
+      if (latencies.length === 0) return null;
+      const idx = Math.min(latencies.length - 1, Math.floor((p / 100) * latencies.length));
+      return latencies[idx];
+    };
+
+    return {
+      periodMs,
+      counts,
+      promotes,
+      fetches,
+      defers,
+      successRate,
+      latencyP50Ms: pct(50),
+      latencyP95Ms: pct(95),
+      totalEvents: rows.reduce((s, r) => s + r.n, 0),
+    };
+  }
+
+  /** Per-CG rollup of replication activity over the window, newest-active first. */
+  getReplicationPerCg(periodMs = 86_400_000): ReplicationPerCgRow[] {
+    return this.memoized(`replicationPerCg:${periodMs}`, periodMs, () => this._computeReplicationPerCg(periodMs));
+  }
+
+  private _computeReplicationPerCg(periodMs: number): ReplicationPerCgRow[] {
+    const cutoff = Date.now() - periodMs;
+    return this.db.prepare(`
+      SELECT context_graph_id,
+             on_chain_cg_id,
+             SUM(CASE WHEN action = 'promote' THEN 1 ELSE 0 END) AS promotes,
+             SUM(CASE WHEN action = 'fetch'   THEN 1 ELSE 0 END) AS fetches,
+             SUM(CASE WHEN action = 'defer'   THEN 1 ELSE 0 END) AS defers,
+             SUM(CASE WHEN action = 'cursor-advance' THEN 1 ELSE 0 END) AS cursor_advances,
+             MAX(to_watermark) AS last_watermark,
+             MAX(head) AS last_head,
+             MAX(ts) AS last_event_ts
+      FROM replication_events
+      WHERE ts >= ?
+      GROUP BY context_graph_id, on_chain_cg_id
+      ORDER BY last_event_ts DESC
+    `).all(cutoff) as ReplicationPerCgRow[];
+  }
+
+  /**
+   * Time-bucketed event series for the timeline charts. When `contextGraphId`
+   * is given, the series is scoped to that CG.
+   */
+  getReplicationTimeline(opts: { periodMs: number; bucketMs: number; contextGraphId?: string }): ReplicationTimelineBucket[] {
+    return this.memoized(
+      `replicationTimeline:${opts.periodMs}:${opts.bucketMs}:${opts.contextGraphId ?? ''}`,
+      // Staleness is driven by the rolling `periodMs` cutoff; `bucketMs` only
+      // controls grouping. We still pass the smaller of the two so timeline
+      // caching also requires a comfortably-large bucket (conservative, per
+      // review) — fine-grained buckets fall back to a fresh compute.
+      Math.min(opts.periodMs, opts.bucketMs),
+      () => this._computeReplicationTimeline(opts),
+    );
+  }
+
+  private _computeReplicationTimeline(opts: { periodMs: number; bucketMs: number; contextGraphId?: string }): ReplicationTimelineBucket[] {
+    const cutoff = Date.now() - opts.periodMs;
+    const bucket = Math.max(1, Math.floor(opts.bucketMs));
+    const where = opts.contextGraphId ? 'AND context_graph_id = @cg' : '';
+    return this.db.prepare(`
+      SELECT (ts / @bucket) * @bucket AS bucket,
+             SUM(CASE WHEN action = 'promote' THEN 1 ELSE 0 END) AS promotes,
+             SUM(CASE WHEN action = 'fetch'   THEN 1 ELSE 0 END) AS fetches,
+             SUM(CASE WHEN action = 'defer'   THEN 1 ELSE 0 END) AS defers,
+             COUNT(*) AS total
+      FROM replication_events
+      WHERE ts >= @cutoff ${where}
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `).all({ cutoff, bucket, cg: opts.contextGraphId ?? null }) as ReplicationTimelineBucket[];
+  }
+
+  /**
+   * Recent raw events for a CG (the per-CG timeline drawer). Newest first.
+   */
+  getReplicationEventsForCg(contextGraphId: string, limit = 100): ReplicationEventRow[] {
+    // Guard against a non-finite limit (e.g. ?limit=foo → NaN upstream): Math.min/max
+    // propagate NaN, which would bind `LIMIT NaN` and make SQLite throw a 500.
+    const safeLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(1000, Math.trunc(limit)))
+      : 100;
+    return this.db.prepare(`
+      SELECT ts, context_graph_id, on_chain_cg_id, action, ual, ordinal, ka_id,
+             from_watermark, to_watermark, head, reconciled, pending, detail
+      FROM replication_events
+      WHERE context_graph_id = ?
+      ORDER BY ts DESC
+      LIMIT ?
+    `).all(contextGraphId, safeLimit) as ReplicationEventRow[];
+  }
+
+  /**
+   * Cursor inspector source: every subscription's persisted watermark joined
+   * with the freshest observed chain head from the event stream. This is the
+   * on-disk truth the Replication tab's cursor inspector renders.
+   */
+  getReplicationCursors(): ReplicationCursorRow[] {
+    return this.db.prepare(`
+      SELECT s.context_graph_id            AS context_graph_id,
+             s.on_chain_id                 AS on_chain_id,
+             s.last_reconciled_ordinal     AS last_reconciled_ordinal,
+             s.core_hosted                 AS core_hosted,
+             s.subscribed                  AS subscribed,
+             (SELECT MAX(head) FROM replication_events e
+                WHERE e.context_graph_id = s.context_graph_id) AS last_head,
+             (SELECT MAX(ts) FROM replication_events e
+                WHERE e.context_graph_id = s.context_graph_id) AS last_event_ts
+      FROM context_graph_subscriptions s
+      ORDER BY s.context_graph_id ASC
+    `).all() as ReplicationCursorRow[];
+  }
+
+  upsertContextGraphMember(record: {
+    context_graph_id: string;
+    principal_type: ContextGraphMemberPrincipalType;
+    principal_id: string;
+    role?: string | null;
+    status: ContextGraphMemberStatus;
+    source?: string | null;
+    display_name?: string | null;
+    metadata?: string | null;
+    first_seen_at?: number | null;
+    updated_at: number;
+  }): void {
+    const firstSeenAt = record.first_seen_at ?? record.updated_at;
+    this.stmt('upsertContextGraphMember', `
+      INSERT INTO context_graph_memberships (
+        context_graph_id, principal_type, principal_id, role, status, source,
+        display_name, metadata, first_seen_at, updated_at
+      ) VALUES (
+        @context_graph_id, @principal_type, @principal_id, @role, @status, @source,
+        @display_name, @metadata, @first_seen_at, @updated_at
+      )
+      ON CONFLICT(context_graph_id, principal_type, principal_id) DO UPDATE SET
+        role = excluded.role,
+        status = excluded.status,
+        source = excluded.source,
+        display_name = excluded.display_name,
+        metadata = excluded.metadata,
+        first_seen_at = context_graph_memberships.first_seen_at,
+        updated_at = excluded.updated_at
+    `).run({
+      context_graph_id: record.context_graph_id,
+      principal_type: record.principal_type,
+      principal_id: record.principal_id,
+      role: record.role ?? null,
+      status: record.status,
+      source: record.source ?? null,
+      display_name: record.display_name ?? null,
+      metadata: record.metadata ?? null,
+      first_seen_at: firstSeenAt,
+      updated_at: record.updated_at,
+    });
+  }
+
+  listContextGraphMembers(contextGraphId?: string): ContextGraphMemberRow[] {
+    if (contextGraphId) {
+      return this.db.prepare(`
+        SELECT * FROM context_graph_memberships
+        WHERE context_graph_id = ?
+        ORDER BY principal_type ASC, principal_id ASC
+      `).all(contextGraphId) as ContextGraphMemberRow[];
+    }
+    return this.db.prepare(`
+      SELECT * FROM context_graph_memberships
+      ORDER BY context_graph_id ASC, principal_type ASC, principal_id ASC
+    `).all() as ContextGraphMemberRow[];
+  }
+
+  deleteContextGraphMember(
+    contextGraphId: string,
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): void {
+    this.stmt(
+      'deleteContextGraphMember',
+      'DELETE FROM context_graph_memberships WHERE context_graph_id = ? AND principal_type = ? AND principal_id = ?',
+    ).run(contextGraphId, principalType, principalId);
   }
 
   getSnapshotHistory(from: number, to: number, maxPoints = 500): MetricSnapshotRow[] {
@@ -301,18 +2197,18 @@ export class DashboardDB {
     operation_name: string;
     started_at: number;
     peer_id?: string | null;
-    paranet_id?: string | null;
+    contextGraph_id?: string | null;
     details?: string | null;
   }): void {
     this.stmt('insertOp', `
-      INSERT INTO operations (operation_id, operation_name, started_at, status, peer_id, paranet_id, details)
-      VALUES (@operation_id, @operation_name, @started_at, 'in_progress', @peer_id, @paranet_id, @details)
+      INSERT INTO operations (operation_id, operation_name, started_at, status, peer_id, contextGraph_id, details)
+      VALUES (@operation_id, @operation_name, @started_at, 'in_progress', @peer_id, @contextGraph_id, @details)
     `).run({
       operation_id: op.operation_id,
       operation_name: op.operation_name,
       started_at: op.started_at,
       peer_id: op.peer_id ?? null,
-      paranet_id: op.paranet_id ?? null,
+      contextGraph_id: op.contextGraph_id ?? null,
       details: op.details ?? null,
     });
   }
@@ -349,6 +2245,7 @@ export class DashboardDB {
 
   getOperations(opts: {
     name?: string;
+    names?: string[];
     status?: string;
     operationId?: string;
     from?: number;
@@ -359,7 +2256,12 @@ export class DashboardDB {
     const wheres: string[] = [];
     const params: unknown[] = [];
 
-    if (opts.name) { wheres.push('operation_name = ?'); params.push(opts.name); }
+    if (opts.names?.length) {
+      wheres.push(`operation_name IN (${opts.names.map(() => '?').join(',')})`);
+      params.push(...opts.names);
+    } else if (opts.name) {
+      wheres.push('operation_name = ?'); params.push(opts.name);
+    }
     if (opts.status) { wheres.push('status = ?'); params.push(opts.status); }
     if (opts.operationId) { wheres.push('operation_id = ?'); params.push(opts.operationId); }
     if (opts.from) { wheres.push('started_at >= ?'); params.push(opts.from); }
@@ -379,6 +2281,7 @@ export class DashboardDB {
 
   getOperationsWithPhases(opts: {
     name?: string;
+    names?: string[];
     status?: string;
     operationId?: string;
     from?: number;
@@ -704,16 +2607,20 @@ export class DashboardDB {
 
     for (const p of periods) {
       const cutoff = now - p.ms;
+      // "Publishes to VM": only publishes that actually spent TRAC
+      // on-chain (Verifiable Memory commits) are counted, so the publish
+      // count and the TRAC total are consistent. Free SWM/local/testnet
+      // publishes record trac_cost = 0 and are intentionally excluded.
       const row = this.db.prepare(`
         SELECT
-          COUNT(*) as publishCount,
-          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+          SUM(CASE WHEN trac_cost > 0 THEN 1 ELSE 0 END) as publishCount,
+          SUM(CASE WHEN status = 'success' AND trac_cost > 0 THEN 1 ELSE 0 END) as successCount,
           COALESCE(SUM(gas_cost_eth), 0) as totalGasEth,
           COALESCE(SUM(trac_cost), 0) as totalTrac,
-          COALESCE(AVG(gas_cost_eth), 0) as avgGasEth,
-          COALESCE(AVG(trac_cost), 0) as avgTrac
+          COALESCE(AVG(CASE WHEN trac_cost > 0 THEN gas_cost_eth END), 0) as avgGasEth,
+          COALESCE(AVG(CASE WHEN trac_cost > 0 THEN trac_cost END), 0) as avgTrac
         FROM operations
-        WHERE operation_name = 'publish' AND started_at >= ?
+        WHERE operation_name = 'publish' AND trac_cost > 0 AND started_at >= ?
       `).get(cutoff) as any;
 
       results.periods.push({
@@ -732,6 +2639,25 @@ export class DashboardDB {
 
   // --- Chat messages ---
 
+  /**
+   * Insert a chat message. rc.9 PR-3 moved the V11 receiver-side
+   * dedup (the partial unique index `idx_chat_msgid`) out of SQL
+   * and into the Universal Messenger substrate
+   * (`Messenger.register` → `message_idempotency` table from V12).
+   * The substrate intercepts duplicate inbound chats BEFORE they
+   * reach this insert, so the table no longer enforces uniqueness
+   * — and this method no longer carries an `ON CONFLICT` clause.
+   * Returns `true` when a row was inserted (always now, modulo
+   * raw SQL constraint failures).
+   *
+   * The `message_id` COLUMN is preserved as nullable + persisted
+   * so HTTP/MCP readers can still surface it. V13 dropped only
+   * the INDEX, not the column — rollback to rc.8 finds a
+   * structurally-compatible schema.
+   *
+   * Non-dedup SQL constraint failures (NOT NULL on `peer`, etc.)
+   * still throw — pinned by db.test.ts.
+   */
   insertChatMessage(msg: {
     ts: number;
     direction: 'in' | 'out';
@@ -739,10 +2665,11 @@ export class DashboardDB {
     peerName?: string | null;
     text: string;
     delivered?: boolean | null;
-  }): void {
-    this.stmt('insertChat', `
-      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered)
-      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered)
+    messageId?: string | null;
+  }): boolean {
+    const info = this.stmt('insertChat', `
+      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered, message_id)
+      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered, @message_id)
     `).run({
       ts: msg.ts,
       direction: msg.direction,
@@ -750,28 +2677,95 @@ export class DashboardDB {
       peer_name: msg.peerName ?? null,
       text: msg.text,
       delivered: msg.delivered == null ? null : msg.delivered ? 1 : 0,
+      message_id: msg.messageId ?? null,
     });
+    return info.changes > 0;
   }
 
+  /**
+   * Read chat history.
+   *
+   * Server-side `direction` filters BEFORE the LIMIT applies, which
+   * matters for inbox reads — if the filter ran client-side, a burst
+   * of outbound replies in the newest N rows would push inbound
+   * messages past the cap and they'd never be surfaced.
+   *
+   * Forward pagination uses a **compound cursor** `(since, sinceId)`
+   * to avoid losing rows that share the same millisecond `ts`.
+   * Without `sinceId`, the predicate is just `ts > since`, and any
+   * second-or-later row that shares the watermark `ts` is permanently
+   * skipped (Codex PR #510 round 2 flagged this — chat bursts can
+   * easily share `Date.now()` values). The compound cursor uses the
+   * `id INTEGER PRIMARY KEY AUTOINCREMENT` from the schema as a stable
+   * tiebreaker so pagination is lossless.
+   *
+   * `order` defaults to `'desc'` for the dashboard "show recent N"
+   * view. Inbox/feed readers pass `'asc'` so pagination walks
+   * oldest → newest and the cursor advances over rows we have
+   * actually returned, never past unseen older ones.
+   */
   getChatMessages(opts: {
     peer?: string;
     since?: number;
+    /**
+     * Secondary cursor — when paired with `since`, the predicate is
+     * `(ts > since) OR (ts = since AND id > sinceId)`, which makes
+     * pagination lossless across rows that share a millisecond.
+     */
+    sinceId?: number;
     limit?: number;
+    direction?: 'in' | 'out';
+    order?: 'asc' | 'desc';
   } = {}): ChatMessageRow[] {
     let sql = 'SELECT * FROM chat_messages WHERE 1=1';
     const params: unknown[] = [];
 
     if (opts.since) {
-      sql += ' AND ts > ?';
-      params.push(opts.since);
+      if (typeof opts.sinceId === 'number') {
+        sql += ' AND (ts > ? OR (ts = ? AND id > ?))';
+        params.push(opts.since, opts.since, opts.sinceId);
+      } else {
+        sql += ' AND ts > ?';
+        params.push(opts.since);
+      }
     }
     if (opts.peer) {
       sql += ' AND peer = ?';
       params.push(opts.peer);
     }
-    sql += ' ORDER BY ts DESC LIMIT ?';
+    if (opts.direction === 'in' || opts.direction === 'out') {
+      sql += ' AND direction = ?';
+      params.push(opts.direction);
+    }
+    // Three sort modes — explicit values are honored literally, the
+    // implicit (omitted) default preserves the pre-RFC dashboard
+    // history contract.
+    //
+    //   order === 'asc'  → true ASC: oldest first (forward pagination)
+    //   order === 'desc' → true DESC: newest first (inverse history)
+    //   omitted          → legacy "newest N then displayed oldest-first":
+    //                      SQL picks the newest N rows then `.reverse()`
+    //                      flips them to chronological order for UI use.
+    //                      Pre-existing callers (PanelRight, openclaw) rely
+    //                      on this shape, so omitting `order` is the only
+    //                      branch that keeps the post-fetch reverse.
+    //
+    // Codex PR #510 round 4 flagged that previously `order: 'desc'` was
+    // not honored — SQL returned DESC and the unconditional `.reverse()`
+    // flipped it back to ASC, so the API contract didn't match the
+    // behaviour. The explicit `'desc'` branch now drops the reverse.
+    if (opts.order === 'asc') {
+      sql += ' ORDER BY ts ASC, id ASC LIMIT ?';
+      params.push(opts.limit ?? 200);
+      return this.db.prepare(sql).all(...params) as ChatMessageRow[];
+    }
+    if (opts.order === 'desc') {
+      sql += ' ORDER BY ts DESC, id DESC LIMIT ?';
+      params.push(opts.limit ?? 200);
+      return this.db.prepare(sql).all(...params) as ChatMessageRow[];
+    }
+    sql += ' ORDER BY ts DESC, id DESC LIMIT ?';
     params.push(opts.limit ?? 200);
-
     return (this.db.prepare(sql).all(...params) as ChatMessageRow[]).reverse();
   }
 
@@ -928,6 +2922,12 @@ export class DashboardDB {
     });
   }
 
+  /**
+   * Backwards-compatible DB-backed log search. V15 deliberately removed
+   * the FTS5 shadow table that made `q=` fast because it dominated DB
+   * growth on production nodes. Keep the public method/API surface using
+   * bounded LIKE scans over the retained base `logs` table.
+   */
   searchLogs(opts: {
     q?: string;
     operationId?: string;
@@ -938,13 +2938,13 @@ export class DashboardDB {
     limit?: number;
     offset?: number;
   } = {}): { logs: LogRow[]; total: number } {
-    if (opts.q) {
-      return this.searchLogsFts(opts);
-    }
-
     const wheres: string[] = [];
     const params: unknown[] = [];
 
+    if (opts.q) {
+      wheres.push(`message LIKE ? ESCAPE '\\'`);
+      params.push(this.likeContains(opts.q));
+    }
     if (opts.operationId) { wheres.push('operation_id = ?'); params.push(opts.operationId); }
     if (opts.level) { wheres.push('level = ?'); params.push(opts.level); }
     if (opts.module) { wheres.push('module = ?'); params.push(opts.module); }
@@ -952,49 +2952,17 @@ export class DashboardDB {
     if (opts.to) { wheres.push('ts <= ?'); params.push(opts.to); }
 
     const where = wheres.length ? `WHERE ${wheres.join(' AND ')}` : '';
-    const limit = opts.limit ?? 200;
-    const offset = opts.offset ?? 0;
-
+    const limit = Math.max(1, Math.min(1000, opts.limit ?? 200));
+    const offset = Math.max(0, opts.offset ?? 0);
     const total = (this.db.prepare(`SELECT COUNT(*) as c FROM logs ${where}`).get(...params) as { c: number }).c;
     const logs = this.db.prepare(
       `SELECT * FROM logs ${where} ORDER BY ts DESC LIMIT ? OFFSET ?`,
     ).all(...params, limit, offset) as LogRow[];
-
     return { logs, total };
   }
 
-  private searchLogsFts(opts: {
-    q?: string;
-    operationId?: string;
-    level?: string;
-    module?: string;
-    from?: number;
-    to?: number;
-    limit?: number;
-    offset?: number;
-  }): { logs: LogRow[]; total: number } {
-    const wheres: string[] = ['logs_fts MATCH ?'];
-    const params: unknown[] = [opts.q!];
-
-    if (opts.operationId) { wheres.push('l.operation_id = ?'); params.push(opts.operationId); }
-    if (opts.level) { wheres.push('l.level = ?'); params.push(opts.level); }
-    if (opts.module) { wheres.push('l.module = ?'); params.push(opts.module); }
-    if (opts.from) { wheres.push('l.ts >= ?'); params.push(opts.from); }
-    if (opts.to) { wheres.push('l.ts <= ?'); params.push(opts.to); }
-
-    const where = wheres.join(' AND ');
-    const limit = opts.limit ?? 200;
-    const offset = opts.offset ?? 0;
-
-    const total = (this.db.prepare(
-      `SELECT COUNT(*) as c FROM logs l JOIN logs_fts ON l.id = logs_fts.rowid WHERE ${where}`,
-    ).get(...params) as { c: number }).c;
-
-    const logs = this.db.prepare(
-      `SELECT l.* FROM logs l JOIN logs_fts ON l.id = logs_fts.rowid WHERE ${where} ORDER BY l.ts DESC LIMIT ? OFFSET ?`,
-    ).all(...params, limit, offset) as LogRow[];
-
-    return { logs, total };
+  private likeContains(value: string): string {
+    return `%${value.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
   }
 
   // --- Query history ---
@@ -1061,10 +3029,23 @@ export class DashboardDB {
     source?: string | null;
     peer?: string | null;
     meta?: string | null;
+    /**
+     * Context-graph scoping key (V16). Written to the indexed
+     * `context_graph_id` column so the scoped read path
+     * (`getScopedNotifications`) can filter/aggregate in SQL. The column is
+     * the authoritative scope source — the wire contract surfaces it as the
+     * top-level `NotifWire.contextGraphId`, NOT nested in `meta`, so we do
+     * NOT re-parse/rewrite caller-supplied `meta` JSON here (that would risk
+     * corrupting already-escaped literals). Callers that also want it inside
+     * `meta` for display include it there themselves (the join handlers
+     * already do). Omitted/undefined → NULL = legacy node/global-scope row,
+     * treated as out-of-scope by the scoped read.
+     */
+    contextGraphId?: string | null;
   }): number {
     const result = this.stmt('insertNotif', `
-      INSERT INTO notifications (ts, type, title, message, source, peer, read, meta)
-      VALUES (@ts, @type, @title, @message, @source, @peer, 0, @meta)
+      INSERT INTO notifications (ts, type, title, message, source, peer, read, meta, context_graph_id)
+      VALUES (@ts, @type, @title, @message, @source, @peer, 0, @meta, @contextGraphId)
     `).run({
       ts: n.ts,
       type: n.type,
@@ -1073,6 +3054,7 @@ export class DashboardDB {
       source: n.source ?? null,
       peer: n.peer ?? null,
       meta: n.meta ?? null,
+      contextGraphId: n.contextGraphId ?? null,
     });
     return result.lastInsertRowid as number;
   }
@@ -1093,6 +3075,87 @@ export class DashboardDB {
     return { notifications, unreadCount: unread.c };
   }
 
+  /**
+   * Scoped notifications read (Codex round-1 B3): return rows ONLY for the
+   * given context-graph ids, newest-first, capped at `limit`. Pushing the
+   * member-CG filter into SQL (on the indexed `context_graph_id` column)
+   * instead of read-N-then-filter guarantees a caller's actionable rows
+   * (join requests) can't be evicted from the window by a flood of
+   * foreign-CG rows. Empty `cgIds` → empty result (no member CGs in scope).
+   *
+   * better-sqlite3 has no array binding, so the `IN (...)` placeholder list
+   * is built from `cgIds.length`.
+   */
+  getNotificationsForContextGraphs(cgIds: string[], limit = 500): NotificationRow[] {
+    if (cgIds.length === 0) return [];
+    const placeholders = cgIds.map(() => '?').join(',');
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE context_graph_id IN (${placeholders})
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(...cgIds, limit) as NotificationRow[];
+  }
+
+  /**
+   * The set of notification row ids in the caller's scope (Codex round-1 B2):
+   * rows whose `context_graph_id` is in `cgIds`. Used to intersect a `/read`
+   * request so a caller can only mark THEIR OWN scoped rows read — never
+   * foreign rows by guessing ids — and so empty-body "mark all" marks only
+   * the caller's scoped rows, not the entire table. Empty `cgIds` → empty set.
+   */
+  getScopedNotificationRowIds(cgIds: string[]): Set<number> {
+    if (cgIds.length === 0) return new Set();
+    const placeholders = cgIds.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT id FROM notifications WHERE context_graph_id IN (${placeholders})`,
+    ).all(...cgIds) as Array<{ id: number }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
+  /**
+   * Read notification rows of the given types regardless of context graph,
+   * newest-first, capped at `limit`. Used for join confirmations
+   * (join_approved/join_rejected): these are the caller's OWN outbound-request
+   * resolutions and are NOT CG-membership-scoped — a rejected requester is no
+   * longer a member of the CG, so a context-graph filter would drop the
+   * rejection entirely (R3-1). Confirmations are low volume (one per resolved
+   * request), so an unscoped type read is bounded; the caller route then keeps
+   * only the rows whose meta.agentAddress is the caller.
+   */
+  getNotificationsOfTypes(types: string[], limit = 200): NotificationRow[] {
+    if (types.length === 0) return [];
+    const placeholders = types.map(() => '?').join(',');
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE type IN (${placeholders})
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(...types, limit) as NotificationRow[];
+  }
+
+  /**
+   * The caller's OWN confirmed-discount rows (`pca_cost_covered`, B8). Wallet-
+   * scoped, NOT CG-membership-scoped (the publishing wallet may not be a member
+   * of the CG it published to — a sponsored edge). Kept on a DEDICATED fetch
+   * (filtered in SQL by type + lowercased `meta.publisherAddress`) rather than
+   * the shared join-confirmation `getNotificationsOfTypes` window: discount rows
+   * are higher-volume (one per discounted publish vs rare join events), so
+   * cap-sharing would let a busy node's join/other volume age a publisher's older
+   * discount rows out of the window → hidden + unmarkable (#1365 round-2). The
+   * SQL pulls ONLY the caller's own rows under its own bound. The type literal
+   * mirrors `PCA_COST_COVERED_TYPE` (kept inline to avoid a notifications-scope
+   * import cycle into the DB layer).
+   */
+  getPcaCostCoveredRowsForWallet(walletAddress: string, limit = 200): NotificationRow[] {
+    const wallet = walletAddress.trim().toLowerCase();
+    if (!wallet) return [];
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE type = 'pca_cost_covered'
+          AND lower(json_extract(meta, '$.publisherAddress')) = ?
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(wallet, limit) as NotificationRow[];
+  }
+
   markNotificationsRead(ids?: number[]): number {
     if (ids && ids.length > 0) {
       const placeholders = ids.map(() => '?').join(',');
@@ -1105,8 +3168,662 @@ export class DashboardDB {
     return result.changes;
   }
 
+  /**
+   * Resolve an activity digest key (`activity:<cgId>:<kind>:<windowBucket>`)
+   * to the ids of the underlying atomic `assertion_activity` rows it
+   * collapses (CR-3). Used by the scoped `/read` path so marking a digest
+   * "seen" flips `read=1` on the real rows that compose it.
+   *
+   * Query shape: the indexed `context_graph_id` column is the pre-filter
+   * (cheap), then `ts` is range-bounded to the bucket window, then
+   * `json_extract(meta,'$.kind')` discriminates the lifecycle kind (which
+   * lives in the JSON `meta`, not its own column). Returns [] for a
+   * malformed key so a bad client id is a no-op, not an error.
+   */
+  resolveActivityDigestRowIds(digestKey: string): number[] {
+    const parsed = parseActivityDigestKey(digestKey);
+    if (!parsed) return [];
+    const windowStart = parsed.windowBucket * ACTIVITY_DIGEST_WINDOW_MS;
+    const windowEnd = windowStart + ACTIVITY_DIGEST_WINDOW_MS;
+    const rows = this.db.prepare(
+      `SELECT id FROM notifications
+        WHERE context_graph_id = ?
+          AND type = ?
+          AND ts >= ? AND ts < ?
+          AND json_extract(meta, '$.kind') = ?`,
+    ).all(
+      parsed.contextGraphId,
+      ASSERTION_ACTIVITY_TYPE,
+      windowStart,
+      windowEnd,
+      parsed.kind,
+    ) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
+  }
+
   close(): void {
     this.db.close();
+  }
+}
+
+// --- Sync requester checkpoints (issue #1138 A3) ---
+
+const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+
+export class SqliteSyncCheckpointStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+  private readonly ttlMs: number;
+
+  constructor(
+    dashboard: DashboardDB,
+    options: { clock?: () => number; ttlMs?: number } = {},
+  ) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+    this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
+  }
+
+  get(key: string): { offset: number; updatedAtMs: number; expiresAtMs: number } | undefined {
+    const now = this.clock();
+    const row = this.db.prepare(
+      `SELECT offset, updated_at, expires_at FROM sync_checkpoints WHERE key = ?`,
+    ).get(key) as { offset: number; updated_at: number; expires_at: number } | undefined;
+    if (!row) return undefined;
+    if (row.expires_at < now) {
+      this.delete(key);
+      return undefined;
+    }
+    return {
+      offset: row.offset,
+      updatedAtMs: row.updated_at,
+      expiresAtMs: row.expires_at,
+    };
+  }
+
+  set(key: string, value: number, nowMs = this.clock()): void {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+    }
+    this.db.prepare(`
+      INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        offset = excluded.offset,
+        updated_at = excluded.updated_at,
+        expires_at = excluded.expires_at
+    `).run(key, value, nowMs, nowMs + this.ttlMs);
+  }
+
+  delete(key: string): void {
+    this.db.prepare(`DELETE FROM sync_checkpoints WHERE key = ?`).run(key);
+  }
+
+  pruneExpired(nowMs = this.clock()): number {
+    return this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(nowMs).changes;
+  }
+}
+
+/**
+ * OT-RFC-59 SC5 durable changelog cursor store (duck-compatible with the agent's
+ * ChangelogCursorStore). Keyed by (peer_id, context_graph_id); stores the last
+ * APPLIED (era, seq) from that responder. Like `ka_numbers` / `protocol_outbox`
+ * this state is durable: it is NEVER added to `prune()` — a TTL would defeat the
+ * O(delta) cross-restart catch-up the changelog lane exists for.
+ */
+export class SqliteChangelogCursorStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  get(peerId: string, contextGraphId: string): { era: string; seq: number; updatedAtMs: number } | undefined {
+    const row = this.db.prepare(
+      `SELECT era, seq, updated_at FROM changelog_cursors WHERE peer_id = ? AND context_graph_id = ?`,
+    ).get(peerId, contextGraphId) as { era: string; seq: number; updated_at: number } | undefined;
+    if (!row) return undefined;
+    return { era: row.era, seq: row.seq, updatedAtMs: row.updated_at };
+  }
+
+  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs = this.clock()): void {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`Invalid changelog cursor seq for ${peerId}/${contextGraphId}: ${seq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_cursors (peer_id, context_graph_id, era, seq, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(peer_id, context_graph_id) DO UPDATE SET
+        era = excluded.era,
+        seq = excluded.seq,
+        updated_at = excluded.updated_at
+    `).run(peerId, contextGraphId, era, seq, nowMs);
+  }
+}
+
+/**
+ * OT-RFC-59 §6 P0 durable era guard (duck-compatible with storage's
+ * ChangelogEraGuard). Persists the single (era, high_seq) high-water in
+ * node-ui.db — which a `store.nq` RDF-store restore does NOT roll back — so the
+ * write-side ChangelogStore can detect a restore/rollback (seq regressed under
+ * the same era) and rotate the era, forcing peers to full-resync instead of
+ * silently skipping. `save` is called after every committed seq, so it must be a
+ * single fast upsert.
+ */
+export class SqliteChangelogEraGuard {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  async load(): Promise<{ era: string; highSeq: number } | null> {
+    const row = this.db.prepare(
+      `SELECT era, high_seq FROM changelog_era WHERE id = 1`,
+    ).get() as { era: string; high_seq: number } | undefined;
+    return row ? { era: row.era, highSeq: row.high_seq } : null;
+  }
+
+  async save(era: string, highSeq: number): Promise<void> {
+    if (!Number.isSafeInteger(highSeq) || highSeq < 0) {
+      throw new Error(`Invalid changelog era high_seq: ${highSeq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_era (id, era, high_seq, updated_at)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        era = excluded.era,
+        high_seq = excluded.high_seq,
+        updated_at = excluded.updated_at
+    `).run(era, highSeq, this.clock());
+  }
+}
+
+// --- Universal Messenger substrate stores (rc.9 plan PR-1) ---
+
+/**
+ * SQLite-backed `MessageIdempotencyStore` against the V12
+ * `message_idempotency` table in `DashboardDB`. Receiver-side dedup
+ * cache + sender-side "did we deliver this" cache, keyed by
+ * `(peer, protocol, message_id, direction)`.
+ *
+ * Constructed against an already-opened `DashboardDB` so all DKG
+ * persistence shares a single SQLite file (one WAL, one fsync, one
+ * pragma surface). Doesn't open the DB itself — the daemon's
+ * `lifecycle.ts` owns DB lifecycle and hands one in here in PR-2.
+ *
+ * Response caching policy lives in `RESPONSE_CACHE_BYTES` (256 KiB
+ * fixed limit, exported from `@origintrail-official/dkg-core`).
+ * Responses up to the limit are stored inline in `response_blob`;
+ * larger responses store `response_blob = NULL` with the actual
+ * size in `response_size` (mark-only). Duplicate receives whose
+ * original was mark-only surface as `RESPONSE_GONE` to the sender
+ * — see `RESPONSE_GONE_MARKER` for the canonical signal string.
+ */
+export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  /** @param clock injectable for deterministic tests. Defaults to `Date.now`. */
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  check(
+    peer: string,
+    protocol: string,
+    messageId: string,
+    direction: MessageDirection,
+  ): IdempotencyCheckResult {
+    const row = this.db
+      .prepare(
+        `SELECT response_blob FROM message_idempotency
+         WHERE peer_id = ? AND protocol = ? AND message_id = ? AND direction = ?`,
+      )
+      .get(peer, protocol, messageId, direction) as
+      | { response_blob: Buffer | null }
+      | undefined;
+    if (!row) return { seen: false };
+    // better-sqlite3 returns Node Buffer for BLOB columns; copy into a
+    // Uint8Array so callers cannot mutate the cached DB snapshot.
+    if (row.response_blob === null) return { seen: true };
+    return {
+      seen: true,
+      cachedResponse: new Uint8Array(row.response_blob),
+    };
+  }
+
+  record(
+    peer: string,
+    protocol: string,
+    messageId: string,
+    direction: MessageDirection,
+    response?: Uint8Array,
+  ): void {
+    const responseSize = response?.length ?? 0;
+    // Mark-only when over the cache limit. Stores NULL blob + the
+    // actual size, so a future duplicate receive can surface
+    // `RESPONSE_GONE`. The 256 KiB cutoff is the rc.9 plan's locked
+    // design decision — no per-protocol/per-call knob.
+    const blob =
+      response !== undefined && response.length <= RESPONSE_CACHE_BYTES
+        ? Buffer.from(response)
+        : null;
+    // Targeted ON CONFLICT — never the broader INSERT OR IGNORE which
+    // would silently swallow unrelated constraint violations (the
+    // Codex #534 lesson). Idempotent re-record on the same key is a
+    // no-op; any other constraint violation surfaces as a thrown
+    // SqliteError so the substrate's bug doesn't disguise itself as
+    // a normal duplicate.
+    this.db
+      .prepare(
+        `INSERT INTO message_idempotency
+           (peer_id, protocol, message_id, direction, response_blob, response_size, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (peer_id, protocol, message_id, direction) DO NOTHING`,
+      )
+      .run(peer, protocol, messageId, direction, blob, responseSize, this.clock());
+  }
+
+  pruneOlderThan(tsMs: number): number {
+    const result = this.db
+      .prepare(`DELETE FROM message_idempotency WHERE ts < ?`)
+      .run(tsMs);
+    return result.changes;
+  }
+}
+
+/**
+ * SQLite-backed `ProtocolOutboxStore` against the V12
+ * `protocol_outbox` table. Sender-side durable retry queue, keyed
+ * by `(peer, protocol, message_id)`. The substrate's reliability
+ * floor: a daemon crash mid-retry doesn't lose the message — the
+ * next startup's `Messenger.processOutboxTick` picks up exactly
+ * where the crash left off (modulo the in-flight bytes that died
+ * with the process, which is documented as the "in-flight queue
+ * caveat" in CHANGELOG for rc.9).
+ *
+ * The backoff ladder + max-age are NOT stored in SQL — they live
+ * on the wrapping `ProtocolOutbox` in `packages/core`, and only
+ * the resulting `next_attempt_at` and `first_failure_at` timestamps
+ * land in the table. This keeps the schema independent of policy
+ * changes: bumping the ladder doesn't require a migration.
+ *
+ * Constructor takes a `maxAgeMs` so `dropExpired` can apply it
+ * directly in SQL (avoiding a full table read).
+ */
+export interface SqliteProtocolOutboxStoreOptions {
+  /**
+   * Max age (ms) from `firstFailureAt` before `dropExpired(now)`
+   * evicts an entry. Defaults to 24h. Mirrors the wrapping
+   * `ProtocolOutbox`'s `maxAgeMs` so both layers agree.
+   */
+  maxAgeMs?: number;
+  /**
+   * Function that returns the backoff (ms) to apply for an entry
+   * about to bump to `attempts`. The schema does NOT store the
+   * ladder; PR-2's `lifecycle.ts` wiring passes the wrapping
+   * `ProtocolOutbox`'s `backoffFor` method here so policy lives in
+   * one place. Defaults to a flat 5s backoff so the store works
+   * standalone in tests + before the wrapping outbox is wired.
+   */
+  backoffFor?: (attempts: number) => number;
+}
+
+export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
+  private readonly db: Database.Database;
+  private maxAgeMs = 24 * 60 * 60 * 1000;
+  private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
+
+  constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
+    this.db = dashboard.db;
+    this.configurePolicy(options);
+  }
+
+  configurePolicy(options: SqliteProtocolOutboxStoreOptions = {}): void {
+    this.maxAgeMs = options.maxAgeMs ?? this.maxAgeMs;
+    this.backoffFor = options.backoffFor ?? this.backoffFor;
+  }
+
+  enqueue(
+    peer: string,
+    protocol: string,
+    messageId: string,
+    payload: Uint8Array,
+    error: string,
+    now: number,
+  ): ProtocolOutboxEntry {
+    const existing = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+      )
+      .get(peer, protocol, messageId) as
+      | {
+          peer_id: string;
+          protocol: string;
+          message_id: string;
+          payload: Buffer;
+          attempts: number;
+          first_failure_at: number;
+          last_attempt_at: number;
+          next_attempt_at: number;
+          last_error: string | null;
+        }
+      | undefined;
+
+    if (existing) {
+      const newAttempts = existing.attempts + 1;
+      const nextAttemptAt = now + this.backoffFor(newAttempts);
+      this.db
+        .prepare(
+          `UPDATE protocol_outbox
+           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+           WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+        )
+        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
+      return {
+        peer,
+        protocol,
+        messageId,
+        payload: new Uint8Array(existing.payload),
+        attempts: newAttempts,
+        firstFailureAt: existing.first_failure_at,
+        lastAttemptAt: now,
+        nextAttemptAt,
+        lastError: error,
+      };
+    }
+
+    const attempts = 1;
+    const nextAttemptAt = now + this.backoffFor(attempts);
+    const blob = Buffer.from(payload);
+    this.db
+      .prepare(
+        `INSERT INTO protocol_outbox
+           (peer_id, protocol, message_id, payload, attempts,
+            first_failure_at, last_attempt_at, next_attempt_at, last_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
+    return {
+      peer,
+      protocol,
+      messageId,
+      payload: new Uint8Array(blob),
+      attempts,
+      firstFailureAt: now,
+      lastAttemptAt: now,
+      nextAttemptAt,
+      lastError: error,
+    };
+  }
+
+  markDelivered(peer: string, protocol: string, messageId: string): boolean {
+    const result = this.db
+      .prepare(
+        `DELETE FROM protocol_outbox
+         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+      )
+      .run(peer, protocol, messageId);
+    return result.changes > 0;
+  }
+
+  hasEntry(peer: string, protocol: string, messageId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM protocol_outbox
+         WHERE peer_id = ? AND protocol = ? AND message_id = ? LIMIT 1`,
+      )
+      .get(peer, protocol, messageId) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
+  }
+
+  pendingFor(peer: string): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE peer_id = ?
+         ORDER BY first_failure_at ASC, protocol ASC, message_id ASC`,
+      )
+      .all(peer) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  due(now: number): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC`,
+      )
+      .all(now) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox
+         WHERE next_attempt_at <= ?
+         ORDER BY next_attempt_at ASC, first_failure_at ASC,
+                  peer_id ASC, protocol ASC, message_id ASC
+         LIMIT ?`,
+      )
+      .all(now, limit) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  dropExpired(now: number): ProtocolOutboxEntry[] {
+    const cutoff = now - this.maxAgeMs;
+    const rows = this.db
+      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
+      .all(cutoff) as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  size(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`).get() as {
+      c: number;
+    };
+    return row.c;
+  }
+
+  list(): ProtocolOutboxEntry[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM protocol_outbox ORDER BY first_failure_at ASC`)
+      .all() as Array<{
+      peer_id: string;
+      protocol: string;
+      message_id: string;
+      payload: Buffer;
+      attempts: number;
+      first_failure_at: number;
+      last_attempt_at: number;
+      next_attempt_at: number;
+      last_error: string | null;
+    }>;
+    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
+  }
+
+  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+      )
+      .get(peer, protocol, messageId) as
+      | {
+          peer_id: string;
+          protocol: string;
+          message_id: string;
+          payload: Buffer;
+          attempts: number;
+          first_failure_at: number;
+          last_attempt_at: number;
+          next_attempt_at: number;
+          last_error: string | null;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return SqliteProtocolOutboxStore.rowToEntry(row);
+  }
+
+  private static rowToEntry(row: {
+    peer_id: string;
+    protocol: string;
+    message_id: string;
+    payload: Buffer;
+    attempts: number;
+    first_failure_at: number;
+    last_attempt_at: number;
+    next_attempt_at: number;
+    last_error: string | null;
+  }): ProtocolOutboxEntry {
+    return {
+      peer: row.peer_id,
+      protocol: row.protocol,
+      messageId: row.message_id,
+      payload: new Uint8Array(row.payload),
+      attempts: row.attempts,
+      firstFailureAt: row.first_failure_at,
+      lastAttemptAt: row.last_attempt_at,
+      nextAttemptAt: row.next_attempt_at,
+      lastError: row.last_error ?? '',
+    };
+  }
+}
+
+/**
+ * SQLite-backed `KaNumberStore` against the V20 `ka_numbers` table.
+ * Per-author durable KA-number allocator for OT-RFC-43 Option-1
+ * deterministic KA identity (B2 allocator core, OFF-CHAIN only).
+ *
+ * Keyed by the attested author address (stored lowercase). Every
+ * method is a single prepared statement; the read-and-increment in
+ * `allocate` is atomic via `INSERT … ON CONFLICT DO UPDATE …
+ * RETURNING`, so concurrent allocations under the same author never
+ * collide on a number (the same atomic-single-statement contract the
+ * other Sqlite*Store classes rely on — there is no `.transaction()`
+ * in this module).
+ *
+ * **Counter width (codex PR #976 F6):** every value crossing the
+ * `KaNumberStore` interface is a `bigint`. `better-sqlite3` returns
+ * INTEGER columns as JS `number` by default — which silently truncates
+ * once a counter passes `Number.MAX_SAFE_INTEGER (2^53 - 1)`. Each
+ * statement here opts into `.safeIntegers(true)`, returning `bigint`
+ * directly so `allocate()`, `peekNext()` and `observed + 1n` stay
+ * exact across the full SQLite signed INTEGER range (`2^63 - 1`). The
+ * RFC's worst-case load ("1000 alloc/s × 1M years ≈ 2^55") sits well
+ * past the `2^53` precision cliff and far under the `2^63` hard
+ * ceiling; if a single author ever does approach `2^63`, SQLite raises
+ * an INTEGER overflow on the next increment — a fail-loud surface
+ * that's strictly preferable to a silent kaId-collision risk.
+ *
+ * Like `protocol_outbox`, this state is durable: it is NEVER added to
+ * `prune()`. Reclaiming a number could re-mint a kaId already used
+ * on-chain under that author.
+ */
+export class SqliteKaNumberStore implements KaNumberStore {
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  allocate(authorAddress: string): bigint {
+    const author = authorAddress.toLowerCase();
+    // Atomic read-and-increment. `next_number` is the value to hand
+    // out; we increment it and RETURN the value just consumed
+    // (`next_number - 1` after the update), so the first call for an
+    // author returns 0n. On first insert `next_number` starts at 1, so
+    // `1 - 1 = 0` is returned there too — uniform either way.
+    // `safeIntegers(true)` opts INTO bigint returns so the counter is
+    // exact past `Number.MAX_SAFE_INTEGER` (codex PR #976 F6).
+    const row = this.db
+      .prepare(
+        `INSERT INTO ka_numbers (author_address, next_number)
+         VALUES (?, 1)
+         ON CONFLICT(author_address) DO UPDATE SET next_number = next_number + 1
+         RETURNING next_number - 1 AS number`,
+      )
+      .safeIntegers(true)
+      .get(author) as { number: bigint };
+    return row.number;
+  }
+
+  reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void {
+    const author = authorAddress.toLowerCase();
+    // Raise `next_number` to at least the floor, never lowering it.
+    // `excluded.next_number` is the proposed floor from the VALUES row.
+    // `better-sqlite3` accepts bigint statement parameters natively.
+    this.db
+      .prepare(
+        `INSERT INTO ka_numbers (author_address, next_number)
+         VALUES (?, ?)
+         ON CONFLICT(author_address) DO UPDATE SET
+           next_number = MAX(next_number, excluded.next_number)`,
+      )
+      .run(author, nextNumberFloor);
+  }
+
+  peekNext(authorAddress: string): bigint {
+    const author = authorAddress.toLowerCase();
+    const row = this.db
+      .prepare(`SELECT next_number FROM ka_numbers WHERE author_address = ?`)
+      .safeIntegers(true)
+      .get(author) as { next_number: bigint } | undefined;
+    return row?.next_number ?? 0n;
   }
 }
 
@@ -1126,7 +3843,7 @@ export interface MetricSnapshotRow {
   direct_peers: number | null;
   relayed_peers: number | null;
   mesh_peers: number | null;
-  paranet_count: number | null;
+  contextGraph_count: number | null;
   total_triples: number | null;
   total_kcs: number | null;
   total_kas: number | null;
@@ -1135,6 +3852,35 @@ export interface MetricSnapshotRow {
   tentative_kcs: number | null;
   rpc_latency_ms: number | null;
   rpc_healthy: number | null;
+  /**
+   * Operator-configured relay reservation cap (DKGNodeConfig.relayServerCapacity).
+   * NULL on edge nodes (no relay server enabled).
+   */
+  relay_capacity: number | null;
+  /** Live count of held reservations at snapshot time. NULL off-relay. */
+  relay_reservation_count: number | null;
+  /**
+   * Active forwarded circuits at snapshot time, counted as the number of
+   * open relay STOP streams (`/libp2p/circuit/relay/0.2.0/stop`). NOTE:
+   * forwarded circuits do not appear as `/p2p-circuit` connections on the
+   * relay host — that multiaddr only exists on the edge endpoints. NULL
+   * off-relay.
+   */
+  relay_active_circuits: number | null;
+  /**
+   * Total bytes received via 'message' events on relay HOP+STOP streams
+   * since the relay started (= bytes ARRIVING at the relay's HOP+STOP
+   * endpoints from the dialer / reservee). Stored as plain integer
+   * (SQLite INTEGER is 8 bytes signed = ~9.2e18, well above any
+   * realistic relay byte total before retention pruning). NULL off-relay.
+   */
+  relay_bytes_in: number | null;
+  /**
+   * Same as relay_bytes_in but for outbound traffic — bytes sent via
+   * `.send()` on relay HOP+STOP streams (= bytes DEPARTING from the
+   * relay toward the dialer / reservee). NULL off-relay.
+   */
+  relay_bytes_out: number | null;
 }
 
 export interface OperationRow {
@@ -1145,7 +3891,7 @@ export interface OperationRow {
   duration_ms: number | null;
   status: string;
   peer_id: string | null;
-  paranet_id: string | null;
+  contextGraph_id: string | null;
   triple_count: number | null;
   error_message: string | null;
   details: string | null;
@@ -1226,6 +3972,8 @@ export interface NotificationRow {
   peer: string | null;
   read: number;
   meta: string | null;
+  /** Context-graph scoping key (V16). NULL on legacy/global-scope rows. */
+  context_graph_id: string | null;
 }
 
 export interface ChatMessageRow {
@@ -1236,6 +3984,17 @@ export interface ChatMessageRow {
   peer_name: string | null;
   text: string;
   delivered: number | null;
+  /**
+   * Sender-assigned message id (UUID v4 by default; caller-overridable
+   * via `dkg-agent.ts`'s `options.messageId`). Nullable for pre-V11
+   * rows AND for any future sender that intentionally omits it.
+   * As of V13 (rc.9 PR-3), receiver-side dedup is owned by the
+   * Universal Messenger substrate (`message_idempotency` table +
+   * `Messenger.register` envelope decode), not by this column's
+   * SQL index — the index was dropped, the column persists for
+   * readers + rollback safety.
+   */
+  message_id: string | null;
 }
 
 export type ChatPersistenceStatus = 'pending' | 'in_progress' | 'stored' | 'failed';
@@ -1263,6 +4022,119 @@ export interface ChatPersistenceHealthRow {
   failed_count: number;
   overdue_pending_count: number;
   oldest_pending_queued_at: number | null;
+}
+
+export interface ContextGraphSubscriptionRow {
+  context_graph_id: string;
+  name: string | null;
+  subscribed: number;
+  synced: number;
+  shared_memory_synced: number | null;
+  meta_synced: number | null;
+  on_chain_id: string | null;
+  on_chain_hash: string | null;
+  last_reconciled_ordinal: number | null;
+  core_hosted: number | null;
+  sync_scoped: number;
+  updated_at: number;
+}
+
+export interface ContextGraphReadinessProvenance {
+  version: number;
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+  updatedAt: number;
+}
+
+export interface VmReconcileNegativeRow {
+  cache_key: string;
+  context_graph_id: string;
+  failures: number;
+  next_retry_at: number;
+  swm_gen: string;
+  candidate_namespaces: string;
+  peer_topology_key: string;
+  updated_at: number;
+}
+
+// --- Phase F: chain-driven VM reconciliation telemetry rows ---
+
+export interface ReplicationEventRow {
+  ts: number;
+  context_graph_id: string;
+  on_chain_cg_id?: string | null;
+  action: string;
+  ual?: string | null;
+  ordinal?: number | null;
+  ka_id?: string | null;
+  from_watermark?: number | null;
+  to_watermark?: number | null;
+  head?: number | null;
+  reconciled?: number | null;
+  pending?: number | null;
+  detail?: string | null;
+}
+
+export interface ReplicationSummary {
+  periodMs: number;
+  counts: Record<string, number>;
+  promotes: number;
+  fetches: number;
+  defers: number;
+  /** promote / (promote + defer); null when no attempts in window. */
+  successRate: number | null;
+  latencyP50Ms: number | null;
+  latencyP95Ms: number | null;
+  totalEvents: number;
+}
+
+export interface ReplicationPerCgRow {
+  context_graph_id: string;
+  on_chain_cg_id: string | null;
+  promotes: number;
+  fetches: number;
+  defers: number;
+  cursor_advances: number;
+  last_watermark: number | null;
+  last_head: number | null;
+  last_event_ts: number | null;
+}
+
+export interface ReplicationTimelineBucket {
+  bucket: number;
+  promotes: number;
+  fetches: number;
+  defers: number;
+  total: number;
+}
+
+export interface ReplicationCursorRow {
+  context_graph_id: string;
+  on_chain_id: string | null;
+  last_reconciled_ordinal: number | null;
+  core_hosted: number | null;
+  // 1 when this node is a member-subscriber of the CG. A row can be BOTH
+  // subscribed and core_hosted; `core_hosted=1, subscribed=0` is the pure
+  // host-only Phase D case (reconciles from chain with no member subscription).
+  subscribed: number | null;
+  last_head: number | null;
+  last_event_ts: number | null;
+}
+
+export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
+export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+
+export interface ContextGraphMemberRow {
+  context_graph_id: string;
+  principal_type: ContextGraphMemberPrincipalType;
+  principal_id: string;
+  role: string | null;
+  status: ContextGraphMemberStatus;
+  source: string | null;
+  display_name: string | null;
+  metadata: string | null;
+  first_seen_at: number;
+  updated_at: number;
 }
 
 export interface SpendingPeriod {

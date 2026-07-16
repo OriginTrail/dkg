@@ -1,0 +1,16 @@
+{
+  "name": "@origintrail-official-fixtures/sample-kafka-plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@origintrail-official/kafka-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

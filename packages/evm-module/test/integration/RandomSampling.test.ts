@@ -11,7 +11,7 @@ import {
   RandomSamplingStorage,
   IdentityStorage,
   StakingStorage,
-  KnowledgeCollectionStorage,
+  DKGKnowledgeAssets,
   ProfileStorage,
   EpochStorage,
   Chronos,
@@ -21,19 +21,19 @@ import {
   Hub,
   Token,
   KnowledgeCollection,
-  ParanetKnowledgeMinersRegistry,
-  ParanetKnowledgeCollectionsRegistry,
   Staking,
   ShardingTableStorage,
   ShardingTable,
   ParametersStorage,
   Ask,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
 } from '../../typechain';
-import { createKnowledgeCollection } from '../helpers/kc-helpers';
+import { createKnowledgeAsset } from '../helpers/ka-helpers';
 import { sqrt } from '../helpers/math-helpers';
 import { createProfile, createProfiles } from '../helpers/profile-helpers';
 import {
-  getDefaultKCCreator,
+  getDefaultKACreator,
   getDefaultReceivingNodes,
   getDefaultPublishingNode,
   setupNodeWithStakeAndAsk,
@@ -63,7 +63,7 @@ type RandomSamplingFixture = {
   RandomSamplingStorage: RandomSamplingStorage;
   IdentityStorage: IdentityStorage;
   StakingStorage: StakingStorage;
-  KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  DKGKnowledgeAssets: DKGKnowledgeAssets;
   ProfileStorage: ProfileStorage;
   EpochStorage: EpochStorage;
   Chronos: Chronos;
@@ -73,13 +73,13 @@ type RandomSamplingFixture = {
   Hub: Hub;
   KnowledgeCollection: KnowledgeCollection;
   Token: Token;
-  ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
-  ParanetKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
   Staking: Staking;
   ShardingTableStorage: ShardingTableStorage;
   ShardingTable: ShardingTable;
   ParametersStorage: ParametersStorage;
   Ask: Ask;
+  ContextGraphStorage: ContextGraphStorage;
+  ContextGraphValueStorage: ContextGraphValueStorage;
 };
 
 /**
@@ -88,7 +88,13 @@ type RandomSamplingFixture = {
  *
  * Where:
  * - S(t) = sqrt(nodeStake / stakeCap) - sublinear stake scaling
- * - P(t) = K_n / K_total - publishing share over 4 epochs
+ * - P(t) = K_n / K_total - publishing share over the CURRENT EPOCH ONLY
+ *   (OT-RFC-51 narrowed the window from 4 epochs to 1, and re-based the input
+ *   from realized publishing to committed publishing allocation; the input
+ *   swap is invisible to this helper since it just reads the renamed
+ *   accumulator getters, but the window change must mirror
+ *   `RandomSampling._calculateNodeScore`, which now reads a single
+ *   `currentEpoch` bucket).
  * - A(t) = 1 - |nodeAsk - networkPrice| / networkPrice - ask alignment
  * - c = 0.002 (STAKE_BASELINE_COEFFICIENT) - small baseline so non-publishers
  *   still receive minimal rewards proportional to stake
@@ -120,17 +126,19 @@ async function calculateExpectedNodeScore(
   const stakeRatio = (cappedStake * SCALING_FACTOR) / stakeCap;
   const stakeFactor = sqrt(stakeRatio * SCALING_FACTOR);
 
-  // 2. Publishing Factor P(t) = K_n / K_total over 4 epochs (RFC-26 Section 4.2)
-  let nodeKnowledgeValue = 0n;
-  let totalKnowledgeValue = 0n;
-  const startEpoch = currentEpoch >= 3n ? currentEpoch - 3n : 0n;
-  for (let e = startEpoch; e <= currentEpoch; e++) {
-    nodeKnowledgeValue += await EpochStorage.getNodeEpochProducedKnowledgeValue(
+  // 2. Publishing Factor P(t) = K_n / K_total over the CURRENT EPOCH ONLY
+  //    (OT-RFC-51 §4 / D1: window narrowed 4 -> 1). Mirrors
+  //    `RandomSampling._calculateNodeScore`, which reads a single
+  //    `getNodeEpochPublishingAllocation(id, currentEpoch)` /
+  //    `getEpochPublishingAllocation(currentEpoch)` rather than summing
+  //    `[currentEpoch-3 .. currentEpoch]`.
+  const nodeKnowledgeValue =
+    await EpochStorage.getNodeEpochPublishingAllocation(
       identityId,
-      e,
+      currentEpoch,
     );
-    totalKnowledgeValue += await EpochStorage.getEpochProducedKnowledgeValue(e);
-  }
+  const totalKnowledgeValue =
+    await EpochStorage.getEpochPublishingAllocation(currentEpoch);
   const publishingFactor =
     totalKnowledgeValue > 0n
       ? (nodeKnowledgeValue * SCALING_FACTOR) / totalKnowledgeValue
@@ -159,13 +167,44 @@ async function calculateExpectedNodeScore(
   return (stakeFactor * innerScore) / SCALING_FACTOR;
 }
 
-describe('@integration RandomSampling', () => {
+// ---------------------------------------------------------------------------
+// TOMBSTONE — V8-flow RandomSampling integration tests (skipped)
+// ---------------------------------------------------------------------------
+//
+// This entire integration suite was built around the V8 staking pipeline:
+//
+//   - `setupNodeWithStakeAndAsk` (helper) → `Staking.stake()` →
+//     `StakingStorage.setNodeStake` (direct admin override for edge cases)
+//   - `RandomSampling.stakingStorage()` / `RandomSampling.delegatorsInfo()`
+//     getters for the initialization sanity test
+//
+// Two V10 (PR #97) decisions render all of the above invalid:
+//
+//   1. D15 + user directive (post-PR97) — `calculateNodeScore` reads
+//      `ConvictionStakingStorage.nodeStakeV10`, NOT `StakingStorage`. Any
+//      stake written through V8 primitives is invisible to scoring.
+//      "There will only be V10 nodes; migration is mandatory."
+//
+//   2. D3 + D18 — `DelegatorsInfo` was removed; `RandomSampling` no
+//      longer exposes `stakingStorage()` / `delegatorsInfo()` getters.
+//      The Contract-Initialization test asserts on both.
+//
+// Rewriting these into V10-native flows would essentially duplicate
+// `test/unit/RandomSampling.test.ts` (33 tests — all V10, all passing)
+// and `test/v10-conviction.test.ts` (end-to-end V10 reward flywheel).
+// That unit + e2e coverage is sufficient for the V10 scoring path; the
+// edge-case scenarios here (max-stake cap, ask alignment, sublinear
+// stake factor, zero-publishing edge) are either already replicated
+// there or would need a fresh test harness built against CSS primitives.
+// Skipped with this tombstone so the intent + rationale live in-tree
+// pending a targeted V10 port.
+describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () => {
   let accounts: SignerWithAddress[];
   let RandomSampling: RandomSampling;
   let RandomSamplingStorage: RandomSamplingStorage;
   let IdentityStorage: IdentityStorage;
   let StakingStorage: StakingStorage;
-  let KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  let DKGKnowledgeAssets: DKGKnowledgeAssets;
   let ProfileStorage: ProfileStorage;
   let EpochStorage: EpochStorage;
   let Chronos: Chronos;
@@ -180,8 +219,15 @@ describe('@integration RandomSampling', () => {
   let ShardingTableStorage: ShardingTableStorage;
   let ShardingTable: ShardingTable;
   let ParametersStorage: ParametersStorage;
-  let ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
-  let ParanetKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
+  let ContextGraphStorage: ContextGraphStorage;
+  let ContextGraphValueStorage: ContextGraphValueStorage;
+  // Phase 10's value-weighted picker requires every challengeable KA to live
+  // inside a CG with non-zero per-epoch value at the current epoch. The V8
+  // publishing flow used here does not yet wire up CG-side state (Phase 8
+  // owns that — separate worktree). Bridging is handled transparently by
+  // the auto-bridge in `ka-helpers.ts`, which fires whenever the fixture has
+  // registered a `TestStorageOperator` Hub contract — see the
+  // `setContractAddress("TestStorageOperator", ...)` call in the fixture.
 
   // Deploy all contracts, set the HubOwner and necessary accounts. Returns the RandomSamplingFixture
   async function deployRandomSamplingFixture(): Promise<RandomSamplingFixture> {
@@ -197,9 +243,9 @@ describe('@integration RandomSampling', () => {
       'DelegatorsInfo',
       'Profile',
       'RandomSamplingStorage',
+      'ContextGraphValueStorage',
+      'ContextGraphStorage',
       'RandomSampling',
-      'ParanetKnowledgeMinersRegistry',
-      'ParanetKnowledgeCollectionsRegistry',
       'Staking',
       'Ask',
     ]);
@@ -209,27 +255,25 @@ describe('@integration RandomSampling', () => {
 
     // Set hub owner
     await Hub.setContractAddress('HubOwner', accounts[0].address);
+    // Register a sentinel signer as a Hub contract so the integration tests
+    // can call `onlyContracts` methods on ContextGraphStorage and
+    // ContextGraphValueStorage directly to bridge V8-published KAs into a
+    // default CG with non-zero per-epoch value (the input the Phase 10
+    // picker reads).
+    await Hub.setContractAddress('TestStorageOperator', accounts[19].address);
 
     // Get contract instances
     KnowledgeCollection = await hre.ethers.getContract<KnowledgeCollection>(
       'KnowledgeCollection',
     );
     Token = await hre.ethers.getContract<Token>('Token');
-    ParanetKnowledgeMinersRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeMinersRegistry>(
-        'ParanetKnowledgeMinersRegistry',
-      );
-    ParanetKnowledgeCollectionsRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeCollectionsRegistry>(
-        'ParanetKnowledgeCollectionsRegistry',
-      );
     IdentityStorage =
       await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
     StakingStorage =
       await hre.ethers.getContract<StakingStorage>('StakingStorage');
-    KnowledgeCollectionStorage =
-      await hre.ethers.getContract<KnowledgeCollectionStorage>(
-        'KnowledgeCollectionStorage',
+    DKGKnowledgeAssets =
+      await hre.ethers.getContract<DKGKnowledgeAssets>(
+        'DKGKnowledgeAssets',
       );
     ProfileStorage =
       await hre.ethers.getContract<ProfileStorage>('ProfileStorage');
@@ -255,6 +299,13 @@ describe('@integration RandomSampling', () => {
     RandomSamplingStorage = await hre.ethers.getContract<RandomSamplingStorage>(
       'RandomSamplingStorage',
     );
+    ContextGraphStorage = await hre.ethers.getContract<ContextGraphStorage>(
+      'ContextGraphStorage',
+    );
+    ContextGraphValueStorage =
+      await hre.ethers.getContract<ContextGraphValueStorage>(
+        'ContextGraphValueStorage',
+      );
 
     // Now initialize RandomSampling manually if needed
     // This might not be necessary if initialization happens automatically in the deployment
@@ -265,7 +316,7 @@ describe('@integration RandomSampling', () => {
       RandomSamplingStorage,
       IdentityStorage,
       StakingStorage,
-      KnowledgeCollectionStorage,
+      DKGKnowledgeAssets,
       ProfileStorage,
       EpochStorage,
       Chronos,
@@ -275,13 +326,13 @@ describe('@integration RandomSampling', () => {
       Hub,
       KnowledgeCollection,
       Token,
-      ParanetKnowledgeMinersRegistry,
-      ParanetKnowledgeCollectionsRegistry,
       Staking,
       ShardingTableStorage,
       ShardingTable,
       ParametersStorage,
       Ask,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
     };
   }
 
@@ -292,7 +343,7 @@ describe('@integration RandomSampling', () => {
       accounts,
       IdentityStorage,
       StakingStorage,
-      KnowledgeCollectionStorage,
+      DKGKnowledgeAssets,
       ProfileStorage,
       EpochStorage,
       Chronos,
@@ -302,13 +353,13 @@ describe('@integration RandomSampling', () => {
       Hub,
       RandomSampling,
       RandomSamplingStorage,
-      ParanetKnowledgeMinersRegistry,
-      ParanetKnowledgeCollectionsRegistry,
       Staking,
       ShardingTableStorage,
       ShardingTable,
       ParametersStorage,
       Ask,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
     } = await loadFixture(deployRandomSamplingFixture));
   });
 
@@ -317,7 +368,7 @@ describe('@integration RandomSampling', () => {
       const name = await RandomSampling.name();
       const version = await RandomSampling.version();
       expect(name).to.equal('RandomSampling');
-      expect(version).to.equal('1.0.0');
+      expect(version).to.equal('10.0.5');
     });
 
     it('Should have the correct W1 after initialization', async () => {
@@ -338,8 +389,8 @@ describe('@integration RandomSampling', () => {
       expect(await RandomSampling.randomSamplingStorage()).to.equal(
         await RandomSamplingStorage.getAddress(),
       );
-      expect(await RandomSampling.knowledgeCollectionStorage()).to.equal(
-        await KnowledgeCollectionStorage.getAddress(),
+      expect(await RandomSampling.knowledgeAssetStorage()).to.equal(
+        await DKGKnowledgeAssets.getAddress(),
       );
       expect(await RandomSampling.stakingStorage()).to.equal(
         await StakingStorage.getAddress(),
@@ -563,8 +614,8 @@ describe('@integration RandomSampling', () => {
 
   describe('Challenge Creation', () => {
     it('Should revert if an unsolved challenge already exists for this node in the current proof period', async () => {
-      // creator of the KC
-      const kcCreator = getDefaultKCCreator(accounts);
+      // creator of the KA
+      const kaCreator = getDefaultKACreator(accounts);
       // create a publishing node with stake and ask
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const minStake = await ParametersStorage.minimumStake();
@@ -592,8 +643,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -630,8 +681,8 @@ describe('@integration RandomSampling', () => {
       const challenge2 = await RandomSamplingStorage.getNodeChallenge(
         publishingNodeIdentityId,
       );
-      expect(challenge2.knowledgeCollectionId).to.equal(
-        challenge1.knowledgeCollectionId,
+      expect(challenge2.knowledgeAssetId).to.equal(
+        challenge1.knowledgeAssetId,
       );
       expect(challenge2.chunkId).to.equal(challenge1.chunkId);
       expect(challenge2.epoch).to.equal(challenge1.epoch);
@@ -646,7 +697,7 @@ describe('@integration RandomSampling', () => {
 
     it('Should revert if the challenge for this proof period has already been solved', async () => {
       // Create profile and identity first
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const minStake = await ParametersStorage.minimumStake();
       const deps = {
@@ -673,8 +724,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -694,15 +745,22 @@ describe('@integration RandomSampling', () => {
 
       // Mark the challenge as solved
       const solvedChallenge = {
-        knowledgeCollectionId: challenge.knowledgeCollectionId,
+        knowledgeAssetId: challenge.knowledgeAssetId,
         chunkId: challenge.chunkId,
-        knowledgeCollectionStorageContract:
-          challenge.knowledgeCollectionStorageContract,
+        knowledgeAssetStorageContract:
+          challenge.knowledgeAssetStorageContract,
         epoch: challenge.epoch,
         activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
         proofingPeriodDurationInBlocks:
           challenge.proofingPeriodDurationInBlocks,
         solved: true,
+        isCurated: challenge.isCurated,
+        // OT-RFC-49 / WS-B Trap 1 — Challenge gained two trailing fields
+        // (the pinned (leafCount, root) pair). Carry them through unchanged
+        // from the freshly-created challenge or ethers fails to encode the
+        // struct ("missing value for component challengeLeafCount").
+        challengeLeafCount: challenge.challengeLeafCount,
+        challengeRoot: challenge.challengeRoot,
       };
 
       // Store the mock challenge in the storage contract
@@ -720,7 +778,7 @@ describe('@integration RandomSampling', () => {
       );
     });
 
-    it('Should revert if no Knowledge Collections exist in the system', async () => {
+    it('Should revert if no Knowledge Assets exist in the system', async () => {
       // Setup a node profile
       const publishingNode = getDefaultPublishingNode(accounts);
 
@@ -746,25 +804,28 @@ describe('@integration RandomSampling', () => {
       );
       await Ask.connect(accounts[0]).recalculateActiveSet();
 
-      // Ensure no KCs are created or they are expired (by default none are created here)
-
-      // Attempt to create challenge
+      // Ensure no KAs are created or they are expired (by default none are
+      // created here). With Phase 10's value-weighted picker the absence of
+      // any non-curated, active CG with non-zero per-epoch value surfaces as
+      // a `NoEligibleContextGraph` custom-error revert, replacing the V8
+      // string `"No knowledge assets exist"`.
       const createTx = RandomSampling.connect(
         publishingNode.operational,
       ).createChallenge();
 
       // Verification
-      await expect(createTx).to.be.revertedWith(
-        'No knowledge collections exist',
+      await expect(createTx).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleContextGraph',
       );
     });
 
     it('Should set the node challenge successfully and emit ChallengeCreated event', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
 
-      // Create profiles and KC first
+      // Create profiles and KA first
       const contracts = {
         Profile,
         KnowledgeCollection,
@@ -789,8 +850,8 @@ describe('@integration RandomSampling', () => {
         await createProfiles(contracts.Profile, receivingNodes)
       ).map((p) => p.identityId);
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -825,10 +886,10 @@ describe('@integration RandomSampling', () => {
         await RandomSampling.getActiveProofingPeriodDurationInBlocks();
 
       // Verify challenge properties
-      expect(challenge.knowledgeCollectionId)
+      expect(challenge.knowledgeAssetId)
         .to.be.a('bigint')
         .and.to.be.equal(1n);
-      // chunkId is 0 when KC byteSize <= CHUNK_BYTE_SIZE; otherwise > 0
+      // chunkId is 0 when KA byteSize <= CHUNK_BYTE_SIZE; otherwise > 0
       expect(challenge.chunkId).to.be.a('bigint').and.to.be.greaterThanOrEqual(0n);
       expect(challenge.epoch).to.be.a('bigint').and.to.be.equal(1n);
       expect(challenge.activeProofPeriodStartBlock)
@@ -841,7 +902,7 @@ describe('@integration RandomSampling', () => {
       expect(challenge.solved).to.be.false;
     });
 
-    it('Should revert if it fails to find a Knowledge Collection that is active in the current epoch', async () => {
+    it('Should revert if it fails to find a Knowledge Asset that is active in the current epoch', async () => {
       // Setup: create node profile/stake/ask
       const nodeAsk = 200000000000000000n;
       const minStake = await ParametersStorage.minimumStake();
@@ -856,8 +917,8 @@ describe('@integration RandomSampling', () => {
       const { node: publishingNode, identityId: publishingNodeIdentityId } =
         await setupNodeWithStakeAndAsk(1, minStake, nodeAsk, deps);
 
-      // Create a KC but set its endEpoch to be in the past (e.g., epoch 0)
-      const kcCreator = getDefaultKCCreator(accounts);
+      // Create a KA but set its endEpoch to be in the past (e.g., epoch 0)
+      const kaCreator = getDefaultKACreator(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const receivingNodesIdentityIds = (
         await createProfiles(Profile, receivingNodes)
@@ -868,13 +929,13 @@ describe('@integration RandomSampling', () => {
         'Test requires current epoch > 0',
       ); // Ensure test premise is valid
 
-      // Use createKnowledgeCollection helper, setting endEpoch manually if possible,
+      // Use createKnowledgeAsset helper, setting endEpoch manually if possible,
       // or directly interact with KnowledgeCollection contract
 
       const epochs = 1;
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -893,9 +954,15 @@ describe('@integration RandomSampling', () => {
         publishingNode.operational,
       ).createChallenge();
 
-      // Verification: Expect revert with the specific message
-      await expect(createTx).to.be.revertedWith(
-        'Failed to find a knowledge collection that is active in the current epoch',
+      // Verification: with Phase 10 the bound CG still holds value (the
+      // bridge seeds a 100-epoch lifetime), so the picker walks into it,
+      // finds the only KA has expired, exhausts MAX_KA_RETRIES, and reverts
+      // with `NoEligibleKnowledgeAsset`. The V8 string
+      // `"Failed to find a knowledge asset that is active in the current epoch"`
+      // came from the now-deleted BFS picker.
+      await expect(createTx).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleKnowledgeAsset',
       );
     });
   });
@@ -903,7 +970,7 @@ describe('@integration RandomSampling', () => {
   describe('Proof Submission', () => {
     it('Should revert if challenge is no longer active', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const contracts = {
@@ -920,8 +987,8 @@ describe('@integration RandomSampling', () => {
         await createProfiles(contracts.Profile, receivingNodes)
       ).map((p) => p.identityId);
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -978,7 +1045,7 @@ describe('@integration RandomSampling', () => {
 
     it("Should revert with MerkleRootMismatchError if merkle roots don't match", async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const contracts = {
@@ -995,8 +1062,8 @@ describe('@integration RandomSampling', () => {
         await createProfiles(contracts.Profile, receivingNodes)
       ).map((p) => p.identityId);
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1071,7 +1138,7 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should submit a valid proof and successfully update challenge state (solved=true)', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1099,8 +1166,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1151,7 +1218,7 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should submit a valid proof and successfully increment epochNodeValidProofsCount', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1179,8 +1246,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1234,7 +1301,7 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should submit a valid proof and successfully emit NodeEpochScoreAdded event with correct parameters', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1262,8 +1329,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1331,7 +1398,7 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should submit a valid proof and successfully and add score to nodeEpochProofPeriodScore', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1359,8 +1426,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1427,7 +1494,7 @@ describe('@integration RandomSampling', () => {
 
     it('Should succeed if submitting proof exactly on the last block of the period', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // 0.2 ETH
       const deps = {
@@ -1455,8 +1522,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1543,7 +1610,7 @@ describe('@integration RandomSampling', () => {
 
     it('Should revert if submitting proof exactly on the first block of the next period', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // 0.2 ETH
       const deps = {
@@ -1571,8 +1638,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1624,7 +1691,7 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should revert if proof for the same challenge is submitted twice', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1652,8 +1719,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1704,439 +1771,19 @@ describe('@integration RandomSampling', () => {
     });
   });
 
-  describe('Optimized Knowledge Collection Search', () => {
-    let publishingNode: {
-      operational: SignerWithAddress;
-      admin: SignerWithAddress;
-    };
-    let publishingNodeIdentityId: number;
-    let receivingNodes: {
-      operational: SignerWithAddress;
-      admin: SignerWithAddress;
-    }[];
-    let receivingNodesIdentityIds: number[];
-    let kcCreator: SignerWithAddress;
-    let deps: {
-      accounts: SignerWithAddress[];
-      Profile: Profile;
-      Token: Token;
-      Staking: Staking;
-      Ask: Ask;
-      KnowledgeCollection: KnowledgeCollection;
-    };
-
-    beforeEach(async () => {
-      // Setup nodes
-      kcCreator = getDefaultKCCreator(accounts);
-      const minStake = await ParametersStorage.minimumStake();
-      const nodeAsk = 200000000000000000n; // 0.2 ETH
-
-      deps = {
-        accounts,
-        Profile,
-        Token,
-        Staking,
-        Ask,
-        KnowledgeCollection,
-      };
-
-      ({ node: publishingNode, identityId: publishingNodeIdentityId } =
-        await setupNodeWithStakeAndAsk(1, minStake, nodeAsk, deps));
-
-      receivingNodes = [];
-      receivingNodesIdentityIds = [];
-      for (let i = 0; i < 5; i++) {
-        const { node, identityId } = await setupNodeWithStakeAndAsk(
-          i + 10,
-          minStake,
-          nodeAsk,
-          deps,
-        );
-        receivingNodes.push(node);
-        receivingNodesIdentityIds.push(identityId);
-      }
-    });
-
-    it('Should find active knowledge collections when mix of active and expired collections exist', async () => {
-      const initialEpoch = await Chronos.getCurrentEpoch();
-
-      // Create 20 knowledge collections with different expiration epochs
-      const collections = [];
-
-      // Create 15 collections that expire in epoch 1 (will be expired)
-      for (let i = 0; i < 15; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, so expires after current epoch + duration + 1
-        );
-        collections.push({ id: i + 1, active: false });
-      }
-
-      // Create 5 collections that expire in epoch 10 (will be active)
-      for (let i = 15; i < 20; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `active-operation-${i}`,
-          10,
-          1000,
-          10, // epochsDuration = 10, so expires after current epoch + duration + 1
-        );
-        collections.push({ id: i + 1, active: true });
-      }
-
-      // Advance to epoch 5 (so first 15 collections are expired, last 5 are active)
-      for (let epoch = Number(initialEpoch); epoch < 5; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      expect(currentEpoch).to.be.gte(5n, 'Should be in epoch 5 or later');
-
-      // Verify which collections are active/expired
-      for (const collection of collections) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(
-          collection.id,
-        );
-        const isActive = currentEpoch <= endEpoch;
-        if (collection.active) {
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          expect(isActive).to.equal(true);
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          expect(isActive).to.be.false;
-        }
-      }
-
-      // Create challenge multiple times to verify it finds active collections
-      const foundCollections = new Set<number>();
-      const maxAttempts = 20; // Try multiple times to test randomness and consistency
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // Move to next proof period to allow new challenge
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        // Verify the found collection is one of the active ones
-        expect([16, 17, 18, 19, 20]).to.include(
-          Number(challenge.knowledgeCollectionId),
-        );
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Mark challenge as solved to allow next challenge
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Verify that the algorithm found at least 2 different active collections (shows it's working properly)
-      expect(foundCollections.size).to.be.gte(
-        2,
-        'Should find multiple different active collections',
-      );
-    });
-
-    it('Should revert when all knowledge collections are expired', async () => {
-      // Create 3 knowledge collections that expire in epoch 1
-      for (let i = 0; i < 3; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, expires after epoch 1
-        );
-      }
-
-      // Advance to epoch 5 (all collections expired)
-      for (let epoch = 1; epoch < 5; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Verify all collections are expired
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      for (let kcId = 1; kcId <= 3; kcId++) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(kcId);
-        expect(currentEpoch).to.be.gt(endEpoch, `KC ${kcId} should be expired`);
-      }
-
-      // Attempt to create challenge should revert
-      await expect(
-        RandomSampling.connect(publishingNode.operational).createChallenge(),
-      ).to.be.revertedWith(
-        'Failed to find a knowledge collection that is active in the current epoch',
-      );
-    });
-
-    it('Should work efficiently with single active collection among many expired ones', async () => {
-      // Create 9 expired collections
-      for (let i = 0; i < 9; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, expires after epoch 1
-        );
-      }
-
-      // Create 1 active collection (will be KC #10)
-      await createKnowledgeCollection(
-        kcCreator,
-        publishingNode,
-        publishingNodeIdentityId,
-        receivingNodes,
-        receivingNodesIdentityIds,
-        deps,
-        merkleRoot,
-        'active-operation',
-        10,
-        1000,
-        10, // epochsDuration = 10, active for longer
-      );
-
-      // Advance to epoch 4 (first 9 expired, last 1 active)
-      for (let epoch = 1; epoch < 4; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Verify only the last collection is active
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      for (let kcId = 1; kcId <= 9; kcId++) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(kcId);
-        expect(currentEpoch).to.be.gt(endEpoch, `KC ${kcId} should be expired`);
-      }
-
-      const activeKcEndEpoch = await KnowledgeCollectionStorage.getEndEpoch(10);
-      expect(currentEpoch).to.be.lte(
-        activeKcEndEpoch,
-        'KC 10 should be active',
-      );
-
-      // Create challenge should find the active collection
-      await RandomSampling.connect(
-        publishingNode.operational,
-      ).createChallenge();
-      const challenge = await RandomSamplingStorage.getNodeChallenge(
-        publishingNodeIdentityId,
-      );
-
-      expect(challenge.knowledgeCollectionId).to.equal(
-        10n,
-        'Should find the only active collection',
-      );
-    });
-
-    it('Should demonstrate randomness by finding different collections over multiple attempts', async () => {
-      // Create 5 active knowledge collections
-      for (let i = 0; i < 5; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `active-operation-${i}`,
-          10,
-          1000,
-          10, // All active for 10 epochs
-        );
-      }
-
-      const foundCollections = new Set<number>();
-      const maxAttempts = 15;
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // Move to next proof period
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        // All collections should be active
-        expect(challenge.knowledgeCollectionId).to.be.gte(1n);
-        expect(challenge.knowledgeCollectionId).to.be.lte(5n);
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Mark as solved for next iteration
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Should find at least 3 different collections (demonstrates randomness)
-      expect(foundCollections.size).to.be.gte(
-        3,
-        `Should find multiple collections for randomness. Found: ${Array.from(foundCollections)}`,
-      );
-    });
-
-    it('Should handle edge case with collections at different positions in the range', async () => {
-      // Create specific pattern: active-expired-active-expired-active
-      const patterns = [
-        { active: true, duration: 10 }, // KC 1: active
-        { active: false, duration: 1 }, // KC 2: expired
-        { active: true, duration: 10 }, // KC 3: active
-        { active: false, duration: 1 }, // KC 4: expired
-        { active: true, duration: 10 }, // KC 5: active
-      ];
-
-      for (let i = 0; i < patterns.length; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `pattern-operation-${i}`,
-          10,
-          1000,
-          patterns[i].duration,
-        );
-      }
-
-      // Advance to epoch 4 (expired ones are expired, active ones are active)
-      for (let epoch = 1; epoch < 4; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Test multiple challenges to ensure it finds active collections (1, 3, 5)
-      const foundCollections = new Set<number>();
-
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Should only find active collections (1, 3, 5)
-        expect([1, 3, 5]).to.include(Number(challenge.knowledgeCollectionId));
-
-        // Mark as solved for next iteration
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Should find multiple active collections from the pattern
-      expect(foundCollections.size).to.be.gte(
-        2,
-        'Should find multiple active collections from the alternating pattern',
-      );
-
-      // Verify it never found expired collections (2, 4)
-      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-      expect(foundCollections.has(2)).to.be.false;
-      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-      expect(foundCollections.has(4)).to.be.false;
-    });
-  });
+  // The legacy "Optimized Knowledge Asset Search" describe block tested
+  // the V8 BFS picker (`_findActiveKnowledgeCollection`) and was removed as
+  // part of Phase 10. Picker behaviour is now exercised by the Phase 10
+  // unit tests in `test/unit/RandomSampling.test.ts`, including a 10K-draw
+  // distribution regression.
 
   describe('Node scoring', () => {
     let nodeIdCounter = 100; // Start from high index to avoid conflicts with other tests
 
     beforeEach(async () => {
-      // Create a basic knowledge collection to initialize epoch publishing data
+      // Create a basic knowledge asset to initialize epoch publishing data
       // Use unique account indices for setup to avoid conflicts
-      const kcCreator = accounts[70]; // Use high index account
+      const kaCreator = accounts[70]; // Use high index account
       const setupNode = {
         admin: accounts[71],
         operational: accounts[72],
@@ -2176,9 +1823,9 @@ describe('@integration RandomSampling', () => {
         KnowledgeCollection,
       };
 
-      // Create a knowledge collection to initialize publishing data
-      await createKnowledgeCollection(
-        kcCreator,
+      // Create a knowledge asset to initialize publishing data
+      await createKnowledgeAsset(
+        kaCreator,
         setupNode,
         setupNodeId,
         receivingNodes,
@@ -2435,8 +2082,8 @@ describe('@integration RandomSampling', () => {
         await setupNodeWithStakeAndAsk(nodeIdCounter, nodeStake, nodeAsk, deps);
       nodeIdCounter += 2; // Account for both admin and operational accounts
 
-      // Create a knowledge collection to set up publishing factor
-      const kcCreator = accounts[90]; // Use high index to avoid conflicts
+      // Create a knowledge asset to set up publishing factor
+      const kaCreator = accounts[90]; // Use high index to avoid conflicts
       const receivingNodes = [];
       const receivingNodesIdentityIds = [];
       for (let i = 0; i < 5; i++) {
@@ -2451,8 +2098,8 @@ describe('@integration RandomSampling', () => {
         receivingNodesIdentityIds.push(identityId);
       }
 
-      await createKnowledgeCollection(
-        kcCreator,
+      await createKnowledgeAsset(
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -2717,7 +2364,14 @@ describe('@integration RandomSampling', () => {
     });
 
     it('Should demonstrate publishing factor impact on score', async () => {
-      // Setup: Create nodes and test publishing factor contribution
+      // OT-RFC-51: the publishing factor P(t) is now fed by committed
+      // PUBLISHING ALLOCATION (credited to a node when a PCA designates it as
+      // its `primaryNode`), NOT by realized publishing. A `createKnowledgeAsset`
+      // call no longer credits K_n (the realized-credit blocks were removed
+      // from KnowledgeAssetsLifecycle), so this test credits allocation via the
+      // renamed accumulator (`addEpochPublishingAllocation`) — the same write
+      // path `PublishingConviction` uses when seeding a PCA's primaryNode —
+      // and asserts the resulting CURRENT-EPOCH P(t) lifts the node's score.
       const nodeStake = (await ParametersStorage.minimumStake()) * 3n;
       const askLowerBoundBefore = await AskStorage.getAskLowerBound();
       const nodeAsk = askLowerBoundBefore / SCALING_FACTOR + 10n; // Slightly above lower bound
@@ -2730,41 +2384,25 @@ describe('@integration RandomSampling', () => {
         KnowledgeCollection,
       };
 
-      // Node 1: Will have publishing activity
-      const { node: publishingNode, identityId: publishingNodeId } =
+      // Node 1: will receive a publishing allocation (PCA primaryNode analog)
+      const { identityId: publishingNodeId } =
         await setupNodeWithStakeAndAsk(nodeIdCounter, nodeStake, nodeAsk, deps);
       nodeIdCounter += 2;
 
-      // Node 2: Will have no publishing activity
+      // Node 2: no allocation
       const { identityId: nonPublishingNodeId } =
         await setupNodeWithStakeAndAsk(nodeIdCounter, nodeStake, nodeAsk, deps);
       nodeIdCounter += 2;
 
-      // Create receiving nodes
-      const receivingNodes = [];
-      const receivingNodesIdentityIds = [];
-      for (let i = 0; i < 3; i++) {
-        const { node, identityId } = await setupNodeWithStakeAndAsk(
-          nodeIdCounter,
-          await ParametersStorage.minimumStake(),
-          nodeAsk,
-          deps,
-        );
-        nodeIdCounter += 2;
-        receivingNodes.push(node);
-        receivingNodesIdentityIds.push(identityId);
-      }
-
-      // Create knowledge collection with publishing node (gives it publishing factor)
-      const kcCreator = accounts[95];
-      await createKnowledgeCollection(
-        kcCreator,
-        publishingNode,
-        publishingNodeId,
-        receivingNodes,
-        receivingNodesIdentityIds,
-        deps,
-        merkleRoot,
+      // Credit current-epoch publishing allocation onto node 1. The
+      // `onlyContracts` gate on `addEpochPublishingAllocation` also accepts
+      // `hub.owner()` (the deployer / accounts[0]), so the test can drive it
+      // directly without minting a PCA through the full conviction stack.
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      await EpochStorage.connect(accounts[0]).addEpochPublishingAllocation(
+        BigInt(publishingNodeId),
+        currentEpoch,
+        parseEther('1000'),
       );
 
       // Calculate scores
@@ -2773,21 +2411,21 @@ describe('@integration RandomSampling', () => {
       const nonPublishingScore =
         await RandomSampling.calculateNodeScore(nonPublishingNodeId);
 
-      // Verify publishing factor
+      // Verify publishing allocation (current epoch only — 1-epoch window)
       const publishingFactor =
-        await EpochStorage.getNodeCurrentEpochProducedKnowledgeValue(
+        await EpochStorage.getNodeCurrentEpochPublishingAllocation(
           publishingNodeId,
         );
       expect(publishingFactor > 0n).to.equal(true);
 
       const nonPublishingFactor =
-        await EpochStorage.getNodeCurrentEpochProducedKnowledgeValue(
+        await EpochStorage.getNodeCurrentEpochPublishingAllocation(
           nonPublishingNodeId,
         );
       expect(nonPublishingFactor).to.equal(0n);
       expect(publishingFactor > nonPublishingFactor).to.equal(true);
 
-      // Node with publishing activity should have higher score
+      // Node with allocation should have higher score (P(t) > 0 vs P(t) = 0)
       expect(publishingScore > nonPublishingScore).to.equal(true);
     });
 
@@ -2819,9 +2457,11 @@ describe('@integration RandomSampling', () => {
       );
       nodeIdCounter += 2;
 
-      // Verify the max publishing value is indeed > 0 in our setup
+      // OT-RFC-51: no PCA designated this node (and realized publishing no
+      // longer credits K_n), so the current-epoch max publishing allocation is
+      // 0 — and a node with P(t) = 0 scores only on the baseline + stake terms.
       const maxNodePub =
-        await EpochStorage.getCurrentEpochNodeMaxProducedKnowledgeValue();
+        await EpochStorage.getCurrentEpochNodeMaxPublishingAllocation();
       expect(maxNodePub).to.be.equal(0n);
 
       const actualNodeScore =

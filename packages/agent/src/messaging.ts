@@ -1,4 +1,4 @@
-import type { StreamHandler, EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
+import type { EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   PROTOCOL_MESSAGE,
@@ -6,10 +6,10 @@ import {
   decodeAgentMessage,
   ed25519Sign,
   ed25519Verify,
-  withRetry,
+  RESPONSE_GONE_MARKER,
   type AgentMessageMsg,
 } from '@origintrail-official/dkg-core';
-import type { ProtocolRouter } from '@origintrail-official/dkg-core';
+import type { Messenger } from './p2p/messenger.js';
 import { encrypt, decrypt, x25519SharedSecret, ed25519ToX25519Public } from './encryption.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -45,7 +45,75 @@ export type ChatHandler = (
   message: string,
   senderPeerId: string,
   conversationId: string,
+  // Optional `contextGraphId` carried in the encrypted payload by the sender.
+  // Receivers that scope chat to a specific CG can use this for ACL bookkeeping
+  // and per-graph storage; legacy chat handlers that don't take this arg keep
+  // working unchanged (extra positional args are silently ignored in JS).
+  senderContextGraphId?: string,
+  // Same value as `senderContextGraphId`, but ONLY set when the ACL has
+  // positively verified the sender's CG claim (i.e. `scoped` mode where
+  // the claim equals the receiver's configured CG, or `shared-context-graph`
+  // mode where the claim matches a subscribed CG the sender is an active
+  // member of). In `any` and `peer-allowlist` modes this is always
+  // undefined because the ACL doesn't check the CG claim, so downstream
+  // code that surfaces the CG to operators (notification titles, log
+  // suffixes) can show it without risking an attacker-controlled label.
+  // Codex PR #510 round 4/5 finding — `senderContextGraphId` alone is
+  // an unverified attacker-controllable claim outside scoped/shared-CG
+  // modes; consumers MUST prefer `verifiedContextGraphId` for display.
+  verifiedContextGraphId?: string,
+  // Optional sender-assigned message id (UUID v4 by default, see
+  // `DKGAgent.sendChat` → `options.messageId`). Receivers use it to
+  // deduplicate messages that arrived twice on parallel transport
+  // paths (e.g. happy-eyeballs racing two relay legs, both winning,
+  // both delivering the same encrypted payload). Older senders that
+  // don't include the field pass `undefined`; the receiver's storage
+  // layer treats it as "no dedup possible" and inserts the row
+  // unconditionally — i.e. legacy on-the-wire behaviour is preserved.
+  messageId?: string,
 ) => void | Promise<void>;
+
+/**
+ * Authorisation hook invoked on every inbound chat AFTER signature
+ * verification and decryption, but BEFORE the user-level ChatHandler.
+ *
+ * Returning `{ accept: false, reason }` causes the receiver to send back
+ * `{ success: false, error: reason ?? 'unauthorized' }` and skip the
+ * ChatHandler entirely — the SQLite row + notification on the daemon
+ * side never get created, so unauthorised senders are inert.
+ *
+ * Authentication (who the sender is) is handled by the existing Ed25519
+ * signature check; this hook layers *authorisation* (are they allowed to
+ * be talking to us at all?) on top.
+ */
+export type ChatAclCheck = (
+  senderPeerId: string,
+  payload: { contextGraphId?: string },
+) => {
+  accept: boolean;
+  reason?: string;
+  // Set ONLY when the ACL implementation has positively verified the
+  // sender's `contextGraphId` claim against its policy (scoped mode:
+  // claim equals the receiver's configured CG; shared-context-graph
+  // mode: claim matches a subscribed CG the sender is an active member
+  // of). MUST remain undefined when the mode does not check the claim
+  // (`any`, `peer-allowlist`) so downstream consumers can distinguish
+  // a verified CG from an attacker-controllable one. See
+  // ChatHandler.verifiedContextGraphId for the consumer-side contract.
+  verifiedContextGraphId?: string;
+};
+
+/**
+ * GH #462 — authorization hook for `skill_request` (parallel to ChatAclCheck).
+ * `PROTOCOL_MESSAGE` authenticates the caller's peerId via Ed25519 but did no
+ * authorization, so any connected peer could invoke any registered skill. When
+ * a check is installed it gates skill invocation; the daemon installs a
+ * default-deny-for-unknown-peers policy (see buildSkillAcl).
+ */
+export type SkillAclCheck = (
+  senderPeerId: string,
+  skillUri: string,
+) => { accept: boolean; reason?: string };
 
 interface ConversationState {
   highWaterMark: number;
@@ -64,7 +132,7 @@ const CONVERSATION_TTL = 60 * 60 * 1000; // 1 hour
  * Ed25519 and verified on receipt.
  */
 export class MessageHandler {
-  private readonly router: ProtocolRouter;
+  private readonly messenger: Messenger;
   private readonly keypair: Ed25519Keypair;
   private readonly x25519Private: Uint8Array;
   private readonly peerId: string;
@@ -73,21 +141,32 @@ export class MessageHandler {
   private readonly skillHandlers = new Map<string, SkillHandler>();
   private readonly peerKeys = new Map<string, Uint8Array>();
   private chatHandler: ChatHandler | null = null;
+  private chatAclCheck: ChatAclCheck | null = null;
+  private skillAclCheck: SkillAclCheck | null = null;
 
   constructor(
-    router: ProtocolRouter,
+    messenger: Messenger,
     keypair: Ed25519Keypair,
     x25519Private: Uint8Array,
     peerId: string,
     eventBus: EventBus,
   ) {
-    this.router = router;
+    this.messenger = messenger;
     this.keypair = keypair;
     this.x25519Private = x25519Private;
     this.peerId = peerId;
     this.eventBus = eventBus;
 
-    router.register(PROTOCOL_MESSAGE, this.handleIncoming.bind(this));
+    // PR-3 substrate migration: register via `messenger.register`
+    // rather than `router.register` so inbound chats get
+    // receiver-side dedup (ReliableEnvelope + idempotency cache)
+    // for free — the multi-path duplicate-arrival class from the
+    // May 2026 soak (seq=13 arriving twice) is now absorbed by the
+    // substrate, not by the chat-specific `idx_chat_msgid` SQL
+    // index.
+    messenger.register(PROTOCOL_MESSAGE, async (data, fromPeerId) => {
+      return this.handleIncoming(data, fromPeerId);
+    });
   }
 
   registerSkill(skillUri: string, handler: SkillHandler): void {
@@ -99,6 +178,24 @@ export class MessageHandler {
   }
 
   /**
+   * Install an authorisation hook for inbound chats. When unset, all
+   * authenticated senders are accepted (legacy behaviour). The daemon
+   * sets this from `chat.acl` in the node config — see lifecycle.ts.
+   */
+  setChatAcl(check: ChatAclCheck | null): void {
+    this.chatAclCheck = check;
+  }
+
+  /**
+   * GH #462 — install an authorisation hook for inbound `skill_request`. When
+   * unset, skills remain open (legacy). The daemon installs a default-deny
+   * policy for unknown peers — see buildSkillAcl / lifecycle.ts.
+   */
+  setSkillAcl(check: SkillAclCheck | null): void {
+    this.skillAclCheck = check;
+  }
+
+  /**
    * Cache a peer's Ed25519 public key for use in outgoing messages.
    * Keys are also auto-cached from incoming messages.
    */
@@ -106,10 +203,39 @@ export class MessageHandler {
     this.peerKeys.set(peerId, ed25519Public);
   }
 
+  /**
+   * Send an encrypted chat over the Universal Messenger substrate.
+   *
+   * Outbound semantics (rc.9 PR-3):
+   *
+   *   * **Delivered** → the recipient's ACK was returned synchronously.
+   *     Returns `{ delivered: true }`.
+   *   * **Queued** → the dial failed with a recoverable error
+   *     (`'no valid addresses for peer'`, `NO_RESERVATION`, etc.).
+   *     The substrate has enqueued the encoded envelope to the SQLite
+   *     outbox and will retry on the periodic tick + every
+   *     `connection:open` from the recipient. Returns
+   *     `{ delivered: false, queued: true, attempts, nextAttemptAtMs, error }`.
+   *   * **Hard failure** → encoding bug, unknown protocol, or other
+   *     non-recoverable error. Returns `{ delivered: false, error }`
+   *     (no retry, no queue entry).
+   *
+   * Sender-side idempotency: if the caller passes the same
+   * `messageId` twice (operator double-click, daemon restart replay
+   * via in-flight outbox), the substrate returns the cached response
+   * without a second wire send.
+   */
   async sendChat(
     recipientPeerId: string,
     text: string,
-  ): Promise<{ delivered: boolean; error?: string }> {
+    options: { contextGraphId?: string; messageId?: string } = {},
+  ): Promise<{
+    delivered: boolean;
+    error?: string;
+    queued?: boolean;
+    attempts?: number;
+    nextAttemptAtMs?: number;
+  }> {
     try {
       const conversationId = bytesToHex(randomBytes(16));
 
@@ -125,6 +251,8 @@ export class MessageHandler {
       const payload = new TextEncoder().encode(JSON.stringify({
         type: 'chat',
         text,
+        ...(options.contextGraphId ? { contextGraphId: options.contextGraphId } : {}),
+        ...(options.messageId ? { messageId: options.messageId } : {}),
       }));
 
       const nonce = buildNonce(conversationId, 1);
@@ -144,16 +272,42 @@ export class MessageHandler {
         senderPublicKey: this.keypair.publicKey,
       };
 
-      const responseBytes = await withRetry(
-        () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
-        {
-          maxAttempts: 3,
-          baseDelayMs: 500,
-          onRetry: (attempt, delay) => {
-            console.warn(`[Messaging] sendChat retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
-          },
-        },
+      const sendResult = await this.messenger.sendReliable(
+        recipientPeerId,
+        PROTOCOL_MESSAGE,
+        encodeAgentMessage(msg),
+        { messageId: options.messageId },
       );
+
+      if (!sendResult.delivered) {
+        // inFlight === true means another sender holds the slot;
+        // no durable outbox row exists yet, so surface it as a
+        // not-yet-queued attempt the caller should retry immediately.
+        const nextAttemptAtMs = sendResult.queued
+          ? sendResult.nextAttemptAtMs
+          : Date.now();
+        return {
+          delivered: false,
+          queued: sendResult.queued,
+          attempts: sendResult.attempts,
+          nextAttemptAtMs,
+          error: sendResult.error,
+        };
+      }
+
+      // RESPONSE_GONE: the receiver cached this messageId mark-only
+      // (response > 256 KiB). For chat the ACK payload is tiny so
+      // this branch should never fire in practice; if it did the
+      // safe thing is to treat the send as delivered (because the
+      // recipient definitely processed it, we just don't have the
+      // ACK body to introspect). Documented in
+      // docs/messenger.md "RESPONSE_GONE handling".
+      const responseBytes = sendResult.response;
+      const responseText = new TextDecoder().decode(responseBytes);
+      if (responseText === RESPONSE_GONE_MARKER) {
+        return { delivered: true };
+      }
+
       const responseMsg = decodeAgentMessage(responseBytes);
       const plain = new TextDecoder().decode(
         decrypt(sharedSecret, responseMsg.encryptedPayload, responseMsg.nonce),
@@ -202,16 +356,31 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    const responseBytes = await withRetry(
-      () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
-      {
-        maxAttempts: 3,
-        baseDelayMs: 500,
-        onRetry: (attempt, delay) => {
-          console.warn(`[Messaging] sendSkillRequest retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
-        },
-      },
+    // Skill requests are synchronous request/response — we don't
+    // want the outbox to silently queue a skill call (the operator
+    // is waiting on the reply). If `sendReliable` queues instead of
+    // delivering, surface that as an explicit failure so the caller
+    // can retry deliberately rather than blocking on a background
+    // tick.
+    const sendResult = await this.messenger.sendReliable(
+      recipientPeerId,
+      PROTOCOL_MESSAGE,
+      encodeAgentMessage(msg),
     );
+    if (!sendResult.delivered) {
+      return {
+        success: false,
+        error: `Skill request queued (not delivered): ${sendResult.error}`,
+      };
+    }
+    const responseBytes = sendResult.response;
+    const responseText = new TextDecoder().decode(responseBytes);
+    if (responseText === RESPONSE_GONE_MARKER) {
+      return {
+        success: false,
+        error: 'Skill response exceeded receiver-side response cache (RESPONSE_GONE); retry with a fresh messageId',
+      };
+    }
 
     const responseMsg = decodeAgentMessage(responseBytes);
     const responsePlain = decrypt(
@@ -230,7 +399,7 @@ export class MessageHandler {
     };
   }
 
-  private async handleIncoming(data: Uint8Array, fromPeerId: { toString(): string }): Promise<Uint8Array> {
+  private async handleIncoming(data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const msg = decodeAgentMessage(data);
     const convId = msg.conversationId;
     const seq = typeof msg.sequence === 'number' ? msg.sequence : msg.sequence.low;
@@ -304,12 +473,34 @@ export class MessageHandler {
 
     this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
       conversationId: convId,
-      from: fromPeerId.toString(),
+      from: fromPeerId,
       type: parsed.type,
     });
 
     if (parsed.type === 'skill_request') {
       const skillUri = parsed.skillUri as string;
+
+      // GH #462 — authorize the skill invocation. Without this gate any peer
+      // with a libp2p connection could invoke any registered skill (the
+      // Ed25519 check only authenticates *who* the caller is, not whether they
+      // may invoke). Fail closed on an ACL error.
+      if (this.skillAclCheck) {
+        let verdict: { accept: boolean; reason?: string };
+        try {
+          verdict = this.skillAclCheck(fromPeerId, skillUri);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[MessageHandler] skill ACL threw, failing closed: ${msg}`);
+          verdict = { accept: false, reason: 'unauthorized: skill ACL evaluation error' };
+        }
+        if (!verdict.accept) {
+          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+            success: false,
+            error: verdict.reason ?? 'unauthorized',
+          });
+        }
+      }
+
       const handler = this.skillHandlers.get(skillUri);
 
       if (!handler) {
@@ -329,7 +520,7 @@ export class MessageHandler {
       };
 
       try {
-        const response = await handler(request, fromPeerId.toString());
+        const response = await handler(request, fromPeerId);
         response.executionTimeMs = Date.now() - startTime;
         return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, response);
       } catch (err) {
@@ -343,9 +534,69 @@ export class MessageHandler {
 
     if (parsed.type === 'chat') {
       const text = (parsed.text as string) ?? '';
+      const senderContextGraphId =
+        typeof parsed.contextGraphId === 'string' ? parsed.contextGraphId : undefined;
+      // Pre-V11 senders omit this; missing or non-string ⇒ undefined ⇒
+      // receiver's dedup layer treats the row as un-dedupable and
+      // inserts unconditionally (legacy on-wire behaviour preserved).
+      const senderMessageId =
+        typeof parsed.messageId === 'string' ? parsed.messageId : undefined;
+
+      // Authorisation check (layered on top of the existing Ed25519
+      // signature check above). When unset, all authenticated senders are
+      // accepted — this preserves the legacy behaviour for nodes that
+      // haven't configured `chat.acl`.
+      // `verifiedContextGraphId` is sourced from the ACL verdict (only
+      // set in scoped / shared-context-graph modes that actually check
+      // the claim). When the ACL is null or omits the field, downstream
+      // consumers see only the unverified `senderContextGraphId` and
+      // MUST treat that as attacker-controllable.
+      let verifiedContextGraphId: string | undefined;
+      if (this.chatAclCheck) {
+        // Defence in depth: an unexpected exception from the ACL
+        // callback (db lookup glitch, custom-callback bug, etc.) must
+        // NOT bubble up as a transport-layer error to the sender —
+        // the sender would interpret it as a network failure and
+        // retry, when the right semantic is "we couldn't authorize
+        // you, fail closed". Codex PR #510 round 4 caught this:
+        // without the try/catch, an ACL/db problem turned into a
+        // confusing send-side timeout. We log the exception locally
+        // and return a clean `unauthorized` so the sender's
+        // ACL-aware error handling kicks in.
+        let verdict: ReturnType<ChatAclCheck>;
+        try {
+          verdict = this.chatAclCheck(fromPeerId, {
+            contextGraphId: senderContextGraphId,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Use console.warn rather than a structured log so we don't
+          // create a new MessageHandler→logger coupling for an edge
+          // case. The daemon's ACL helpers don't throw in normal
+          // operation; this branch is the misbehaving-custom-callback
+          // safety net.
+          console.warn(`[MessageHandler] chat ACL threw, failing closed: ${msg}`);
+          verdict = { accept: false, reason: 'unauthorized: ACL evaluation error' };
+        }
+        if (!verdict.accept) {
+          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+            success: false,
+            error: verdict.reason ?? 'unauthorized',
+          });
+        }
+        verifiedContextGraphId = verdict.verifiedContextGraphId;
+      }
+
       if (this.chatHandler) {
         try {
-          await this.chatHandler(text, fromPeerId.toString(), convId);
+          await this.chatHandler(
+            text,
+            fromPeerId,
+            convId,
+            senderContextGraphId,
+            verifiedContextGraphId,
+            senderMessageId,
+          );
         } catch (err) {
           console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);
         }

@@ -65,6 +65,33 @@ describe('MerkleTree', () => {
     expect(tree.root).toHaveLength(32);
   });
 
+  it('proof() rejects index at padding boundary for odd-leaf trees', () => {
+    const leaves = ['a', 'b', 'c'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(3);
+    // Index 0-2 are valid, index 3 is the synthetic duplicate padding leaf
+    expect(() => tree.proof(2)).not.toThrow();
+    expect(() => tree.proof(3)).toThrow(RangeError);
+  });
+
+  it('leafCount returns original count, not padded (odd leaves)', () => {
+    const leaves = ['a', 'b', 'c', 'd', 'e'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(5);
+  });
+
+  it('leafCount returns original count for even leaves', () => {
+    const leaves = ['a', 'b', 'c', 'd'].map(s =>
+      sha256(new TextEncoder().encode(s)),
+    );
+    const tree = new MerkleTree(leaves);
+    expect(tree.leafCount).toBe(4);
+  });
+
   it('is order-independent (sorted internally)', () => {
     const a = sha256(new TextEncoder().encode('a'));
     const b = sha256(new TextEncoder().encode('b'));
@@ -106,11 +133,20 @@ describe('MerkleTree', () => {
     expect(MerkleTree.computeKARoot(pub, undefined)).toEqual(pub);
   });
 
-  it('computeKCRoot computes root from KA roots', () => {
+  it('computeKCRoot computes root from KA roots as a MerkleTree', () => {
     const r1 = sha256(new TextEncoder().encode('ka1'));
     const r2 = sha256(new TextEncoder().encode('ka2'));
     const root = MerkleTree.computeKCRoot([r1, r2]);
     expect(root).toHaveLength(32);
+
+    const tree = new MerkleTree([r1, r2]);
+    expect(root).toEqual(tree.root);
+  });
+
+  it('computeKCRoot with single KA root equals that root', () => {
+    const r = sha256(new TextEncoder().encode('only-ka'));
+    const root = MerkleTree.computeKCRoot([r]);
+    expect(root).toEqual(r);
   });
 });
 
@@ -138,13 +174,36 @@ describe('hashTriple', () => {
 });
 
 describe('canonicalize', () => {
-  it('canonicalizes N-Quads', async () => {
+  it('returns exact canonical output for a single quad', async () => {
     const input = [
       '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
       '',
     ].join('\n');
     const result = await canonicalize(input);
-    expect(result).toContain('<http://example.org/s>');
+    expect(result.trim()).toBe(
+      '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+    );
+  });
+
+  it('sorts multiple quads into deterministic order', async () => {
+    const input = [
+      '<http://example.org/b> <http://example.org/p> <http://example.org/o> .',
+      '<http://example.org/a> <http://example.org/p> <http://example.org/o> .',
+      '',
+    ].join('\n');
+    const result = await canonicalize(input);
+    const lines = result.trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('example.org/a');
+    expect(lines[1]).toContain('example.org/b');
+  });
+
+  it('produces identical output regardless of input order', async () => {
+    const inputA = '<http://ex.org/z> <http://ex.org/p> "1" .\n<http://ex.org/a> <http://ex.org/p> "2" .\n';
+    const inputB = '<http://ex.org/a> <http://ex.org/p> "2" .\n<http://ex.org/z> <http://ex.org/p> "1" .\n';
+    const resultA = await canonicalize(inputA);
+    const resultB = await canonicalize(inputB);
+    expect(resultA).toBe(resultB);
   });
 });
 

@@ -1,0 +1,18 @@
+# Aderyn config — see https://cyfrin.gitbook.io/cyfrin-docs/aderyn for the
+# full reference. We rely on `src` auto-detection from hardhat.config.ts
+# (which sets paths.sources = "./contracts") rather than overriding it
+# here, so any future hardhat layout change stays in one place.
+
+# DO NOT CHANGE — Aderyn schema version. Only 1 is supported as of 0.6.x.
+version = 1
+
+root = "."
+
+# Path-segment matches: any file whose path contains one of these
+# substrings is excluded. Mirrors the same exclude set used by
+# slither.config.json (filter_paths) and .solhintignore.
+exclude = [
+    "contracts/.deps/",
+    "contracts/archive/",
+    "contracts/mocks/",
+]

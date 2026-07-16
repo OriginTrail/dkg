@@ -1,0 +1,86 @@
+[
+  {
+    "id": "#1093",
+    "title": "ACK pool quorum: 5 publishes across core1+core2",
+    "pass": true,
+    "detail": "statuses=[\"confirmed\",\"confirmed\",\"confirmed\",\"confirmed\",\"confirmed\"] (all 'confirmed' ⇒ ACK quorum met)"
+  },
+  {
+    "id": "#1094",
+    "title": "edit loop: publish→pull-from(vm)→edit→re-publish→VM has edit",
+    "pass": true,
+    "detail": "pub1=confirmed pull=200/seeded=1 pub2=confirmed vmHasEdit=true"
+  },
+  {
+    "id": "#1095",
+    "title": "discard on a published KA keeps it vm-confirmed (not flipped to discarded)",
+    "pass": true,
+    "detail": "before=vm-confirmed discardResp=200 after: state=published status=vm-confirmed publishedUal=present"
+  },
+  {
+    "id": "#1096",
+    "title": "memory/search finds VM-published entity",
+    "pass": true,
+    "detail": "status=200 results=1 matched=true"
+  },
+  {
+    "id": "#1097",
+    "title": "publish without share ⇒ clean 409 (not 500); main design supersedes auto-promote",
+    "pass": true,
+    "detail": "status=409 code=VM_PUBLISH_PRECONDITION err=No quads in shared memory for context graph v1107-pub-1781709633236 matching sel"
+  },
+  {
+    "id": "#1098",
+    "title": "VM materializes on subscribed replica (core2) after publish on core1",
+    "pass": false,
+    "detail": "core2 VM rows=0 (NOT materialized)"
+  },
+  {
+    "id": "#1099",
+    "title": "SWM drained on publisher after confirmed publish",
+    "pass": true,
+    "detail": "SWM rows for published root = 0 (expect 0)"
+  },
+  {
+    "id": "#1101",
+    "title": "import-file infers text/markdown for octet-stream .md upload",
+    "pass": true,
+    "detail": "status=200 detectedContentType=text/markdown extraction={\"status\":\"completed\",\"tripleCount\":1,\"pipelineUsed\":\"text/markdown\"}"
+  },
+  {
+    "id": "#1102",
+    "title": "CG routes accept `id` alias (subscribe + rename)",
+    "pass": true,
+    "detail": "subscribe{id} status=200; rename{id} status=200"
+  },
+  {
+    "id": "#1103",
+    "title": "sign-join is sign-only: forwarded:false + next→request-join hint",
+    "pass": true,
+    "detail": "status=200 forwarded=false next=This route only SIGNS the join request — nothing was sent to the curator. To deliver it, P"
+  },
+  {
+    "id": "#1104",
+    "title": "descriptor surfaces publishedUal (≠ reservedUal)",
+    "pass": true,
+    "detail": "publishedUal=present reservedUal=present distinct=true"
+  },
+  {
+    "id": "#1105",
+    "title": "query-remote against public CG returns rows from another node",
+    "pass": true,
+    "detail": "http=200 remoteStatus=OK matched=true body={\"operationId\":\"ae901eb2-5fd9-4a78-a826-fb5a26f5f19d\",\"status\":\"OK\",\"bindings\":\"[{\\\"o\\\":\\\"\\\\\\\"UniqueSearchTokenXYZ\\\\\\\"\\\"}]\",\"truncated\":false,\"resultCount\":1}"
+  },
+  {
+    "id": "#1106",
+    "title": "chat peerId/message aliases + WM default-agent query + sub-graph \"/\" rejected",
+    "pass": true,
+    "detail": "chat=200 wmDefaultRows=1 subGraphSlashRejected=true(400)"
+  },
+  {
+    "id": "APP",
+    "title": "all 6 nodes healthy + meshed",
+    "pass": true,
+    "detail": "core1:up/peers=? core2:up/peers=? core3:up/peers=? core4:up/peers=? edge5:up/peers=? edge6:up/peers=?"
+  }
+]

@@ -1,0 +1,101 @@
+{
+  "title": "DKG Node Logs",
+  "uid": "dkg-node-logs",
+  "tags": ["dkg", "logs"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m"],
+    "time_options": ["15m", "1h", "3h", "6h", "12h", "24h", "2d", "7d"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "loki",
+        "label": "Loki",
+        "type": "datasource",
+        "query": "loki",
+        "refresh": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "name": "env",
+        "label": "Environment",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "${loki}" },
+        "definition": "label_values(deployment_environment)",
+        "query": "label_values(deployment_environment)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "${loki}" },
+        "definition": "label_values({deployment_environment=~\"$env\"}, service_instance_id)",
+        "query": "label_values({deployment_environment=~\"$env\"}, service_instance_id)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false,
+        "current": {}
+      },
+      {
+        "name": "search",
+        "label": "Filter (regex)",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "logs",
+      "title": "Logs — $node  ($env)",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 21, "w": 24, "x": 0, "y": 1 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "queryType": "range",
+          "expr": "{service_instance_id=\"$node\"} |~ `(?i)$search`"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Log volume by level — $node",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "queryType": "range",
+          "expr": "sum by (detected_level) (count_over_time({service_instance_id=\"$node\"} |~ `(?i)$search` [$__auto]))",
+          "legendFormat": "{{detected_level}}"
+        }
+      ]
+    }
+  ]
+}

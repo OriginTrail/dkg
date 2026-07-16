@@ -291,7 +291,7 @@ function SimRunDetail({ run }: { run: SimulationRun }) {
         <span>{run.config.opsPerSec}/s pace</span>
         <span>{run.config.concurrency} concurrency</span>
         <span>{run.config.kasPerPublish ?? 1} KAs/publish</span>
-        <span>{run.config.paranet}</span>
+        <span>{run.config.contextGraphId}</span>
         <span>{run.config.enabledOps.join(', ')}</span>
         <span>{fmtDuration(elapsed)} {isActive ? 'so far' : 'total'}</span>
       </div>

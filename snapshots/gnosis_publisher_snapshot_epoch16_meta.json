@@ -1,0 +1,12 @@
+{
+  "gnosis": {
+    "blockchainId": "gnosis:100",
+    "blockNumber": 45579539,
+    "blockDate": "2026-04-09T04:17:30.000Z",
+    "currentEpoch": 16,
+    "lastKnowledgeCollectionId": 5641044,
+    "totalKCsWithFutureEpochs": 3343814,
+    "maxFutureEpoch": 73,
+    "epochsCapped": 17
+  }
+}

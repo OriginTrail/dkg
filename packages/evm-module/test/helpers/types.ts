@@ -5,7 +5,7 @@ export type NodeAccounts = {
   operational: SignerWithAddress;
 };
 
-export type KCSignaturesData = {
+export type KASignaturesData = {
   merkleRoot: string;
   publisherR: string;
   publisherVS: string;

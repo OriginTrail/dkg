@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "_comment": "DKG chat-capture + context-injection hooks. capture-chat.mjs auto-promotes operator-Cursor conversation turns into the project's chat sub-graph (workspace bound). inject-session-context.mjs prepends <dkg-session-context> to every prompt with sessionId + nextTurnIndex + predicted turn URI so the agent can author annotations carrying graph edges back to the chat:Turn that capture-chat writes after the response (restores the V9 forSession linkage that #381 + R3 capture-chat reduction retired). inject-inbox.mjs (Phase 1.5 of the agent debug chat RFC) auto-prepends unread agent-to-agent peer messages. All three fail open: hook errors never block the operator's chat.",
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "_comment": "capture-chat MUST run first so it stashes the operator's ORIGINAL prompt for later afterAgentResponse capture, before any other hook mutates updated_input. It also persists session state (turnIndex), which inject-session-context reads.",
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt",
+        "failClosed": false
+      },
+      {
+        "_comment": "inject-session-context reads the state file capture-chat just wrote and prepends a <dkg-session-context> block. Runs before inject-inbox so the final prompt order is: <dkg-inbox-notice> (most urgent) / <dkg-session-context> (administrative metadata) / <operator prompt>.",
+        "command": "node packages/mcp-dkg/hooks/inject-session-context.mjs",
+        "failClosed": false
+      },
+      {
+        "command": "node packages/mcp-dkg/hooks/inject-inbox.mjs",
+        "failClosed": false
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse",
+        "failClosed": false
+      }
+    ]
+  }
+}

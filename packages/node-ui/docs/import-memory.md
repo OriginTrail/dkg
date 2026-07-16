@@ -6,7 +6,7 @@ Allow users to import their memories and preferences from other AI assistants (C
 
 Users accumulate context and preferences across AI assistants over time. This feature lets them consolidate that knowledge into their private DKG node, where it becomes:
 
-- **Private** — stored in the `agent-memory` paranet with `localOnly: true`, never broadcast to other nodes
+- **Private** — stored in the `agent-memory` contextGraph with `localOnly: true`, never broadcast to other nodes
 - **Structured** — raw text is parsed into individual memory items and optionally enriched with entity extraction via LLM
 - **Queryable** — memories become part of the agent's knowledge graph, available for semantic recall during conversations
 
@@ -48,7 +48,7 @@ sequenceDiagram
 
     CMM->>CMM: Build RDF quads (MemoryImport batch + ImportedMemory items)
     CMM->>DKG: writeToWorkspace("agent-memory", quads, { localOnly: true })
-    DKG-->>CMM: { workspaceOperationId }
+    DKG-->>CMM: { shareOperationId }
 
     alt LLM configured — knowledge extraction
         CMM->>LLM: Extract N-Triples (MEMORY_KG_PROMPT)
@@ -115,8 +115,8 @@ Memories are classified into categories:
 
 All imported data is:
 
-1. Written to the `agent-memory` paranet with `localOnly: true`
-2. The paranet itself is created with `private: true`
+1. Written to the `agent-memory` contextGraph with `localOnly: true`
+2. The contextGraph itself is created with `private: true`
 3. Data never appears in GossipSub broadcasts
 4. Other nodes cannot query or discover imported memories
 

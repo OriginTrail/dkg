@@ -3,7 +3,7 @@ import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ProofIndex } from '../src/proof-index.js';
 
-const GRAPH = 'did:dkg:paranet:test/contextGraphs/1';
+const GRAPH = 'did:dkg:context-graph:test/contextGraphs/1';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -169,6 +169,28 @@ describe('ProofIndex', () => {
       });
 
       expect(new Set(roots).size).toBe(1);
+    });
+
+    it('MerkleTree.verify fails when a sibling in the proof is tampered', () => {
+      const evenTriples: Quad[] = [
+        q('did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"'),
+        q('did:dkg:agent:Alice', 'http://schema.org/age', '"30"'),
+        q('did:dkg:agent:Bob', 'http://schema.org/name', '"Bob"'),
+        q('did:dkg:agent:Bob', 'http://schema.org/age', '"25"'),
+      ];
+      index.storeBatch(CG_ID, '51', evenTriples);
+      const proof = index.generateProof(
+        CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"',
+      );
+      expect(proof).toBeDefined();
+
+      const leaf = hashTriple('did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"');
+      const rootBytes = hexToBytes(proof!.merkleRoot);
+      const badSiblings = proof!.siblings.map((s, i) => (i === 0 ? '0x' + 'ee'.repeat(32) : s));
+
+      expect(
+        MerkleTree.verify(rootBytes, leaf, badSiblings.map(hexToBytes), proof!.leafIndex),
+      ).toBe(false);
     });
 
     it('different batches have different merkle roots', () => {

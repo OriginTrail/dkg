@@ -1,4 +1,4 @@
-import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import { MerkleTree, hashTriple, compareBytes } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface TripleProof {
@@ -16,14 +16,6 @@ interface BatchEntry {
 
 function toHex(bytes: Uint8Array): string {
   return '0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
 }
 
 /**

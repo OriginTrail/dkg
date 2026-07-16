@@ -1,0 +1,16 @@
+{
+  "name": "@origintrail-official/dkg-devnet-pr1386-term-canon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:devnet": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0",
+    "@origintrail-official/dkg-core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

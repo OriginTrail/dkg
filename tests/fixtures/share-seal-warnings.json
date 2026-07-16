@@ -1,0 +1,6 @@
+{
+  "_comment": "#1116 — canonical share-outcome warning strings. The MCP, OpenClaw, and Hermes adapters each keep their own copy of these three constants (no shared module: MCP deliberately has no dkg-core dependency, and creating a package is out of scope). Each adapter's test suite asserts its constants are byte-identical to these values, so drift is caught by a test, not a code comment. If you change a warning, update it HERE and in all three adapters; the parity tests will flag any mismatch.",
+  "SHARE_NOT_PUBLISH_READY_WARNING": "The atomic SWM share did not become publish-ready (sealed:false). Keep the Working Memory draft and retry the complete Knowledge Asset share; do not publish it.",
+  "SHARE_SUBSET_NOT_PUBLISH_READY_WARNING": "A legacy partial-share outcome was reported. Root-scoped subsets are read-only and not publishable; model the intended data as its own Knowledge Asset and share it atomically.",
+  "SHARE_INCOMPLETE_PROMOTE_WARNING": "The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; keep the Working Memory draft and retry the atomic share."
+}

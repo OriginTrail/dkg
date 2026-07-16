@@ -16,7 +16,7 @@ export type QueryStatus =
 export interface QueryRequest {
   operationId: string;
   lookupType: LookupType;
-  paranetId?: string;
+  contextGraphId?: string;
   ual?: string;
   entityUri?: string;
   rdfType?: string;
@@ -37,7 +37,7 @@ export interface QueryResponse {
   error?: string;
 }
 
-export interface ParanetQueryPolicy {
+export interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';
   allowedPeers?: string[];
   allowedLookupTypes?: LookupType[];
@@ -48,6 +48,6 @@ export interface ParanetQueryPolicy {
 
 export interface QueryAccessConfig {
   defaultPolicy: 'deny' | 'public';
-  paranets?: Record<string, ParanetQueryPolicy>;
+  contextGraphs?: Record<string, ContextGraphQueryPolicy>;
   rateLimitPerMinute?: number;
 }

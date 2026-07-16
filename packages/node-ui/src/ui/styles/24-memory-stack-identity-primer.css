@@ -1,0 +1,505 @@
+/* ── Memory Stack — cross-project 3-layer overview ── */
+.v10-memstack {
+  display: flex; flex-direction: column;
+  height: 100%; overflow: auto;
+  padding: 18px 22px 28px;
+}
+.v10-memstack-head {
+  margin-bottom: 18px;
+}
+.v10-memstack-title {
+  font-size: 20px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+}
+.v10-memstack-sub {
+  font-size: 12px; color: var(--text-tertiary);
+  margin: 0;
+}
+.v10-memstack-empty {
+  font-size: 12px; color: var(--text-tertiary);
+  padding: 40px 0;
+  text-align: center;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 8px;
+}
+.v10-memstack-table {
+  display: flex; flex-direction: column;
+  gap: 10px;
+}
+.v10-memstack-colheads {
+  display: grid;
+  grid-template-columns: 220px repeat(3, 1fr);
+  gap: 10px;
+  padding: 0 2px 4px;
+}
+.v10-memstack-colhead {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-memstack-colhead.project { border-bottom: none; }
+.v10-memstack-colhead-icon { font-size: 14px; line-height: 1; }
+.v10-memstack-colhead-title { color: inherit; }
+.v10-memstack-colhead-desc {
+  margin-left: auto;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-ghost);
+  font-size: 10px;
+}
+.v10-memstack-row {
+  display: grid;
+  grid-template-columns: 220px repeat(3, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+.v10-memstack-project {
+  display: flex; flex-direction: column;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border-subtle);
+}
+.v10-memstack-project-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0; background: none; border: none;
+  color: var(--text-primary);
+  font-size: 13px; font-weight: 600;
+  cursor: pointer; text-align: left;
+  font-family: var(--font-sans);
+  transition: color 0.15s;
+}
+.v10-memstack-project-btn:hover { color: var(--accent-blue, #3b82f6); }
+.v10-memstack-project-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #a855f7;
+  box-shadow: 0 0 0 3px rgba(168,85,247,0.15);
+  flex-shrink: 0;
+}
+.v10-memstack-project-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-memstack-project-desc {
+  font-size: 11px; color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.45;
+  max-height: 3em;
+  overflow: hidden;
+}
+.v10-memstack-project-status {
+  margin-top: 6px;
+  font-size: 10px; color: var(--text-ghost);
+  font-style: italic;
+}
+.v10-memstack-project-status.error { color: var(--accent-red, #ef4444); }
+
+.v10-memstack-cell {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 20%, var(--border-subtle));
+  background: color-mix(in srgb, var(--cell-color, #64748b) 3%, transparent);
+  min-height: 130px;
+}
+.v10-memstack-cell.empty {
+  opacity: 0.5;
+  background: transparent;
+}
+.v10-memstack-cell-stats {
+  display: flex; align-items: baseline; gap: 4px;
+  flex-wrap: wrap;
+}
+.v10-memstack-cell-n {
+  font-size: 20px; font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--cell-color, var(--text-primary));
+  line-height: 1;
+}
+.v10-memstack-cell-n-lbl {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.v10-memstack-cell-sep { color: var(--text-ghost); margin: 0 2px; }
+.v10-memstack-cell-t {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.v10-memstack-cell-t-lbl {
+  font-size: 9px;
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.v10-memstack-cell-recent {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1;
+}
+.v10-memstack-cell-recent-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-secondary);
+  padding: 2px 0;
+}
+.v10-memstack-cell-recent-bullet {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--cell-color, #64748b);
+  flex-shrink: 0;
+}
+.v10-memstack-cell-recent-label {
+  flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-memstack-cell-recent-time {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-ghost);
+  white-space: nowrap;
+}
+.v10-memstack-cell-empty-hint {
+  font-size: 10px; color: var(--text-ghost);
+  font-style: italic;
+  padding: 4px 0;
+  flex: 1;
+}
+.v10-memstack-cell-open {
+  align-self: flex-start;
+  padding: 3px 10px;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 30%, var(--border-subtle));
+  border-radius: 6px;
+  color: var(--cell-color, var(--text-secondary));
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  margin-top: auto;
+  transition: background 0.15s, color 0.15s;
+}
+.v10-memstack-cell-open:hover {
+  background: color-mix(in srgb, var(--cell-color, #64748b) 16%, transparent);
+  color: var(--text-primary);
+}
+
+/* ── Verifiable Memory on-chain identity banner (KA detail, right pane) ── */
+.v10-vm-identity {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    rgba(34,197,94,0.10) 0%,
+    rgba(245,158,11,0.05) 100%
+  );
+  border: 1px solid rgba(34,197,94,0.35);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.v10-vm-identity-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.v10-vm-identity-glyph {
+  font-size: 14px; color: #22c55e; line-height: 1;
+}
+.v10-vm-identity-title {
+  font-size: 12px; font-weight: 700; color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+.v10-vm-identity-badge {
+  margin-left: auto;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 10px;
+  color: var(--text-success);
+  background: rgba(34,197,94,0.12);
+  border: 1px solid rgba(34,197,94,0.35);
+}
+.v10-vm-identity-row {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.v10-vm-identity-lbl {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  min-width: 56px;
+}
+.v10-vm-identity-val {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+  max-width: 260px;
+  white-space: nowrap;
+}
+.v10-vm-identity-val.mono {
+  font-family: var(--font-mono); font-size: 11px;
+}
+.v10-vm-identity-wallet {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.v10-vm-identity-opid {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.v10-vm-identity-copy {
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s;
+}
+.v10-vm-identity-copy:hover {
+  border-color: var(--border-strong); color: var(--text-primary);
+}
+
+/* Inline attribution inside each Provenance Trail event
+   ("Created by <agent>", "Promoted by <agent>", "Published by <agent>") */
+.v10-ka-event-attribution {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 18px;  /* line up under the title, past the dot */
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.v10-ka-event-attribution-prefix {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: var(--text-tertiary);
+}
+
+/* Author block in the KA detail header (prominent "Proposed by …" card) */
+.v10-ka-header-author {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 4px; margin-left: auto;
+  padding-left: 16px;
+  flex-shrink: 0;
+}
+.v10-ka-header-author-label {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+/* ── Persistent project header strip ── */
+.v10-project-strip {
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--sg-color, #a855f7) 8%, transparent) 0%,
+    transparent 40%
+  );
+  /* PR #793 round 2 — `min-height: 44px` reserves space for the
+     fully-populated breadcrumb state (project name + `›`
+     separator + subgraph chip + description). Pre-fix the row
+     was 34px when only the project name showed (e.g. on the
+     Subgraphs / WM / SWM / VM tabs without an active subgraph)
+     and grew to ~42-44px when the breadcrumb expanded, pushing
+     the body content down on transition. Reserving the
+     expanded height at all times eliminates the layout shift. */
+  min-height: 44px;
+}
+.v10-project-strip-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  flex-shrink: 0;
+}
+.v10-project-strip-name {
+  font-size: 13px; font-weight: 600;
+  color: var(--text-primary);
+  background: none; border: none; padding: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: color 0.15s;
+}
+.v10-project-strip-name:disabled {
+  cursor: default; opacity: 1;
+}
+.v10-project-strip-name:not(:disabled):hover {
+  color: var(--sg-color, #a855f7);
+}
+.v10-project-strip-sep {
+  color: var(--text-ghost);
+  font-size: 14px;
+  font-weight: 400;
+}
+.v10-project-strip-sg {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 600;
+  color: var(--text-secondary);
+}
+.v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
+.v10-project-strip-desc {
+  font-size: 12px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-left: 14px;
+  max-width: 720px;
+  padding-left: 0;
+  flex: 0 1 auto;
+}
+
+/* Context Graph primer */
+.v10-primer-view {
+  height: 100%;
+  overflow: auto;
+  padding: 28px 32px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+.v10-primer-header {
+  max-width: 860px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-primer-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-2, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.v10-primer-back:hover {
+  background: var(--surface-3, rgba(127, 127, 127, 0.12));
+  color: var(--text-primary);
+  border-color: var(--border-strong, var(--border-subtle));
+}
+.v10-primer-back:focus-visible {
+  outline: 2px solid var(--accent, #4c8bf5);
+  outline-offset: 2px;
+}
+.v10-primer-kicker {
+  margin: 0 0 8px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.v10-primer-header h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 26px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+.v10-primer-header p {
+  max-width: 720px;
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.v10-primer-pipeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr) 32px minmax(0, 1fr);
+  align-items: center;
+  max-width: 980px;
+  gap: 10px;
+  padding: 22px 0;
+}
+.v10-primer-pipeline span:not(.connector) {
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+.v10-primer-pipeline .wm {
+  border-color: rgba(100, 116, 139, 0.48);
+  background: rgba(100, 116, 139, 0.12);
+}
+.v10-primer-pipeline .swm {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.12);
+}
+.v10-primer-pipeline .vm {
+  border-color: rgba(34, 197, 94, 0.42);
+  background: rgba(34, 197, 94, 0.11);
+}
+.v10-primer-pipeline .connector {
+  height: 1px;
+  background: var(--border-strong);
+}
+.v10-primer-sections {
+  max-width: 860px;
+  display: flex;
+  flex-direction: column;
+}
+.v10-primer-section {
+  padding: 18px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-primer-section:first-child {
+  border-top: 0;
+}
+.v10-primer-section h2 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 750;
+}
+.v10-primer-section p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .v10-graph-shell {
+    min-height: clamp(360px, 68vh, 620px);
+  }
+  .v10-graph-body {
+    flex-direction: column;
+  }
+  .v10-graph-rail {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 180px;
+    border-left: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .v10-graph-expanded-backdrop {
+    padding: 10px;
+  }
+  .v10-graph-singleton-shelf {
+    max-height: 26%;
+  }
+  .v10-primer-view { padding: 22px 18px; }
+  .v10-primer-pipeline {
+    grid-template-columns: 1fr;
+  }
+  .v10-primer-pipeline .connector {
+    width: 1px;
+    height: 18px;
+    justify-self: center;
+  }
+}

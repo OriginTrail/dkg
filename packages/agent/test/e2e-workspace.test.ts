@@ -1,18 +1,32 @@
 /**
- * E2E tests for the workspace graph: writeToWorkspace → GossipSub replicate →
- * query workspace → enshrineFromWorkspace → query data graph.
+ * E2E tests for the workspace graph: share → GossipSub replicate →
+ * query workspace → publishFromSharedMemory → query data graph.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
-import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
-const PARANET = 'workspace-e2e';
+const CONTEXT_GRAPH = 'workspace-e2e';
 const ENTITY = 'urn:e2e:workspace:entity:1';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('Workspace E2E (2 nodes)', () => {
   let nodeA: DKGAgent;
@@ -29,14 +43,18 @@ describe('Workspace E2E (2 nodes)', () => {
 
   it('bootstraps two agent nodes and connects them', async () => {
     nodeA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'WorkspaceA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'WorkspaceB',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -51,17 +69,18 @@ describe('Workspace E2E (2 nodes)', () => {
     expect(nodeB.peerId).toBeDefined();
   }, 10000);
 
-  it('node A creates a paranet; node B subscribes; A writes to workspace and B receives via GossipSub', async () => {
-    await nodeA.createParanet({
-      id: PARANET,
-      name: 'Workspace E2E Paranet',
+  it('node A creates a contextGraph; node B subscribes; A writes to workspace and B receives via GossipSub', async () => {
+    await nodeA.createContextGraph({
+      id: CONTEXT_GRAPH,
+      name: 'Workspace E2E ContextGraph',
       description: 'For workspace graph tests',
     });
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
 
-    const exists = await nodeA.paranetExists(PARANET);
+    const exists = await nodeA.contextGraphExists(CONTEXT_GRAPH);
     expect(exists).toBe(true);
 
-    nodeB.subscribeToParanet(PARANET);
+    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(2000);
 
     const quads = [
@@ -69,32 +88,31 @@ describe('Workspace E2E (2 nodes)', () => {
       { subject: ENTITY, predicate: 'http://schema.org/description', object: '"Replicated via workspace topic"', graph: '' as const },
     ];
 
-    const result = await nodeA.writeToWorkspace(PARANET, quads);
-    expect(result.workspaceOperationId).toMatch(/^ws-\d+-[a-z0-9]+$/);
+    const result = await nodeA.share(CONTEXT_GRAPH, quads);
+    expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
 
     await sleep(5000);
 
     const onA = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
 
-    // Node B may receive via GossipSub (depends on mesh formation timing)
+    // Node B should receive via GossipSub
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_workspace' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
-    if (onB.bindings.length > 0) {
-      expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
-    }
+    expect(onB.bindings.length).toBeGreaterThan(0);
+    expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
   }, 25000);
 
-  it('query with includeWorkspace returns workspace data', async () => {
+  it('query with includeSharedMemory returns workspace data', async () => {
     const unionResult = await nodeA.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, includeWorkspace: true },
+      { contextGraphId: CONTEXT_GRAPH, includeSharedMemory: true },
     );
     expect(unionResult.bindings.length).toBeGreaterThanOrEqual(1);
     const names = unionResult.bindings.map((r) => String(r['name']));
@@ -102,7 +120,7 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 5000);
 
   it('node A enshrines workspace to data graph', async () => {
-    const result = await nodeA.enshrineFromWorkspace(PARANET, 'all');
+    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all');
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
@@ -111,7 +129,7 @@ describe('Workspace E2E (2 nodes)', () => {
   it('node A sees enshrined data in data graph', async () => {
     const dataGraphResult = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(dataGraphResult.bindings.length).toBe(1);
     expect(dataGraphResult.bindings[0]['name']).toBe('"Workspace Draft"');

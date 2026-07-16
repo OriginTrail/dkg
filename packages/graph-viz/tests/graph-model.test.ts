@@ -48,6 +48,30 @@ describe('GraphModel', () => {
       expect(names![0].value).toBe('Alice');
     });
 
+    it('creates edges for absolute IRI schemes beyond http and urn', () => {
+      model.addTriple({
+        subject: 'did:dkg:entity:source',
+        predicate: 'https://schema.org/mentions',
+        object: 'ipfs://bafy-example-target',
+      });
+
+      expect(model.edges.size).toBe(1);
+      expect(model.nodes.has('did:dkg:entity:source')).toBe(true);
+      expect(model.nodes.has('ipfs://bafy-example-target')).toBe(true);
+    });
+
+    it('keeps quoted values with URI-like text as literals', () => {
+      model.addTriple({
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/identifier',
+        object: '"did:dkg:literal"',
+      });
+
+      expect(model.edges.size).toBe(0);
+      const node = model.nodes.get('https://example.org/alice')!;
+      expect(node.properties.get('https://schema.org/identifier')?.[0]?.value).toBe('"did:dkg:literal"');
+    });
+
     it('stores rdf:type in node.types, not as edge', () => {
       model.addTriple({
         subject: 'https://example.org/alice',
@@ -210,6 +234,89 @@ describe('GraphModel', () => {
       const fromA = model.getEdgesFrom('https://example.org/a');
       expect(fromA).toHaveLength(1);
       expect(fromA[0].predicate).toBe('https://schema.org/likes');
+    });
+
+    // Regression: GH #692 — `addTriple` cleanUri-normalises the indices but
+    // used to push the raw triple into `_triples`, so a later `removeTriples`
+    // call that used the opposite bracket style would tear down the indices
+    // while leaving the orphaned triple stranded in `_triples`.
+    it('removes a triple added with brackets when called without brackets', () => {
+      model.addTriple({
+        subject: '<urn:x>',
+        predicate: '<urn:p>',
+        object: '<urn:y>',
+      });
+      model.removeTriples([{
+        subject: 'urn:x',
+        predicate: 'urn:p',
+        object: 'urn:y',
+      }]);
+
+      expect(model.tripleCount).toBe(0);
+      expect(model.edges.size).toBe(0);
+      expect(model.nodes.size).toBe(0);
+    });
+
+    it('removes a triple added without brackets when called with brackets', () => {
+      model.addTriple({
+        subject: 'urn:x',
+        predicate: 'urn:p',
+        object: 'urn:y',
+      });
+      model.removeTriples([{
+        subject: '<urn:x>',
+        predicate: '<urn:p>',
+        object: '<urn:y>',
+      }]);
+
+      expect(model.tripleCount).toBe(0);
+      expect(model.edges.size).toBe(0);
+      expect(model.nodes.size).toBe(0);
+    });
+
+    it('stores triples in canonical (cleanUri-normalised) form', () => {
+      model.addTriple({
+        subject: '<urn:x>',
+        predicate: '<urn:p>',
+        object: '<urn:y>',
+      });
+
+      const [stored] = model.triples;
+      expect(stored.subject).toBe('urn:x');
+      expect(stored.predicate).toBe('urn:p');
+      expect(stored.object).toBe('urn:y');
+    });
+
+    it('preserves literal objects verbatim (no bracket-stripping on literals)', () => {
+      model.addTriple({
+        subject: '<urn:x>',
+        predicate: '<urn:name>',
+        object: 'Alice',
+      });
+
+      const [stored] = model.triples;
+      expect(stored.subject).toBe('urn:x');
+      expect(stored.object).toBe('Alice');
+    });
+
+    it('removes an rdf:type triple regardless of bracket style on either side', () => {
+      const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+      model.addTriple({
+        subject: '<urn:x>',
+        predicate: RDF_TYPE,
+        object: '<https://schema.org/Person>',
+      });
+
+      expect(model.nodes.get('urn:x')!.types).toContain('https://schema.org/Person');
+
+      model.removeTriples([{
+        subject: 'urn:x',
+        predicate: RDF_TYPE,
+        object: 'https://schema.org/Person',
+      }]);
+
+      expect(model.tripleCount).toBe(0);
+      expect(model.nodes.size).toBe(0);
     });
   });
 

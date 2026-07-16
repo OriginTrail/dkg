@@ -151,6 +151,8 @@ export interface HexagonConfig {
 }
 
 export interface StyleConfig {
+  /** Per-node colors keyed by node URI — highest priority, wins over all other rules */
+  nodeColors?: Record<string, string>;
   /** Per rdf:type class colors */
   classColors?: Record<string, string>;
   /** Per namespace prefix colors (applies to nodes whose types fall in that namespace) */

@@ -43,8 +43,8 @@ type ScenarioResult = {
   };
 };
 
-const MEMORY_PARANET = 'agent-memory';
-const DATA_GRAPH = `did:dkg:paranet:${MEMORY_PARANET}`;
+const MEMORY_CONTEXT_GRAPH = 'agent-memory';
+const DATA_GRAPH = `did:dkg:context-graph:${MEMORY_CONTEXT_GRAPH}`;
 const WORKSPACE_GRAPH = `${DATA_GRAPH}/_workspace`;
 const CHAT_NS = 'urn:dkg:chat:';
 const SCHEMA = 'http://schema.org/';
@@ -267,10 +267,10 @@ function makeManager(store: OxigraphStore): ChatMemoryManager {
         if (opts?.graphSuffix === '_workspace') return executeOnGraph(store, sparql, WORKSPACE_GRAPH);
         return executeOnGraph(store, sparql, DATA_GRAPH);
       },
-      writeToWorkspace: async () => ({ workspaceOperationId: 'noop' }),
-      enshrineFromWorkspace: async () => ({}),
-      createParanet: async () => undefined,
-      listParanets: async () => [{ id: MEMORY_PARANET, name: 'Agent Memory' }],
+      createAssertion: async () => ({ assertionUri: 'urn:bench:assertion', alreadyExists: true }),
+      writeAssertion: async (_contextGraphId: string, _name: string, quads: any[]) => ({ written: quads.length }),
+      createContextGraph: async () => undefined,
+      listContextGraphs: async () => [{ id: MEMORY_CONTEXT_GRAPH, name: 'Agent Memory' }],
     },
     { apiKey: '' },
   );

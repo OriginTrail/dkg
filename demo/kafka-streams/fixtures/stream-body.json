@@ -1,0 +1,5 @@
+{
+  "name": "demo-stream",
+  "kafkaBootstrapUrl": "kafka://broker.devnet:9092",
+  "kafkaTopicName": "demo.topic.v1"
+}

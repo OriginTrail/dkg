@@ -9,7 +9,7 @@
  * Failures surface gaps in the daemon integration layer.
  *
  * Prerequisites:
- *   1. Add "epcis": { "paranetId": "testing" } to ~/.dkg/config.json
+ *   1. Add "epcis": { "contextGraphId": "testing" } to ~/.dkg/config.json
  *   2. Restart daemon: dkg stop && dkg start
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
@@ -35,7 +35,7 @@ type StoryCaptureKey = 'objectEvent' | 'transformationEvent' | 'aggregationEvent
 
 type CaptureResponseData = {
   ual: string;
-  kcId: string;
+  kaId: string;
   status: string;
   receivedAt: string;
   eventCount: number;
@@ -179,7 +179,7 @@ async function captureDoc(doc: Record<string, unknown>): Promise<CaptureResponse
 
   const data = await res.json() as CaptureResponseData;
   expect(typeof data.ual).toBe('string');
-  expect(typeof data.kcId).toBe('string');
+  expect(typeof data.kaId).toBe('string');
   expect(typeof data.status).toBe('string');
   expect(typeof data.eventCount).toBe('number');
   expect(typeof data.receivedAt).toBe('string');
@@ -314,7 +314,7 @@ describe('EPCIS API E2E', () => {
       expect(data).toHaveProperty('peerId');
     });
 
-    it('EPCIS endpoints return 200 (not 503), confirming paranetId is configured', async () => {
+    it('EPCIS endpoints return 200 (not 503), confirming contextGraphId is configured', async () => {
       // Per PRD user story #20: no-filter query returns 30 most recent events
       const res = await authedFetch('GET', '/api/epcis/events');
       expect(res.status).not.toBe(503);
@@ -1194,7 +1194,7 @@ describe('EPCIS API E2E', () => {
         const data = await res.json();
 
         expect(typeof data.ual).toBe('string');
-        expect(typeof data.kcId).toBe('string');
+        expect(typeof data.kaId).toBe('string');
         expect(typeof data.status).toBe('string');
         expect(typeof data.eventCount).toBe('number');
         expect(typeof data.receivedAt).toBe('string');

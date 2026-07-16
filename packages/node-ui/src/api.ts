@@ -1,12 +1,21 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, realpath } from 'node:fs/promises';
+import { PayloadTooLargeError, type RelayStats } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
-import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
-import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
+import { type ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
-import { ChatPersistenceQueue, type TurnPersistenceJobInput } from './chat-persistence-queue.js';
+
+/**
+ * Live relay-stats provider — wraps `DKGNode.getRelayStats()`. Returns
+ * `null` when the node is not running a relay server (i.e. edge node)
+ * so the route can respond 404. The `/api/relay/stats` route reads
+ * this directly rather than going through the MetricsCollector path
+ * because it needs the per-reservee detail array, which is too large
+ * to persist in periodic snapshots.
+ */
+export type RelayStatsProvider = () => RelayStats | null;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -20,7 +29,11 @@ const MIME: Record<string, string> = {
   '.woff': 'font/woff',
 };
 
-const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
+/**
+ * Per-request CORS origin — stored on the ServerResponse to avoid
+ * global state races in concurrent async handlers and long-lived SSE streams.
+ */
+
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const PERIOD_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
@@ -46,15 +59,6 @@ function autoBucketMs(periodMs: number): number {
   return 86_400_000;                                     // >7d      → daily buckets
 }
 
-function getChatPersistenceQueue(db: DashboardDB, memoryManager: ChatMemoryManager): ChatPersistenceQueue {
-  let queue = chatPersistenceQueues.get(db);
-  if (!queue) {
-    queue = new ChatPersistenceQueue(db, memoryManager);
-    chatPersistenceQueues.set(db, queue);
-  }
-  return queue;
-}
-
 function normalizeSessionId(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const value = raw.trim();
@@ -77,7 +81,7 @@ export interface TelemetrySettingsCallbacks {
 }
 
 /**
- * Handles all /api/metrics, /api/operations, /api/logs, /api/query-history,
+ * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
  */
 export async function handleNodeUIRequest(
@@ -86,32 +90,50 @@ export async function handleNodeUIRequest(
   url: URL,
   db: DashboardDB,
   staticDir: string,
-  chatAssistant?: ChatAssistant,
+  _legacyRemovedArg?: unknown,
   metricsCollector?: MetricsCollector,
   authToken?: string,
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
   telemetrySettings?: TelemetrySettingsCallbacks,
+  corsOrigin?: string | null,
+  relayStatsProvider?: RelayStatsProvider,
+  /**
+   * Called when a metric-serving route (/api/metrics[/history]) is actually
+   * served here — i.e. after the daemon's rate-limit/admission/auth gates have
+   * accepted the request. Lets the metrics collector treat the caller as a live
+   * consumer without the daemon duplicating route knowledge. (#1066 Item 1)
+   */
+  markMetricsConsumer?: () => void,
 ): Promise<boolean> {
+  (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 
   // --- Metrics ---
 
   if (req.method === 'GET' && path === '/api/metrics') {
+    markMetricsConsumer?.();
+    // Serve the latest tick-written snapshot rather than live-collecting.
+    // A live collect() re-runs the full-store COUNT scans on every request, so
+    // an external poller (Grafana / health probe) could hammer a saturated
+    // store. The periodic collector already refreshes the snapshot (effective
+    // 30s TTL) and a store outage still surfaces as null columns rather than
+    // being masked. (#1066 Item 1)
+    const snap = db.getLatestSnapshot();
+    if (snap) return json(res, 200, snap);
+    // Cold start only: no snapshot yet (before the first tick). Fall back to a
+    // single live collect so the first request isn't empty; steady state never
+    // reaches here, so external pollers never trigger a per-request scan.
     if (metricsCollector) {
       try {
-        const live = await metricsCollector.collect();
-        return json(res, 200, live);
-      } catch {
-        const snap = db.getLatestSnapshot();
-        return json(res, 200, snap ?? {});
-      }
+        return json(res, 200, await metricsCollector.collect());
+      } catch { /* fall through to empty */ }
     }
-    const snap = db.getLatestSnapshot();
-    return json(res, 200, snap ?? {});
+    return json(res, 200, {});
   }
 
   if (req.method === 'GET' && path === '/api/metrics/history') {
+    markMetricsConsumer?.();
     const from = parseInt(url.searchParams.get('from') ?? '0', 10) || (Date.now() - 86_400_000);
     const to = parseInt(url.searchParams.get('to') ?? '0', 10) || Date.now();
     const maxPoints = parseInt(url.searchParams.get('maxPoints') ?? '500', 10);
@@ -119,66 +141,88 @@ export async function handleNodeUIRequest(
     return json(res, 200, { snapshots });
   }
 
-  // --- Prometheus metrics ---
+  // --- Relay observability ---
+  //
+  // Live relay-server stats. Always 404 on edge nodes (no relay).
+  // Per-reservee detail is included here but NOT in the periodic
+  // snapshot table — the array is unbounded with reservation count
+  // and not useful for time-series graphing.
+  if (req.method === 'GET' && path === '/api/relay/stats') {
+    if (!relayStatsProvider) {
+      return json(res, 404, {
+        error: 'relay-stats-not-available',
+        // nodeRole: "core" alone is sufficient — `DKGNode.start()`
+        // defaults `enableRelayServer` to true when role is core.
+        // `enableRelayServer: true` is only required to override the
+        // default on a non-core node, which is unusual.
+        message: 'This node is not running a relay server (set nodeRole: "core" in config.json).',
+      });
+    }
+    const stats = relayStatsProvider();
+    if (!stats) {
+      return json(res, 404, {
+        error: 'relay-stats-not-available',
+        message: 'Relay server not started or not yet ready.',
+      });
+    }
+    // Bigints don't survive JSON.stringify. Stringify the cumulative
+    // byte counters so dashboard clients see "12345678901234567890"
+    // (a string they can BigInt-parse) rather than a serialization
+    // error. Number-typed fields stay numeric.
+    return json(res, 200, {
+      capacity: stats.capacity,
+      reservationCount: stats.reservationCount,
+      activeCircuits: stats.activeCircuits,
+      utilization: stats.capacity > 0
+        ? Math.round((stats.reservationCount / stats.capacity) * 10000) / 100
+        : null,
+      bytesIn: stats.bytesIn.toString(),
+      bytesOut: stats.bytesOut.toString(),
+      reservations: stats.reservations.map((r) => ({
+        peerId: r.peerId,
+        expiryTs: r.expiryTs,
+        // Convenience: time-to-expiry in ms so dashboards don't have
+        // to compute it client-side. Negative if already expired (a
+        // libp2p teardown race we'd surface for debugging).
+        ttlMs: r.expiryTs != null ? r.expiryTs - Date.now() : null,
+        addr: r.addr,
+        limitDurationMs: r.limitDurationMs,
+        limitDataBytes: r.limitDataBytes,
+      })),
+    });
+  }
 
-  // TODO: Prometheus /metrics endpoint — implementation in progress, hidden until ready
-  // if (req.method === 'GET' && path === '/metrics') {
-  //   if (metricsCollector) {
-  //     try {
-  //       const m = await metricsCollector.collect();
-  //       const lines = [
-  //         `# HELP dkg_uptime_seconds Node uptime in seconds`,
-  //         `# TYPE dkg_uptime_seconds gauge`,
-  //         `dkg_uptime_seconds ${m.uptime_seconds ?? 0}`,
-  //         `# HELP dkg_cpu_percent CPU usage percentage`,
-  //         `# TYPE dkg_cpu_percent gauge`,
-  //         `dkg_cpu_percent ${m.cpu_percent ?? 0}`,
-  //         `# HELP dkg_memory_bytes Memory usage in bytes`,
-  //         `# TYPE dkg_memory_bytes gauge`,
-  //         `dkg_memory_bytes{type="heap"} ${m.heap_used_bytes ?? 0}`,
-  //         `dkg_memory_bytes{type="system"} ${m.mem_used_bytes ?? 0}`,
-  //         `# HELP dkg_peers_total Number of connected peers`,
-  //         `# TYPE dkg_peers_total gauge`,
-  //         `dkg_peers_total{type="direct"} ${m.direct_peers ?? 0}`,
-  //         `dkg_peers_total{type="relayed"} ${m.relayed_peers ?? 0}`,
-  //         `dkg_peers_total{type="mesh"} ${m.mesh_peers ?? 0}`,
-  //         `# HELP dkg_triples_total Total triples in the store`,
-  //         `# TYPE dkg_triples_total gauge`,
-  //         `dkg_triples_total ${m.total_triples ?? 0}`,
-  //         `# HELP dkg_kcs_total Knowledge collections`,
-  //         `# TYPE dkg_kcs_total gauge`,
-  //         `dkg_kcs_total{status="confirmed"} ${m.confirmed_kcs ?? 0}`,
-  //         `dkg_kcs_total{status="tentative"} ${m.tentative_kcs ?? 0}`,
-  //         `# HELP dkg_kas_total Knowledge assets`,
-  //         `# TYPE dkg_kas_total gauge`,
-  //         `dkg_kas_total ${m.total_kas ?? 0}`,
-  //         `# HELP dkg_store_bytes Triple store size in bytes`,
-  //         `# TYPE dkg_store_bytes gauge`,
-  //         `dkg_store_bytes ${m.store_bytes ?? 0}`,
-  //         `# HELP dkg_rpc_latency_ms RPC latency in milliseconds`,
-  //         `# TYPE dkg_rpc_latency_ms gauge`,
-  //         `dkg_rpc_latency_ms ${m.rpc_latency_ms ?? 0}`,
-  //         `# HELP dkg_rpc_healthy RPC health status (1=healthy, 0=unhealthy)`,
-  //         `# TYPE dkg_rpc_healthy gauge`,
-  //         `dkg_rpc_healthy ${m.rpc_healthy ?? 0}`,
-  //         '',
-  //       ];
-  //       res.writeHead(200, {
-  //         'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
-  //         'Cache-Control': 'no-cache',
-  //       });
-  //       res.end(lines.join('\n'));
-  //       return true;
-  //     } catch {
-  //       res.writeHead(503, { 'Content-Type': 'text/plain' });
-  //       res.end('# metrics temporarily unavailable\n');
-  //       return true;
-  //     }
-  //   }
-  //   res.writeHead(503, { 'Content-Type': 'text/plain' });
-  //   res.end('# metrics collector not initialized\n');
-  //   return true;
-  // }
+  // --- Replication (chain-driven VM reconciliation) — Phase F ---
+
+  if (req.method === 'GET' && path === '/api/replication/summary') {
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? '24h');
+    return json(res, 200, db.getReplicationSummary(periodMs));
+  }
+
+  if (req.method === 'GET' && path === '/api/replication/per-cg') {
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? '24h');
+    return json(res, 200, { rows: db.getReplicationPerCg(periodMs) });
+  }
+
+  if (req.method === 'GET' && path === '/api/replication/timeline') {
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? '24h');
+    const rawBucket = parseInt(url.searchParams.get('bucketMs') ?? '', 10);
+    const bucketMs = Number.isFinite(rawBucket) && rawBucket > 0 ? rawBucket : autoBucketMs(periodMs);
+    const contextGraphId = url.searchParams.get('cg') ?? undefined;
+    return json(res, 200, { buckets: db.getReplicationTimeline({ periodMs, bucketMs, contextGraphId }) });
+  }
+
+  if (req.method === 'GET' && path === '/api/replication/cursors') {
+    return json(res, 200, { cursors: db.getReplicationCursors() });
+  }
+
+  if (req.method === 'GET' && path === '/api/replication/events') {
+    const cg = url.searchParams.get('cg');
+    if (!cg) return json(res, 400, { error: 'Missing cg query param' });
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '', 10);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 100;
+    return json(res, 200, { events: db.getReplicationEventsForCg(cg, limit) });
+  }
 
   // --- Error hotspots ---
 
@@ -202,6 +246,7 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'GET' && path === '/api/operations') {
     const name = url.searchParams.get('name') ?? undefined;
+    const names = url.searchParams.get('names')?.split(',').filter(Boolean) ?? undefined;
     const status = url.searchParams.get('status') ?? undefined;
     const operationId = url.searchParams.get('operationId') ?? undefined;
     const from = url.searchParams.get('from') ? parseInt(url.searchParams.get('from')!, 10) : undefined;
@@ -210,10 +255,10 @@ export async function handleNodeUIRequest(
     const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
     const includePhases = url.searchParams.get('phases') === '1';
     if (includePhases) {
-      const result = db.getOperationsWithPhases({ name, status, operationId, from, to, limit, offset });
+      const result = db.getOperationsWithPhases({ name, names, status, operationId, from, to, limit, offset });
       return json(res, 200, result);
     }
-    const result = db.getOperations({ name, status, operationId, from, to, limit, offset });
+    const result = db.getOperations({ name, names, status, operationId, from, to, limit, offset });
     return json(res, 200, result);
   }
 
@@ -260,7 +305,7 @@ export async function handleNodeUIRequest(
     return json(res, 200, spending);
   }
 
-  // --- Logs ---
+  // --- Logs (compatibility endpoint) ---
 
   if (req.method === 'GET' && path === '/api/logs') {
     const q = url.searchParams.get('q') ?? undefined;
@@ -387,11 +432,12 @@ export async function handleNodeUIRequest(
   // --- LLM settings ---
 
   if (req.method === 'GET' && path === '/api/settings/llm') {
-    if (chatAssistant) {
-      const info = chatAssistant.getLlmConfig();
-      return json(res, 200, info);
-    }
-    return json(res, 200, { configured: false });
+    const llm = llmSettings?.getLlm();
+    return json(res, 200, {
+      configured: !!llm?.apiKey,
+      model: llm?.model,
+      baseURL: llm?.baseURL,
+    });
   }
 
   if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
@@ -433,162 +479,14 @@ export async function handleNodeUIRequest(
     }
     try {
       await llmSettings.setLlm(llm);
-      const info = chatAssistant?.getLlmConfig() ?? { configured: !!llm };
-      return json(res, 200, { ok: true, ...info });
+      return json(res, 200, {
+        ok: true,
+        configured: !!llm?.apiKey,
+        model: llm?.model,
+        baseURL: llm?.baseURL,
+      });
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to save LLM config' });
-    }
-  }
-
-  // --- Chat assistant ---
-
-  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/events' && memoryManager) {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    beginSse(res);
-    const now = Date.now();
-    sendSse(res, {
-      type: 'persist_health',
-      ts: now,
-      ...queue.getHealthSnapshot(now),
-    });
-
-    const unsubscribe = queue.subscribe((event) => {
-      sendSse(res, event);
-    });
-
-    const keepAlive = setInterval(() => {
-      if (res.writableEnded || res.destroyed) return;
-      res.write(': ping\n\n');
-    }, 15_000);
-
-    const cleanup = () => {
-      clearInterval(keepAlive);
-      unsubscribe();
-      if (!res.writableEnded) {
-        res.end();
-      }
-    };
-
-    req.on('close', cleanup);
-    req.on('error', cleanup);
-    return true;
-  }
-
-  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/health' && memoryManager) {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    const now = Date.now();
-    return json(res, 200, {
-      ts: now,
-      ...queue.getHealthSnapshot(now),
-    });
-  }
-
-  if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
-    const body = await readBody(req);
-    let payload: { message?: unknown; sessionId?: unknown; stream?: unknown };
-    try {
-      payload = JSON.parse(body ?? '{}');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON payload' });
-    }
-    const message = typeof payload.message === 'string' ? payload.message.trim() : '';
-    const rawSessionId = payload.sessionId;
-    const acceptHeader = Array.isArray(req.headers.accept) ? req.headers.accept.join(', ') : (req.headers.accept ?? '');
-    const streamRequested = payload.stream === true || acceptHeader.includes('text/event-stream');
-    if (!message) return json(res, 400, { error: 'Missing "message"' });
-    const providedSessionId = rawSessionId === undefined ? null : normalizeSessionId(rawSessionId);
-    if (rawSessionId !== undefined && !providedSessionId) {
-      return json(res, 400, { error: 'Invalid "sessionId" format' });
-    }
-    const sessionId = providedSessionId ?? crypto.randomUUID();
-    const turnId = crypto.randomUUID();
-
-    if (streamRequested) {
-      beginSse(res);
-      sendSse(res, { type: 'meta', sessionId });
-      const startedAt = Date.now();
-      const llmStartedAt = Date.now();
-      let finalReply: ChatResponse | undefined;
-      try {
-        for await (const event of chatAssistant.answerStream({ message })) {
-          if (event.type === 'text_delta') {
-            sendSse(res, event);
-            continue;
-          }
-          if (event.type === 'final') {
-            finalReply = event.response;
-          }
-        }
-        if (!finalReply) throw new Error('Chat stream ended without a final response');
-
-        const llmMs = Date.now() - llmStartedAt;
-        const persisted = enqueueTurnPersistence(db, memoryManager, {
-          turnId,
-          sessionId,
-          userMessage: message,
-          assistantReply: finalReply.reply,
-          toolCalls: finalReply.toolCalls,
-        });
-        const totalMs = Date.now() - startedAt;
-        const responseMode = finalReply.responseMode ?? 'rule-based';
-        sendSse(res, {
-          type: 'final',
-          ...finalReply,
-          responseMode,
-          sessionId,
-          turnId,
-          persistStatus: persisted.persistStatus,
-          persistError: persisted.persistError,
-          timings: {
-            llm_ms: llmMs,
-            store_ms: persisted.storeMs,
-            total_ms: totalMs,
-          },
-        });
-      } catch (err: unknown) {
-        const messageText = err instanceof Error ? err.message : String(err);
-        const diagnostics: ChatLlmDiagnostics | undefined = finalReply?.llmDiagnostics;
-        console.error('[chat-assistant] Streaming error:', messageText);
-        sendSse(res, {
-          type: 'error',
-          error: messageText,
-          llmDiagnostics: diagnostics,
-        });
-      } finally {
-        res.end();
-      }
-      return true;
-    }
-
-    try {
-      const startedAt = Date.now();
-      const llmStartedAt = Date.now();
-      const reply = await chatAssistant.answer({ message });
-      const llmMs = Date.now() - llmStartedAt;
-      const persisted = enqueueTurnPersistence(db, memoryManager, {
-        turnId,
-        sessionId,
-        userMessage: message,
-        assistantReply: reply.reply,
-        toolCalls: reply.toolCalls,
-      });
-      const totalMs = Date.now() - startedAt;
-      const responseMode = reply.responseMode ?? 'rule-based';
-      return json(res, 200, {
-        ...reply,
-        responseMode,
-        sessionId,
-        turnId,
-        persistStatus: persisted.persistStatus,
-        persistError: persisted.persistError,
-        timings: {
-          llm_ms: llmMs,
-          store_ms: persisted.storeMs,
-          total_ms: totalMs,
-        },
-      });
-    } catch (err: any) {
-      return json(res, 500, { error: err.message });
     }
   }
 
@@ -637,86 +535,127 @@ export async function handleNodeUIRequest(
   ) {
     const sessionId = normalizeSessionId(decodeURIComponent(path.slice('/api/memory/sessions/'.length)));
     if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
+    const rawLimit = url.searchParams.get('limit');
+    const parsedLimit = rawLimit && /^\d+$/.test(rawLimit)
+      ? Number.parseInt(rawLimit, 10)
+      : undefined;
+    if (rawLimit && (!/^\d+$/.test(rawLimit) || (parsedLimit ?? 0) <= 0)) {
+      return json(res, 400, { error: 'Invalid "limit" query parameter' });
+    }
+    const rawOrder = (url.searchParams.get('order') ?? 'asc').toLowerCase();
+    if (rawOrder !== 'asc' && rawOrder !== 'desc') {
+      return json(res, 400, { error: 'Invalid "order" query parameter' });
+    }
     try {
-      const session = await memoryManager.getSession(sessionId);
-      if (!session) return json(res, 404, { error: 'Session not found' });
+      const session = await memoryManager.getSession(sessionId, {
+        ...(parsedLimit != null ? { limit: parsedLimit } : {}),
+        order: rawOrder,
+      });
+      // Returning 404 for "no history yet" was a bad UX/observability
+      // contract: the OpenClaw chat panel hits this endpoint on every
+      // page load, so a fresh node showed a red 404 line in DevTools
+      // even though the panel was working correctly. Return 200 with
+      // an empty `messages: []` envelope instead — semantically
+      // accurate (the session simply has no turns yet) and matches the
+      // shape `fetchLocalAgentHistoryBySessionId` expects (BUG-001).
+      if (!session) {
+        return json(res, 200, { session: sessionId, messages: [] });
+      }
       return json(res, 200, session);
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to fetch session' });
     }
   }
 
+  // B38: `/api/memory/sessions/:id/publication` and
+  // `/api/memory/sessions/:id/publish` are both backed by a
+  // shared-memory read path that the openclaw-dkg-primary-memory
+  // workstream broke by design: chat turns now live in Working Memory
+  // assertions (`agent-context/chat-turns`) and never reach SWM
+  // automatically, so `getSessionPublicationStatus` always reports
+  // `empty` and `publishSession` throws
+  // `No shared memory entities found for session ...`. The chat-memory
+  // methods still exist with a TODO pointing at the v2 follow-up
+  // (reimplement via `agent.assertion.promote` against the chat-turns
+  // WM assertion), but exposing them through these routes in v1 just
+  // returns misleading empty statuses or 400s to the UI. Return 501
+  // Not Implemented with a stable error code and a pointer at the
+  // follow-up issue so callers can gracefully degrade instead of
+  // treating the misleading response as a real publication state.
   if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publication') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publication'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    try {
-      const status = await memoryManager.getSessionPublicationStatus(sessionId);
-      return json(res, 200, status);
-    } catch (err: any) {
-      return json(res, 500, { error: err.message ?? 'Failed to fetch session publication status' });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based publication flow ' +
+        'returns misleading empty state. A future release will re-implement session promotion ' +
+        'via agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
   if (req.method === 'POST' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publish') && memoryManager) {
-    const sessionId = normalizeSessionId(decodeURIComponent(
-      path.slice('/api/memory/sessions/'.length, -'/publish'.length),
-    ));
-    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
-    const body = await readBody(req);
-    let payload: { rootEntities?: unknown; clearAfter?: unknown };
-    try {
-      payload = JSON.parse(body || '{}');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON payload' });
-    }
-    const rootEntities = Array.isArray(payload.rootEntities)
-      ? payload.rootEntities.filter((r): r is string => typeof r === 'string')
-      : undefined;
-    const clearWorkspaceAfter = payload.clearAfter === true;
-    try {
-      const result = await memoryManager.publishSession(sessionId, {
-        rootEntities,
-        clearWorkspaceAfter,
-      });
-      return json(res, 200, result);
-    } catch (err: any) {
-      const message = err?.message ?? 'Failed to publish session';
-      const status = /No workspace entities found|Selected root entities/.test(message) ? 400 : 500;
-      return json(res, status, { error: message });
-    }
+    return json(res, 501, {
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+      reason:
+        'Chat turns now live in Working Memory assertions (agent-context/chat-turns) and are ' +
+        'not promoted into shared memory automatically, so the old SWM-based /publish flow ' +
+        'has nothing to promote. A future release will re-implement session promotion via ' +
+        'agent.assertion.promote against the chat-turns WM assertion.',
+    });
   }
 
-  if (req.method === 'POST' && path === '/api/memory/import' && memoryManager) {
-    let body: string;
-    try {
-      body = await readBody(req, IMPORT_MAX_BYTES);
-    } catch (err) {
-      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
-      throw err;
-    }
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON body' });
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return json(res, 400, { error: 'Request body must be a JSON object' });
-    }
-    const { text, source, useLlm } = parsed;
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return json(res, 400, { error: 'Missing or empty "text" field' });
-    }
-    const importSource = IMPORT_SOURCES.includes(source) ? source : 'other';
-    try {
-      const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
-      return json(res, 200, result);
-    } catch (err: any) {
-      console.error('[node-ui] Import memories failed:', err);
-      return json(res, 500, { error: 'Failed to import memories' });
-    }
+  // B52: POST /api/memory/import was retired as part of the
+  // openclaw-dkg-primary-memory work. It required LLM API keys on the node
+  // and wrote dkg:ImportedMemory ad-hoc types into a
+  // throwaway sidecar graph. Rather than let existing callers fall
+  // through to the generic 404 (wire-level contract break with no
+  // migration signal), serve a 410 Gone stub that names the two
+  // replacements so external CLI scripts, MCP servers, and local agents
+  // see a clear migration pointer. Mirrors the B38 pattern for the
+  // session-publication routes above.
+  if (req.method === 'POST' && path === '/api/memory/import') {
+    return json(res, 410, {
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
+      reason:
+        'This retired endpoint required LLM API keys on the node and wrote ' +
+        'ad-hoc `dkg:ImportedMemory` triples into a throwaway sidecar graph. It was retired ' +
+        'as part of the openclaw-dkg-primary-memory workstream.',
+      // Codex B64: callers following this pointer for the first write to
+      // a fresh project CG need the create step before the write step —
+      // `POST /api/knowledge-assets/:name/wm/write` fails if the assertion
+      // does not already exist. List both routes in order so the migration
+      // path is reachable for both existing and brand-new assertions. The
+      // previous `dkg_memory_import` adapter-tool replacement was retired
+      // along with this endpoint (see eccbe19d) and has been dropped from
+      // this list so non-OpenClaw callers do not chase a tool that no longer
+      // exists.
+      replacements: [
+        {
+          surface: 'daemon HTTP route',
+          method: 'POST',
+          path: '/api/knowledge-assets',
+          description:
+            'One-time assertion bootstrap for a fresh project context graph. ' +
+            'POST `{ contextGraphId, name: "memory" }` to create the WM assertion ' +
+            'on first use. Idempotent: already-created assertions are a no-op. ' +
+            'Call this before the first `/api/knowledge-assets/:name/wm/write` on a new CG; ' +
+            'subsequent writes do not need it.',
+        },
+        {
+          surface: 'daemon HTTP route',
+          method: 'POST',
+          path: '/api/knowledge-assets/:name/wm/write',
+          description:
+            'Direct V10 WM assertion write route on the daemon. Use when writing from ' +
+            'a non-OpenClaw caller (CLI, external agent, MCP server) that already has a ' +
+            'resolved context graph id and peer identity. The assertion at `:name` must ' +
+            'exist first — bootstrap it via `POST /api/knowledge-assets` on a fresh CG.',
+        },
+      ],
+    });
   }
 
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
@@ -724,32 +663,21 @@ export async function handleNodeUIRequest(
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 200, { contextGraphId: 'agent-context', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 
   // --- Notifications ---
-
-  if (req.method === 'GET' && path === '/api/notifications') {
-    const since = url.searchParams.get('since');
-    const limit = url.searchParams.get('limit');
-    const data = db.getNotifications({
-      since: since ? Number(since) : undefined,
-      limit: limit ? Number(limit) : undefined,
-    });
-    return json(res, 200, data);
-  }
-
-  if (req.method === 'POST' && path === '/api/notifications/read') {
-    const body = await readBody(req);
-    let ids: number[] | undefined;
-    try {
-      const parsed = JSON.parse(body);
-      if (Array.isArray(parsed.ids)) ids = parsed.ids.map(Number);
-    } catch { /* mark all */ }
-    const count = db.markNotificationsRead(ids);
-    return json(res, 200, { marked: count });
-  }
+  //
+  // ADR-003 (notifications-pane redesign): `GET /api/notifications` and
+  // `POST /api/notifications/read` are now served by the AGENT-AWARE daemon
+  // route (`packages/cli/src/daemon/routes/notifications.ts`), which has the
+  // caller identity + `agent.listContextGraphs`/`listPendingJoinRequests`
+  // needed to scope the feed. `handleNodeUIRequest` runs before the daemon's
+  // `handleRequest`, so the legacy flat (unscoped) routes were REMOVED here
+  // (clean cut) to let the request fall through to the scoped handler. The
+  // pure scoping/digest logic lives in `scopeNotifications` (see
+  // `./notifications-scope.js`), which the daemon route calls.
 
   // --- Static UI files ---
 
@@ -760,52 +688,38 @@ export async function handleNodeUIRequest(
   return false;
 }
 
-function enqueueTurnPersistence(
-  db: DashboardDB,
-  memoryManager: ChatMemoryManager | undefined,
-  job: TurnPersistenceJobInput,
-): {
-  persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
-  persistError?: string;
-  storeMs: number;
-} {
-  if (!memoryManager) {
-    return { persistStatus: 'skipped', storeMs: 0 };
-  }
-  try {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    const snapshot = queue.enqueue(job);
-    return {
-      persistStatus: snapshot.status,
-      persistError: snapshot.error,
-      storeMs: snapshot.storeMs ?? 0,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[chat-persistence] enqueue failed:', message);
-    return { persistStatus: 'failed', persistError: message, storeMs: 0 };
-  }
-}
-
-function beginSse(res: ServerResponse): void {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': '*',
-  });
-}
-
-function sendSse(res: ServerResponse, data: unknown): void {
-  if (res.writableEnded || res.destroyed) return;
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
-}
-
 async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
+
+  const lexicalResolved = resolve(filePath);
+  const lexicalBase = resolve(staticDir);
+  const lexicalRel = relative(lexicalBase, lexicalResolved);
+  if (lexicalRel === '..' || lexicalRel.startsWith(`..${sep}`) || isAbsolute(lexicalRel) || resolve(lexicalBase, lexicalRel) !== lexicalResolved) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
+
+  if (existsSync(filePath)) {
+    try {
+      const realFile = await realpath(filePath);
+      const realBase = await realpath(staticDir);
+      const realRel = relative(realBase, realFile);
+      if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
+    }
+  }
 
   // SPA fallback: if not a file with extension, serve index.html
   const ext = filePath.slice(filePath.lastIndexOf('.'));
@@ -840,7 +754,16 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
         'Content-Length': s.size,
         'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
       });
-      createReadStream(filePath).pipe(res);
+      const stream = createReadStream(filePath);
+      stream.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Stream read error' }));
+        } else {
+          res.destroy(err);
+        }
+      });
+      stream.pipe(res);
     }
   } catch {
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -851,10 +774,13 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
 }
 
 function json(res: ServerResponse, status: number, data: unknown): true {
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
+  const origin = (res as any).__corsOrigin as string | null ?? null;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    if (origin !== '*') headers['Vary'] = 'Origin';
+  }
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
   return true;
 }
@@ -878,10 +804,4 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
     req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
     req.on('error', reject);
   });
-}
-
-const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
-
-class PayloadTooLargeError extends Error {
-  constructor() { super('Payload too large'); }
 }

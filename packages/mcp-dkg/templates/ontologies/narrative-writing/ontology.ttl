@@ -1,0 +1,101 @@
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema:  <http://schema.org/> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix bibo:    <http://purl.org/ontology/bibo/> .
+
+@prefix chat: <http://dkg.io/ontology/chat/> .
+@prefix :     <http://dkg.io/ontology/narrative-writing/> .
+
+<http://dkg.io/ontology/narrative-writing/>
+  a owl:Ontology ;
+  dcterms:title "DKG Narrative Writing Project Ontology (v1)" ;
+  dcterms:description """Starter for fiction or narrative non-fiction
+projects: novels, screenplays, biographies. Tracks Characters, Scenes,
+Plot Points, Themes, and the relationships between them.""" ;
+  owl:versionInfo "1.0.0" ;
+  dcterms:created "2026-04-18"^^xsd:date ;
+  owl:imports
+    <http://schema.org/> , <http://purl.org/dc/terms/> ,
+    <http://xmlns.com/foaf/0.1/> ,
+    <http://www.w3.org/2004/02/skos/core#> ,
+    <http://purl.org/ontology/bibo/> .
+
+# ─── Universal annotation predicates ────────────────────────────────
+chat:topic    a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:mentions a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:subPropertyOf schema:mentions .
+chat:examines a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:proposes a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:concludes a owl:ObjectProperty  ; rdfs:domain chat:Turn ; rdfs:range :Finding .
+chat:asks     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range :Question .
+
+# ─── Universal annotation entities ──────────────────────────────────
+:Concept rdfs:subClassOf skos:Concept .
+:Topic   rdfs:subClassOf skos:Concept .
+:Question rdfs:subClassOf schema:Question .
+:Finding  rdfs:subClassOf prov:Entity .
+
+# ─── Narrative-writing-specific ─────────────────────────────────────
+
+:Character a owl:Class ;
+  rdfs:label "Character" ;
+  rdfs:comment "A character in the narrative — fictional or historical." ;
+  rdfs:subClassOf foaf:Person, schema:Person .
+
+:Scene a owl:Class ;
+  rdfs:label "Scene" ;
+  rdfs:comment "A discrete unit of narrative action — a single place/time/event in the story." ;
+  rdfs:subClassOf schema:Event .
+
+:PlotPoint a owl:Class ;
+  rdfs:label "Plot point" ;
+  rdfs:comment "A structural moment in the narrative arc (inciting incident, climax, resolution, etc.)." .
+
+:Theme a owl:Class ;
+  rdfs:label "Theme" ;
+  rdfs:comment "A unifying idea explored across the narrative." ;
+  rdfs:subClassOf skos:Concept .
+
+:Setting a owl:Class ;
+  rdfs:label "Setting" ;
+  rdfs:comment "A place + time context within which Scenes occur." .
+
+:appearsIn a owl:ObjectProperty ;
+  rdfs:label "appears in" ;
+  rdfs:domain :Character ;
+  rdfs:range :Scene .
+
+:setIn a owl:ObjectProperty ;
+  rdfs:label "set in" ;
+  rdfs:domain :Scene ;
+  rdfs:range :Setting .
+
+:develops a owl:ObjectProperty ;
+  rdfs:label "develops" ;
+  rdfs:comment "A Scene or PlotPoint develops a Theme or a Character arc." ;
+  rdfs:range owl:Thing .
+
+:precedes a owl:ObjectProperty ;
+  rdfs:label "precedes" ;
+  rdfs:domain :Scene ;
+  rdfs:range :Scene .
+
+# ─── URI patterns ───────────────────────────────────────────────────
+:UriPattern rdfs:label "URI minting pattern" .
+
+:concept-pattern   a :UriPattern ; skos:notation "urn:dkg:concept:<slug>" .
+:topic-pattern     a :UriPattern ; skos:notation "urn:dkg:topic:<slug>" .
+:question-pattern  a :UriPattern ; skos:notation "urn:dkg:question:<slug>" .
+:character-pattern a :UriPattern ; skos:notation "urn:dkg:character:<slug>" .
+:scene-pattern     a :UriPattern ; skos:notation "urn:dkg:scene:<slug>" .
+:plotpoint-pattern a :UriPattern ; skos:notation "urn:dkg:plotpoint:<slug>" .
+:theme-pattern     a :UriPattern ; skos:notation "urn:dkg:theme:<slug>" .
+:setting-pattern   a :UriPattern ; skos:notation "urn:dkg:setting:<slug>" .
+
+:slug-normalisation a skos:Note ;
+  skos:definition "Lowercase → ASCII-fold → strip stopwords → hyphenate → ≤60 chars." .

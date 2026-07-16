@@ -1,6 +1,6 @@
 import { sha256 } from './hashing.js';
 
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
+export function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const len = Math.min(a.length, b.length);
   for (let i = 0; i < len; i++) {
     if (a[i] !== b[i]) return a[i] - b[i];
@@ -17,14 +17,17 @@ function hashPair(left: Uint8Array, right: Uint8Array): Uint8Array {
 
 export class MerkleTree {
   private readonly layers: Uint8Array[][];
+  private readonly _originalLeafCount: number;
 
   constructor(leaves: Uint8Array[]) {
     if (leaves.length === 0) {
       this.layers = [[]];
+      this._originalLeafCount = 0;
       return;
     }
 
     const sorted = [...leaves].sort(compareBytes);
+    this._originalLeafCount = sorted.length;
     this.layers = [sorted];
     this.buildTree();
   }
@@ -52,11 +55,11 @@ export class MerkleTree {
   }
 
   get leafCount(): number {
-    return this.layers[0].length;
+    return this._originalLeafCount;
   }
 
   proof(leafIndex: number): Uint8Array[] {
-    if (leafIndex < 0 || leafIndex >= this.layers[0].length) {
+    if (leafIndex < 0 || leafIndex >= this._originalLeafCount) {
       throw new RangeError(`Leaf index ${leafIndex} out of range`);
     }
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
 
@@ -30,6 +31,26 @@ export function NetworkPage() {
 
   return (
     <div>
+      {/* This page renders standalone (outside the app shell), so without an
+          explicit affordance the operator has no way back to the dashboard
+          once they land here. Keep a back link at the top. */}
+      <Link
+        to="/"
+        className="page-back-link"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          marginBottom: 12,
+          fontSize: 13,
+          color: 'var(--text-secondary)',
+          textDecoration: 'none',
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+        Back to dashboard
+      </Link>
+
       <h1 className="page-title">Network</h1>
 
       <div className="stats-grid">

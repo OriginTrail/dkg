@@ -1,0 +1,153 @@
+# Dependabot configuration — keeps the supply chain on a maintained surface.
+#
+# Two ecosystems matter for the TeamPCP-class attack model:
+#
+#   1. `github-actions` — every `uses:` we run executes attacker-supplied
+#      code on a runner with our `GITHUB_TOKEN` (and, on main, NPM_TOKEN).
+#      Pinned to full commit SHAs in every workflow; this updater bumps
+#      each SHA when upstream cuts a new release. PRs include the release
+#      notes inline so a reviewer can spot suspicious changes.
+#
+#   2. `npm` — same reasoning, applied to runtime dependencies. The
+#      CanisterWorm wave proved that even narrow-scope npm publishers get
+#      compromised; the only cheap defence is a fast lockfile bump cadence
+#      so we land patched versions before a 0-day in our tree sits idle.
+#
+# Both run weekly to minimise PR noise. Updates land as PRs and follow
+# normal review + CI gates. Major version bumps for runtime npm deps are
+# grouped per-package-manager to avoid one-PR-per-package floods.
+#
+# Cooldown windows (`cooldown:` blocks below):
+# Most published-then-discovered supply-chain attacks against the npm
+# ecosystem (event-stream, ua-parser-js, eslint-config-prettier malware,
+# Lottiefiles, the September 2025 wave) were detected and recorded in
+# GHSA/OSV within seven days of the bad version landing on the registry.
+# A version-update cadence that refuses to even *consider* a release
+# until it has aged on the registry therefore moves us out of the first-
+# mover blast radius for the vast majority of real-world incidents,
+# without affecting security advisories: `cooldown` is documented as
+# applying only to version updates, not security updates, so a CVE patch
+# still arrives the same day GitHub raises the advisory.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: 'Europe/Belgrade'
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+      - security
+    commit-message:
+      prefix: 'ci'
+      include: scope
+    cooldown:
+      # Same tiers as npm below — keep the policy uniform across both
+      # ecosystems so reviewers have one mental model. GitHub Actions are
+      # SHA-pinned, so cooldown is belt-and-braces over the pinning itself.
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 7
+      default-days: 7
+      include:
+        - '*'
+    groups:
+      # Group all `actions/*` first-party updates into one PR per week —
+      # they almost always release in lockstep and reviewing them as a
+      # bundle is the right ergonomics.
+      actions-core:
+        patterns:
+          - 'actions/*'
+      # Third-party action updates are higher-risk; keep each one in its
+      # own PR so the upgrade can be reviewed in isolation.
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: 'Europe/Belgrade'
+    open-pull-requests-limit: 15
+    versioning-strategy: increase-if-necessary
+    labels:
+      - dependencies
+      - npm
+      - security
+    commit-message:
+      prefix: 'chore(deps)'
+      include: scope
+    cooldown:
+      # Refuse to even propose any npm version-update PR until the release
+      # has been on the registry long enough for the security-research
+      # community to have caught and recorded an attack against it.
+      # Majors get a longer window (higher blast radius, more brittle
+      # upgrades worth letting the world test first); minors and patches
+      # share the 7-day window. Security updates bypass cooldown by design
+      # — GitHub documents that the `cooldown` block only affects version
+      # updates, not advisory-driven security updates, so a CVE fix still
+      # arrives the same day the advisory drops.
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 7
+      default-days: 7
+      include:
+        - '*'
+    groups:
+      # Group dev/build-tool updates — eslint, prettier, typescript,
+      # vitest, vite, playwright, types/*. Bumping these as a bundle keeps
+      # PR review noise manageable; runtime risk is low.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - 'eslint*'
+          - 'prettier*'
+          - 'typescript'
+          - 'vitest'
+          - '@vitest/*'
+          - 'vite'
+          - '@vitejs/*'
+          - '@playwright/*'
+          - 'playwright'
+          - '@types/*'
+          - 'tsx'
+          - 'ts-node'
+      # Group hardhat ecosystem — also low-risk and updates in lockstep.
+      hardhat:
+        patterns:
+          - 'hardhat'
+          - '@nomicfoundation/*'
+          - 'hardhat-*'
+      # Group transitive-only updates into a single weekly PR. These are
+      # packages we do not import directly but our direct deps drag in
+      # via the lockfile. Without this group every transitive bump opens
+      # its own PR, which used to flood the queue and was the reason an
+      # earlier revision of this file applied `allow: dependency-type:
+      # direct` — that filter, however, also blocked transitive
+      # *security* fixes from showing up as normal weekly PRs and
+      # silently relied on Dependabot security alerts to catch them.
+      # Grouping is the structurally correct fix: noise goes away, but
+      # transitive-only CVE patches still reach reviewers within a
+      # week of upstream landing them.
+      transitive:
+        dependency-type: production
+        update-types:
+          - 'minor'
+          - 'patch'
+        patterns:
+          - '*'
+        # `dev-tooling` and `hardhat` above declare their own patterns,
+        # so they take precedence and this catch-all only grabs what
+        # they don't claim.
+    # Runtime/production direct deps NOT in the groups above (ethers,
+    # n3, commander, better-sqlite3, react, …) each get their own PR
+    # so any behaviour change is reviewable in isolation.
+    #
+    # Intentionally NO `allow: dependency-type: direct` filter — see
+    # the `transitive` group above. The earlier filter is the gap
+    # PR460-02 / P0 #2 flagged in the security review.

@@ -1,0 +1,2 @@
+<urn:experiment:agent-provenance:turn-fallthrough> <https://schema.org/name> "Negative case: unauthorized-PCA fall-through" <urn:dkg:context-graph:test/_meta> .
+<urn:experiment:agent-provenance:turn-fallthrough> <https://schema.org/text> "Publisher names a core that has a PCA but is not on authorizedKeys; full fee, attribution preserved." <urn:dkg:context-graph:test/_meta> .

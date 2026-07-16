@@ -28,11 +28,16 @@ export class StyleEngine {
   private _config: Required<StyleConfig>;
   private _prefixManager: PrefixManager;
   private _palette: ColorPalette;
+  private _hasExplicitDefaultNodeColor: boolean;
+  private _hasExplicitDefaultEdgeColor: boolean;
 
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
     this._palette = palette ?? PALETTE_DARK;
+    this._hasExplicitDefaultNodeColor = config?.defaultNodeColor !== undefined;
+    this._hasExplicitDefaultEdgeColor = config?.defaultEdgeColor !== undefined;
     this._config = {
+      nodeColors: config?.nodeColors ?? {},
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
@@ -58,16 +63,25 @@ export class StyleEngine {
     this._palette = palette;
     // Only override defaults that weren't explicitly set by the user
     this._config = { ...this._config };
-    this._config.defaultNodeColor = palette.primary;
-    this._config.defaultEdgeColor = palette.edgeColor;
+    if (!this._hasExplicitDefaultNodeColor) this._config.defaultNodeColor = palette.primary;
+    if (!this._hasExplicitDefaultEdgeColor) this._config.defaultEdgeColor = palette.edgeColor;
   }
 
   get config(): Readonly<Required<StyleConfig>> {
     return this._config;
   }
 
+  /** Update per-node color overrides (merges with existing) */
+  setNodeColors(colors: Record<string, string>): void {
+    this._config = { ...this._config, nodeColors: { ...this._config.nodeColors, ...colors } };
+  }
+
   /** Get the fill color for a node */
   getNodeColor(node: GraphNode): string {
+    // 0. Per-node color override (highest priority — used for trust-level coloring)
+    const nodeColor = this._config.nodeColors[node.id];
+    if (nodeColor) return nodeColor;
+
     // 1. Check per-class colors (user-supplied, using compact or full URIs)
     for (const type of node.types) {
       const compact = this._prefixManager.compact(type);

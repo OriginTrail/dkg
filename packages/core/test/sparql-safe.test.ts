@@ -7,15 +7,14 @@ import {
   escapeSparqlLiteral,
   sparqlString,
   sparqlInt,
-  assertSafeRdfTerm,
 } from '../src/index.js';
 
 describe('assertSafeIri', () => {
   it('accepts normal URIs', () => {
     expect(assertSafeIri('http://example.org/resource')).toBe('http://example.org/resource');
-    expect(assertSafeIri('did:dkg:paranet:agents')).toBe('did:dkg:paranet:agents');
+    expect(assertSafeIri('did:dkg:context-graph:agents')).toBe('did:dkg:context-graph:agents');
     expect(assertSafeIri('urn:uuid:550e8400-e29b-41d4-a716-446655440000')).toBe('urn:uuid:550e8400-e29b-41d4-a716-446655440000');
-    expect(assertSafeIri('did:dkg:paranet:agents/_meta')).toBe('did:dkg:paranet:agents/_meta');
+    expect(assertSafeIri('did:dkg:context-graph:agents/_meta')).toBe('did:dkg:context-graph:agents/_meta');
   });
 
   it('rejects empty string', () => {
@@ -66,7 +65,7 @@ describe('assertSafeIri', () => {
 describe('isSafeIri', () => {
   it('returns true for valid scheme-prefixed IRIs', () => {
     expect(isSafeIri('http://example.org/resource')).toBe(true);
-    expect(isSafeIri('did:dkg:paranet:test')).toBe(true);
+    expect(isSafeIri('did:dkg:context-graph:test')).toBe(true);
     expect(isSafeIri('urn:test:123')).toBe(true);
   });
 
@@ -87,7 +86,7 @@ describe('isSafeIri', () => {
 describe('sparqlIri', () => {
   it('wraps valid IRIs in angle brackets', () => {
     expect(sparqlIri('http://example.org/p')).toBe('<http://example.org/p>');
-    expect(sparqlIri('did:dkg:paranet:agents/_meta')).toBe('<did:dkg:paranet:agents/_meta>');
+    expect(sparqlIri('did:dkg:context-graph:agents/_meta')).toBe('<did:dkg:context-graph:agents/_meta>');
   });
 
   it('throws on unsafe IRIs', () => {

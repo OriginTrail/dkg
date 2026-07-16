@@ -38,11 +38,26 @@ function networkDiscovery(): Plugin {
             const nodes = readTestnetNodes();
             let chainRpc = '';
             let hubAddress = '';
+            // Operator overrides come from ~/.dkg/config.json#chain. Anything
+            // they leave out (which is everything on a fresh `dkg openclaw
+            // setup` post-PR-322) falls back to the shipped network defaults
+            // in network/testnet.json — mirroring resolveChainConfig in
+            // packages/cli/src/config.ts so this devtool doesn't break for
+            // freshly bootstrapped nodes that intentionally omit `chain` to
+            // let hub/RPC rotations propagate.
             try {
               const cfg = JSON.parse(fs.readFileSync(path.join(DKG_HOME, 'config.json'), 'utf-8'));
               chainRpc = cfg.chain?.rpcUrl ?? '';
               hubAddress = cfg.chain?.hubAddress ?? '';
             } catch { /* ignore */ }
+            if (!chainRpc || !hubAddress) {
+              try {
+                const networkPath = path.resolve(__dirname, '../../network/testnet.json');
+                const network = JSON.parse(fs.readFileSync(networkPath, 'utf-8'));
+                chainRpc = chainRpc || network.chain?.rpcUrl || '';
+                hubAddress = hubAddress || network.chain?.hubAddress || '';
+              } catch { /* ignore */ }
+            }
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({
               nodes,

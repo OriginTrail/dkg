@@ -1,0 +1,321 @@
+/* ══════════════════════════════════════════
+   SHARED COMPONENT STYLES
+   ══════════════════════════════════════════ */
+
+/* Tooltip */
+.tt{position:fixed;transform:translate(-50%,-100%) translateY(-8px);padding:8px 12px;background:var(--bg-elevated);border:1px solid var(--border-strong);border-radius:8px;color:var(--text-secondary);font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;line-height:1.5;pointer-events:none;z-index:99999;box-shadow:0 4px 16px rgba(0,0,0,.4);white-space:normal;word-wrap:break-word}
+.tt.tt-below{transform:translate(-50%,0) translateY(8px)}
+.tt::after{content:'';position:absolute;bottom:-5px;left:50%;transform:translateX(-50%) rotate(45deg);width:8px;height:8px;background:var(--bg-elevated);border-right:1px solid var(--border-strong);border-bottom:1px solid var(--border-strong)}
+.tt.tt-below::after{bottom:auto;top:-5px;border-right:none;border-bottom:none;border-left:1px solid var(--border-strong);border-top:1px solid var(--border-strong)}
+
+p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+
+/* Unified button styles */
+.dkg-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;border:1px solid rgba(34,197,94,.3);background:var(--green-dim);color:var(--accent-green);cursor:pointer;transition:filter .15s;font-family:inherit;min-height:36px}
+.dkg-btn:hover{filter:brightness(1.2)}
+.dkg-btn:disabled{opacity:.4;cursor:not-allowed;filter:none}
+.dkg-btn-secondary{background:var(--bg-surface);border:1px solid var(--border-default);color:var(--text-secondary)}
+.dkg-btn-solid{background:var(--accent-green);border:none;color:var(--bg-root);font-weight:700}
+.dkg-btn-solid:hover{filter:brightness(1.1)}
+
+/* Cards */
+.card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:12px;overflow:hidden;transition:border-color .15s}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
+.card-title{font-size:12px;font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
+
+/* ── Settings page (cleanup): the page migrates the keep-cards onto the
+   canonical .card idiom above. These add the body padding the idiom omits,
+   the single-column page stack, and token-driven field rows (replacing the
+   previously-undefined .settings-card/.settings-grid/.prov-field-* hooks). */
+.card-body{padding:14px 18px}
+.settings-stack{display:flex;flex-direction:column;gap:16px;max-width:720px}
+.settings-field-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-dim);margin-bottom:3px}
+.settings-field-value{font-size:12px;color:var(--text-primary);word-break:break-word}
+.settings-field-value.mono{font-family:var(--font-mono)}
+
+/* ── Observability page shared components ───────────────────────────────── */
+
+/* Page layout */
+.page-section { padding: 20px 24px; max-width: 1400px; }
+.page-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
+
+/* Tab bar (legacy v9-style, used by Observability page) */
+.tab-group {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 0;
+}
+.tab-item {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  color: var(--text-tertiary);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  cursor: pointer;
+  outline: none;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.tab-item:hover { color: var(--text-secondary); }
+.tab-item:focus { outline: none; }
+.tab-item.active { color: var(--text-primary); border-bottom-color: var(--accent-blue); }
+
+/* Form inputs and selects */
+.input {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.input:focus { border-color: var(--accent-blue); }
+.input.mono { font-family: var(--font-mono); }
+select.input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 24px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  cursor: pointer;
+}
+
+/* Filter bar */
+.filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+
+/* Data table */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.data-table th {
+  padding: 8px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: var(--bg-panel);
+}
+.data-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+.data-table tbody tr:hover { background: var(--bg-hover); }
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+/* F7/M5: theme-aware text tokens (dark-on-tint in light theme) so these clear
+   WCAG 4.5:1 — the raw #22c55e/#ef4444/#3b82f6 failed in light theme. Mirrors
+   `.badge-warn` below. */
+.badge-success { background: rgba(34,197,94,.12); color: var(--text-success); }
+.badge-error   { background: rgba(239,68,68,.12);  color: var(--text-danger); }
+/* Warning semantics resolve to the theme-aware `--text-warning` token
+   (#fbbf24 dark / #92400e light) on `--amber-dim`, matching
+   `.v10-modal-warning` and the EmptyState `warning` tone so the whole
+   warning family shares ONE token. This is deliberately NOT the raw
+   `#f59e0b` (`--accent-amber` / `--layer-shared`), which is the SWM
+   layer-IDENTITY accent — those uses stay as-is. */
+.badge-warn    { background: var(--amber-dim); color: var(--text-warning); }
+.badge-info    { background: rgba(59,130,246,.12); color: var(--text-info); }
+
+/* Empty states */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.empty-state--compact { padding: 28px 16px; }
+.empty-state--rich    { padding: 40px 24px; }
+.empty-state-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.empty-state-title { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.empty-state-desc  { font-size: 12px; color: var(--text-secondary); max-width: 340px; line-height: 1.6; }
+
+/* Phase bar (inline progress bars in the operations table) */
+.phase-bar-wrap { display: flex; gap: 1px; border-radius: 3px; overflow: hidden; height: 6px; min-width: 80px; background: var(--bg-elevated); }
+.phase-bar-seg  { height: 100%; min-width: 2px; }
+
+/* Tx link icon */
+.tx-link-icon { color: var(--text-tertiary); opacity: 0.6; transition: opacity 0.15s; }
+.tx-link-icon:hover { opacity: 1; color: var(--accent-blue); }
+
+/* Stat cards */
+.stat-card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:12px;padding:18px 20px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.stat-card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
+.stat-label{font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.stat-value{font-size:28px;font-weight:700;color:var(--text-primary);line-height:1}
+.stat-sub{font-size:13px;color:var(--text-secondary);margin-top:6px}
+
+/* Badges */
+.agent-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:600;white-space:nowrap;font-family:var(--font-mono)}
+.agent-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.verify-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;font-size:10px;font-weight:600;font-family:var(--font-mono)}
+.verify-badge.verified{background:rgba(34,197,94,.1);color:var(--accent-green);border:1px solid rgba(34,197,94,.2)}
+.verify-badge.pending{background:var(--amber-dim);color:var(--accent-amber);border:1px solid rgba(251,191,36,.2)}
+
+/* Mode tabs */
+.mode-tabs{display:flex;gap:4px;background:var(--bg-surface);border-radius:8px;padding:3px;border:1px solid var(--border-default)}
+.mode-tab{padding:8px 14px;border-radius:6px;border:none;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;background:transparent;color:var(--text-secondary);min-height:36px}
+.mode-tab.active{background:var(--green-dim);color:var(--accent-green)}
+
+/* Chat (legacy) */
+.chat-area{flex:1;overflow:auto;padding:16px 20px}
+.chat-msg{margin-bottom:14px;display:flex;flex-direction:column}
+.chat-msg.user{align-items:flex-end}
+.chat-msg.assistant{align-items:flex-start}
+.chat-bubble{padding:10px 14px;border-radius:10px;max-width:80%;font-size:12px;line-height:1.55;word-break:break-word;overflow-wrap:anywhere}
+.chat-bubble.user{background:var(--green-dim);color:var(--accent-green);border:1px solid rgba(34,197,94,.13)}
+.chat-bubble.assistant{background:rgba(255,255,255,.04);color:var(--text-primary);border:1px solid var(--border-default)}
+.chat-input-row{padding:16px 20px;border-top:1px solid var(--border-default);display:flex;gap:12px;align-items:center}
+.chat-input{flex:1;padding:12px 16px;border-radius:10px;border:1px solid var(--border-default);background:var(--bg-root);color:var(--text-primary);font-size:13px;outline:none;font-family:inherit;min-height:44px;box-sizing:border-box}
+.chat-input:focus{border-color:rgba(34,197,94,.4)}
+
+/* ══════════════════════════════════════════
+   MODAL STYLES (V10)
+   ══════════════════════════════════════════ */
+.v10-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+  animation: fadeSlideIn 0.15s ease;
+}
+.v10-modal-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.v10-modal-header {
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+}
+.v10-modal-subtitle {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+.v10-modal-body {
+  padding: 20px 24px;
+}
+.v10-modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.v10-modal-btn {
+  height: 34px;
+  padding: 0 18px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  background: none;
+}
+.v10-modal-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.v10-modal-btn.primary {
+  background: var(--text-primary);
+  color: var(--bg-root);
+  border-color: var(--text-primary);
+}
+.v10-modal-btn.primary:hover { opacity: 0.85; }
+.v10-modal-btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.v10-modal-error {
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-danger);
+  line-height: 1.5;
+}
+
+.v10-modal-warning {
+  padding: 10px 14px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-warning);
+  line-height: 1.5;
+}
+
+.v10-modal-tip {
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.v10-modal-tip-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}

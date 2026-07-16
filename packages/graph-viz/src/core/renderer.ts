@@ -144,8 +144,7 @@ export class Canvas2DRenderer implements RendererBackend {
       .linkDirectionalArrowRelPos(1)
       .linkCanvasObjectMode(() => 'after')
       .linkCanvasObject((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-        // Skip expensive label rendering entirely when not zoomed in enough
-        if (globalScale < 3.0) return;
+        if (globalScale < 0.3) return;
 
         const fl = link as ForceLink;
         if (!fl._graphEdge) return;
@@ -153,9 +152,8 @@ export class Canvas2DRenderer implements RendererBackend {
         const label = fl._graphEdge.label;
         if (!label) return;
 
-        // Fade in between globalScale 3–4
-        const fadeStart = 3.0;
-        const fadeFull = 4.0;
+        const fadeStart = 0.3;
+        const fadeFull = 0.8;
         const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
 
         const fontSize = 12 / globalScale;

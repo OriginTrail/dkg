@@ -78,8 +78,9 @@ export function sparqlString(value: string): string {
  * Handles `bigint` natively via `.toString()` to avoid precision loss
  * for values beyond `Number.MAX_SAFE_INTEGER`.
  */
-// SPARQL STRING_LITERAL2: forbid raw CR/LF, only allow valid SPARQL escapes
-// BCP47 lang tags: primary subtag alpha-only, subsequent subtags alphanumeric (e.g. de-CH-1996)
+// SPARQL STRING_LITERAL2: forbid raw CR/LF, only allow valid SPARQL escapes.
+// BCP47 lang tags: primary subtag alpha-only, subsequent subtags alphanumeric (e.g. de-CH-1996).
+// Datatype IRIs use the same safe-IRI character set as SAFE_RDF_IRI_TERM.
 const SAFE_IRI_CHARS = '[^<>"{}|\\\\^`\\x00-\\x20>]';
 const SAFE_RDF_LITERAL = new RegExp(
   `^"(?:[^"\\\\\\r\\n]|\\\\[tbnrf"'\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\U[0-9a-fA-F]{8})*"` +

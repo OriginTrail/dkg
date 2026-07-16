@@ -74,9 +74,7 @@ describe('@unit ParametersStorage contract', function () {
     const valueInContract = 1;
     const newValue = '7';
     stakeWithdrawalDelay = await ParametersStorage.stakeWithdrawalDelay();
-    const expectedValue = `${stakeWithdrawalDelay}/60`;
-
-    expect(eval(expectedValue)).to.eql(valueInContract);
+    expect(Number(stakeWithdrawalDelay) / 60).to.eql(valueInContract);
 
     // set new value for stake withdrawal delay and validate is correct
     await Hub.forwardCall(
@@ -98,5 +96,119 @@ describe('@unit ParametersStorage contract', function () {
         stakeWithdrawalDelay.toString(),
       ),
     ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+  });
+
+  describe('protocol treasury fee', () => {
+    it('defaults: fee = 300 bps (3%), treasury = zero address, cap = 1000 bps', async () => {
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(300n);
+      expect(await ParametersStorage.protocolTreasury()).to.equal(
+        hre.ethers.ZeroAddress,
+      );
+      expect(await ParametersStorage.MAX_PROTOCOL_TREASURY_FEE()).to.equal(
+        1000n,
+      );
+    });
+
+    it('owner can set protocolTreasuryFee within the cap and it emits ParameterChanged', async () => {
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          500,
+        ]),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ParameterChanged')
+        .withArgs('protocolTreasuryFee', 500n);
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(500n);
+    });
+
+    it('owner can set the fee to the cap and to 0 (disable)', async () => {
+      await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          1000,
+        ]),
+      );
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(1000n);
+
+      await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          0,
+        ]),
+      );
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(0n);
+    });
+
+    it('setProtocolTreasuryFee reverts above the cap', async () => {
+      await expect(
+        Hub.forwardCall(
+          await ParametersStorage.getAddress(),
+          ParametersStorageInterface.encodeFunctionData(
+            'setProtocolTreasuryFee',
+            [1001],
+          ),
+        ),
+      ).to.be.revertedWith('protocolTreasuryFee too large');
+    });
+
+    it('setProtocolTreasuryFee reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setProtocolTreasuryFee(100),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
+
+    it('owner can set protocolTreasury and it emits ProtocolTreasurySet', async () => {
+      const treasury = accounts[3].address;
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasury', [
+          treasury,
+        ]),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ProtocolTreasurySet')
+        .withArgs(treasury);
+      expect(await ParametersStorage.protocolTreasury()).to.equal(treasury);
+    });
+
+    it('setProtocolTreasury reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setProtocolTreasury(
+          accounts[3].address,
+        ),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
+  });
+
+  describe('minPcaCommitmentForCgWaiver (OT-RFC-53 waiver floor)', () => {
+    it('defaults to 25,000 TRAC', async () => {
+      expect(await ParametersStorage.minPcaCommitmentForCgWaiver()).to.equal(
+        hre.ethers.parseEther('25000'),
+      );
+    });
+
+    it('owner can set it, the value updates, and it emits ParameterChanged', async () => {
+      const v = hre.ethers.parseEther('5000');
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData(
+          'setMinPcaCommitmentForCgWaiver',
+          [v],
+        ),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ParameterChanged')
+        .withArgs('minPcaCommitmentForCgWaiver', v);
+      expect(await ParametersStorage.minPcaCommitmentForCgWaiver()).to.equal(v);
+    });
+
+    it('setMinPcaCommitmentForCgWaiver reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setMinPcaCommitmentForCgWaiver(
+          hre.ethers.parseEther('1'),
+        ),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
   });
 });

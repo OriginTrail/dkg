@@ -27,26 +27,31 @@ export interface Quad {
   graph: string;
 }
 
-function uri(s: string): string { return s; }
-function literal(s: string): string { return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`; }
-function intLiteral(n: number): string { return `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`; }
+export const DEVGRAPH_NS = DEVGRAPH;
+export const RDF_TYPE_IRI = RDF_TYPE;
+export const DEFAULT_GRAPH = 'did:dkg:context-graph:dev-coordination';
 
-function moduleUri(repoRoot: string, filePath: string): string {
+export function uri(s: string): string { return s; }
+export function literal(s: string): string { return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`; }
+export function intLiteral(n: number): string { return `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`; }
+export function boolLiteral(b: boolean): string { return `"${b}"^^<http://www.w3.org/2001/XMLSchema#boolean>`; }
+
+export function moduleUri(repoRoot: string, filePath: string): string {
   const rel = relative(repoRoot, filePath).replace(/\\/g, '/');
   return `file:${rel}`;
 }
 
-function packageUri(name: string): string {
+export function packageUri(name: string): string {
   return `pkg:${name.replace(/[^a-zA-Z0-9@/_-]/g, '_')}`;
 }
 
-function symbolUri(repoRoot: string, filePath: string, name: string, kind: string): string {
+export function symbolUri(repoRoot: string, filePath: string, name: string, kind: string): string {
   const rel = relative(repoRoot, filePath).replace(/\\/g, '/');
   return `symbol:${rel}/${kind}/${encodeURIComponent(name)}`;
 }
 
 function moduleBaseQuads(repoRoot: string, filePath: string, pkgName: string, lineCount: number): Quad[] {
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const modUri = uri(moduleUri(repoRoot, filePath));
   return [
     { subject: modUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}CodeModule`), graph },
@@ -131,7 +136,7 @@ async function indexPackages(repoRoot: string): Promise<{ packages: PkgInfo[]; q
     } catch { /* already loaded */ }
   }
 
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   for (const pkg of packages) {
     const subj = uri(packageUri(pkg.name));
     quads.push({ subject: subj, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Package`), graph });
@@ -155,7 +160,7 @@ async function indexTypeScriptFile(
   repoRoot: string, filePath: string, pkgName: string,
 ): Promise<Quad[]> {
   const quads: Quad[] = [];
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const modUri = uri(moduleUri(repoRoot, filePath));
 
   const source = await readFile(filePath, 'utf-8');
@@ -259,7 +264,7 @@ async function indexTypeScriptFile(
 async function indexJavaScriptFile(
   repoRoot: string, filePath: string, pkgName: string,
 ): Promise<Quad[]> {
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const quads: Quad[] = [];
   const modUri = uri(moduleUri(repoRoot, filePath));
 
@@ -324,7 +329,7 @@ async function indexJavaScriptFile(
 async function indexPythonFile(
   repoRoot: string, filePath: string, pkgName: string,
 ): Promise<Quad[]> {
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const quads: Quad[] = [];
   const modUri = uri(moduleUri(repoRoot, filePath));
 
@@ -402,7 +407,7 @@ async function indexPythonFile(
 async function indexContentFile(
   repoRoot: string, filePath: string, pkgName: string,
 ): Promise<Quad[]> {
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const source = await readFile(filePath, 'utf-8');
   const lineCount = source.split('\n').length;
   const wordCount = source.trim().length ? source.trim().split(/\s+/).length : 0;
@@ -480,7 +485,7 @@ function extractMethodSignature(node: ts.MethodDeclaration, sourceFile: ts.Sourc
 
 async function indexSolidityFile(repoRoot: string, filePath: string, pkgName: string): Promise<Quad[]> {
   const quads: Quad[] = [];
-  const graph = 'did:dkg:paranet:dev-coordination';
+  const graph = 'did:dkg:context-graph:dev-coordination';
   const modUri = uri(moduleUri(repoRoot, filePath));
 
   const source = await readFile(filePath, 'utf-8');
@@ -587,6 +592,22 @@ export interface IndexResult {
 
 export interface IndexOptions {
   includeContent?: boolean;
+  /**
+   * When true, replace the regex-based Solidity extractor with an AST-based
+   * one that reads Hardhat `artifacts/build-info/*.json` and emits richer
+   * devgraph: quads (StateVariable / Event / Error / Modifier as first-class
+   * nodes, plus visibility / stateMutability / docstring / call-graph edges).
+   * Packages without a build-info dir fall back to the regex pass.
+   */
+  solidityAst?: boolean;
+  /**
+   * Target context graph id. If set, all emitted quads are rewritten to
+   * carry `did:dkg:context-graph:<id>` as their graph — required by the
+   * daemon's SWM validator which rejects quads whose named graph does not
+   * match the destination context graph. Defaults to 'dev-coordination'
+   * (the legacy hardcoded graph in the extractors).
+   */
+  contextGraphId?: string;
 }
 
 interface LanguageExtractor {
@@ -637,6 +658,7 @@ export async function indexRepository(repoRoot: string, options: IndexOptions = 
   let classCount = 0;
   let contractCount = 0;
   const includeContent = options.includeContent ?? false;
+  const solidityAst = options.solidityAst ?? false;
 
   // Index packages
   const { packages, quads: pkgQuads } = await indexPackages(repoRoot);
@@ -658,6 +680,36 @@ export async function indexRepository(repoRoot: string, options: IndexOptions = 
     return 'unknown';
   }
 
+  // Track which (pkg, file) pairs were handled by the AST pass so we can
+  // skip them in the regex pass and avoid emitting conflicting URIs.
+  const astHandled = new Set<string>();
+
+  // Solidity AST pass first (so its richer quads are authoritative).
+  if (solidityAst) {
+    const { indexSolidityBuildInfo } = await import('./indexer-solidity-ast.js');
+    for (const pkg of packages) {
+      const pkgDir = join(repoRoot, pkg.path);
+      const buildInfoDir = join(pkgDir, 'artifacts', 'build-info');
+      if (!existsSync(buildInfoDir)) continue;
+      try {
+        const astResult = await indexSolidityBuildInfo(repoRoot, pkgDir, pkg.name);
+        allQuads.push(...astResult.quads);
+        moduleCount += astResult.sourceCount;
+        functionCount += astResult.functionCount;
+        contractCount += astResult.contractCount;
+        // Mark every .sol file under this package as AST-handled.
+        const contractsDir = join(pkgDir, 'contracts');
+        if (existsSync(contractsDir)) {
+          for await (const f of walkFiles(contractsDir, new Set(['.sol']))) {
+            astHandled.add(f);
+          }
+        }
+      } catch (err) {
+        process.stderr.write(`Warning [solidity-ast]: could not index ${pkg.name}: ${err}\n`);
+      }
+    }
+  }
+
   for (const extractor of CODE_EXTRACTORS) {
     for (const pkg of packages) {
       for (const relRoot of extractor.roots) {
@@ -666,6 +718,7 @@ export async function indexRepository(repoRoot: string, options: IndexOptions = 
 
         for await (const file of walkFiles(rootDir, extractor.extensions)) {
           if (file.endsWith('.d.ts')) continue;
+          if (extractor.id === 'solidity' && astHandled.has(file)) continue;
           try {
             const quads = await extractor.indexFile(repoRoot, file, pkg.name);
             allQuads.push(...quads);
@@ -690,6 +743,17 @@ export async function indexRepository(repoRoot: string, options: IndexOptions = 
       } catch (err) {
         process.stderr.write(`Warning [content]: could not index ${relative(repoRoot, file)}: ${err}\n`);
       }
+    }
+  }
+
+  // Rewrite the quad graph URI to match the destination context graph so the
+  // daemon's SWM validator accepts the payload. Extractors emit a legacy
+  // 'did:dkg:context-graph:dev-coordination' default which is fine for the
+  // dev-coordination graph but breaks when publishing to any other graph.
+  if (options.contextGraphId && options.contextGraphId !== 'dev-coordination') {
+    const target = `did:dkg:context-graph:${options.contextGraphId}`;
+    for (const q of allQuads) {
+      if (q.graph === DEFAULT_GRAPH) q.graph = target;
     }
   }
 

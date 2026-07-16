@@ -1,0 +1,581 @@
+// daemon/routes/epcis.ts
+//
+// Route handlers for EPCIS events + capture.
+//
+// Extracted verbatim from the legacy monolithic `handleRequest` —
+// every block is a contiguous slice of the original source with zero
+// edits to route bodies. Dispatch is driven by the surviving
+// `handle-request.ts` shell, which awaits each group handler in
+// sequence and uses `res.writableEnded` to short-circuit once a
+// route claims the request.
+//
+// See `packages/cli/scripts/split-handle-request.mjs` for the
+// extraction driver.
+
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  appendFile,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { execSync, exec, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join, dirname, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+// Namespace import: our Phase-8 install-context builder (~line 290) calls
+// `osModule.homedir()`, and the later agent-identity probe (~line 6851)
+// uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// below so both sites coexist without a duplicate-module import.
+import * as osModule from 'node:os';
+const { homedir } = osModule;
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { ethers } from 'ethers';
+
+// Lazy resolver used by the manifest-install flow: find the
+// @origintrail-official/dkg-mcp package via Node's own resolution
+// algorithm, so the daemon can write workspace-level configs that
+// point at a valid MCP server install regardless of whether it's
+// running from a monorepo checkout, an npm-global `dkg`, or a
+// `pnpm dlx` tarball.
+const daemonRequire = createRequire(import.meta.url);
+
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  DashboardDB,
+  MetricsCollector,
+  OperationTracker,
+  handleNodeUIRequest,
+  ChatMemoryManager,
+  LogPushWorker,
+  LlmClient,
+  type MetricsSource,
+} from "@origintrail-official/dkg-node-ui";
+import {
+  loadConfig,
+  saveConfig,
+  loadNetworkConfig,
+  dkgDir,
+  writePid,
+  removePid,
+  writeApiPort,
+  removeApiPort,
+  logPath,
+  ensureDkgDir,
+  TELEMETRY_ENDPOINTS,
+  type DkgConfig,
+  type AutoUpdateConfig,
+  type LocalAgentIntegrationCapabilities,
+  type LocalAgentIntegrationConfig,
+  type LocalAgentIntegrationManifest,
+  type LocalAgentIntegrationRuntime,
+  type LocalAgentIntegrationStatus,
+  type LocalAgentIntegrationTransport,
+  resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
+  resolveSharedMemoryTtlMs,
+  repoDir,
+  releasesDir,
+  activeSlot,
+  inactiveSlot,
+  swapSlot,
+  gitCommandEnv,
+  gitCommandArgs,
+  isStandaloneInstall,
+  slotEntryPoint,
+  CLI_NPM_PACKAGE,
+} from '../../config.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
+import {
+  expectedBundledMarkItDownBuildMetadata,
+  readCliPackageVersion,
+  type BundledMarkItDownMetadata,
+} from "../../extraction/markitdown-bundle-metadata.js";
+import {
+  checksumPathFor as markItDownChecksumPath,
+  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
+  metadataPathFor as markItDownMetadataPath,
+} from '../../../scripts/markitdown-bundle-validation.mjs';
+import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
+import { FileStore } from '../../file-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
+import { handleCaptureAsync, EpcisValidationError, handleEventsQuery, EpcisQueryError, type AsyncPublisher as EpcisAsyncPublisher } from '@origintrail-official/dkg-epcis';
+// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
+// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
+// format stays identical between curator/joiner/CLI paths.
+import {
+  publishManifest as publishManifestImpl,
+  assembleStandardTemplates,
+} from '@origintrail-official/dkg-mcp/manifest/publish';
+import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
+import {
+  planInstall as planInstallImpl,
+  writeInstall as writeInstallImpl,
+  buildReviewMarkdown as buildReviewMarkdownImpl,
+  type InstallContext,
+} from '@origintrail-official/dkg-mcp/manifest/install';
+import { DkgClient } from '@origintrail-official/dkg-mcp/client';
+
+// Daemon sub-module imports — every public symbol from sibling
+// modules is pulled in here because the legacy monolithic file used
+// them all without explicit imports. Unused ones are tolerated by
+// the project's tsconfig (`noUnusedLocals` is off).
+import {
+  daemonState,
+  DEBUG_SYNC_TRACE,
+  resolveAutoUpdateEnabled,
+  type CorsAllowlist,
+} from '../state.js';
+import {
+  type CatchupJobState,
+  type CatchupJob,
+  type CatchupTracker,
+  toCatchupStatusResponse,
+} from '../types.js';
+import {
+  type MarkItDownTarget,
+  manifestRepoRoot,
+  type McpDkgAssets,
+  resolveMcpDkgAssets,
+  readMcpDkgVersion,
+  parseSemver,
+  cmpSemverForRange,
+  versionSatisfiesRange,
+  manifestNetworkLabel,
+  formatDaemonAuthority,
+  manifestSelfClient,
+  manifestPublisherUri,
+  type SupportedTool,
+  nicknameToSlug,
+  buildManifestInstallContext,
+  _autoUpdateIo,
+  loadMarkItDownTargets,
+  getNodeVersion,
+  getCurrentCommitShort,
+  loadSkillTemplate,
+  buildSkillMd,
+  skillEtag,
+  DAEMON_EXIT_CODE_RESTART,
+  parseRequiredSignatures,
+  normalizeDetectedContentType,
+  currentBundledMarkItDownAssetName,
+  bindingValue,
+  carryForwardBundledMarkItDownBinary,
+} from '../manifest.js';
+import {
+  resolveNameToPeerId,
+  jsonResponse,
+  oversizedRdfLiteralResponseBody,
+  safeDecodeURIComponent,
+  safeParseJson,
+  validateOptionalSubGraphName,
+  validateRequiredContextGraphId,
+  validateEntities,
+  validateConditions,
+  MAX_BODY_BYTES,
+  SMALL_BODY_BYTES,
+  MAX_UPLOAD_BYTES,
+  type ImportFileExtractionPayload,
+  buildImportFileResponse,
+  unregisteredSubGraphError,
+  readBody,
+  readBodyBuffer,
+  buildCorsAllowlist,
+  resolveCorsOrigin,
+  corsHeaders,
+  HttpRateLimiter,
+  isLoopbackClientIp,
+  isLoopbackRateLimitExemptPath,
+  shouldBypassRateLimitForLoopbackTraffic,
+  isValidContextGraphId,
+  shortId,
+  sleep,
+  deriveBlockExplorerUrl,
+} from '../http-utils.js';
+import {
+  normalizeRepo,
+  isValidRepoSpec,
+  repoToFetchUrl,
+  githubRepoForApi,
+  resolveRemoteCommitSha,
+  type PendingUpdateState,
+  type CommitCheckStatus,
+  readPendingUpdateState,
+  clearPendingUpdateState,
+  writePendingUpdateState,
+  type NpmVersionResult,
+  resolveLatestNpmVersion,
+  compareSemver,
+  getCurrentCliVersion,
+  type NpmVersionStatus,
+  checkForNpmVersionUpdate,
+  type UpdateStatus,
+  acquireUpdateLock,
+  releaseUpdateLock,
+  performNpmUpdate,
+} from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
+import {
+  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
+  OPENCLAW_UI_CONNECT_POLL_MS,
+  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+  type PendingOpenClawUiAttachJob,
+  isOpenClawBridgeHealthCacheValid,
+  type OpenClawChannelTarget,
+  trimTrailingSlashes,
+  buildOpenClawGatewayBase,
+  loadBridgeAuthToken,
+  getOpenClawChannelTargets,
+  type OpenClawBridgeHealthState,
+  type OpenClawGatewayHealthState,
+  type OpenClawChannelHealthReport,
+  transportPatchFromOpenClawTarget,
+  probeOpenClawChannelHealth,
+  runOpenClawUiSetup,
+  localOpenclawConfigPath,
+  isOpenClawMemorySlotElected,
+  restartOpenClawGateway,
+  waitForOpenClawChatReady,
+  type OpenClawUiAttachDeps,
+  formatOpenClawUiAttachFailure,
+  scheduleOpenClawUiAttachJob,
+  cancelPendingLocalAgentAttachJob,
+  isOpenClawUiAttachCancelled,
+  shouldTryNextOpenClawTarget,
+  buildOpenClawChannelHeaders,
+  ensureOpenClawBridgeAvailable,
+  type OpenClawStreamRequest,
+  type OpenClawStreamResponse,
+  type OpenClawStreamReader,
+  writeOpenClawStreamChunk,
+  pipeOpenClawStream,
+  isValidOpenClawPersistTurnPayload,
+  type OpenClawAttachmentRef,
+  normalizeOpenClawAttachmentRef,
+  normalizeOpenClawAttachmentRefs,
+  type OpenClawChatContextEntry,
+  normalizeOpenClawChatContextEntry,
+  normalizeOpenClawChatContextEntries,
+  hasOpenClawChatTurnContent,
+  unescapeOpenClawAttachmentLiteralBody,
+  stripOpenClawAttachmentLiteral,
+  parseOpenClawAttachmentTripleCount,
+  isOpenClawAttachmentAssertionUriForContextGraph,
+  extractionRecordMatchesOpenClawAttachmentRef,
+  verifyOpenClawAttachmentRefsProvenance,
+} from '../openclaw.js';
+import {
+  type LocalAgentIntegrationDefinition,
+  type LocalAgentIntegrationRecord,
+  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
+  isPlainRecord,
+  normalizeIntegrationId,
+  normalizeLocalAgentTransport,
+  normalizeLocalAgentCapabilities,
+  normalizeLocalAgentManifest,
+  normalizeLocalAgentRuntime,
+  isLocalAgentExplicitlyUserDisabled,
+  isExplicitLocalAgentDisconnectPatch,
+  normalizeExplicitLocalAgentDisconnectBody,
+  mergeLocalAgentIntegrationConfig,
+  getStoredLocalAgentIntegrations,
+  computeLocalAgentIntegrationStatus,
+  buildLocalAgentIntegrationRecord,
+  listLocalAgentIntegrations,
+  getLocalAgentIntegration,
+  pruneLegacyOpenClawConfig,
+  extractLocalAgentIntegrationPatch,
+  connectLocalAgentIntegration,
+  updateLocalAgentIntegration,
+  hasConfiguredLocalAgentChat,
+  hasStoredLocalAgentTransportConfig,
+  connectLocalAgentIntegrationFromUi,
+  type ReverseLocalAgentSetupDeps,
+  reverseLocalAgentSetupForUi,
+  refreshLocalAgentIntegrationFromUi,
+} from '../local-agents.js';
+
+import type { RequestContext } from './context.js';
+
+type ResolveOk<T> = { ok: true; value: T };
+type ResolveErr = { ok: false; status: number; body: object };
+type ResolveResult<T> = ResolveOk<T> | ResolveErr;
+
+function resolveCgId(
+  input: unknown,
+  source: 'query string' | 'request body',
+  fallback?: string,
+): ResolveResult<string> {
+  // Distinguish "absent" (undefined/null) from "explicitly empty" (''):
+  //   - absent → fall back to config.epcis.contextGraphId or 400 if no fallback
+  //   - empty string → 400 InvalidContent (caller asked us to use a CG named
+  //     "", which can't possibly match a real graph; falling back silently
+  //     would route the request to the daemon default CG and could publish
+  //     to the wrong tenant)
+  if (input === '') {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'InvalidContent', message: '"contextGraphId" cannot be an empty string' },
+    };
+  }
+  if (input !== undefined && input !== null) {
+    if (typeof input !== 'string') {
+      return { ok: false, status: 400, body: { error: 'InvalidContent', message: '"contextGraphId" must be a string' } };
+    }
+    const v = validateContextGraphId(input);
+    if (!v.valid) {
+      return { ok: false, status: 400, body: { error: 'InvalidContent', message: `Invalid "contextGraphId": ${v.reason}` } };
+    }
+    return { ok: true, value: input };
+  }
+  if (!fallback) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: 'InvalidContent',
+        message: `Missing "contextGraphId": provide it in the ${source} or configure epcis.contextGraphId`,
+      },
+    };
+  }
+  return { ok: true, value: fallback };
+}
+
+function resolveSubGraphName(input: unknown): ResolveResult<string | undefined> {
+  // Same absent-vs-empty distinction as resolveCgId. Empty subGraphName
+  // can't be coerced to "root partition" silently — that would route a
+  // request the caller flagged with `subGraphName=""` to a different
+  // partition than the one they asked for. Reject explicitly.
+  if (input === '') {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'InvalidContent', message: '"subGraphName" cannot be an empty string' },
+    };
+  }
+  if (input === undefined || input === null) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof input !== 'string') {
+    return { ok: false, status: 400, body: { error: 'InvalidContent', message: 'subGraphName must be a string' } };
+  }
+  const v = validateSubGraphName(input);
+  if (!v.valid) {
+    return { ok: false, status: 400, body: { error: 'InvalidContent', message: `Invalid "subGraphName": ${v.reason}` } };
+  }
+  return { ok: true, value: input };
+}
+
+export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
+  const {
+    req,
+    res,
+    agent,
+    publisherControl,
+    config,
+    startedAt,
+    dashDb,
+    opWallets,
+    network,
+    tracker,
+    memoryManager,
+    bridgeAuthToken,
+    nodeVersion,
+    nodeCommit,
+    catchupTracker,
+    extractionRegistry,
+    fileStore,
+    extractionStatus,
+    assertionImportLocks,
+    vectorStore,
+    embeddingProvider,
+    validTokens,
+    apiHost,
+    apiPortRef,
+    url,
+    path,
+    requestToken,
+    requestAgentAddress,
+  } = ctx;
+
+
+  // GET /api/epcis/events?contextGraphId=...&subGraphName=...&epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  if (req.method === "GET" && path === "/api/epcis/events") {
+    const searchParams = new URL(req.url!, `http://${req.headers.host}`)
+      .searchParams;
+
+    const cg = resolveCgId(searchParams.get('contextGraphId'), 'query string', config.epcis?.contextGraphId);
+    if (!cg.ok) return jsonResponse(res, cg.status, cg.body);
+    const sg = resolveSubGraphName(searchParams.get('subGraphName'));
+    if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
+
+    const epcisQueryEngine = {
+      query: (
+        sparql: string,
+        opts?: {
+          contextGraphId?: string;
+          subGraphName?: string;
+          graphSuffix?: '_shared_memory';
+          includePrivate?: boolean;
+        },
+      ) => agent.query(sparql, opts),
+    };
+    try {
+      const result = await handleEventsQuery(searchParams, {
+        contextGraphId: cg.value,
+        subGraphName: sg.value,
+        queryEngine: epcisQueryEngine,
+        basePath: "/api/epcis/events",
+      });
+      if (result.headers?.link) {
+        res.setHeader("Link", result.headers.link);
+      }
+      return jsonResponse(res, 200, result.body);
+    } catch (err) {
+      if (err instanceof EpcisQueryError) {
+        return jsonResponse(res, err.statusCode, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // GET /api/epcis/capture/:captureID
+  if (req.method === "GET" && path.startsWith("/api/epcis/capture/")) {
+    const captureID = decodeURIComponent(path.slice("/api/epcis/capture/".length));
+    if (!captureID) {
+      return jsonResponse(res, 404, { error: "CaptureNotFound" });
+    }
+    const job = await publisherControl.getStatus(captureID);
+    if (!job) {
+      return jsonResponse(res, 404, { error: "CaptureNotFound" });
+    }
+    return jsonResponse(res, 200, {
+      captureID,
+      state: job.status,
+      receivedAt: new Date(job.timestamps.acceptedAt).toISOString(),
+      finalizedAt: job.timestamps.finalizedAt
+        ? new Date(job.timestamps.finalizedAt).toISOString()
+        : null,
+      error: job.status === "failed"
+        ? job.failure?.message ?? "Async capture failed"
+        : null,
+    });
+  }
+
+  // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
+  if (req.method === "POST" && path === "/api/epcis/capture") {
+    const publisherAvailability = ctx.publisherState.availability;
+    if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
+      return jsonResponse(res, 503, {
+        error: "PublisherDisabled",
+        message: "Async EPCIS capture requires publisher.enabled=true",
+      });
+    }
+    if (!publisherAvailability.available) {
+      return jsonResponse(res, 503, {
+        error: "PublisherUnavailable",
+        message: "Async EPCIS capture requires the publisher runtime to be running with at least one configured publisher wallet",
+        reason: publisherAvailability.reason,
+        retryable: publisherAvailability.retryable,
+        operatorActionRequired: publisherAvailability.operatorActionRequired,
+      });
+    }
+    const body = await readBody(req);
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, {
+        error: "InvalidContent",
+        message: "Invalid JSON in request body",
+      });
+    }
+    const { epcisDocument, publishOptions, contextGraphId: bodyContextGraphId, subGraphName: bodySubGraphName } = parsed;
+    if (!epcisDocument) {
+      return jsonResponse(res, 400, {
+        error: "InvalidContent",
+        message: 'Missing "epcisDocument" in request body',
+      });
+    }
+
+    const cg = resolveCgId(bodyContextGraphId, 'request body', config.epcis?.contextGraphId);
+    if (!cg.ok) return jsonResponse(res, cg.status, cg.body);
+    const sg = resolveSubGraphName(bodySubGraphName);
+    if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
+
+    const epcisPublisher: EpcisAsyncPublisher = {
+      async publishAsync(contextGraphId, content, opts) {
+        return agent.publishAsync(
+          contextGraphId,
+          content as Record<string, unknown>,
+          opts,
+        );
+      },
+    };
+    try {
+      const result = await handleCaptureAsync(
+        {
+          epcisDocument,
+          publishOptions,
+          contextGraphId: cg.value,
+          subGraphName: sg.value,
+        },
+        { contextGraphId: cg.value, publisher: epcisPublisher },
+      );
+      return jsonResponse(res, 202, result);
+    } catch (err) {
+      if (err instanceof EpcisValidationError) {
+        return jsonResponse(res, 400, {
+          error: "InvalidContent",
+          message: err.message,
+          details: err.errors,
+        });
+      }
+      const code = (err as { code?: string; name?: string })?.code ?? (err as { name?: string })?.name;
+      if (code === "ContextGraphNotFound") {
+        return jsonResponse(res, 404, {
+          error: "ContextGraphNotFound",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (code === "InvalidContent") {
+        return jsonResponse(res, 400, {
+          error: "InvalidContent",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (code === "OVERSIZED_RDF_LITERAL") {
+        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      return jsonResponse(res, 503, {
+        error: "EnqueueFailed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}

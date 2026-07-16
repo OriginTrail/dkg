@@ -84,8 +84,8 @@ describe('@unit Identity contract', function () {
     expect(await Identity.name()).to.equal('Identity');
   });
 
-  it('The contract is version "1.0.0"', async () => {
-    expect(await Identity.version()).to.equal('1.0.0');
+  it('The contract is version "10.0.2"', async () => {
+    expect(await Identity.version()).to.equal('10.0.2');
   });
 
   it('Create an identity as a contract, expect to pass', async () => {
@@ -123,7 +123,12 @@ describe('@unit Identity contract', function () {
     const getIdentityId = await createIdentity(operationalKey, adminKey);
     const deleteIdentity = await Identity.deleteIdentity(getIdentityId);
 
-    await expect(deleteIdentity).to.emit(Identity, 'IdentityDeleted');
+    // Pin the indexed identityId so a regression that emits the event for
+    // the wrong id (or a stale one) fails. Event: IdentityDeleted(uint72
+    // indexed identityId).
+    await expect(deleteIdentity)
+      .to.emit(Identity, 'IdentityDeleted')
+      .withArgs(getIdentityId);
   });
 
   it('Add an admin key to existing identity, expect to pass', async () => {
@@ -485,7 +490,11 @@ describe('@unit Identity contract', function () {
     ).to.be.revertedWithCustomError(Identity, 'OperationalKeyTaken');
   });
 
-  it('Create identity, try to attach multiple operational wallets with already existing key, expect to revert', async () => {
+  // Identity 1.1.0 — same-identity collision (primary added by
+  // `createIdentity` OR intra-array duplicate) surfaces as
+  // `OperationalWalletDuplicate(wallet)`. Cross-identity collisions
+  // keep firing `OperationalKeyTaken(key)`.
+  it('addOperationalWallets reverts OperationalWalletDuplicate when an op wallet equals the primary (already attached)', async () => {
     const identityId = await createIdentity(operationalKey, adminKey);
 
     await expect(
@@ -493,10 +502,25 @@ describe('@unit Identity contract', function () {
         accounts[1].address,
         accounts[3].address,
       ]),
-    ).to.be.revertedWithCustomError(Identity, 'OperationalKeyTaken');
+    )
+      .to.be.revertedWithCustomError(Identity, 'OperationalWalletDuplicate')
+      .withArgs(accounts[1].address);
   });
 
-  it('Create identity, try to attach multiple operational wallets with already taken key, expect to revert', async () => {
+  it('addOperationalWallets reverts OperationalWalletDuplicate on intra-array duplicates', async () => {
+    const identityId = await createIdentity(operationalKey, adminKey);
+
+    await expect(
+      Identity.addOperationalWallets(identityId, [
+        accounts[3].address,
+        accounts[3].address,
+      ]),
+    )
+      .to.be.revertedWithCustomError(Identity, 'OperationalWalletDuplicate')
+      .withArgs(accounts[3].address);
+  });
+
+  it('addOperationalWallets reverts OperationalKeyTaken when an op wallet is mapped to a different identity', async () => {
     const identityId = await createIdentity(operationalKey, adminKey);
     await createIdentity(accounts[3].address, accounts[4].address);
 
@@ -507,7 +531,8 @@ describe('@unit Identity contract', function () {
       ]),
     ).to.be.revertedWithCustomError(Identity, 'OperationalKeyTaken');
 
-    // We still can attach someones admin wallet as a key, but it shouldn't be a problem
+    // Cross-identity ADMIN wallet reuse is intentional and still
+    // permitted (admin keys don't populate `identityIds`).
     await expect(
       Identity.addOperationalWallets(identityId, [
         accounts[4].address,

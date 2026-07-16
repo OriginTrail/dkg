@@ -1,471 +1,335 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve, sep, isAbsolute } from 'node:path';
 import { handleNodeUIRequest } from '../src/api.js';
+import { DashboardDB } from '../src/db.js';
 
-function createMockReq(opts: {
-  method: string;
-  path: string;
-  body?: string;
-  headers?: Record<string, string>;
-}): { req: IncomingMessage; url: URL } {
-  const stream = Readable.from(opts.body != null ? [Buffer.from(opts.body, 'utf8')] : []);
-  const req = stream as unknown as IncomingMessage & {
-    method: string;
-    headers: Record<string, string>;
-  };
-  req.method = opts.method;
-  req.headers = opts.headers ?? {};
-  return {
-    req: req as IncomingMessage,
-    url: new URL(`http://localhost${opts.path}`),
-  };
-}
+/**
+ * Boots a real Node `http.Server` whose request handler delegates to
+ * `handleNodeUIRequest`. Tests then make real `fetch` calls into it — no
+ * fake req/res objects, no mocks of node:http.
+ *
+ * The handler arguments after the request triple are configured per request
+ * via the `configure` callback so each test can supply its own `memoryManager`,
+ * `dataDir`, `corsOrigin`, etc.
+ */
+function makeHarness() {
+  type HandlerArgs = Parameters<typeof handleNodeUIRequest>;
+  type Tail = [
+    HandlerArgs[3], // db
+    HandlerArgs[4], // staticRoot
+    HandlerArgs[5], HandlerArgs[6], HandlerArgs[7], HandlerArgs[8], HandlerArgs[9],
+    HandlerArgs[10]?, HandlerArgs[11]?, HandlerArgs[12]?,
+  ];
+  let nextArgs: Tail = [
+    {} as any, '.', undefined, undefined, undefined, undefined, undefined,
+  ] as Tail;
 
-function createMockRes(): {
-  res: ServerResponse;
-  state: {
-    statusCode: number;
-    headers: Record<string, string>;
-    body: string;
-  };
-} {
-  const chunks: Buffer[] = [];
-  const state = {
-    statusCode: 0,
-    headers: {} as Record<string, string>,
-    body: '',
-  };
-
-  const res: any = {
-    writableEnded: false,
-    destroyed: false,
-    writeHead(code: number, headers?: Record<string, string>) {
-      state.statusCode = code;
-      state.headers = headers ?? {};
-      return res;
-    },
-    write(chunk: Buffer | string) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
-      return true;
-    },
-    end(chunk?: Buffer | string) {
-      if (chunk !== undefined) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
+  const server: Server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    handleNodeUIRequest(req, res, url, ...nextArgs).then((handled) => {
+      if (!handled && !res.headersSent) {
+        res.statusCode = 404;
+        res.end('Not Found');
       }
-      state.body = Buffer.concat(chunks).toString('utf8');
-      res.writableEnded = true;
-      return res;
-    },
-  };
+    }).catch((err) => {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end(String(err));
+      }
+    });
+  });
 
-  return { res: res as ServerResponse, state };
+  return {
+    server,
+    listen: (): Promise<number> => new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo;
+        resolve(addr.port);
+      });
+    }),
+    close: (): Promise<void> => new Promise((resolve) => server.close(() => resolve())),
+    setArgs: (tail: Tail) => { nextArgs = tail; },
+  };
 }
 
-function parseJsonBody(body: string): any {
-  return body ? JSON.parse(body) : {};
+let harness: ReturnType<typeof makeHarness>;
+let baseUrl: string;
+
+beforeAll(async () => {
+  harness = makeHarness();
+  const port = await harness.listen();
+  baseUrl = `http://127.0.0.1:${port}`;
+});
+
+afterAll(async () => {
+  await harness.close();
+});
+
+/** Stable test double that records calls; not a vi.fn so we can read from it directly. */
+function recorder<T>(impl: (...args: any[]) => T | Promise<T>) {
+  const calls: any[][] = [];
+  const fn = async (...args: any[]) => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return { fn, calls };
 }
 
 describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   it('returns session graph delta for valid session/turn parameters', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn().mockResolvedValue({
-        mode: 'delta',
-        sessionId: 'session-1',
-        turnId: 'turn-2',
-        watermark: {
-          baseTurnId: 'turn-1',
-          previousTurnId: 'turn-1',
-          appliedTurnId: 'turn-2',
-          latestTurnId: 'turn-2',
-          turnIndex: 2,
-          turnCount: 2,
-        },
-        triples: [{ subject: 's', predicate: 'p', object: 'o' }],
-      }),
-    } as any;
+    const delta = recorder(() => ({
+      mode: 'delta',
+      sessionId: 'session-1',
+      turnId: 'turn-2',
+      watermark: {
+        baseTurnId: 'turn-1',
+        previousTurnId: 'turn-1',
+        appliedTurnId: 'turn-2',
+        latestTurnId: 'turn-2',
+        turnIndex: 2,
+        turnCount: 2,
+      },
+      triples: [{ subject: 's', predicate: 'p', object: 'o' }],
+    }));
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=turn-1',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
+    const res = await fetch(
+      `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=turn-1`,
     );
 
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionGraphDelta).toHaveBeenCalledWith('session-1', 'turn-2', { baseTurnId: 'turn-1' });
-    expect(parseJsonBody(state.body)).toMatchObject({ mode: 'delta', turnId: 'turn-2' });
+    expect(res.status).toBe(200);
+    expect(delta.calls[0]).toEqual(['session-1', 'turn-2', { baseTurnId: 'turn-1' }]);
+    const body = await res.json();
+    expect(body).toMatchObject({ mode: 'delta', turnId: 'turn-2' });
   });
 
   it('returns 400 for invalid turn id in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const delta = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=bad/turn',
-    });
-    const { res, state } = createMockRes();
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=bad/turn`);
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Missing or invalid "turnId"' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({ error: 'Missing or invalid "turnId"' });
+    expect(delta.calls).toHaveLength(0);
   });
 
   it('returns 400 for invalid baseTurnId in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const delta = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=bad/base',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
+    const res = await fetch(
+      `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=bad/base`,
     );
 
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "baseTurnId" format' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({ error: 'Invalid "baseTurnId" format' });
+    expect(delta.calls).toHaveLength(0);
   });
 
-  it('returns publication status for a valid session id', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        workspaceTripleCount: 12,
-        dataTripleCount: 3,
-        scope: 'enshrined',
-        rootEntityCount: 4,
-      }),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/publication',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionPublicationStatus).toHaveBeenCalledWith('session-1');
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      scope: 'enshrined',
-    });
-  });
-
-  it('publishes a session with selected roots and clearAfter option', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        rootEntityCount: 1,
-        status: 'confirmed',
-        tripleCount: 5,
-        publication: {
-          sessionId: 'session-1',
-          workspaceTripleCount: 5,
-          dataTripleCount: 5,
-          scope: 'enshrined',
-          rootEntityCount: 1,
+  it('passes session history limit and descending ordering through to memoryManager.getSession() without reordering the backend result', async () => {
+    const session = recorder(() => ({
+      session: 'session-1',
+      messages: [
+        {
+          uri: 'urn:dkg:chat:msg:agent-2',
+          author: 'agent',
+          text: 'newest',
+          ts: '2026-04-14T08:00:01Z',
         },
-      }),
-    } as any;
+        {
+          uri: 'urn:dkg:chat:msg:user-1',
+          author: 'user',
+          text: 'older',
+          ts: '2026-04-14T08:00:00Z',
+          failureReason: 'timeout',
+        },
+      ],
+    }));
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSession: session.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1?limit=25&order=desc`);
+
+    expect(res.status).toBe(200);
+    expect(session.calls[0]).toEqual(['session-1', { limit: 25, order: 'desc' }]);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      session: 'session-1',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:agent-2', text: 'newest' },
+        { uri: 'urn:dkg:chat:msg:user-1', failureReason: 'timeout' },
+      ],
+    });
+  });
+
+  it('returns 400 for invalid session query parameters', async () => {
+    const session = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSession: session.fn } as any, undefined,
+    ] as any);
+
+    const invalidPaths = [
+      '/api/memory/sessions/session-1?limit=0',
+      '/api/memory/sessions/session-1?limit=25xyz',
+      '/api/memory/sessions/session-1?order=sideways',
+    ];
+
+    for (const path of invalidPaths) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status).toBe(400);
+    }
+
+    expect(session.calls).toHaveLength(0);
+  });
+
+  // Codex Bug B38: the session-publication routes are no-ops in v1
+  // because chat turns now live in Working Memory assertions rather
+  // than in shared memory — the old SWM-based publication flow has
+  // nothing to read. The routes short-circuit to HTTP 501 with a
+  // stable error code and a pointer at the v2 follow-up; chat-memory
+  // manager methods are never invoked. See api.ts for the handler
+  // and chat-memory.ts:1218-1224 for the TODO that tracks the v2
+  // promotion-based reimplementation.
+
+  it('returns 501 Not Implemented for GET /api/memory/sessions/:id/publication (Codex B38)', async () => {
+    const status = recorder(() => undefined);
+    const publish = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publication`);
+
+    expect(res.status).toBe(501);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
+    });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
+    expect(status.calls).toHaveLength(0);
+  });
+
+  it('returns 501 Not Implemented for POST /api/memory/sessions/:id/publish (Codex B38)', async () => {
+    const status = recorder(() => undefined);
+    const publish = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publish`, {
       method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         rootEntities: ['urn:dkg:chat:msg:m-1'],
         clearAfter: true,
       }),
-      headers: { 'content-type': 'application/json' },
     });
-    const { res, state } = createMockRes();
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.publishSession).toHaveBeenCalledWith('session-1', {
-      rootEntities: ['urn:dkg:chat:msg:m-1'],
-      clearWorkspaceAfter: true,
+    expect(res.status).toBe(501);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      error: 'Session publication is not implemented in v1',
+      errorCode: 'session_publication_not_implemented_v1',
     });
-    expect(parseJsonBody(state.body)).toMatchObject({
-      sessionId: 'session-1',
-      status: 'confirmed',
-    });
+    expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
+    expect(publish.calls).toHaveLength(0);
   });
 
-  it('returns 400 for invalid session id in publication route', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn(),
-    } as any;
+  // Codex Bug B52: the legacy `/api/memory/import` endpoint was retired
+  // in the openclaw-dkg-primary-memory workstream. Rather than let
+  // external callers fall through to the generic 404 (wire-level
+  // contract break with no migration signal), the route serves a 410
+  // Gone stub that names the two replacements — the adapter's
+  // `dkg_memory_import` tool and the daemon's
+  // `POST /api/knowledge-assets/:name/wm/write` direct route. Mirrors the
+  // B38 pattern for the session-publication routes above.
+  it('returns 410 Gone for POST /api/memory/import with migration pointers (Codex B52)', async () => {
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      undefined, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1%2Fbad/publication',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for invalid session id in publish route', async () => {
-    const memoryManager = {
-      publishSession: vi.fn(),
-    } as any;
-
-    const { req, url } = createMockReq({
+    const res = await fetch(`${baseUrl}/api/memory/import`, {
       method: 'POST',
-      path: '/api/memory/sessions/session-1%2Fbad/publish',
-      body: JSON.stringify({}),
       headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'anything', source: 'claude' }),
     });
-    const { res, state } = createMockRes();
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(memoryManager.publishSession).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for session-scope publish validation errors', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(
-        new Error('Selected root entities are not part of session session-1'),
-      ),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({ rootEntities: ['urn:dkg:chat:msg:other'] }),
-      headers: { 'content-type': 'application/json' },
+    expect(res.status).toBe(410);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
     });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({
-      error: 'Selected root entities are not part of session session-1',
-    });
-  });
-
-  it('returns 500 for unexpected publish failures', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(new Error('storage offline')),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
-      body: JSON.stringify({}),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(500);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'storage offline' });
+    expect(body.reason).toMatch(/LLM API keys|sidecar graph/i);
+    expect(Array.isArray(body.replacements)).toBe(true);
+    // Codex B64: the 410 migration pointer must list BOTH the create step
+    // and the write step so callers bootstrapping a fresh project CG
+    // don't hit a failing first write. The retired `dkg_memory_import`
+    // adapter-tool replacement was dropped along with the tool itself
+    // (eccbe19d) — non-OpenClaw callers now go directly through the two
+    // daemon HTTP routes below.
+    expect(body.replacements.length).toBeGreaterThanOrEqual(2);
+    const replacementPaths = body.replacements.map((r: any) => r.path ?? r.name ?? '');
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/knowledge-assets(?:\s|$)/);
+    expect(replacementPaths.join(' ')).toMatch(/\/api\/knowledge-assets\/:name\/wm\/write/);
+    const allNames = body.replacements.map((r: any) => r.name ?? '').join(' ');
+    expect(allNames).not.toMatch(/dkg_memory_import/);
   });
 });
 
-describe('handleNodeUIRequest accept header normalization', () => {
-  it('detects text/event-stream from an array accept header', async () => {
-    const chatAssistant = {
-      answer: vi.fn(),
-      answerStream: vi.fn(async function* () {
-        yield { type: 'text', text: 'ok' };
-      }),
-    } as any;
+// --- /api/logs compatibility route ---
 
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/chat-assistant',
-      body: JSON.stringify({ message: 'hello' }),
-      headers: { 'content-type': 'application/json' },
+describe('handleNodeUIRequest /api/logs', () => {
+  it('delegates to the DB-backed compatibility search surface', async () => {
+    const calls: any[] = [];
+    harness.setArgs([
+      {
+        searchLogs: (opts: any) => {
+          calls.push(opts);
+          return {
+            total: 1,
+            logs: [{ ts: 1234, level: 'info', module: 'Publisher', message: 'publish completed' }],
+          };
+        },
+      } as any,
+      '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/logs?q=publish&level=info&module=Publisher&limit=5&offset=2`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(1);
+    expect(body.logs[0].message).toBe('publish completed');
+    expect(calls[0]).toMatchObject({
+      q: 'publish',
+      level: 'info',
+      module: 'Publisher',
+      limit: 5,
+      offset: 2,
     });
-    (req.headers as any).accept = ['text/event-stream', 'application/json'];
-    const { res, state } = createMockRes();
-    res.on = (() => res) as any;
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      chatAssistant,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.headers['Content-Type']).toMatch(/text\/event-stream/);
-  });
-});
-
-describe('handleNodeUIRequest Stage 5 sessionId validation', () => {
-  it('rejects invalid session id in /api/chat-assistant payload', async () => {
-    const chatAssistant = {
-      answer: vi.fn(),
-      answerStream: vi.fn(),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/chat-assistant',
-      body: JSON.stringify({
-        message: 'hello',
-        sessionId: 'bad/session-id',
-      }),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      chatAssistant,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "sessionId" format' });
-    expect(chatAssistant.answer).not.toHaveBeenCalled();
   });
 });
 
@@ -487,16 +351,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `log line ${i + 1}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=5' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    const handled = await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?lines=5`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     const nonEmpty = body.lines.filter((l: string) => l.length > 0);
     expect(nonEmpty.length).toBeLessThanOrEqual(5);
     expect(nonEmpty[nonEmpty.length - 1]).toBe('log line 20');
@@ -507,14 +368,12 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log`);
+    const body = await res.json();
     expect(body.lines.length).toBeGreaterThan(0);
     expect(body.lines.length).toBeLessThanOrEqual(500);
   });
@@ -523,15 +382,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
     writeFileSync(join(tmpDir, 'daemon.log'), 'single line\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=-10' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?lines=-10`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines).toBeDefined();
   });
 
@@ -540,16 +397,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=99999' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
-    // File has 100 lines, but clamped request means we get all of them (< 5000)
+    const res = await fetch(`${baseUrl}/api/node-log?lines=99999`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines.length).toBeGreaterThan(0);
   });
 
@@ -563,32 +417,364 @@ describe('handleNodeUIRequest /api/node-log', () => {
     ].join('\n') + '\n';
     writeFileSync(join(tmpDir, 'daemon.log'), content);
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?q=publish' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?q=publish`);
+    const body = await res.json();
     expect(body.lines.every((l: string) => l.toLowerCase().includes('publish'))).toBe(true);
     expect(body.lines).toHaveLength(2);
   });
 
   it('returns empty lines when daemon.log does not exist', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
-    // No daemon.log created
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines).toEqual([]);
     expect(body.totalSize).toBe(0);
+  });
+});
+
+describe('serveStatic path traversal prevention', () => {
+  let staticDir: string;
+
+  function fakeDb(dir: string) { return { dataDir: dir } as any; }
+
+  afterEach(() => {
+    if (staticDir) rmSync(staticDir, { recursive: true, force: true });
+  });
+
+  function setup(): void {
+    staticDir = mkdtempSync(join(tmpdir(), 'dkg-static-'));
+    writeFileSync(join(staticDir, 'index.html'), '<html></html>');
+    mkdirSync(join(staticDir, 'assets'), { recursive: true });
+    writeFileSync(join(staticDir, 'assets', 'app.js'), 'console.log("ok")');
+  }
+
+  it('URL normalization prevents ../ traversal at the HTTP layer', async () => {
+    setup();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    // Real HTTP normalizes /ui/../../etc/passwd → /etc/passwd before it
+    // reaches our handler, so the handler returns false (not its route)
+    // and our harness emits a 404. That matches the original test's
+    // assertion that `handled === false`.
+    const res = await fetch(`${baseUrl}/ui/../../etc/passwd`);
+    expect(res.status).toBe(404);
+  });
+
+  // The next two tests directly call handleNodeUIRequest with a hand-crafted
+  // URL whose pathname bypasses normalization (defense-in-depth check). Since
+  // we cannot send such a path through real HTTP without a custom client, we
+  // exercise the handler directly here while still avoiding any req/res mocks
+  // — we use a real http server, route the request through it, and let the
+  // handler swap in the malicious URL via a small request middleware.
+  it('rejects ../ traversal if URL bypasses normalization (defense-in-depth)', async () => {
+    setup();
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer((req, res) => {
+        const rawUrl = { pathname: '/ui/../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+        handleNodeUIRequest(
+          req, res, rawUrl, fakeDb(staticDir), staticDir,
+          undefined, undefined, undefined, undefined, undefined,
+        );
+      });
+      s.listen(0, '127.0.0.1', () => {
+        const a = s.address() as AddressInfo;
+        // Capture the server reference so we can close it after the request.
+        (s as any).__port = a.port;
+        resolve(a.port);
+      });
+      (globalThis as any).__lastTestServer = s;
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/ui/x`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain('Forbidden');
+    await new Promise<void>((r) => (globalThis as any).__lastTestServer.close(() => r()));
+  });
+
+  it('rejects deeply nested traversal if URL bypasses normalization', async () => {
+    setup();
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer((req, res) => {
+        const rawUrl = { pathname: '/ui/assets/../../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+        handleNodeUIRequest(
+          req, res, rawUrl, fakeDb(staticDir), staticDir,
+          undefined, undefined, undefined, undefined, undefined,
+        );
+      });
+      s.listen(0, '127.0.0.1', () => {
+        const a = s.address() as AddressInfo;
+        resolve(a.port);
+      });
+      (globalThis as any).__lastTestServer = s;
+    });
+
+    const res = await fetch(`http://127.0.0.1:${port}/ui/x`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain('Forbidden');
+    await new Promise<void>((r) => (globalThis as any).__lastTestServer.close(() => r()));
+  });
+
+  it('serves valid /ui/index.html normally', async () => {
+    setup();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/ui/index.html`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<html>');
+  });
+
+  it('allows filenames starting with .. that are not traversals', () => {
+    const base = '/srv/static';
+    const file = resolve(base, '..page.html');
+    const r = relative(base, file);
+    expect(r).toBe('..page.html');
+    expect(r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r)).toBe(false);
+  });
+
+  it('serves valid /ui/ root normally', async () => {
+    setup();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/ui/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<html>');
+  });
+});
+
+describe('handleNodeUIRequest CORS origin handling', () => {
+  it('omits Access-Control-Allow-Origin when corsOrigin is undefined', async () => {
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('sets Access-Control-Allow-Origin when corsOrigin is provided', async () => {
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, 'https://example.com',
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://example.com');
+  });
+
+  it('omits Access-Control-Allow-Origin when corsOrigin is explicitly null (rejected origin)', async () => {
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, null,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+});
+
+describe('handleNodeUIRequest /api/metrics snapshot-first behaviour (#1066 Item 1)', () => {
+  it('serves the latest snapshot without live-collecting when a snapshot exists', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => ({ ts: 123, total_triples: 42, peer_count: 3 }),
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(42);
+    expect(body.ts).toBe(123);
+    // No per-request full-store scan — the periodic collector is the only scanner.
+    expect(collectCalls).toBe(0);
+  });
+
+  it('cold start: falls back to a single live collect when no snapshot exists yet', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => undefined,
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999, total_triples: 7 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(7);
+    expect(collectCalls).toBe(1);
+  });
+});
+
+describe('handleNodeUIRequest metrics-consumer presence wiring (#1066 Item 1)', () => {
+  // markMetricsConsumer is the 11th positional arg (after relayStatsProvider).
+  // This proves the runtime wiring: a served metric route marks the presence
+  // object the collector consults; other routes do not. Because the daemon
+  // calls handleNodeUIRequest only after rate-limit/admission/auth accept the
+  // request, marking here is inherently post-auth (a rejected request never
+  // reaches this handler, so it cannot open the store-metrics gate).
+  const fakeDb = () => ({
+    getMetrics: () => [], getErrorHotspots: () => [],
+    getLatestSnapshot: () => ({ ts: 1, total_triples: 1 }),
+    getSnapshotHistory: () => [],
+  } as any);
+
+  it('GET /api/metrics marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('GET /api/metrics/history marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics/history`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('a non-metrics route does NOT mark a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    // /api/relay/stats is handled here (404 without a relay provider) but is
+    // not a metric route, so it must not open the gate.
+    const res = await fetch(`${baseUrl}/api/relay/stats`);
+    expect(res.status).toBe(404);
+    expect(marks).toBe(0);
+  });
+});
+
+describe('handleNodeUIRequest replication routes (Phase F)', () => {
+  let db: DashboardDB;
+  let dir: string;
+  const now = Date.now();
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-repl-api-'));
+    db = new DashboardDB({ dataDir: dir });
+    db.upsertContextGraphSubscription({
+      context_graph_id: 'mfacts', name: 'Monday Fun Facts', subscribed: 1, synced: 1,
+      on_chain_id: '7', last_reconciled_ordinal: 2, sync_scoped: 1, updated_at: now,
+    });
+    db.insertReplicationEvent({ ts: now - 6000, context_graph_id: 'mfacts', on_chain_cg_id: '7', action: 'fetch', ual: 'urn:ka:1', ordinal: 1 });
+    db.insertReplicationEvent({ ts: now - 3000, context_graph_id: 'mfacts', on_chain_cg_id: '7', action: 'promote', ual: 'urn:ka:1', ordinal: 1 });
+    db.insertReplicationEvent({ ts: now - 2000, context_graph_id: 'mfacts', on_chain_cg_id: '7', action: 'cursor-advance', from_watermark: 1, to_watermark: 2, head: 4 });
+  });
+
+  afterAll(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const args = () => [db as any, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined] as any;
+
+  it('GET /api/replication/summary returns KPIs', async () => {
+    harness.setArgs(args());
+    const res = await fetch(`${baseUrl}/api/replication/summary`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.promotes).toBe(1);
+    expect(body.fetches).toBe(1);
+    expect(body.latencyP50Ms).toBe(3000);
+  });
+
+  it('GET /api/replication/per-cg returns rows', async () => {
+    harness.setArgs(args());
+    const res = await fetch(`${baseUrl}/api/replication/per-cg`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.rows[0].context_graph_id).toBe('mfacts');
+    expect(body.rows[0].last_watermark).toBe(2);
+  });
+
+  it('GET /api/replication/cursors joins subscription watermark with head', async () => {
+    harness.setArgs(args());
+    const res = await fetch(`${baseUrl}/api/replication/cursors`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const c = body.cursors.find((r: any) => r.context_graph_id === 'mfacts');
+    expect(c.last_reconciled_ordinal).toBe(2);
+    expect(c.last_head).toBe(4);
+  });
+
+  it('GET /api/replication/timeline buckets events', async () => {
+    harness.setArgs(args());
+    const res = await fetch(`${baseUrl}/api/replication/timeline?bucketMs=60000`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.buckets.reduce((s: number, b: any) => s + b.total, 0)).toBe(3);
+  });
+
+  it('GET /api/replication/events requires cg and returns the stream', async () => {
+    harness.setArgs(args());
+    const missing = await fetch(`${baseUrl}/api/replication/events`);
+    expect(missing.status).toBe(400);
+
+    const res = await fetch(`${baseUrl}/api/replication/events?cg=mfacts`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.events.length).toBe(3);
+    expect(body.events[0].action).toBe('cursor-advance'); // newest first
+  });
+
+  it('GET /api/replication/summary accepts a unit-suffixed period (e.g. 24h)', async () => {
+    harness.setArgs(args());
+    // Raw parseInt('24h') === 24 (24ms window → excludes everything). parsePeriodMs
+    // must read this as 24 hours so the recent events stay in range.
+    const res = await fetch(`${baseUrl}/api/replication/summary?periodMs=24h`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.promotes).toBe(1);
+    expect(body.fetches).toBe(1);
+  });
+
+  it('GET /api/replication/events tolerates a non-numeric limit', async () => {
+    harness.setArgs(args());
+    // ?limit=foo previously bound `LIMIT NaN` and surfaced a SQLite 500.
+    const res = await fetch(`${baseUrl}/api/replication/events?cg=mfacts&limit=foo`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.events.length).toBe(3);
   });
 });

@@ -77,7 +77,7 @@ describe('LogPushWorker', () => {
     const line = result[0];
     // PRI = FACILITY_LOCAL0 * 8 + severity(info=6) = 16*8+6 = 134
     expect(line).toMatch(/^<134>1 /);
-    expect(line).toContain(' dkg-v9 ');
+    expect(line).toContain(' dkg ');
     expect(line).toContain(' tars ');
     expect(line).toContain('[dkg@0 ');
     expect(line).toContain('peer="12D3KooWTestPeer"');

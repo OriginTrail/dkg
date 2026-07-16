@@ -1,14 +1,26 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import {
   OxigraphStore,
   BlazegraphStore,
+  SparqlHttpStore,
   GraphManager,
   PrivateContentStore,
   createTripleStore,
+  loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
   registerTripleStoreAdapter,
+  resolveSharedMemoryReadGraphs,
+  resolveVerifiableMemoryReadGraphs,
   type Quad,
   type TripleStore,
 } from '../src/index.js';
+import {
+  contextGraphDataGraphUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSharedMemoryUri,
+  sharedMemoryReadBothFilter,
+} from '@origintrail-official/dkg-core';
+import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
 
 // ---------------------------------------------------------------------------
 // Shared TripleStore conformance suite — runs against every backend
@@ -77,6 +89,50 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       expect(await store.countQuads(g)).toBe(1);
     });
 
+    // ── blank-node coverage ──────────────────────────────────────────────
+    // These run against EVERY backend in the matrix. On the SPARQL-over-HTTP
+    // adapters (oxigraph-server, blazegraph) they exercise the code path that
+    // shipped broken in rc.16: deleting quads with blank nodes via DELETE DATA
+    // (illegal SPARQL → HTTP 400). The embedded backends were always safe;
+    // running both side by side is what catches adapter divergence.
+
+    it('round-trips a quad whose object is a blank node', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '_:b0', graph: g }]);
+      expect(await store.countQuads(g)).toBe(1);
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      expect(r.type).toBe('quads');
+      if (r.type === 'quads') {
+        expect(r.quads.length).toBe(1);
+        expect(r.quads[0].object.startsWith('_:')).toBe(true);
+      }
+    });
+
+    it('deletes a quad whose object is a blank node (read-back then delete)', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '_:b0', graph: g }]);
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      const quads = r.type === 'quads' ? r.quads.map((q) => ({ ...q, graph: g })) : [];
+      await store.delete(quads); // pre-fix: HTTP 400 on the SPARQL backends
+      expect(await store.countQuads(g)).toBe(0);
+    });
+
+    it('deletes a nested entity with blank-node children (the WM→SWM promote shape)', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([
+        { subject: 'http://ex.org/alice', predicate: 'http://ex.org/address', object: '_:addr', graph: g },
+        { subject: '_:addr', predicate: 'http://ex.org/city', object: '"Springfield"', graph: g },
+        { subject: '_:addr', predicate: 'http://ex.org/geo', object: '_:geo', graph: g },
+        { subject: '_:geo', predicate: 'http://ex.org/lat', object: '"1.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', graph: g },
+      ]);
+      // CONSTRUCT the whole graph then delete it — exactly what assertionPromote does.
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      const quads = r.type === 'quads' ? r.quads.map((q) => ({ ...q, graph: g })) : [];
+      expect(quads.length).toBe(4);
+      await store.delete(quads);
+      expect(await store.countQuads(g)).toBe(0);
+    });
+
     it('listGraphs', async () => {
       await store.insert([
         { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'http://ex.org/g1' },
@@ -142,9 +198,14 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       }
     });
 
-    it('close is idempotent', async () => {
-      await store.close();
-      await store.close();
+    it('close is idempotent — a second close() resolves without throwing', async () => {
+      // Teardown paths (overlapping lifecycle events, double-unmount in UI
+      // hosts, shutdown signal racing with manual close) frequently call
+      // close() twice. This asserts the contract: the second call must
+      // resolve cleanly instead of throwing a "worker terminated" /
+      // "connection ended" error that would surface as a teardown failure.
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(store.close()).resolves.toBeUndefined();
     });
   });
 }
@@ -155,31 +216,72 @@ tripleStoreConformanceSuite('OxigraphStore (direct)', async () => new OxigraphSt
 // Run conformance suite against OxigraphStore via factory (validates adapter registration)
 tripleStoreConformanceSuite('OxigraphStore (factory)', async () => createTripleStore({ backend: 'oxigraph' }));
 
+// Run the SAME suite against the `sparql-http` adapter (the oxigraph-server
+// backend a fresh `dkg init` defaults to) by default, on every run. Backed by
+// an in-process SPARQL endpoint running the real Oxigraph engine — so it
+// reproduces server-only behaviour (e.g. blank nodes illegal in DELETE DATA)
+// without the server binary. This is the matrix entry that would have caught
+// the rc.16 blank-node delete bug.
+let sparqlHttpEndpoint: OxigraphSparqlEndpoint | undefined;
+beforeAll(async () => { sparqlHttpEndpoint = await startOxigraphSparqlEndpoint(); });
+afterAll(async () => { await sparqlHttpEndpoint?.close(); });
+tripleStoreConformanceSuite('SparqlHttpStore (oxigraph-server, in-process)', async () => {
+  // Fresh state per test: every backend factory yields an empty store.
+  sparqlHttpEndpoint!.store.update('DROP ALL');
+  return new SparqlHttpStore({
+    queryEndpoint: sparqlHttpEndpoint!.queryEndpoint,
+    updateEndpoint: sparqlHttpEndpoint!.updateEndpoint,
+  });
+});
+
 // BlazegraphStore conformance runs only when Blazegraph is reachable.
 // Set BLAZEGRAPH_URL=http://127.0.0.1:9999/bigdata/namespace/test/sparql to enable.
 const blazeUrl = process.env.BLAZEGRAPH_URL;
 if (blazeUrl) {
   tripleStoreConformanceSuite('BlazegraphStore', async () => new BlazegraphStore(blazeUrl));
-} else {
-  describe('BlazegraphStore (skipped — set BLAZEGRAPH_URL to run)', () => {
-    it.skip('requires a running Blazegraph instance', () => {});
-  });
 }
+// NOTE: previously this branch ran `it.skip('requires a running Blazegraph …', () => {})`
+// as a placeholder to surface the skip in the reporter. That empty stub added
+// one "skipped" counter but carried no assertion, so it only existed to
+// decorate the output. The conformance suite above is what actually exercises
+// Blazegraph when `BLAZEGRAPH_URL` is set, so the placeholder was noise —
+// removed to keep the suite strictly assertion-backed.
 
 // ---------------------------------------------------------------------------
 // Adapter registry / factory tests
 // ---------------------------------------------------------------------------
 
 describe('createTripleStore factory', () => {
-  it('all built-in backends are registered', async () => {
+  it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
+    // The *registry* contract being tested here is: every built-in
+    // backend name is recognized. The construction itself may require
+    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`)
+    // or worker artifacts (oxigraph-worker needs the compiled worker
+    // impl). So a backend passes this test iff calling `createTripleStore`
+    // either succeeds OR throws a *non*-"Unknown TripleStore backend"
+    // error.
+    //
+    // The previous version of this test used `.resolves.not.toThrow()`
+    // inside a catch-that-returned-'registered', which made the test
+    // effectively assert "a promise settled" — noise. This version
+    // asserts the positive contract explicitly and points at the
+    // specific failing backend if the registry regresses.
     const backends = ['oxigraph', 'oxigraph-worker', 'blazegraph', 'sparql-http'];
     for (const backend of backends) {
-      await expect(
-        createTripleStore({ backend }).catch((err: Error) => {
-          if (err.message.includes('Unknown TripleStore backend')) throw err;
-          return 'registered';
-        }),
-      ).resolves.not.toThrow();
+      let outcome: 'constructed' | Error;
+      try {
+        const store = await createTripleStore({ backend });
+        outcome = 'constructed';
+        try { await store.close(); } catch { /* close failures not in scope here */ }
+      } catch (err) {
+        outcome = err as Error;
+      }
+      if (outcome instanceof Error) {
+        expect(
+          outcome.message,
+          `backend "${backend}" surfaced "Unknown TripleStore backend" — registry regressed`,
+        ).not.toMatch(/Unknown TripleStore backend/);
+      }
     }
   });
 
@@ -201,6 +303,13 @@ describe('createTripleStore factory', () => {
     );
   });
 
+  it('passes the Blazegraph operation timeout through store.options', async () => {
+    await expect(createTripleStore({
+      backend: 'blazegraph',
+      options: { url: 'http://blaze.test/sparql', timeout: 0 },
+    })).rejects.toThrow(/timeout must be a positive integer/);
+  });
+
   it('sparql-http adapter is registered and requires queryEndpoint', async () => {
     await expect(createTripleStore({ backend: 'sparql-http' })).rejects.toThrow(
       'queryEndpoint',
@@ -210,26 +319,45 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered', async () => {
+  it('oxigraph-worker adapter is registered and round-trips an insert', async () => {
+    // The worker adapter resolves `./oxigraph-worker-impl.js` relative to
+    // the module loaded at runtime. When vitest runs against raw source
+    // without a prior `pnpm build`, that URL lands in `src/adapters/` where
+    // only the .ts files live, so the Worker constructor throws
+    // "Cannot find module … oxigraph-worker-impl.js".
+    //
+    // This used to be caught and converted to `ctx.skip()`, which meant a
+    // green CI run even when the worker artifact was missing — i.e. a
+    // broken build never triggered a test failure. We now FAIL LOUDLY in
+    // that case with a remediation hint, so:
+    //   • locally, the developer sees "run pnpm build first" instead of a
+    //     silent skip;
+    //   • in CI, if `pnpm build` was not wired into the lane (or the build
+    //     regresses), this test surfaces it as a red failure.
+    let store: Awaited<ReturnType<typeof createTripleStore>>;
     try {
-      const store = await createTripleStore({ backend: 'oxigraph-worker' });
-      await store.insert([{
-        subject: 'http://ex.org/s',
-        predicate: 'http://ex.org/p',
-        object: '"hi"',
-        graph: 'http://ex.org/g',
-      }]);
-      expect(await store.countQuads()).toBe(1);
-      await store.close();
+      store = await createTripleStore({ backend: 'oxigraph-worker' });
     } catch (err: unknown) {
-      // Worker file may not exist when running tests against uncompiled source
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        expect(true).toBe(true);
-        return;
+        throw new Error(
+          `oxigraph-worker adapter is not runnable — the compiled ` +
+          `oxigraph-worker-impl.js artifact is missing from ` +
+          `packages/storage/dist/adapters/. Run ` +
+          `\`pnpm --filter @origintrail-official/dkg-storage build\` ` +
+          `before running this test. Underlying error: ${msg}`,
+        );
       }
       throw err;
     }
+    await store.insert([{
+      subject: 'http://ex.org/s',
+      predicate: 'http://ex.org/p',
+      object: '"hi"',
+      graph: 'http://ex.org/g',
+    }]);
+    expect(await store.countQuads()).toBe(1);
+    await store.close();
   });
 
   it('throws on unknown backend', async () => {
@@ -265,33 +393,248 @@ describe('GraphManager', () => {
   let store: TripleStore;
   let gm: GraphManager;
 
+  function indexedReadContractStore(graphsByPrefix: Record<string, string[]>): {
+    store: TripleStore;
+    prefixCalls: string[];
+    queries: string[];
+  } {
+    const prefixCalls: string[] = [];
+    const queries: string[] = [];
+    const fakeStore: TripleStore = {
+      insert: async () => {},
+      delete: async () => {},
+      deleteByPattern: async () => 0,
+      query: async (sparql) => {
+        queries.push(sparql);
+        return { type: 'quads', quads: [] };
+      },
+      hasGraph: async () => false,
+      createGraph: async () => {},
+      dropGraph: async () => {},
+      listGraphs: async () => {
+        throw new Error('unbounded listGraphs should not be used');
+      },
+      listGraphsByPrefix: async (prefix) => {
+        prefixCalls.push(prefix);
+        return graphsByPrefix[prefix] ?? [];
+      },
+      deleteBySubjectPrefix: async () => 0,
+      countQuads: async () => 0,
+      close: async () => {},
+    };
+    return { store: fakeStore, prefixCalls, queries };
+  }
+
   beforeEach(() => {
     store = new OxigraphStore();
     gm = new GraphManager(store);
   });
 
-  it('generates correct graph URIs', () => {
-    expect(gm.dataGraphUri('agent-registry')).toBe('did:dkg:paranet:agent-registry');
-    expect(gm.metaGraphUri('agent-registry')).toBe('did:dkg:paranet:agent-registry/_meta');
+  it('generates correct graph URIs (V10 context-graph prefix)', () => {
+    expect(gm.dataGraphUri('agent-registry')).toBe('did:dkg:context-graph:agent-registry');
+    expect(gm.metaGraphUri('agent-registry')).toBe('did:dkg:context-graph:agent-registry/_meta');
   });
 
-  it('lists paranets', async () => {
+  it('lists context graphs', async () => {
     await store.insert([
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:paranet:test1' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:paranet:test1/_meta' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:paranet:test2' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:test1' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:test1/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:context-graph:test2' },
     ]);
-    const paranets = await gm.listParanets();
-    expect(paranets.sort()).toEqual(['test1', 'test2']);
+    const cgs = await gm.listContextGraphs();
+    expect(cgs.sort()).toEqual(['test1', 'test2']);
   });
 
-  it('drops paranet', async () => {
+  it('keeps listSubGraphs as a deprecated compatibility shim', async () => {
     await store.insert([
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:paranet:x' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:paranet:x/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:test1/code' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:test1/decisions/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:context-graph:test1/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"d"', graph: 'did:dkg:context-graph:test1/assertion/agent/name' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"e"', graph: 'did:dkg:context-graph:test2/notes' },
     ]);
-    await gm.dropParanet('x');
-    expect(await gm.hasParanet('x')).toBe(false);
+
+    const subGraphs = await gm.listSubGraphs('test1');
+    expect(subGraphs.sort()).toEqual(['code', 'decisions']);
+  });
+
+  it('drops context graph', async () => {
+    await store.insert([
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:x' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:x/_meta' },
+    ]);
+    await gm.dropContextGraph('x');
+    expect(await gm.hasContextGraph('x')).toBe(false);
+  });
+
+  it('resolves the exact SWM read graph set from the named-graph index', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('resolver-swm');
+    try {
+      await indexed.insert([
+        { subject: 'urn:bucket', predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: 'urn:partition', predicate: 'urn:p', object: '"partition"', graph: `${swm}/0xabc/7` },
+        { subject: 'urn:staging', predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
+        { subject: 'urn:meta', predicate: 'urn:p', object: '"meta"', graph: contextGraphSharedMemoryMetaUri('resolver-swm') },
+        { subject: 'urn:other', predicate: 'urn:p', object: '"other"', graph: contextGraphSharedMemoryUri('resolver-other') },
+      ]);
+
+      expect((await resolveSharedMemoryReadGraphs(indexed, swm)).sort()).toEqual([
+        swm,
+        `${swm}/0xabc/7`,
+      ].sort());
+      expect(await resolveSharedMemoryReadGraphs(indexed, contextGraphSharedMemoryUri('empty-swm'))).toEqual([
+        contextGraphSharedMemoryUri('empty-swm'),
+      ]);
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('loads selected SWM quads with the same graph semantics as sharedMemoryReadBothFilter', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('resolver-loader');
+    const root = 'urn:root';
+    const child = `${root}/.well-known/genid/child`;
+    const other = 'urn:other-root';
+    const key = (quad: Quad) => `${quad.subject}|${quad.predicate}|${quad.object}`;
+    const keys = (quads: Quad[]) => quads.map(key).sort();
+    try {
+      await indexed.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket-root"', graph: swm },
+        { subject: child, predicate: 'urn:p', object: '"child"', graph: `${swm}/0xabc/7` },
+        { subject: other, predicate: 'urn:p', object: '"other"', graph: `${swm}/0xabc/7` },
+        { subject: 'urn:staged', predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
+      ]);
+
+      const oldAll = await indexed.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swm)} }`,
+      );
+      expect(oldAll.type).toBe('quads');
+      if (oldAll.type !== 'quads') return;
+      expect(keys(await loadSelectedSharedMemoryQuads(indexed, swm, 'all'))).toEqual(keys(oldAll.quads));
+
+      const oldRoot = await indexed.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE {
+          GRAPH ?g {
+            VALUES ?root { <${root}> }
+            ?s ?p ?o .
+            FILTER(
+              ?s = ?root
+              || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+            )
+          }
+          ${sharedMemoryReadBothFilter(swm)}
+        }`,
+      );
+      expect(oldRoot.type).toBe('quads');
+      if (oldRoot.type !== 'quads') return;
+      expect(keys(await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] }))).toEqual(keys(oldRoot.quads));
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('binds selected SWM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const swm = contextGraphSharedMemoryUri('resolver-swm-contract');
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${swm}/`]: [
+        `${swm}/0xabc/7`,
+        `${swm}/staging/tmp`,
+      ],
+    });
+
+    await loadSelectedSharedMemoryQuads(contractStore, swm, {
+      rootEntities: ['http://example.com/root'],
+    });
+
+    expect(prefixCalls).toEqual([`${swm}/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${swm}>`);
+    expect(queries[0]).toContain(`<${swm}/0xabc/7>`);
+    expect(queries[0]).not.toContain('/staging/tmp');
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
+  });
+
+  it('resolves the exact VM read graph set from the named-graph index', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const dataGraph = contextGraphDataGraphUri('resolver-vm');
+    const vmGraph = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const vmMetaGraph = `${vmGraph}/_meta`;
+    try {
+      await indexed.insert([
+        { subject: 'urn:data', predicate: 'urn:p', object: '"data"', graph: dataGraph },
+        { subject: 'urn:vm', predicate: 'urn:p', object: '"vm"', graph: vmGraph },
+        { subject: 'urn:vm-meta', predicate: 'urn:p', object: '"vm-meta"', graph: vmMetaGraph },
+        { subject: 'urn:private', predicate: 'urn:p', object: '"private"', graph: `${dataGraph}/_private` },
+        { subject: 'urn:other', predicate: 'urn:p', object: '"other"', graph: contextGraphDataGraphUri('resolver-vm-other') },
+      ]);
+
+      expect((await resolveVerifiableMemoryReadGraphs(indexed, dataGraph)).sort()).toEqual([
+        dataGraph,
+        vmGraph,
+        vmMetaGraph,
+      ].sort());
+      expect(await resolveVerifiableMemoryReadGraphs(indexed, contextGraphDataGraphUri('empty-vm'))).toEqual([
+        contextGraphDataGraphUri('empty-vm'),
+      ]);
+      await expect(resolveVerifiableMemoryReadGraphs(indexed, `${dataGraph}">`)).rejects.toThrow();
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('binds selected VM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-contract');
+    const vmGraph = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${dataGraph}/_verifiable_memory/`]: [vmGraph],
+    });
+
+    await loadSelectedVerifiableMemoryQuads(contractStore, dataGraph, ['http://example.com/root']);
+
+    expect(prefixCalls).toEqual([`${dataGraph}/_verifiable_memory/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${dataGraph}>`);
+    expect(queries[0]).toContain(`<${vmGraph}>`);
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
+  });
+
+  it('loads selected VM quads from the base graph and multiple per-KA VM graphs', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-loader');
+    const vmGraphA = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const vmGraphB = `${dataGraph}/_verifiable_memory/0xdef/8`;
+    const vmMetaGraph = `${vmGraphA}/_meta`;
+    const root = 'urn:vm-root';
+    const childA = `${root}/.well-known/genid/a`;
+    const childB = `${root}/.well-known/genid/b`;
+    const otherRoot = 'urn:vm-other-root';
+    const key = (quad: Quad) => `${quad.subject}|${quad.predicate}|${quad.object}`;
+    const keys = (quads: Quad[]) => quads.map(key).sort();
+    try {
+      await indexed.insert([
+        { subject: root, predicate: 'urn:p', object: '"base-root"', graph: dataGraph },
+        { subject: childA, predicate: 'urn:p', object: '"child-a"', graph: vmGraphA },
+        { subject: childB, predicate: 'urn:p', object: '"child-b"', graph: vmGraphB },
+        { subject: root, predicate: 'urn:p', object: '"meta-root"', graph: vmMetaGraph },
+        { subject: otherRoot, predicate: 'urn:p', object: '"other-root"', graph: vmGraphA },
+        { subject: root, predicate: 'urn:p', object: '"private-root"', graph: `${dataGraph}/_private` },
+        { subject: root, predicate: 'urn:p', object: '"other-graph"', graph: contextGraphDataGraphUri('resolver-vm-loader-other') },
+      ]);
+
+      expect(keys(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [root, root]))).toEqual([
+        `${childA}|urn:p|"child-a"`,
+        `${childB}|urn:p|"child-b"`,
+        `${root}|urn:p|"base-root"`,
+        `${root}|urn:p|"meta-root"`,
+      ].sort());
+      expect(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [])).toEqual([]);
+    } finally {
+      await indexed.close();
+    }
   });
 });
 
@@ -308,18 +651,18 @@ describe('N-Quads literal escaping (regression for parser errors)', () => {
         subject: 'urn:test:turn:1',
         predicate: 'http://ex.org/gameState',
         object: `"${escapeNQuads(gameStateJson)}"`,
-        graph: 'http://ex.org/workspace',
+        graph: 'http://ex.org/shared-memory',
       },
       {
         subject: 'urn:test:turn:1',
         predicate: 'http://ex.org/message',
         object: `"${escapeNQuads('Line1\nLine2\r\nLine3')}"`,
-        graph: 'http://ex.org/workspace',
+        graph: 'http://ex.org/shared-memory',
       },
     ]);
 
     const result = await store.query(
-      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/workspace> { ?s ?p ?o } }',
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/shared-memory> { ?s ?p ?o } }',
     );
     expect(result.type).toBe('quads');
     if (result.type !== 'quads') return;
@@ -410,7 +753,7 @@ describe('PrivateContentStore', () => {
 
   it('stores and retrieves private triples', async () => {
     const entity = 'did:dkg:agent:QmBot';
-    const paranet = 'agent-registry';
+    const contextGraph = 'agent-registry';
     const quads: Quad[] = [
       {
         subject: entity,
@@ -419,10 +762,10 @@ describe('PrivateContentStore', () => {
         graph: '',
       },
     ];
-    await ps.storePrivateTriples(paranet, entity, quads);
-    expect(ps.hasPrivateTriples(paranet, entity)).toBe(true);
+    await ps.storePrivateTriples(contextGraph, entity, quads);
+    expect(ps.hasPrivateTriples(contextGraph, entity)).toBe(true);
 
-    const retrieved = await ps.getPrivateTriples(paranet, entity);
+    const retrieved = await ps.getPrivateTriples(contextGraph, entity);
     expect(retrieved.length).toBe(1);
     expect(retrieved[0].subject).toBe(entity);
     expect(retrieved[0].object).toBe('"hidden"');
@@ -437,5 +780,121 @@ describe('PrivateContentStore', () => {
     expect(ps.hasPrivateTriples('p1', entity)).toBe(false);
     const remaining = await ps.getPrivateTriples('p1', entity);
     expect(remaining.length).toBe(0);
+  });
+
+  it('storePrivateTriples with empty quads is a no-op', async () => {
+    const entity = 'did:dkg:agent:NoOp';
+    await ps.storePrivateTriples('cg-1', entity, []);
+    expect(ps.hasPrivateTriples('cg-1', entity)).toBe(false);
+  });
+
+  it('keeps operation-staged private triples out of the canonical private graph', async () => {
+    const entity = 'did:dkg:agent:AsyncPrivate';
+    const quads: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/secret', object: '"pending"', graph: '' },
+    ];
+
+    await ps.storePrivateTriplesForOperation('cg-stage', 'op-1', entity, quads);
+
+    expect(ps.hasPrivateTriples('cg-stage', entity)).toBe(false);
+    expect(await ps.getPrivateTriples('cg-stage', entity)).toEqual([]);
+    expect(await ps.hasPrivateTriplesInStore('cg-stage', entity)).toBe(false);
+    expect(await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity)).toEqual(quads);
+
+    await ps.storePrivateTriples('cg-stage', entity, await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity));
+    await ps.deletePrivateTriplesForOperation('cg-stage', 'op-1', entity);
+
+    expect(ps.hasPrivateTriples('cg-stage', entity)).toBe(true);
+    expect(await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity)).toEqual([]);
+    expect((await ps.getPrivateTriples('cg-stage', entity)).map((quad) => quad.object)).toEqual(['"pending"']);
+  });
+
+  it('rejects oversized aggregate operation-staged private payloads before replacing existing staged data', async () => {
+    const entity = 'did:dkg:agent:AsyncPrivateOversized';
+    const prior: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/secret', object: '"prior"', graph: '' },
+    ];
+    const oversizedAggregate: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/a', object: `"${'a'.repeat(35_000)}"`, graph: '' },
+      { subject: entity, predicate: 'http://ex.org/b', object: `"${'b'.repeat(35_000)}"`, graph: '' },
+    ];
+
+    await ps.storePrivateTriplesForOperation('cg-stage', 'op-oversized', entity, prior);
+
+    await expect(
+      ps.storePrivateTriplesForOperation('cg-stage', 'op-oversized', entity, oversizedAggregate),
+    ).rejects.toMatchObject({
+      code: 'OVERSIZED_RDF_LITERAL',
+      predicate: 'http://dkg.io/ontology/privateStagedQuads',
+    });
+    expect(await ps.getPrivateTriplesForOperation('cg-stage', 'op-oversized', entity)).toEqual(prior);
+  });
+
+  it('hasPrivateTriples returns false before any data is stored', () => {
+    expect(ps.hasPrivateTriples('unknown-cg', 'urn:x')).toBe(false);
+  });
+
+  it('stores and retrieves private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubGraph';
+    const quads: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/sg', object: '"subgraph-val"', graph: '' },
+    ];
+    await ps.storePrivateTriples('cg-sg', entity, quads, 'my-sub');
+    expect(ps.hasPrivateTriples('cg-sg', entity, 'my-sub')).toBe(true);
+    expect(ps.hasPrivateTriples('cg-sg', entity)).toBe(false);
+
+    const retrieved = await ps.getPrivateTriples('cg-sg', entity, 'my-sub');
+    expect(retrieved.length).toBe(1);
+    expect(retrieved[0].object).toBe('"subgraph-val"');
+  });
+
+  it('deletes private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubDel';
+    await ps.storePrivateTriples('cg-del', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"x"', graph: '' },
+    ], 'sub-del');
+
+    await ps.deletePrivateTriples('cg-del', entity, 'sub-del');
+    expect(ps.hasPrivateTriples('cg-del', entity, 'sub-del')).toBe(false);
+    const remaining = await ps.getPrivateTriples('cg-del', entity, 'sub-del');
+    expect(remaining.length).toBe(0);
+  });
+
+  it('clearCache removes in-memory tracker for a context graph', async () => {
+    const entity = 'did:dkg:agent:QmCacheClear';
+    await ps.storePrivateTriples('cg-cache', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"val"', graph: '' },
+    ]);
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(true);
+
+    ps.clearCache('cg-cache');
+    // In-memory tracker cleared, but data is still in store
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(false);
+    const inStore = await ps.hasPrivateTriplesInStore('cg-cache', entity);
+    expect(inStore).toBe(true);
+  });
+
+  it('hasPrivateTriplesInStore returns false when no data exists', async () => {
+    const result = await ps.hasPrivateTriplesInStore('empty-cg', 'urn:nothing');
+    expect(result).toBe(false);
+  });
+
+  it('multiple entities can coexist in the same context graph', async () => {
+    const e1 = 'did:dkg:agent:Multi1';
+    const e2 = 'did:dkg:agent:Multi2';
+
+    await ps.storePrivateTriples('cg-multi', e1, [
+      { subject: e1, predicate: 'http://ex.org/p', object: '"v1"', graph: '' },
+    ]);
+    await ps.storePrivateTriples('cg-multi', e2, [
+      { subject: e2, predicate: 'http://ex.org/p', object: '"v2"', graph: '' },
+    ]);
+
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(true);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
+
+    await ps.deletePrivateTriples('cg-multi', e1);
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(false);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
   });
 });
