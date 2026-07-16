@@ -73,25 +73,51 @@ function propertyNameText(name) {
     : undefined;
 }
 
-function staticStringConstants(sourceFile) {
-  const constants = new Map();
-  for (const statement of sourceFile.statements) {
-    if (
-      !ts.isVariableStatement(statement)
-      || !(statement.declarationList.flags & ts.NodeFlags.Const)
-    ) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name) && ts.isStringLiteralLike(declaration.initializer)) {
-        constants.set(declaration.name.text, declaration.initializer.text);
-      }
-    }
-  }
-  return constants;
+function bindingNameIncludes(name, identifier) {
+  if (ts.isIdentifier(name)) return name.text === identifier;
+  return name.elements.some(
+    (element) => !ts.isOmittedExpression(element)
+      && bindingNameIncludes(element.name, identifier),
+  );
 }
 
-function staticExclusionValue(node, constants) {
+function lexicalBinding(scope, identifier) {
+  if (ts.isFunctionLike(scope)) {
+    const parameter = scope.parameters.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (parameter) return { declaration: parameter, isConst: false };
+  }
+  if (!ts.isSourceFile(scope) && !ts.isBlock(scope)) return undefined;
+  for (const statement of scope.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const declaration = statement.declarationList.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(statement.declarationList.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
+  return undefined;
+}
+
+function staticStringConstant(node) {
+  for (let scope = node.parent; scope; scope = scope.parent) {
+    const binding = lexicalBinding(scope, node.text);
+    if (!binding) continue;
+    return binding.isConst && ts.isStringLiteralLike(binding.declaration.initializer)
+      ? binding.declaration.initializer.text
+      : undefined;
+  }
+  return undefined;
+}
+
+function staticExclusionValue(node) {
   if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isIdentifier(node)) return constants.get(node.text);
+  if (ts.isIdentifier(node)) return staticStringConstant(node);
   return undefined;
 }
 
@@ -242,7 +268,6 @@ export function analyzeD2Source(source, filePath) {
     true,
     scriptKindFor(filePath),
   );
-  const constants = staticStringConstants(sourceFile);
   const findings = [];
 
   const visit = (node) => {
@@ -257,7 +282,7 @@ export function analyzeD2Source(source, filePath) {
       );
       if (exclude && ts.isArrayLiteralExpression(exclude.initializer)) {
         for (const element of exclude.initializer.elements) {
-          const value = staticExclusionValue(element, constants);
+          const value = staticExclusionValue(element);
           if (value === undefined || !isTestTargetingExclusion(value)) continue;
           const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
           findings.push({
