@@ -2312,6 +2312,7 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
+    // sparql-scan-allow: R3 -- exact-graph paging is bounded by the retained session plan row count
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
         VALUES ?root { ${graphValues(entry.roots)} }
