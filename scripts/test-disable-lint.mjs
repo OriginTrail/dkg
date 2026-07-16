@@ -110,7 +110,10 @@ function lexicalBinding(scope, identifier) {
       };
     }
   }
-  if (ts.isForOfStatement(scope) && ts.isVariableDeclarationList(scope.initializer)) {
+  if (
+    (ts.isForOfStatement(scope) || ts.isForInStatement(scope))
+    && ts.isVariableDeclarationList(scope.initializer)
+  ) {
     const declaration = scope.initializer.declarations.find(
       ({ name }) => bindingNameIncludes(name, identifier),
     );
