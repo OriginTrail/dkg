@@ -9,7 +9,6 @@ import {
   type CompatibleProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
-  type ProtocolOutboxMetadata,
   type ProtocolRouter,
   type SendOptions,
 } from '@origintrail-official/dkg-core';
@@ -1151,7 +1150,7 @@ export class Messenger {
     lastError: string;
   }> {
     if (!this.outbox) return [];
-    const dropped = this.outbox.dropExpiredMetadata(now);
+    const dropped = this.outbox.dropExpired(now);
     // rc.9 PR-12: clean firstAttemptAt for expired entries so the
     // SLO bookkeeping map doesn't grow unbounded on permanently
     // unreachable peers.
@@ -1177,16 +1176,13 @@ export class Messenger {
   }
 
   /**
-   * Snapshot of every payload-bearing entry currently in the outbox.
+   * Snapshot of every entry currently in the outbox. Used by the
+   * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
+   * operators can see what's pending after a long recipient outage.
    * Empty array when no outbox is wired.
    */
   listOutbox(): ProtocolOutboxEntry[] {
     return this.outbox?.list() ?? [];
-  }
-
-  /** Metadata-only snapshot for diagnostics that do not need retry payloads. */
-  listOutboxMetadata(): ProtocolOutboxMetadata[] {
-    return this.outbox?.listMetadata() ?? [];
   }
 
   /**

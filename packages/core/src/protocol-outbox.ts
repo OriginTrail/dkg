@@ -34,8 +34,6 @@ import type {
   MessageIdempotencyStore,
   LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
-  ProtocolOutboxMetadata,
-  ProtocolOutboxMetadataCapability,
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
@@ -93,29 +91,6 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
   return { ...entry, payload: cloneBytes(entry.payload) };
 }
 
-function cloneOutboxMetadata(entry: ProtocolOutboxMetadata): ProtocolOutboxMetadata {
-  const {
-    peer,
-    protocol,
-    messageId,
-    attempts,
-    firstFailureAt,
-    lastAttemptAt,
-    nextAttemptAt,
-    lastError,
-  } = entry;
-  return {
-    peer,
-    protocol,
-    messageId,
-    attempts,
-    firstFailureAt,
-    lastAttemptAt,
-    nextAttemptAt,
-    lastError,
-  };
-}
-
 function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
   return a.nextAttemptAt - b.nextAttemptAt
     || a.firstFailureAt - b.firstFailureAt
@@ -144,17 +119,15 @@ type PolicyAwareProtocolOutboxStore = CompatibleProtocolOutboxStore & {
 };
 
 /**
- * Keep peer-presence compatibility at the constructor boundary. Current
- * stores retain their identity; only legacy peer-snapshot stores are adapted.
+ * Keep compatibility at the constructor boundary. Internally the outbox only
+ * sees the current boolean peer-presence contract, while a legacy snapshot
+ * store is adapted once with all method receivers preserved.
  */
-function normalizeOutboxStore(
-  store: CompatibleProtocolOutboxStore,
-): ProtocolOutboxStore {
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
   if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
 
   const legacy = store as LegacyProtocolOutboxStore;
   const normalized: ProtocolOutboxStore = {
-    originTrailProtocolOutboxMetadata: legacy.originTrailProtocolOutboxMetadata,
     enqueue: legacy.enqueue.bind(legacy),
     markDelivered: legacy.markDelivered.bind(legacy),
     hasEntry: legacy.hasEntry.bind(legacy),
@@ -308,32 +281,19 @@ export class ProtocolOutbox {
     return this.store.dropExpired(now);
   }
 
-  /** Metadata-only expiration, with a compatibility fallback for legacy stores. */
-  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
-    const metadataStore = this.store.originTrailProtocolOutboxMetadata;
-    const dropped = metadataStore?.dropExpiredMetadata(now) ?? this.store.dropExpired(now);
-    return dropped.map(cloneOutboxMetadata);
-  }
-
   /** Total entries currently queued. */
   size(): number {
     return this.store.size();
   }
 
   /**
-   * Snapshot of every full entry currently in the underlying store.
-   * Returns entries in store order; callers that need per-peer FIFO
-   * should sort by `firstFailureAt`.
+   * Snapshot of every entry currently in the underlying store. Used
+   * by `Messenger.listOutbox` for the diagnostics surface. Returns
+   * entries in store order — callers that need per-peer FIFO should
+   * sort by `firstFailureAt`.
    */
   list(): ProtocolOutboxEntry[] {
     return this.store.list();
-  }
-
-  /** Metadata-only diagnostics snapshot, with a compatibility fallback. */
-  listMetadata(): ProtocolOutboxMetadata[] {
-    const metadataStore = this.store.originTrailProtocolOutboxMetadata;
-    const entries = metadataStore?.listMetadata() ?? this.store.list();
-    return entries.map(cloneOutboxMetadata);
   }
 
   /**
@@ -365,11 +325,6 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly entries = new Map<string, ProtocolOutboxEntry>();
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
-
-  readonly originTrailProtocolOutboxMetadata: ProtocolOutboxMetadataCapability = {
-    dropExpiredMetadata: (now) => this.dropExpiredWith(now, cloneOutboxMetadata),
-    listMetadata: () => Array.from(this.entries.values()).map(cloneOutboxMetadata),
-  };
 
   constructor(options: ProtocolOutboxOptions = {}) {
     this.configurePolicy(options);
@@ -456,17 +411,10 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
-    return this.dropExpiredWith(now, cloneOutboxEntry);
-  }
-
-  private dropExpiredWith<Result>(
-    now: number,
-    project: (entry: ProtocolOutboxEntry) => Result,
-  ): Result[] {
-    const dropped: Result[] = [];
+    const dropped: ProtocolOutboxEntry[] = [];
     for (const [key, entry] of this.entries) {
       if (now - entry.firstFailureAt > this.maxAgeMs) {
-        dropped.push(project(entry));
+        dropped.push(cloneOutboxEntry(entry));
         this.entries.delete(key);
       }
     }

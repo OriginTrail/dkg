@@ -123,6 +123,7 @@ describe('bounded rootless durable progress', () => {
 
     expect(plan).not.toBeNull();
     expect(plan?.safeNextOffset).toBe(8);
+    expect(plan?.manifestRowCount).toBe(12);
     expect(plan?.completedGraphCount).toBe(2);
     expect(plan?.changedDataGraphs).toEqual([
       fixtures[0]!.graph,
@@ -213,6 +214,58 @@ describe('bounded rootless durable progress', () => {
     expect(materialized.flatMap((entry) => entry.dataQuads)
       .some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
     expect(inserted.flat().some((quad) => fixtures.some((entry) => entry.graph === quad.graph))).toBe(false);
+  });
+
+  it('checkpoints a cleanly-closed rootless prefix instead of replaying it from zero', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const cleanPrefix = fixtures[0]!.payload;
+    const materialized: Array<{ dataQuads: Quad[] }> = [];
+    const checkpoints: Array<[string, number]> = [];
+    const deleted: string[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        _contextGraphId,
+        _includeSharedMemory,
+        phase,
+      ) => phase === 'meta'
+        ? pageResult('meta', {
+          quads: meta,
+          nextOffset: meta.length,
+        })
+        : pageResult('data', {
+          quads: cleanPrefix,
+          nextOffset: cleanPrefix.length,
+          completed: true,
+          timedOut: false,
+        }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async (entry) => {
+        materialized.push(entry);
+        return 'applied';
+      },
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.rejectedKcs).toBe(0);
+    expect(summary.timedOutPhases).toBe(0);
+    expect(summary.insertedDataTriples).toBe(cleanPrefix.length);
+    expect(summary.completedPhases).toBe(1);
+    expect(checkpoints).toContainEqual([`${CONTEXT_GRAPH_ID}:data`, cleanPrefix.length]);
+    expect(deleted).not.toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual(cleanPrefix);
   });
 
   it('verifies the remaining suffix and cleanly completes a resumed snapshot', async () => {

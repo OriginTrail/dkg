@@ -99,9 +99,24 @@ export class RelayFlapGuard {
     relayPeerId: string;
     remotePeerId: string;
     durationMs: number;
+    /**
+     * A short-lived relay circuit is not, by itself, a failure: normal DKG
+     * request/response streams routinely open and close in well under a
+     * second. Callers must have an independent failure signal before a close
+     * can contribute to quarantine.
+     */
+    confirmedFailure: boolean;
     now?: number;
   }): RelayFlapCloseResult {
     const now = input.now ?? Date.now();
+    if (!input.confirmedFailure) {
+      return {
+        shortClose: false,
+        shortCloseCount: 0,
+        enteredQuarantine: false,
+        cleared: false,
+      };
+    }
     if (input.durationMs >= this.options.stableCloseMs) {
       return {
         shortClose: false,

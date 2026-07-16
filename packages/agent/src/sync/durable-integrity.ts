@@ -130,6 +130,8 @@ export interface BoundedGraphScopedDurableBatch {
   safeNextOffset: number;
   /** Number of positive-size assertion graphs completed in this round. */
   completedGraphCount: number;
+  /** Total public rows declared by the verified graph-scoped manifest. */
+  manifestRowCount: number;
 }
 
 function compareUnicodeCodePoints(leftValue: string, rightValue: string): number {
@@ -264,6 +266,7 @@ export function planBoundedGraphScopedDurableBatch(
     changedDataGraphs: [...completeGraphs],
     safeNextOffset,
     completedGraphCount,
+    manifestRowCount: manifestOffset,
   };
 }
 

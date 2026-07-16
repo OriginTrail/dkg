@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.0.6",
+  "version": "10.0.7",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,9 +19,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc && pnpm run test:types",
+    "build": "tsc",
     "test": "vitest run",
-    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

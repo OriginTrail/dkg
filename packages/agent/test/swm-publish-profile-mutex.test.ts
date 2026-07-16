@@ -111,6 +111,33 @@ describe('DKGAgent.publishProfile — tail-chain mutex serialization (PR #700 ro
     expect(results.map((r) => (r as { callId: number }).callId)).toEqual([0, 1, 2, 3, 4]);
   });
 
+  it('coalesces concurrent first-profile readiness checks into one publish', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    let publishes = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (agent as unknown as { publishProfile: () => Promise<unknown> }).publishProfile = async () => {
+      publishes++;
+      await gate;
+      return { ok: true };
+    };
+
+    const readiness = [
+      agent.ensureProfilePublished(),
+      agent.ensureProfilePublished(),
+      agent.ensureProfilePublished(),
+    ];
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(publishes).toBe(1);
+
+    release();
+    await expect(Promise.all(readiness)).resolves.toHaveLength(3);
+    expect(publishes).toBe(1);
+  });
+
   it('error isolation: a failing publishProfileImpl does not poison the tail for subsequent callers', async () => {
     // Pinned by the explicit `.catch(swallow)` in the mutex body.
     // Without that, a single rejected publish would wedge every

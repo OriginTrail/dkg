@@ -4,9 +4,34 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.7] - 2026-07-16
+
+Rootless Knowledge Assets and production hardening for private Context Graphs. New Knowledge Assets are stored and synchronized by their canonical UAL-derived named graph without synthetic `rootEntity` triples; legacy V10 assets remain readable but are no longer rewritten through the legacy lifecycle. The release also completes private-CG auto-approval, late-join recovery, and scalable SWM/VM fan-out, including the fixes validated by the multi-network testnet harness. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.6).
+
+### Added
+
+- **Rootless, graph-scoped Knowledge Assets:** publish, update, finalize, query, Random Sampling, and recovery now use the canonical UAL-derived graph as the asset boundary. Blank-node input is canonicalized deterministically, lifecycle metadata is stored separately, and legacy assets retain read compatibility without remaining on the new write path.
+- **Private Context Graph enrollment controls:** owners can opt a private Context Graph into bounded automatic approval of authenticated join requests, while requester identity, membership, privacy, and curator-local control records remain fail-closed.
+- **Realistic private-CG recovery gates:** local and testnet harnesses cover live receivers, mid-run and cold late joiners, unauthorized negative nodes, SWM and VM payloads, exact manifest integrity, and resource sampling across independent network paths.
+
 ### Fixed
 
 - **PCA agents can register PCA-backed Context Graphs:** the agent, CLI/API, and MCP surfaces now match the deployed contract by allowing either the PCA owner or a wallet registered to that exact PCA to register a curated Context Graph. Eligible registrations consume a quota-backed deposit waiver instead of requiring a separate liquid-TRAC deposit; exact-account authorization and Context Graph NFT ownership alignment remain fail-closed.
+- **Private SWM and VM late-join recovery:** graph-scoped manifests, authenticated sync controls, exact-graph reads, lifecycle pointers, queued VM intent, and private access evidence survive restart and catch-up without leaking private data or accepting unverified control metadata.
+- **Bounded sync makes durable progress:** recovery retains verified prefixes across truncated responses, retries while progress advances, tolerates a bounded flat round, and only declares a snapshot complete after exact integrity verification.
+- **Large snapshots no longer crawl one tiny page at a time:** responder pages are constrained by both frame and byte budgets, requester page size adapts to the transport, and successive pages reuse a framed sync stream with a safe fallback to the prior single-request protocol.
+- **Relay fan-out capacity matches large KA transfer:** the default relayed-circuit byte allowance is raised from 16 MiB to 256 MiB, avoiding deterministic stream termination during realistic private-CG synchronization while preserving the circuit duration and concurrency bounds.
+- **Join and discovery startup races:** profile readiness gates enrollment, durable discovery metadata survives restart, false relay quarantine is avoided, and repeated connect/catch-up work remains bounded.
+- **Graph-scoped publish and update safety:** chain identity, ownership, access-control metadata, immutable snapshot integrity, crash recovery, and update authorization are checked before materialization or promotion.
+
+### Changed
+
+- **Sync work is graph-addressed and backend-agnostic:** scalable paths enumerate candidate UALs from bounded metadata and fetch individual named graphs with SPARQL 1.1-compatible queries, avoiding store-wide ordered/offset scans and preserving Oxigraph/Blazegraph portability.
+- **Release version set:** all workspace packages move together to 10.0.7, including `@origintrail-official/dkg-rdf-utils`.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.6; nodes can upgrade through the normal npm release path.
 
 ## [10.0.6] - 2026-07-13
 

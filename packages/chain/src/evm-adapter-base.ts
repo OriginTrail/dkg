@@ -187,6 +187,14 @@ export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
+// V10 publish/update execution cost can increase between eth_estimateGas and
+// mining when concurrent writes land first and advance shared contract state.
+// Base Sepolia Jenkins evidence showed three status=0 receipts consuming their
+// gas limits exactly while four nodes published into the same block. Keep this
+// headroom local to the shared V10 write path; unrelated contract writes retain
+// their existing gas policy.
+const V10_WRITE_GAS_LIMIT_BUFFER_BPS = 2_500;
+
 type IdentityIdCacheEntry = {
   identityId: bigint;
   ttlMs: number;
@@ -1513,6 +1521,7 @@ export class EVMChainAdapterBase {
           [methodParams],
           signer,
           `V10 ${method}`,
+          { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
         );
       } catch (err) {
         enrichEvmError(err);
