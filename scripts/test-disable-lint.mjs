@@ -676,6 +676,35 @@ function staticD2ArraySelfTest() {
   return pass;
 }
 
+function wrappedD2ArraySelfTest() {
+  const source = [
+    "const OUTPUT_EXCLUSIONS = (['coverage/**'] as const);",
+    "const TEST_EXCLUSIONS = (['tests/unit/**'] as const);",
+    "const TEST_FILE = ('**/*.test.ts' as const) satisfies string;",
+    "const SPEC_EXCLUSIONS = ['**/*.spec.ts'] satisfies readonly string[];",
+    'export default {',
+    '  test: {',
+    '    exclude: ([',
+    '      ...OUTPUT_EXCLUSIONS,',
+    '      ...TEST_EXCLUSIONS,',
+    '      TEST_FILE,',
+    '      ...SPEC_EXCLUSIONS,',
+    '    ] as const) satisfies readonly string[],',
+    '  },',
+    '};',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.test.ts', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: wrapped D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
 function opaqueD2RatchetSelfTest() {
   const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-opaque-d2-'));
   const git = (...args) => execFileSync('git', args, {
@@ -816,6 +845,7 @@ function selfTest({ report = true } = {}) {
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
   const staticD2ArraysPass = staticD2ArraySelfTest();
+  const wrappedD2ArraysPass = wrappedD2ArraySelfTest();
   const opaqueD2RatchetPass = opaqueD2RatchetSelfTest();
   const destructuredD2RatchetPass = destructuredD2RatchetSelfTest();
   if (report) {
@@ -824,6 +854,7 @@ function selfTest({ report = true } = {}) {
         + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
         + `audit modes ${auditsPass ? 'pass' : 'FAIL'}, `
         + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}, `
+        + `wrapped D2 arrays ${wrappedD2ArraysPass ? 'pass' : 'FAIL'}, `
         + `opaque D2 ratchet ${opaqueD2RatchetPass ? 'pass' : 'FAIL'}, `
         + `destructured D2 ratchet ${destructuredD2RatchetPass ? 'pass' : 'FAIL'}.\n`,
     );
@@ -832,6 +863,7 @@ function selfTest({ report = true } = {}) {
     && growthPasses
     && auditsPass
     && staticD2ArraysPass
+    && wrappedD2ArraysPass
     && opaqueD2RatchetPass
     && destructuredD2RatchetPass
     ? 0
