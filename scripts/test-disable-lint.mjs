@@ -216,6 +216,17 @@ export function computeDiffFindings(baseRevision, headRevision, cwd = process.cw
   return { results };
 }
 
+function runDiff(baseRevision, headRevision) {
+  const blocking = computeDiffFindings(baseRevision, headRevision).results
+    .filter(({ verdict }) => verdict === 'new');
+  for (const finding of blocking) {
+    process.stdout.write(
+      `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
+    );
+  }
+  return blocking.length === 0 ? 0 : 1;
+}
+
 function semanticMoveSelfTest() {
   const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
   const git = (...args) => execFileSync('git', args, {
@@ -319,6 +330,20 @@ function selfTest() {
 
 export function runCli(argv = process.argv.slice(2)) {
   if (argv[0] === '--self-test') return selfTest();
+  if (argv[0] === '--diff') {
+    const [, baseRevision, headRevision] = argv;
+    if (!baseRevision || !headRevision) {
+      process.stderr.write(
+        'Usage: node scripts/test-disable-lint.mjs --diff <base> <head>\n',
+      );
+      return 2;
+    }
+    if (!process.env.TEST_DISABLE_LINT_NO_SELF_TEST) {
+      const selfTestResult = selfTest();
+      if (selfTestResult !== 0) return selfTestResult;
+    }
+    return runDiff(baseRevision, headRevision);
+  }
   if (argv[0] !== '--files' || argv.length === 1) {
     process.stderr.write('Usage: node scripts/test-disable-lint.mjs --files <path...>\n');
     return 2;
