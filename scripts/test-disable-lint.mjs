@@ -1,8 +1,17 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -180,12 +189,299 @@ export function auditFiles(filePaths) {
   });
 }
 
+function git(args, cwd = process.cwd()) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function changedD1Entries(baseRevision, headRevision, cwd) {
+  const entries = [];
+  const fields = git([
+    'diff',
+    '--name-status',
+    '-z',
+    '--find-renames',
+    '--find-copies-harder',
+    '--diff-filter=ACDMR',
+    baseRevision,
+    headRevision,
+  ], cwd).split('\0');
+
+  for (let index = 0; index < fields.length - 1;) {
+    const status = fields[index++];
+    const firstPath = fields[index++];
+    const secondPath = status.startsWith('R') || status.startsWith('C')
+      ? fields[index++]
+      : undefined;
+    if (status.startsWith('R')) {
+      if (isD1ScannableFile(firstPath) || isD1ScannableFile(secondPath)) {
+        entries.push({
+          basePath: isD1ScannableFile(firstPath) ? firstPath : null,
+          headPath: isD1ScannableFile(secondPath) ? secondPath : null,
+        });
+      }
+    } else if (status.startsWith('C')) {
+      if (isD1ScannableFile(secondPath)) {
+        entries.push({ basePath: null, headPath: secondPath });
+      }
+    } else if (isD1ScannableFile(firstPath)) {
+      entries.push({
+        basePath: status === 'A' ? null : firstPath,
+        headPath: status === 'D' ? null : firstPath,
+      });
+    }
+  }
+  return entries;
+}
+
+function findingsAt(revision, filePath, cwd) {
+  if (!filePath) return [];
+  return analyzeD1Source(git(['show', `${revision}:${filePath}`], cwd), filePath);
+}
+
+export function computeDiffFindings(baseRevision, headRevision, cwd = process.cwd()) {
+  const entries = changedD1Entries(baseRevision, headRevision, cwd);
+  const baseline = new Map();
+  for (const entry of entries) {
+    for (const finding of findingsAt(baseRevision, entry.basePath, cwd)) {
+      baseline.set(finding.fingerprint, (baseline.get(finding.fingerprint) ?? 0) + 1);
+    }
+  }
+
+  const results = entries.flatMap((entry) => findingsAt(headRevision, entry.headPath, cwd))
+    .map((finding) => {
+      const remaining = baseline.get(finding.fingerprint) ?? 0;
+      if (remaining === 0) return { ...finding, verdict: 'new' };
+      baseline.set(finding.fingerprint, remaining - 1);
+      return { ...finding, verdict: 'grandfathered' };
+    });
+  return { results };
+}
+
+function runDiff(baseRevision, headRevision) {
+  const blocking = computeDiffFindings(baseRevision, headRevision).results
+    .filter(({ verdict }) => verdict === 'new');
+  for (const finding of blocking) {
+    process.stdout.write(
+      `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
+    );
+  }
+  return blocking.length === 0 ? 0 : 1;
+}
+
+function listTrackedD1Files() {
+  return git(['ls-files', '-z'])
+    .split('\0')
+    .filter(isD1ScannableFile);
+}
+
+function semanticMoveSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    writeFileSync(
+      path.join(fixtureRoot, 'test/original.test.ts'),
+      "test.skip('existing debt', () => {});\n",
+    );
+    writeFileSync(
+      path.join(fixtureRoot, 'test/untouched.test.ts'),
+      "it.todo('untouched debt');\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    git('mv', 'test/original.test.ts', 'test/moved.test.ts');
+    writeFileSync(
+      path.join(fixtureRoot, 'test/moved.test.ts'),
+      "\n\ntest.skip('existing debt', () => {});\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'move disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const pass = cli.status === 0 && cli.stdout === '';
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: semantic move exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function semanticGrowthSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-growth-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    const fixturePath = path.join(fixtureRoot, 'test/original.test.ts');
+    const disabledTest = "test.skip('copied debt', () => {});\n";
+    writeFileSync(fixturePath, disabledTest);
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    const copiedPath = path.join(fixtureRoot, 'test/café\tcopy.test.ts');
+    copyFileSync(fixturePath, copiedPath);
+    git('add', '-A');
+    git('commit', '-qm', 'copy disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const diagnostics = cli.stdout
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes(': D1 '));
+    const expected = ['test/café\tcopy.test.ts:1:1: D1 test.skip'];
+    const pass = cli.status === 1 && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: semantic growth exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function auditModesSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-audit-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const relativeFixturePath = 'test/café\tdebt.test.ts';
+    const fixturePath = path.join(fixtureRoot, relativeFixturePath);
+    mkdirSync(path.dirname(fixturePath), { recursive: true });
+    writeFileSync(fixturePath, "it.todo('audit debt');\n");
+    git('add', '-A');
+
+    const spawnAudit = (args) => spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), ...args],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const fileAudit = spawnAudit(['--files', fixturePath]);
+    const fullAudit = spawnAudit(['--all']);
+    const pass = fileAudit.status === 0
+      && fileAudit.stdout.trim() === `${fixturePath}:1:1: D1 it.todo`
+      && fullAudit.status === 0
+      && fullAudit.stdout.trim() === `${relativeFixturePath}:1:1: D1 it.todo`;
+    if (!pass) {
+      process.stderr.write(
+        'SELF-TEST FAIL: audit modes did not report debt without failure\n'
+          + `--files exit=${fileAudit.status}\nstdout:\n${fileAudit.stdout}\nstderr:\n${fileAudit.stderr}`
+          + `--all exit=${fullAudit.status}\nstdout:\n${fullAudit.stdout}\nstderr:\n${fullAudit.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function selfTest({ report = true } = {}) {
+  const movePasses = semanticMoveSelfTest();
+  const growthPasses = semanticGrowthSelfTest();
+  const auditsPass = auditModesSelfTest();
+  if (report) {
+    process.stdout.write(
+      `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
+        + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
+        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
+    );
+  }
+  return movePasses && growthPasses && auditsPass ? 0 : 1;
+}
+
+function validateScanner() {
+  return process.env.TEST_DISABLE_LINT_NO_SELF_TEST ? 0 : selfTest({ report: false });
+}
+
 export function runCli(argv = process.argv.slice(2)) {
+  if (argv[0] === '--self-test') return selfTest();
+  if (argv[0] === '--diff') {
+    const [, baseRevision, headRevision] = argv;
+    if (!baseRevision || !headRevision) {
+      process.stderr.write(
+        'Usage: node scripts/test-disable-lint.mjs --diff <base> <head>\n',
+      );
+      return 2;
+    }
+    const selfTestResult = validateScanner();
+    if (selfTestResult !== 0) return selfTestResult;
+    return runDiff(baseRevision, headRevision);
+  }
+  if (argv[0] === '--all') {
+    const selfTestResult = validateScanner();
+    if (selfTestResult !== 0) return selfTestResult;
+    for (const finding of auditFiles(listTrackedD1Files())) {
+      process.stdout.write(
+        `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
+      );
+    }
+    return 0;
+  }
   if (argv[0] !== '--files' || argv.length === 1) {
-    process.stderr.write('Usage: node scripts/test-disable-lint.mjs --files <path...>\n');
+    process.stderr.write(
+      'Usage: node scripts/test-disable-lint.mjs '
+        + '--diff <base> <head> | --all | --files <path...> | --self-test\n',
+    );
     return 2;
   }
 
+  const selfTestResult = validateScanner();
+  if (selfTestResult !== 0) return selfTestResult;
   for (const finding of auditFiles(argv.slice(1))) {
     process.stdout.write(
       `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
