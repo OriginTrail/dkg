@@ -24,6 +24,10 @@ import {
   generateEd25519Keypair,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
+  decodeAgentMessage,
+  decodeReliableEnvelope,
+  encodeAgentMessage,
+  encodeReliableEnvelope,
   type Ed25519Keypair,
   type EventBus,
   type DKGStreamHandler,
@@ -86,6 +90,7 @@ interface TestPair {
   /** The bound `handleIncoming` for peer B (what A's messenger calls). */
   bIncoming: DKGStreamHandler;
   aIncoming: DKGStreamHandler;
+  wireFromA: Uint8Array[];
 }
 
 async function buildPair(): Promise<TestPair> {
@@ -101,6 +106,7 @@ async function buildPair(): Promise<TestPair> {
   // these tests because they cover the full chat round-trip.
   let aIncoming: DKGStreamHandler | null = null;
   let bIncoming: DKGStreamHandler | null = null;
+  const wireFromA: Uint8Array[] = [];
 
   const routerA: ProtocolRouter = {
     register: (_proto: string, handler: DKGStreamHandler) => {
@@ -108,6 +114,7 @@ async function buildPair(): Promise<TestPair> {
     },
     send: async (_to: string, _proto: string, data: Uint8Array) => {
       if (!bIncoming) throw new Error('bIncoming not registered');
+      wireFromA.push(Uint8Array.from(data));
       return await bIncoming(data, { toString: () => PEER_A });
     },
   } as unknown as ProtocolRouter;
@@ -142,7 +149,27 @@ async function buildPair(): Promise<TestPair> {
   if (!aIncoming || !bIncoming) {
     throw new Error('handlers not captured');
   }
-  return { a, b, keyA, keyB, aIncoming, bIncoming };
+  return { a, b, keyA, keyB, aIncoming, bIncoming, wireFromA };
+}
+
+function tamperLastMessage(
+  pair: TestPair,
+  mutate: (message: ReturnType<typeof decodeAgentMessage>) => void,
+  messageId: string,
+): Promise<Uint8Array> {
+  const wire = pair.wireFromA.at(-1);
+  if (!wire) throw new Error('no captured message from peer A');
+  const envelope = decodeReliableEnvelope(wire);
+  const message = decodeAgentMessage(envelope.payload);
+  mutate(message);
+  return pair.bIncoming(
+    encodeReliableEnvelope({
+      ...envelope,
+      messageId,
+      payload: encodeAgentMessage(message),
+    }),
+    { toString: () => PEER_A },
+  );
 }
 
 describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
@@ -182,6 +209,7 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     const acl = recorder<Parameters<ChatAclCheck>, ReturnType<ChatAclCheck>>((sender, payload) => {
       expect(sender).toBe(PEER_A);
       expect(payload.contextGraphId).toBe('cg-ok');
+      expect(payload.textBytes).toBe(new TextEncoder().encode('allowed').byteLength);
       return { accept: true };
     });
     b.setChatAcl(acl);
@@ -306,6 +334,59 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     await a.sendChat(PEER_B, 'm3');
 
     expect(acl.calls).toHaveLength(3);
+  });
+
+  it('rejects an envelope whose claimed sender or recipient disagrees with transport state', async () => {
+    const pair = await buildPair();
+    pair.b.setChatAcl(() => ({ accept: true }));
+    pair.b.onChat(() => {});
+    await pair.a.sendChat(PEER_B, 'capture a valid signed message');
+
+    await expect(tamperLastMessage(
+      pair,
+      (message) => { message.senderPeerId = PEER_B; },
+      '00000000-0000-4000-8000-000000000001',
+    )).rejects.toThrow(/senderPeerId does not match authenticated transport peer/);
+
+    await expect(tamperLastMessage(
+      pair,
+      (message) => { message.recipientPeerId = PEER_A; },
+      '00000000-0000-4000-8000-000000000002',
+    )).rejects.toThrow(/recipientPeerId does not match this node/);
+  });
+
+  it('rejects malformed or forged signing material before consulting the chat ACL', async () => {
+    const pair = await buildPair();
+    const acl = recorder<Parameters<ChatAclCheck>, ReturnType<ChatAclCheck>>(() => ({
+      accept: true,
+    }));
+    pair.b.setChatAcl(acl);
+    pair.b.onChat(() => {});
+    await pair.a.sendChat(PEER_B, 'capture a valid signed message');
+    expect(acl.calls).toHaveLength(1);
+
+    await expect(tamperLastMessage(
+      pair,
+      (message) => { message.senderPublicKey = new Uint8Array(); },
+      '00000000-0000-4000-8000-000000000003',
+    )).rejects.toThrow(/missing a valid sender public key/);
+
+    await expect(tamperLastMessage(
+      pair,
+      (message) => { message.senderSignature = new Uint8Array(); },
+      '00000000-0000-4000-8000-000000000004',
+    )).rejects.toThrow(/missing a valid sender signature/);
+
+    await expect(tamperLastMessage(
+      pair,
+      (message) => {
+        message.senderSignature = Uint8Array.from(message.senderSignature);
+        message.senderSignature[0] ^= 0xff;
+      },
+      '00000000-0000-4000-8000-000000000005',
+    )).rejects.toThrow(/Invalid message signature/);
+
+    expect(acl.calls).toHaveLength(1);
   });
 });
 

@@ -463,10 +463,12 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
-        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
+        // Reject an unaccepted transport identity before buffering any
+        // attacker-controlled request bytes.
         await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
           signal: handlerSignal,
         });
+        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         const peerId = {
           toString: () => remotePeer,
           toBytes: () => connection.remotePeer.toMultihash().bytes,

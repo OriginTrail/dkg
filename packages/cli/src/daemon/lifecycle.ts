@@ -1965,14 +1965,12 @@ export async function runDaemonInner(
     );
   }
 
-  // Inbound chat authorisation (Phase 1 of agent debug chat RFC). Layered
-  // on top of the protocol-level Ed25519 signature check that messaging.ts
-  // already does — this controls *which* authenticated peers we'll accept
-  // chats from, configured via `chat.acl` in the node config. When unset,
-  // the legacy "accept all authenticated peers" behaviour is preserved.
+  // Inbound chat is deliberately default-off. Enabling the listener still
+  // leaves it default-deny; operators must explicitly trust exact peer IDs
+  // or curator-managed peer memberships in explicit context graphs.
   agent.setChatAcl(
     buildChatAcl({
-      config: config.chat?.acl,
+      config: config.chat,
       dashDb,
       getLocalPeerId: () => agent.peerId,
       log,
@@ -2037,7 +2035,9 @@ export async function runDaemonInner(
       }
       if (writeOutcome === 'deduped') {
         const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
-        log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag} (deduped): ${text}`);
+        log(
+          `CHAT IN  [${shortId(senderPeerId)}]${cgTag} (deduped, ${Buffer.byteLength(text, 'utf8')} bytes)`,
+        );
         return;
       }
       // ADR-001: inbound peer chat no longer produces a bell notification —
@@ -2047,7 +2047,9 @@ export async function runDaemonInner(
       // bell-pane `chat_message` notification.
     }
     const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
-    log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
+    log(
+      `CHAT IN  [${shortId(senderPeerId)}]${cgTag}: stored ${Buffer.byteLength(text, 'utf8')} bytes (content redacted)`,
+    );
   });
 
   // Register before network startup. A queued join approval can arrive as

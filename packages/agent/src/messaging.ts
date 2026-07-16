@@ -2,6 +2,7 @@ import type { EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   PROTOCOL_MESSAGE,
+  PROTOCOL_MESSAGE_MAX_WIRE_BYTES,
   encodeAgentMessage,
   decodeAgentMessage,
   ed25519Sign,
@@ -88,7 +89,7 @@ export type ChatHandler = (
  */
 export type ChatAclCheck = (
   senderPeerId: string,
-  payload: { contextGraphId?: string },
+  payload: { contextGraphId?: string; textBytes: number },
 ) => {
   accept: boolean;
   reason?: string;
@@ -164,9 +165,11 @@ export class MessageHandler {
     // May 2026 soak (seq=13 arriving twice) is now absorbed by the
     // substrate, not by the chat-specific `idx_chat_msgid` SQL
     // index.
-    messenger.register(PROTOCOL_MESSAGE, async (data, fromPeerId) => {
-      return this.handleIncoming(data, fromPeerId);
-    });
+    messenger.register(
+      PROTOCOL_MESSAGE,
+      async (data, fromPeerId) => this.handleIncoming(data, fromPeerId),
+      { maxWireBytes: PROTOCOL_MESSAGE_MAX_WIRE_BYTES },
+    );
   }
 
   registerSkill(skillUri: string, handler: SkillHandler): void {
@@ -404,19 +407,32 @@ export class MessageHandler {
     const convId = msg.conversationId;
     const seq = typeof msg.sequence === 'number' ? msg.sequence : msg.sequence.low;
 
-    // Cache sender's public key from the message
-    const senderKey = msg.senderPublicKey?.length === 32
-      ? msg.senderPublicKey
-      : this.peerKeys.get(msg.senderPeerId);
-
-    if (senderKey) {
-      this.peerKeys.set(msg.senderPeerId, senderKey);
+    // Bind the signed application envelope to the authenticated libp2p
+    // transport identity and this recipient. Without this check, peer A
+    // could stamp peer B into the payload and poison B's cached app key.
+    if (msg.senderPeerId !== fromPeerId) {
+      throw new Error('Message senderPeerId does not match authenticated transport peer');
+    }
+    if (msg.recipientPeerId !== this.peerId) {
+      throw new Error('Message recipientPeerId does not match this node');
+    }
+    if (msg.senderPublicKey.length !== 32) {
+      throw new Error('Message is missing a valid sender public key');
+    }
+    if (msg.senderSignature.length !== 64) {
+      throw new Error('Message is missing a valid sender signature');
     }
 
-    // Derive shared secret from sender's public key
-    const sharedSecret = senderKey
-      ? this.deriveSecret(senderKey)
-      : new Uint8Array(32); // backward compat with pre-encryption messages
+    const senderKey = msg.senderPublicKey;
+    const sigData = buildSignatureInput(convId, seq, msg.encryptedPayload);
+    const validSignature = await ed25519Verify(msg.senderSignature, sigData, senderKey);
+    if (!validSignature) {
+      throw new Error('Invalid message signature');
+    }
+
+    // Cache only after signature verification and transport binding.
+    this.peerKeys.set(fromPeerId, senderKey);
+    const sharedSecret = this.deriveSecret(senderKey);
 
     let conv = this.conversations.get(convId);
     if (!conv) {
@@ -436,18 +452,6 @@ export class MessageHandler {
     }
     conv.highWaterMark = seq;
     conv.lastActivity = Date.now();
-
-    // Verify sender's signature
-    if (senderKey && msg.senderSignature.length === 64) {
-      const sigData = buildSignatureInput(convId, seq, msg.encryptedPayload);
-      const valid = await ed25519Verify(msg.senderSignature, sigData, senderKey);
-      if (!valid) {
-        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
-          success: false,
-          error: 'Invalid signature',
-        });
-      }
-    }
 
     // Decrypt payload
     let plaintext: string;
@@ -470,12 +474,6 @@ export class MessageHandler {
         error: 'Invalid message format',
       });
     }
-
-    this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
-      conversationId: convId,
-      from: fromPeerId,
-      type: parsed.type,
-    });
 
     if (parsed.type === 'skill_request') {
       const skillUri = parsed.skillUri as string;
@@ -510,6 +508,12 @@ export class MessageHandler {
         });
       }
 
+      this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
+        conversationId: convId,
+        from: fromPeerId,
+        type: parsed.type,
+      });
+
       const startTime = Date.now();
       const request: SkillRequest = {
         skillUri,
@@ -533,7 +537,14 @@ export class MessageHandler {
     }
 
     if (parsed.type === 'chat') {
-      const text = (parsed.text as string) ?? '';
+      if (typeof parsed.text !== 'string') {
+        return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+          success: false,
+          error: 'Invalid chat text: expected a string',
+        });
+      }
+      const text = parsed.text;
+      const textBytes = new TextEncoder().encode(text).byteLength;
       const senderContextGraphId =
         typeof parsed.contextGraphId === 'string' ? parsed.contextGraphId : undefined;
       // Pre-V11 senders omit this; missing or non-string ⇒ undefined ⇒
@@ -567,6 +578,7 @@ export class MessageHandler {
         try {
           verdict = this.chatAclCheck(fromPeerId, {
             contextGraphId: senderContextGraphId,
+            textBytes,
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -586,6 +598,12 @@ export class MessageHandler {
         }
         verifiedContextGraphId = verdict.verifiedContextGraphId;
       }
+
+      this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
+        conversationId: convId,
+        from: fromPeerId,
+        type: parsed.type,
+      });
 
       if (this.chatHandler) {
         try {
