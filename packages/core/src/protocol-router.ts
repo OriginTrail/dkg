@@ -638,7 +638,7 @@ export class ProtocolRouter {
     // is exhausted.
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
-    if (!singleUsePayload && overlay && memoizedVariant !== 'one-shot') {
+    if (overlay && memoizedVariant !== 'one-shot') {
       try {
         const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
@@ -664,6 +664,15 @@ export class ProtocolRouter {
           // variant. Pin to one-shot for future sends; fall through
           // to existing single-path / multi-path logic below.
           this.memoizePeerWire(peerIdStr, protocolId, 'one-shot');
+        } else if (singleUsePayload) {
+          // The authenticated sync envelope is single-use. A pooled request is
+          // itself one wire attempt, but after any ambiguous transport failure
+          // we MUST NOT fall through and replay those bytes on a one-shot
+          // stream. Bubble to sync's outer retry, which rebuilds a fresh signed
+          // envelope before trying again. Protocol-unsupported is the one safe
+          // fallback above: multistream negotiation fails before payload bytes
+          // are written.
+          throw err;
         } else if (memoizedVariant === 'pooled') {
           // Peer is KNOWN to speak the pooled wire (we've delivered
           // on it before). This is a transient failure on the held

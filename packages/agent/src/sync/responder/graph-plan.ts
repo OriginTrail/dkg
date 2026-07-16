@@ -145,6 +145,8 @@ interface RowListCache {
   refresh?: boolean;
   refreshGeneration?: string;
   expiredMessage?: string;
+  /** Byte-budget pages may serialize only a prefix of a short row slice. */
+  releaseOnShortPage?: boolean;
 }
 
 export function createResponderGraphListMemo(
@@ -415,10 +417,39 @@ export function compareRows(a: SyncRow, b: SyncRow): number {
   );
 }
 
+function serializeResponderRow(row: SyncRow): string {
+  return `${formatTerm(row.s)} <${assertSafeIri(row.p)}> ${formatTerm(row.o)} <${assertSafeIri(row.g)}> .`;
+}
+
 export function serializeResponderRows(rows: readonly SyncRow[]): string {
-  return rows.map((row) =>
-    `${formatTerm(row.s)} <${assertSafeIri(row.p)}> ${formatTerm(row.o)} <${assertSafeIri(row.g)}> .`,
-  ).join('\n');
+  return rows.map(serializeResponderRow).join('\n');
+}
+
+/**
+ * Serialize the largest prefix that fits the negotiated response target.
+ * Pagination advances by the number of N-Quads actually parsed by the
+ * requester, so returning a prefix is cursor-safe. Always emit one row when a
+ * non-empty input contains an unexpectedly oversized row; that guarantees
+ * forward progress and leaves the transport's existing hard frame limit as the
+ * final safety boundary for that pathological single row.
+ */
+export function serializeResponderRowsWithinByteBudget(
+  rows: readonly SyncRow[],
+  maxBytes: number,
+): string {
+  const safeMaxBytes = Math.max(1, Math.floor(maxBytes));
+  const encoder = new TextEncoder();
+  const page: string[] = [];
+  let bytes = 0;
+  for (const row of rows) {
+    const serialized = serializeResponderRow(row);
+    const rowBytes = encoder.encode(serialized).byteLength + (page.length > 0 ? 1 : 0);
+    if (page.length > 0 && bytes + rowBytes > safeMaxBytes) break;
+    page.push(serialized);
+    bytes += rowBytes;
+    if (bytes >= safeMaxBytes) break;
+  }
+  return page.join('\n');
 }
 
 export async function readSwmMetaPage(params: {
@@ -1071,6 +1102,8 @@ export async function readDurableDataPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /** Keep the immutable row snapshot until an explicit empty-page EOF. */
+  releaseCacheOnShortPage?: boolean;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1082,6 +1115,7 @@ export async function readDurableDataPage(params: {
       ),
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
     }
     : undefined;
 
@@ -1693,7 +1727,7 @@ async function readCachedRowsPage(
   // page allocates only that page's backing array, never a shallow copy of the
   // complete snapshot first.
   const page = rows.slice(safeOffset, safeOffset + safeLimit);
-  if (page.length < safeLimit) {
+  if (page.length === 0 || (cache.releaseOnShortPage !== false && page.length < safeLimit)) {
     cache.memo.release(cache.key, { graceMs: COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS });
   }
   return page;

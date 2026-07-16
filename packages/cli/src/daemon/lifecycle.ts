@@ -2201,7 +2201,7 @@ export async function runDaemonInner(
   const publisherChainBase = runtimeEvmChainConfig;
   const startPostApiPublishing = () => {
     const profileTimer = setTimeout(() => {
-      void agent.publishProfile().catch((err: any) => {
+      void agent.ensureProfilePublished().catch((err: any) => {
         log(`Agent profile publish failed: ${err?.message ?? String(err)}`);
       });
     }, 0);

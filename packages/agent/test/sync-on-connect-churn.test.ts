@@ -237,6 +237,8 @@ describe('sync-on-connect churn gates', () => {
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
       completed: true,
     });
   });
