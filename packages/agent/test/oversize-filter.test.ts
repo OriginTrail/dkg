@@ -239,6 +239,45 @@ describe('insertWithOversizeGuard', () => {
     }
   });
 
+  it('keeps a transitive blank-node chain in one insert call across a batch boundary', async () => {
+    const { hooks } = collect();
+    const detail = lit(50_000);
+    const chainedComponent = [
+      { ...quad('_:b', SWM_GRAPH, '_:a'), predicate: 'http://ex.org/next' },
+      { ...quad('_:c', SWM_GRAPH, '_:b'), predicate: 'http://ex.org/next' },
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:c'),
+        predicate: `http://ex.org/chain-detail-${index}`,
+      })),
+    ];
+    const groundQuads = Array.from({ length: 100 }, (_, index) => ({
+      ...quad(detail, SWM_GRAPH, `http://ex.org/ground-${index}`),
+      predicate: `http://ex.org/ground-detail-${index}`,
+    }));
+    const input = chainedComponent.flatMap((componentQuad, index) => (
+      index < groundQuads.length ? [componentQuad, groundQuads[index]!] : [componentQuad]
+    ));
+    const batches: Quad[][] = [];
+
+    await insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      input,
+      hooks,
+      'swm-sync',
+    );
+
+    expect(batches.length).toBeGreaterThan(1);
+    const chainBatches = batches.filter((batch) => batch.some((q) =>
+      ['_:a', '_:b', '_:c'].includes(q.subject) ||
+      ['_:a', '_:b', '_:c'].includes(q.object) ||
+      ['_:a', '_:b', '_:c'].includes(q.graph)));
+    expect(chainBatches).toHaveLength(1);
+    expect(chainBatches[0]!.filter((q) =>
+      ['_:a', '_:b', '_:c'].includes(q.subject) ||
+      ['_:a', '_:b', '_:c'].includes(q.object) ||
+      ['_:a', '_:b', '_:c'].includes(q.graph))).toHaveLength(chainedComponent.length);
+  });
+
   it('rejects an over-bound blank-node component before any insert mutation', async () => {
     const { hooks } = collect();
     const detail = lit(50_000);

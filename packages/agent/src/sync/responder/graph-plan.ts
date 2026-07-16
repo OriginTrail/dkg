@@ -19,6 +19,7 @@ import {
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
+  createGenerationAwareTtlSingleFlightMemo,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
@@ -60,6 +61,11 @@ const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
+
+function rootClosureSparqlFilter(subjectVariable: string, rootVariable: string): string {
+  return `FILTER(sameTerm(${subjectVariable}, ${rootVariable}) || STRSTARTS(STR(${subjectVariable}), CONCAT(STR(${rootVariable}), "/.well-known/genid/")))`;
+}
+
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
   return { signal, priority: 'background', source };
 }
@@ -253,77 +259,7 @@ export function createResponderFreshSwmDataGraphPlanMemo(
   ttlMs = 10 * 60_000,
   maxEntries = 32,
 ): FreshSwmDataGraphPlanMemo {
-  const cached = new Map<string, {
-    value: FreshSwmDataGraphPlan;
-    cachedAt: number;
-    refreshGeneration?: string;
-  }>();
-  const inflight = new Map<string, {
-    promise: Promise<FreshSwmDataGraphPlan>;
-    refreshGeneration?: string;
-  }>();
-  const prune = (now = Date.now()) => {
-    for (const [key, entry] of cached) {
-      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
-    }
-  };
-  return {
-    async get(key, load, options) {
-      throwIfAborted(options?.signal);
-      const requestedGeneration = options?.refreshGeneration;
-      while (true) {
-        const pending = inflight.get(key);
-        if (!pending) break;
-        const supersedesPending = requestedGeneration !== undefined &&
-          requestedGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
-          return raceAgainstAbort(pending.promise, options?.signal);
-        }
-        try {
-          await raceAgainstAbort(pending.promise, options?.signal);
-        } catch {
-          // A newer responder session owns an independent plan attempt. Do not
-          // inherit an older generation's load failure, but keep caller aborts.
-          throwIfAborted(options?.signal);
-        }
-      }
-      const now = Date.now();
-      prune(now);
-      let existing = cached.get(key);
-      if (
-        existing &&
-        requestedGeneration !== undefined &&
-        existing.refreshGeneration !== requestedGeneration
-      ) {
-        cached.delete(key);
-        existing = undefined;
-      }
-      if (!options?.refresh && existing) {
-        cached.delete(key);
-        cached.set(key, { ...existing, cachedAt: now });
-        return existing.value;
-      }
-      if (options?.requireExisting) return null;
-      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
-      const pendingLoad = load()
-        .then((value) => {
-          cached.set(key, {
-            value,
-            cachedAt: Date.now(),
-            refreshGeneration: requestedGeneration,
-          });
-          return value;
-        })
-        .finally(() => {
-          if (inflight.get(key)?.promise === pendingLoad) inflight.delete(key);
-        });
-      inflight.set(key, {
-        promise: pendingLoad,
-        refreshGeneration: requestedGeneration,
-      });
-      return raceAgainstAbort(pendingLoad, options?.signal);
-    },
-  };
+  return createGenerationAwareTtlSingleFlightMemo<FreshSwmDataGraphPlan>(ttlMs, maxEntries);
 }
 
 /**
@@ -2301,13 +2237,7 @@ async function buildFreshSwmDataGraphPlan(
             ${cutoffFilter}
           }
           GRAPH <${assertSafeIri(graph)}> { ?candidateSubject ?rootPredicate ?rootObject }
-          FILTER(
-            ?candidateSubject = ?root
-            || STRSTARTS(
-              STR(?candidateSubject),
-              CONCAT(STR(?root), "/.well-known/genid/")
-            )
-          )
+          ${rootClosureSparqlFilter('?candidateSubject', '?root')}
         }
       }`);
     const rootResult = await store.query(`
@@ -2339,7 +2269,7 @@ async function buildFreshSwmDataGraphPlan(
             SELECT DISTINCT ?s ?p ?o WHERE {
               VALUES ?root { ${graphValues(roots)} }
               GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
-              FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+              ${rootClosureSparqlFilter('?s', '?root')}
             }
           }
         }
@@ -2386,7 +2316,7 @@ async function readFreshSwmDataRowsPageFromPlan(
       SELECT DISTINCT ?s ?p ?o WHERE {
         VALUES ?root { ${graphValues(entry.roots)} }
         GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        ${rootClosureSparqlFilter('?s', '?root')}
       }
       ORDER BY ?s ?p ?o
       OFFSET ${skip}

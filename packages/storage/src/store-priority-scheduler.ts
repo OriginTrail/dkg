@@ -84,6 +84,7 @@ interface NonAckLanePolicy {
 interface LegacyStorePrioritySchedulerArguments {
   argumentCount: number;
   ackReservedSlots?: number;
+  healthReservedSlots?: number;
   now?: () => number;
   backgroundReservedSlots?: number;
   queueLimits?: number | Partial<StorePriorityQueueLimits>;
@@ -250,6 +251,7 @@ export class StorePriorityScheduler {
     const options = normalizeStorePrioritySchedulerOptions(optionsOrMaxConcurrent, {
       argumentCount: arguments.length,
       ackReservedSlots: legacyAckReservedSlots,
+      healthReservedSlots: legacyHealthReservedSlots,
       now: legacyNow,
       backgroundReservedSlots: legacyBackgroundReservedSlots,
       queueLimits: legacyQueueLimits,

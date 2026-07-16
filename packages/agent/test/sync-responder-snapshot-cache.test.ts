@@ -115,6 +115,33 @@ describe('sync responder snapshot budget defaults', () => {
 });
 
 describe('fresh SWM data graph-plan memo', () => {
+  it('coalesces concurrent loads from the same refresh generation', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const gate = deferred<{ entries: []; totalRows: number }>();
+    let loads = 0;
+    const load = () => {
+      loads += 1;
+      return gate.promise;
+    };
+
+    const first = memo.get('peer/cg', load, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const second = memo.get('peer/cg', load, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+
+    await Promise.resolve();
+    expect(loads).toBe(1);
+    const plan = { entries: [] as [], totalRows: 2 };
+    gate.resolve(plan);
+    await expect(first).resolves.toBe(plan);
+    await expect(second).resolves.toBe(plan);
+    expect(loads).toBe(1);
+  });
+
   it('does not let a refreshed session join an older in-flight plan', async () => {
     const memo = createResponderFreshSwmDataGraphPlanMemo();
     const firstGate = deferred<{ entries: []; totalRows: number }>();

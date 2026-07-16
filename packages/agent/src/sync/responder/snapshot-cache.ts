@@ -135,6 +135,136 @@ function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal | undefine
   });
 }
 
+interface GenerationAwareInflight<T> {
+  promise: Promise<T>;
+  refreshGeneration?: string;
+}
+
+const NO_COMPATIBLE_INFLIGHT = Symbol('no-compatible-inflight');
+
+/**
+ * Coalesce callers from the same responder-session generation while making a
+ * newer generation wait for, then supersede, an older in-flight load. Waiting
+ * is abortable per caller; the shared loader itself remains owner-independent.
+ */
+function awaitCompatibleGenerationInflight<T>(
+  getPending: () => GenerationAwareInflight<T> | undefined,
+  requestedGeneration: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof NO_COMPATIBLE_INFLIGHT> | typeof NO_COMPATIBLE_INFLIGHT {
+  const firstPending = getPending();
+  if (!firstPending) return NO_COMPATIBLE_INFLIGHT;
+  const supersedesFirst = requestedGeneration !== undefined &&
+    requestedGeneration !== firstPending.refreshGeneration;
+  if (!supersedesFirst) return raceAgainstAbort(firstPending.promise, signal);
+
+  return (async () => {
+    let pending: GenerationAwareInflight<T> | undefined = firstPending;
+    while (pending) {
+      const supersedesPending = requestedGeneration !== undefined &&
+        requestedGeneration !== pending.refreshGeneration;
+      if (!supersedesPending) return raceAgainstAbort(pending.promise, signal);
+      try {
+        await raceAgainstAbort(pending.promise, signal);
+      } catch {
+        // A newer generation owns an independent attempt. Do not inherit an
+        // older load failure, but preserve the waiting caller's local abort.
+        throwIfAborted(signal);
+      }
+      pending = getPending();
+    }
+    return NO_COMPATIBLE_INFLIGHT;
+  })();
+}
+
+export interface GenerationAwareTtlSingleFlightMemo<T> {
+  get(
+    key: string,
+    load: () => Promise<T>,
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
+  ): Promise<T | null>;
+}
+
+/**
+ * Small generation-aware TTL memo for responder plans and inventories. It
+ * centralizes the refresh/supersession protocol used by the row-snapshot memo
+ * without coupling scalar plan values to row retention budgets.
+ */
+export function createGenerationAwareTtlSingleFlightMemo<T>(
+  ttlMs: number,
+  maxEntries: number,
+): GenerationAwareTtlSingleFlightMemo<T> {
+  const cached = new Map<string, {
+    value: T;
+    cachedAt: number;
+    refreshGeneration?: string;
+  }>();
+  const inflight = new Map<string, GenerationAwareInflight<T>>();
+  const prune = (now = Date.now()) => {
+    for (const [key, entry] of cached) {
+      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
+    }
+  };
+
+  return {
+    async get(key, load, options) {
+      throwIfAborted(options?.signal);
+      const requestedGeneration = options?.refreshGeneration;
+      const pendingResult = awaitCompatibleGenerationInflight(
+        () => inflight.get(key),
+        requestedGeneration,
+        options?.signal,
+      );
+      if (pendingResult !== NO_COMPATIBLE_INFLIGHT) {
+        const joined = await pendingResult;
+        if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
+      }
+
+      const now = Date.now();
+      prune(now);
+      let existing = cached.get(key);
+      if (
+        existing &&
+        requestedGeneration !== undefined &&
+        existing.refreshGeneration !== requestedGeneration
+      ) {
+        cached.delete(key);
+        existing = undefined;
+      }
+      if (!options?.refresh && existing) {
+        cached.delete(key);
+        cached.set(key, { ...existing, cachedAt: now });
+        return existing.value;
+      }
+      if (options?.requireExisting) return null;
+      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
+
+      const pendingLoad = load()
+        .then((value) => {
+          cached.set(key, {
+            value,
+            cachedAt: Date.now(),
+            refreshGeneration: requestedGeneration,
+          });
+          return value;
+        })
+        .finally(() => {
+          if (inflight.get(key)?.promise === pendingLoad) inflight.delete(key);
+        });
+      inflight.set(key, {
+        promise: pendingLoad,
+        refreshGeneration: requestedGeneration,
+      });
+      return raceAgainstAbort(pendingLoad, options?.signal);
+    },
+  };
+}
+
 /**
  * Session snapshot cache with coalesced loads, TTL expiry, immutable row-array
  * sharing, and optional process-wide retention budgeting. Returned arrays are
@@ -322,22 +452,14 @@ export function createResponderSyncRowListMemo(
       // written delegation). Wait for older loads to settle, then issue a new
       // store read. Re-check in a loop so concurrent refreshes serialize rather
       // than racing two writers against the same cache key.
-      while (true) {
-        const pending = inflight.get(key);
-        if (!pending) break;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
-          return raceAgainstAbort(pending.promise, options?.signal);
-        }
-        try {
-          await raceAgainstAbort(pending.promise, options?.signal);
-        } catch {
-          // A new session owns an independent attempt. An older session's
-          // query/budget failure must not be inherited, but caller abort still
-          // takes precedence.
-          throwIfAborted(options?.signal);
-        }
+      const pendingResult = awaitCompatibleGenerationInflight(
+        () => inflight.get(key),
+        options?.refreshGeneration,
+        options?.signal,
+      );
+      if (pendingResult !== NO_COMPATIBLE_INFLIGHT) {
+        const joined = await pendingResult;
+        if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
       }
 
       const now = Date.now();
