@@ -61,6 +61,7 @@ export default defineConfig({
       "test/sync-requester-progress.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",
       "test/swm-recovery.test.ts",
+      "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",

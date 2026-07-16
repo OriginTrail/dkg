@@ -242,6 +242,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       if (!snapshotSync.completed) {
+        // The responder was reachable, but the snapshot phase did not produce
+        // a complete, verified snapshot. Preserve any verified data prefix
+        // below, while keeping the overall sync result non-successful so the
+        // lifecycle scheduler retries instead of stamping this peer as caught
+        // up with dangling/missing public snapshot state.
+        summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
           await ensureContextGraph(pid);
           await storeInsert(validWsQuads);
