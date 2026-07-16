@@ -209,6 +209,7 @@ export async function subscribeAndWait(
   nodeName,
   timeoutMs,
   pollIntervalMs = 3000,
+  allowedTerminalStatuses = [],
 ) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
@@ -228,6 +229,13 @@ export async function subscribeAndWait(
     if (status === 'done') return res;
     if (['failed', 'error', 'denied', 'deferred', 'unreachable'].includes(status)) {
       const detail = res?.error ? `: ${res.error}` : '';
+      if (allowedTerminalStatuses.includes(status)) {
+        console.warn(
+          `⚠️ ${nodeName} historical catch-up reported ${status}${detail}; ` +
+          'the subscription is active, so continuing with fresh-publish Query Remote validation',
+        );
+        return res;
+      }
       throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}${detail}`);
     }
     if (Date.now() > deadline) {
@@ -308,8 +316,24 @@ export function defineChainPublishSuite(config) {
         console.log(`🔗 Preparing all ${nodes.length} Query Remote receiver(s) for "${contextGraphId}"…`);
         await Promise.all(nodes.map(async (node) => {
           const client = makeNodeClient(node.hostname, node.token);
-          await subscribeAndWait(client, contextGraphId, node.name, CG_SUBSCRIBE_TIMEOUT_MS);
-          console.log(`✅ ${node.name} subscribed and synced for Query Remote`);
+          const catchup = await subscribeAndWait(
+            client,
+            contextGraphId,
+            node.name,
+            CG_SUBSCRIBE_TIMEOUT_MS,
+            3000,
+            // This suite measures reads of KAs published AFTER this barrier.
+            // A public node's subscription is already active when historical
+            // catch-up reports a transport/data-plane failure, so keep that as
+            // an explicit warning without suppressing the fresh-read canary.
+            ['failed', 'unreachable'],
+          );
+          const catchupStatus = catchup?.catchup?.status || catchup?.status;
+          console.log(
+            catchupStatus === 'done'
+              ? `✅ ${node.name} subscribed and synced for Query Remote`
+              : `✅ ${node.name} subscribed for fresh Query Remote (historical catch-up: ${catchupStatus})`,
+          );
         }));
       }
 

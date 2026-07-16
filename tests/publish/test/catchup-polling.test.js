@@ -46,3 +46,24 @@ test('subscribeAndWait includes the node catch-up error in a terminal failure', 
     /reported failed: no sync-capable peers responded/,
   );
 });
+
+test('subscribeAndWait can preserve a fresh-publish canary after historical catch-up fails', async () => {
+  const client = {
+    subscribe: async () => ({ subscribed: true, catchup: { status: 'running' } }),
+    catchupStatus: async () => ({
+      status: 'failed',
+      error: 'old staging data is not discoverable',
+    }),
+  };
+
+  const result = await subscribeAndWait(
+    client,
+    'jenkins-publish-tests',
+    'TestNode4',
+    1000,
+    0,
+    ['failed'],
+  );
+
+  assert.equal(result.status, 'failed');
+});
