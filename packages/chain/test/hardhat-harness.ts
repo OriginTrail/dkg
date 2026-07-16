@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { readContractDeploymentAddress } from '../../evm-module/utils/deployment-artifacts.js';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -63,7 +64,8 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
   return false;
 }
 
-export function parseSuccessfulHubDeployment(
+export function resolveSuccessfulHubDeployment(
+  deploymentsDir: string,
   stdout: string,
   stderr: string,
   code: number | null,
@@ -73,14 +75,26 @@ export function parseSuccessfulHubDeployment(
     throw new Error(`Deploy failed (code ${code}, signal ${signal}):\n${stderr}\n${stdout}`);
   }
 
-  const hubMatch = stdout.match(/deploying "Hub".*?deployed at (\S+)/s);
-  if (!hubMatch) {
-    throw new Error(`Hub address not found in deploy output:\n${stdout}`);
+  try {
+    const hubAddress = readContractDeploymentAddress(
+      deploymentsDir,
+      'localhost',
+      'Hub',
+    );
+    if (!ethers.isAddress(hubAddress)) {
+      throw new Error(`invalid Hub address: ${hubAddress}`);
+    }
+    return hubAddress;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Hub deployment artifact unavailable in ${deploymentsDir}: ${detail}\n` +
+      `deploy stdout:\n${stdout}`,
+    );
   }
-  return hubMatch[1];
 }
 
-export async function deployContracts(rpcUrl: string, deploymentsDir?: string): Promise<string> {
+export async function deployContracts(rpcUrl: string, deploymentsDir: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
       paths: [EVM_MODULE_DIR],
@@ -94,9 +108,7 @@ export async function deployContracts(rpcUrl: string, deploymentsDir?: string): 
         env: {
           ...process.env,
           RPC_LOCALHOST: rpcUrl,
-          ...(deploymentsDir
-            ? { DKG_HARDHAT_DEPLOYMENTS_DIR: deploymentsDir }
-            : {}),
+          DKG_HARDHAT_DEPLOYMENTS_DIR: deploymentsDir,
         },
       },
     );
@@ -108,10 +120,15 @@ export async function deployContracts(rpcUrl: string, deploymentsDir?: string): 
 
     proc.on('close', (code, signal) => {
       try {
-        // A Hub address appears near the beginning of deployment output. It
-        // is not proof that later registrations completed, so never accept a
-        // killed or failed deploy process as a usable environment.
-        resolve(parseSuccessfulHubDeployment(stdout, stderr, code, signal));
+        // A successful process plus the canonical isolated artifact proves
+        // the whole deploy completed. Partial stdout alone is never accepted.
+        resolve(resolveSuccessfulHubDeployment(
+          deploymentsDir,
+          stdout,
+          stderr,
+          code,
+          signal,
+        ));
       } catch (error) {
         reject(error);
       }

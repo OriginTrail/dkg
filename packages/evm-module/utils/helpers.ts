@@ -2,12 +2,12 @@
 import 'dotenv/config';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
-import * as path from 'path';
 
 import { AddressLike, Contract } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { HubLib } from '../typechain/contracts/storage/Hub';
+import { deploymentConfigPath } from './deployment-artifacts';
 
 type AbiEntry = {
   inputs?: Array<{ internalType: string; name: string; type: string }>;
@@ -98,10 +98,9 @@ export class Helpers {
 
     this.repositoryPath = this._getGitRepositoryPath();
 
-    const deploymentsDirectory = this.hre.config.paths.deployments;
-    const deploymentsConfig = path.join(
-      deploymentsDirectory,
-      `${this.hre.network.name}_contracts.json`,
+    const deploymentsConfig = deploymentConfigPath(
+      this.hre.config.paths.deployments,
+      this.hre.network.name,
     );
 
     if (fs.existsSync(deploymentsConfig)) {
@@ -188,7 +187,7 @@ export class Helpers {
       });
     } catch (error) {
       if (this.hre.network.config.environment !== 'development') {
-        this.saveDeploymentsJson('deployments');
+        this.saveDeploymentsJson();
       }
       let message;
       if (error instanceof Error) message = error.message;
@@ -257,7 +256,7 @@ export class Helpers {
       newContractName,
     );
 
-    this.saveDeploymentsJson('deployments');
+    this.saveDeploymentsJson();
 
     return this.hre.ethers.getContractAt(
       this.getAbi(newContractName),
@@ -449,7 +448,7 @@ export class Helpers {
     };
   }
 
-  public saveDeploymentsJson(_folder: string) {
+  public saveDeploymentsJson() {
     console.log(
       `New or redeployed contracts: ${JSON.stringify(this.newContracts)}`,
     );
@@ -472,7 +471,7 @@ export class Helpers {
     const deploymentsDirectory = this.hre.config.paths.deployments;
     fs.mkdirSync(deploymentsDirectory, { recursive: true });
     fs.writeFileSync(
-      path.join(deploymentsDirectory, `${this.hre.network.name}_contracts.json`),
+      deploymentConfigPath(deploymentsDirectory, this.hre.network.name),
       JSON.stringify(this.contractDeployments, null, 4),
     );
   }
