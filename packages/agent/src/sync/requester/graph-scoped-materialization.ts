@@ -23,6 +23,8 @@ const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
 const STATUS = 'http://dkg.io/ontology/status';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
+const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
+const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
@@ -46,8 +48,36 @@ export async function authenticateVerifiedGraphScopedAsset(
   chain: ChainAdapter,
   asset: VerifiedGraphScopedAsset,
   resolveOnChainContextGraphId?: (contextGraphId: string) => Promise<string | null>,
+  receivedAt = new Date(),
 ): Promise<VerifiedGraphScopedAsset> {
-  if (chain.chainId === 'none') return asset;
+  const receivedAtMs = receivedAt.getTime();
+  if (!Number.isFinite(receivedAtMs)) {
+    throw new Error(`Graph-scoped durable sync ${asset.ual} has an invalid local receive time`);
+  }
+  const locallyVisibleMetadata = (status: 'confirmed' | 'tentative'): Quad[] => [
+    {
+      subject: asset.ual,
+      predicate: PUBLISHED_AT,
+      object: `"${receivedAt.toISOString()}"^^<${XSD_DATE_TIME}>`,
+      graph: asset.metaGraph,
+    },
+    {
+      subject: asset.ual,
+      predicate: STATUS,
+      object: `"${status}"`,
+      graph: asset.metaGraph,
+    },
+  ];
+  // The timestamp above is local receive time, not peer metadata. It is safe
+  // for discovery ordering and keeps graph-scoped KAs visible without trusting
+  // a peer-controlled dkg:publishedAt value. No-chain mode remains explicitly
+  // tentative because it has integrity verification but no chain provenance.
+  if (chain.chainId === 'none') {
+    return {
+      ...asset,
+      metadataQuads: [...asset.metadataQuads, ...locallyVisibleMetadata('tentative')],
+    };
+  }
   if (
     !chain.getLatestMerkleRoot
     || !chain.getMerkleRootCount
@@ -184,12 +214,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     ...asset,
     metadataQuads: [
       ...asset.metadataQuads,
-      {
-        subject: asset.ual,
-        predicate: STATUS,
-        object: '"confirmed"',
-        graph: asset.metaGraph,
-      },
+      ...locallyVisibleMetadata('confirmed'),
       {
         subject: asset.ual,
         predicate: MATERIALIZED_VERSION,
@@ -232,11 +257,26 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     if (currentVersion !== undefined && currentVersion > asset.assertionVersion) {
       return 'stale';
     }
+    let replacementMetadata = asset.metadataQuads;
+    if (currentVersion === asset.assertionVersion) {
+      const currentPublishedAt = await readCurrentPublishedAt(
+        store,
+        asset.metaGraph,
+        asset.ual,
+        options,
+      );
+      if (currentPublishedAt) {
+        replacementMetadata = [
+          ...asset.metadataQuads.filter((quad) => quad.predicate !== PUBLISHED_AT),
+          currentPublishedAt,
+        ];
+      }
+    }
     const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
       store,
       asset.metaGraph,
       asset.ual,
-      asset.metadataQuads,
+      replacementMetadata,
       options,
     );
 
@@ -246,7 +286,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.dataQuads,
       asset.metaGraph,
       asset.ual,
-      [...asset.metadataQuads, ...locallyTrustedMetadata],
+      [...replacementMetadata, ...locallyTrustedMetadata],
       options,
     );
     if (!replaced) {
@@ -257,6 +297,26 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     return 'applied';
   });
+}
+
+async function readCurrentPublishedAt(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  options: QueryOptions,
+): Promise<Quad | undefined> {
+  const result = await store.query(`
+    SELECT ?publishedAt WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(ual)}> <${PUBLISHED_AT}> ?publishedAt .
+      }
+    }
+  `, options);
+  if (result.type !== 'bindings' || result.bindings.length !== 1) return undefined;
+  const object = result.bindings[0]?.publishedAt;
+  const lexical = object?.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1];
+  if (!object || !lexical || !Number.isFinite(Date.parse(lexical))) return undefined;
+  return { subject: ual, predicate: PUBLISHED_AT, object, graph: metaGraph };
 }
 
 async function readCurrentAssertionVersion(

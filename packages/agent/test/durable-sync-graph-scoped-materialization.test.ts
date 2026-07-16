@@ -22,6 +22,7 @@ import {
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const contextGraphId = 'graph-scoped-sync-materialization';
 const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/0x1111111111111111111111111111111111111111/1`;
@@ -108,6 +109,51 @@ async function graphQuads(store: OxigraphStore, graph: string): Promise<Quad[]> 
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
+    const store = new OxigraphStore();
+    const asset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(1)],
+      metadataQuads: metadata(1),
+    };
+    const noChain = { chainId: 'none' } as ChainAdapter;
+    const firstReceivedAt = new Date('2026-07-16T08:00:00.000Z');
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      noChain,
+      asset,
+      undefined,
+      firstReceivedAt,
+    );
+
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: authenticated }))
+      .resolves.toBe('applied');
+    expect(await values(store, 'status')).toEqual(['"tentative"']);
+    expect(await values(store, 'publishedAt')).toEqual([
+      `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
+    ]);
+    const visible = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${ual}> <${DKG}status> ?status ; <${DKG}publishedAt> ?publishedAt .
+      FILTER(?status IN ("confirmed", "tentative"))
+    } }`);
+    expect(visible).toEqual({ type: 'boolean', value: true });
+
+    const replayed = await authenticateVerifiedGraphScopedAsset(
+      noChain,
+      asset,
+      undefined,
+      new Date('2026-07-16T09:00:00.000Z'),
+    );
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed }))
+      .resolves.toBe('applied');
+    expect(await values(store, 'publishedAt')).toEqual([
+      `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
+    ]);
+  });
+
   it('does not mistake a lifecycle assertionGraph pointer for a second UAL owner', async () => {
     const v2Data = dataQuad(1);
     const root = toHex(computeFlatKCRootV10([v2Data], []));
@@ -283,7 +329,12 @@ describe('durable graph-scoped KA materialization', () => {
         asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'],
       ) => materializeVerifiedGraphScopedAsset({
         store,
-        asset: await authenticateVerifiedGraphScopedAsset(chain, asset, async () => '1'),
+        asset: await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          async () => '1',
+          new Date('2026-07-16T08:30:00.000Z'),
+        ),
       }),
     };
 
@@ -339,6 +390,9 @@ describe('durable graph-scoped KA materialization', () => {
       `"${packedKaId}"^^<${XSD_INTEGER}>`,
     ]);
     expect(await values(store, 'status')).toEqual(['"confirmed"']);
+    expect(await values(store, 'publishedAt')).toEqual([
+      `"2026-07-16T08:30:00Z"^^<${XSD_DATE_TIME}>`,
+    ]);
     expect(await values(store, 'transactionHash')).toEqual([`"${transactionHash(2)}"`]);
     expect(await values(store, 'materializedVersion')).toEqual(['"123:4"']);
     const unrelatedControls = await store.query(`
