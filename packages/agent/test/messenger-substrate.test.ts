@@ -7,6 +7,8 @@ import {
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
   type LegacyProtocolOutboxStore,
+  type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
@@ -434,6 +436,106 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
     });
     expect(second.queued).toBe(true);
     expect(second.attempts).toBe(2);
+  });
+});
+
+describe('Messenger outbox snapshots', () => {
+  it('preserves payloads for existing listOutbox callers', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expected: ProtocolOutboxEntry = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      payload: new Uint8Array([0xde, 0xad]),
+      attempts: 2,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
+      listMetadata: () => {
+        throw new Error('listOutbox dropped payloads');
+      },
+    });
+    Object.assign(outboxStore, {
+      list: () => [expected],
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.listOutbox()).toEqual([expected]);
+  });
+
+  it('reads metadata without asking the store for payload-bearing entries', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expected: ProtocolOutboxMetadata = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 2,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    const listMetadata = recorder(() => [expected]);
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
+      listMetadata,
+    });
+    Object.assign(outboxStore, {
+      list: () => {
+        throw new Error('diagnostics materialized payloads');
+      },
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.listOutboxMetadata()).toEqual([expected]);
+    expect(listMetadata.calls).toHaveLength(1);
+  });
+
+  it('expires entries through metadata without asking the store for payloads', () => {
+    const outboxStore = new InMemoryProtocolOutboxStore();
+    const expired: ProtocolOutboxMetadata = {
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 3,
+      firstFailureAt: 1_000,
+      lastAttemptAt: 2_000,
+      nextAttemptAt: 7_000,
+      lastError: 'offline',
+    };
+    const dropExpiredMetadata = recorder((_now: number) => [expired]);
+    Object.assign(outboxStore.originTrailProtocolOutboxMetadata, {
+      dropExpiredMetadata,
+    });
+    Object.assign(outboxStore, {
+      dropExpired: () => {
+        throw new Error('expiration materialized payloads');
+      },
+    });
+    const messenger = new Messenger({
+      router: makeRouter() as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+    });
+
+    expect(messenger.dropExpiredOutbox(8_000)).toEqual([{
+      peer: PEER_A,
+      protocol: PROTO,
+      messageId: FIXED_MSG_ID,
+      attempts: 3,
+      lastError: 'offline',
+    }]);
+    expect(dropExpiredMetadata.calls).toEqual([[8_000]]);
   });
 });
 

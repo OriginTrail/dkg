@@ -150,18 +150,11 @@ export interface MessageIdempotencyStore {
   pruneOlderThan(tsMs: number): number;
 }
 
-/**
- * A single durable outbox entry. The `payload` is the
- * envelope-wrapped bytes (i.e. the `ReliableEnvelope` proto output
- * from `Messenger.sendToPeer`), not the raw application payload —
- * this lets retries replay byte-identical wire frames without re-
- * encoding the envelope.
- */
-export interface ProtocolOutboxEntry {
+/** Metadata used by cleanup and operator diagnostics without message bytes. */
+export interface ProtocolOutboxMetadata {
   peer: string;
   protocol: string;
   messageId: string;
-  payload: Uint8Array;
   attempts: number;
   firstFailureAt: number;
   lastAttemptAt: number;
@@ -169,7 +162,33 @@ export interface ProtocolOutboxEntry {
   lastError: string;
 }
 
+/**
+ * A single durable outbox entry. The `payload` is the
+ * envelope-wrapped bytes (i.e. the `ReliableEnvelope` proto output
+ * from `Messenger.sendToPeer`), not the raw application payload —
+ * this lets retries replay byte-identical wire frames without re-
+ * encoding the envelope.
+ */
+export interface ProtocolOutboxEntry extends ProtocolOutboxMetadata {
+  payload: Uint8Array;
+}
+
+/**
+ * Payload-free outbox operations supplied through the explicit, branded
+ * store extension.
+ */
+export interface ProtocolOutboxMetadataCapability {
+  /** Delete expired rows without reading or returning payload bytes. */
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[];
+
+  /** Read diagnostics metadata without materializing payload bytes. */
+  listMetadata(): ProtocolOutboxMetadata[];
+}
+
 interface ProtocolOutboxStoreBase {
+  /** Optional explicit payload-free OriginTrail storage capability. */
+  readonly originTrailProtocolOutboxMetadata?: ProtocolOutboxMetadataCapability;
+
   /**
    * Insert or update an outbox entry for `(peer, protocol, messageId)`.
    * First failure creates the entry with `attempts = 1`. Subsequent
@@ -227,21 +246,15 @@ interface ProtocolOutboxStoreBase {
 
   /**
    * Drop entries whose `firstFailureAt` is older than the
-   * configured max-age. Returns the dropped entries so the caller
-   * can log them ("we gave up on this after 24h" diagnostic).
+   * configured max-age. Returns the dropped entries for compatibility
+   * with existing stores and callers.
    */
   dropExpired(now: number): ProtocolOutboxEntry[];
 
   /** Total entries currently queued. For diagnostics + tests. */
   size(): number;
 
-  /**
-   * Snapshot of every entry in the store. Used by the diagnostics
-   * surface (`/api/chat/outbox`, `dkg_outbox_status` MCP tool) so
-   * operators can see what's pending after a long recipient outage.
-   * Order is implementation-defined; callers that need per-peer
-   * FIFO should sort by `firstFailureAt`.
-   */
+  /** Snapshot of every full entry, including payload bytes. */
   list(): ProtocolOutboxEntry[];
 
   /**

@@ -82,6 +82,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
   encryptV10PublishPayload,
   encryptChunked,
   buildCiphertextChunksRoot,
@@ -1765,20 +1766,20 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Snapshot of the substrate outbox for diagnostics. Used by the
-   * `GET /api/chat/outbox` route + the MCP `dkg_outbox_status` tool
-   * so operators can see what's pending after a long recipient
-   * outage. Returns the generic `ProtocolOutboxEntry` shape from
-   * the substrate (rc.9 PR-3) rather than the chat-specific
-   * `ChatOutboxRetryEntry` that rc.8 used — same fields are
-   * exposed (`peer`, `messageId`, `attempts`, `firstFailureAt`,
-   * `nextAttemptAt`, `lastError`), but filtered to the chat
-   * protocol so the existing operator surface still talks about
-   * "the chat outbox".
+   * Payload-bearing chat outbox snapshot retained for public API compatibility.
+   * Diagnostics should use `listMessageOutboxMetadata()` so retry payloads are
+   * not copied into memory.
    */
   listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
     return this.messenger
       .listOutbox()
+      .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+  }
+
+  /** Metadata-only chat outbox snapshot for payload-free diagnostics. */
+  listMessageOutboxMetadata(this: DKGAgent): ProtocolOutboxMetadata[] {
+    return this.messenger
+      .listOutboxMetadata()
       .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   }
 
