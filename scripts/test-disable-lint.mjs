@@ -88,6 +88,21 @@ function lexicalBinding(scope, identifier) {
     );
     if (parameter) return { declaration: parameter, isConst: false };
   }
+  if (
+    ts.isForStatement(scope)
+    && scope.initializer
+    && ts.isVariableDeclarationList(scope.initializer)
+  ) {
+    const declaration = scope.initializer.declarations.find(
+      ({ name }) => bindingNameIncludes(name, identifier),
+    );
+    if (declaration) {
+      return {
+        declaration,
+        isConst: Boolean(scope.initializer.flags & ts.NodeFlags.Const),
+      };
+    }
+  }
   if (!ts.isSourceFile(scope) && !ts.isBlock(scope)) return undefined;
   for (const statement of scope.statements) {
     if (!ts.isVariableStatement(statement)) continue;
