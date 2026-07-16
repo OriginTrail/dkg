@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -16,8 +17,10 @@ const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\
 const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
 const DIRECT_MEMBERS = new Set(['skip', 'todo', 'skipIf', 'runIf']);
+const CONDITIONAL_MEMBERS = new Set(['skipIf', 'runIf']);
 const LEGACY_ALIASES = new Set(['xdescribe', 'xit', 'xtest']);
 const TICKET = /^(?:#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|[A-Z][A-Z0-9]*-\d+)$/i;
+const AST_PRINTER = ts.createPrinter({ removeComments: true });
 
 function scriptKindFor(filePath) {
   if (/\.tsx$/i.test(filePath)) return ts.ScriptKind.TSX;
@@ -28,6 +31,24 @@ function scriptKindFor(filePath) {
 
 function normalizedPath(filePath) {
   return filePath.replaceAll(path.sep, '/');
+}
+
+function normalizedStaticTitle(node) {
+  if (!node || !ts.isStringLiteralLike(node)) return undefined;
+  return node.text.replace(/\s+/g, ' ').trim();
+}
+
+function normalizedFragment(node, sourceFile) {
+  return AST_PRINTER
+    .printNode(ts.EmitHint.Unspecified, node, sourceFile)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile) {
+  const identity = normalizedStaticTitle(titleNode)
+    ?? normalizedFragment(fallbackNode, sourceFile);
+  return createHash('sha1').update(`D1:${pattern}:${identity}`).digest('hex');
 }
 
 function sourceComments(source, sourceFile, filePath) {
@@ -90,11 +111,12 @@ export function analyzeD1Source(source, filePath) {
   const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
 
-  const addFinding = (node, api) => {
+  const addFinding = (node, api, pattern, titleNode, fallbackNode = node) => {
     const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
     findings.push({
       rule: 'D1',
       api,
+      fingerprint: d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile),
       filePath,
       line: location.line + 1,
       column: location.character + 1,
@@ -105,15 +127,44 @@ export function analyzeD1Source(source, filePath) {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
       if (ts.isIdentifier(callee) && LEGACY_ALIASES.has(callee.text)) {
-        addFinding(callee, callee.text);
+        addFinding(
+          callee,
+          callee.text,
+          `legacy:${callee.text}`,
+          node.arguments[0],
+          node.arguments[0] ?? callee,
+        );
       } else if (
         ts.isPropertyAccessExpression(callee)
         && ts.isIdentifier(callee.expression)
         && DIRECT_BASES.has(callee.expression.text)
         && DIRECT_MEMBERS.has(callee.name.text)
       ) {
-        addFinding(callee, `${callee.expression.text}.${callee.name.text}`);
+        const api = `${callee.expression.text}.${callee.name.text}`;
+        const conditional = CONDITIONAL_MEMBERS.has(callee.name.text);
+        const declaration = conditional
+          && ts.isCallExpression(node.parent)
+          && node.parent.expression === node
+          ? node.parent
+          : node;
+        addFinding(
+          callee,
+          api,
+          `${conditional ? 'conditional' : 'declaration'}:${api}`,
+          declaration.arguments[0],
+          declaration.arguments[0] ?? callee,
+        );
       }
+    }
+    if (
+      ts.isPropertyAccessExpression(node)
+      && ts.isIdentifier(node.expression)
+      && DIRECT_BASES.has(node.expression.text)
+      && node.name.text === 'skip'
+      && !(ts.isCallExpression(node.parent) && node.parent.expression === node)
+    ) {
+      const api = `${node.expression.text}.${node.name.text}`;
+      addFinding(node, api, `reference:${api}`);
     }
     ts.forEachChild(node, visit);
   };
