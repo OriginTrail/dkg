@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -258,12 +258,63 @@ function semanticMoveSelfTest() {
   }
 }
 
+function semanticGrowthSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-growth-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    const fixturePath = path.join(fixtureRoot, 'test/copy.test.ts');
+    const disabledTest = "test.skip('copied debt', () => {});\n";
+    writeFileSync(fixturePath, disabledTest);
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(fixturePath, `${disabledTest}\n\n${disabledTest}`);
+    git('commit', '-aqm', 'copy disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const diagnostics = cli.stdout
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes(': D1 '));
+    const expected = ['test/copy.test.ts:4:1: D1 test.skip'];
+    const pass = cli.status === 1 && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: semantic growth exit=${cli.status}\nstdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 function selfTest() {
   const movePasses = semanticMoveSelfTest();
+  const growthPasses = semanticGrowthSelfTest();
   process.stdout.write(
-    `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}.\n`,
+    `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
+      + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}.\n`,
   );
-  return movePasses ? 0 : 1;
+  return movePasses && growthPasses ? 0 : 1;
 }
 
 export function runCli(argv = process.argv.slice(2)) {
