@@ -162,6 +162,7 @@ function staticConstantInitializer(node) {
     const binding = lexicalBinding(scope, node.text);
     if (!binding) continue;
     return binding.isConst
+      && ts.isIdentifier(binding.declaration.name)
       && binding.declaration.initializer
       ? binding.declaration.initializer
       : undefined;
