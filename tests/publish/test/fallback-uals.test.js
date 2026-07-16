@@ -14,6 +14,7 @@ test('Base testnet uses the known-good Base Sepolia UAL by default', () => {
   );
   assert.equal(config.blockchainName, 'v10:base:84532');
   assert.equal(config.fallbackUal, BASE_TESTNET_FALLBACK_UAL);
+  assert.equal(config.remoteQuerySubscribeAll, true);
   assert.match(config.fallbackUal, /^did:dkg:base:84532\//);
 });
 

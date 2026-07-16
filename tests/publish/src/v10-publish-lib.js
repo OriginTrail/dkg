@@ -261,7 +261,13 @@ const mean = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.len
 // NODE_TO_TEST (env) selects which node this Jenkins stage runs.
 // ---------------------------------------------------------------------------
 export function defineChainPublishSuite(config) {
-  const { title, blockchainName, contextGraphId, nodes } = config;
+  const {
+    title,
+    blockchainName,
+    contextGraphId,
+    nodes,
+    remoteQuerySubscribeAll = false,
+  } = config;
   // Known-good, already-indexed UAL used to exercise the read paths when a
   // publish fails (no fresh UAL). Per-chain, overridable via DKG_FALLBACK_UAL.
   const FALLBACK_UAL = process.env.DKG_FALLBACK_UAL || config.fallbackUal || '';
@@ -278,6 +284,20 @@ export function defineChainPublishSuite(config) {
 
       console.log(`\nRunning test for node: ${nodesToRun.map((n) => n.name).join(', ')}`);
       console.log(`Blockchain: ${blockchainName} | Context graph: ${contextGraphId} | KAs per node: ${KA_COUNT}`);
+
+      // A remote query reads the selected peer's LOCAL VM; it does not initiate
+      // sync. Because this suite chooses an arbitrary receiver, every possible
+      // receiver must subscribe and finish catch-up first. Jenkins runs one
+      // process per node in parallel, so every process performs this idempotent
+      // barrier and none can publish before all four receivers are ready.
+      if (remoteQuerySubscribeAll) {
+        console.log(`🔗 Preparing all ${nodes.length} Query Remote receiver(s) for "${contextGraphId}"…`);
+        await Promise.all(nodes.map(async (node) => {
+          const client = makeNodeClient(node.hostname, node.token);
+          await subscribeAndWait(client, contextGraphId, node.name, CG_SUBSCRIBE_TIMEOUT_MS);
+          console.log(`✅ ${node.name} subscribed and synced for Query Remote`);
+        }));
+      }
 
       for (let currentIndex = 0; currentIndex < nodesToRun.length; currentIndex++) {
         const { name, hostname, token } = nodesToRun[currentIndex];
@@ -358,8 +378,10 @@ export function defineChainPublishSuite(config) {
         // publish into them (a public open-publish CG needs none of this). Auto-on
         // when the id is canonical ("<curator>/<slug>", contains '/') — bare public
         // names ('sports'/'foodie-network') skip it. V10_CG_SUBSCRIBE=true forces it.
-        const needsSubscribe = CG_SUBSCRIBE
-          || (typeof contextGraphId === 'string' && contextGraphId.includes('/'));
+        const needsSubscribe = !remoteQuerySubscribeAll && (
+          CG_SUBSCRIBE
+          || (typeof contextGraphId === 'string' && contextGraphId.includes('/'))
+        );
         if (needsSubscribe) {
           console.log(`🔗 ${name} subscribing to private CG "${contextGraphId}" (syncing from curator)…`);
           await subscribeAndWait(client, contextGraphId, name, CG_SUBSCRIBE_TIMEOUT_MS);
