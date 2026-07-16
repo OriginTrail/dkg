@@ -17,6 +17,7 @@ const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
 const DIRECT_MEMBERS = new Set(['skip', 'todo']);
 const LEGACY_ALIASES = new Set(['xdescribe', 'xit', 'xtest']);
+const TICKET = /^(?:#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|[A-Z][A-Z0-9]*-\d+)$/i;
 
 function scriptKindFor(filePath) {
   if (/\.tsx$/i.test(filePath)) return ts.ScriptKind.TSX;
@@ -27,6 +28,47 @@ function scriptKindFor(filePath) {
 
 function normalizedPath(filePath) {
   return filePath.replaceAll(path.sep, '/');
+}
+
+function sourceComments(source, sourceFile, filePath) {
+  const languageVariant = /\.[jt]sx$/i.test(filePath)
+    ? ts.LanguageVariant.JSX
+    : ts.LanguageVariant.Standard;
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, languageVariant, source);
+  const comments = [];
+
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (
+      token !== ts.SyntaxKind.SingleLineCommentTrivia
+      && token !== ts.SyntaxKind.MultiLineCommentTrivia
+    ) continue;
+
+    const start = scanner.getTokenPos();
+    const end = scanner.getTextPos();
+    comments.push({
+      text: source.slice(start, end),
+      endLine: sourceFile.getLineAndCharacterOfPosition(end - 1).line + 1,
+    });
+  }
+  return comments;
+}
+
+function pragmaRule(comment) {
+  const body = comment.text
+    .replace(/^\/\//, '')
+    .replace(/^\/\*/, '')
+    .replace(/\*\/$/, '')
+    .trim();
+  const match = body.match(/^test-disable-allow:\s*(D[12])\s+(\S+)\s+--\s*(.+)$/i);
+  if (!match || !TICKET.test(match[2]) || !match[3].trim()) return undefined;
+  return match[1].toUpperCase();
+}
+
+function isAllowed(finding, comments) {
+  return comments.some((comment) => {
+    const distance = finding.line - comment.endLine;
+    return distance >= 1 && distance <= 3 && pragmaRule(comment) === finding.rule;
+  });
 }
 
 export function isD1ScannableFile(filePath) {
@@ -45,6 +87,7 @@ export function analyzeD1Source(source, filePath) {
     true,
     scriptKindFor(filePath),
   );
+  const comments = sourceComments(source, sourceFile, filePath);
   const findings = [];
 
   const addFinding = (node, api) => {
@@ -76,7 +119,7 @@ export function analyzeD1Source(source, filePath) {
   };
 
   visit(sourceFile);
-  return findings;
+  return findings.filter((finding) => !isAllowed(finding, comments));
 }
 
 export function auditFiles(filePaths) {
