@@ -215,14 +215,18 @@ export function createGenerationAwareTtlSingleFlightMemo<T>(
     async get(key, load, options) {
       throwIfAborted(options?.signal);
       const requestedGeneration = options?.refreshGeneration;
-      const pendingResult = awaitCompatibleGenerationInflight(
-        () => inflight.get(key),
-        requestedGeneration,
-        options?.signal,
-      );
-      if (pendingResult !== NO_COMPATIBLE_INFLIGHT) {
+      while (true) {
+        const pendingResult = awaitCompatibleGenerationInflight(
+          () => inflight.get(key),
+          requestedGeneration,
+          options?.signal,
+        );
+        if (pendingResult === NO_COMPATIBLE_INFLIGHT) break;
         const joined = await pendingResult;
         if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
+        // Multiple callers for the same newer generation can all finish
+        // waiting on the older load together. Re-enter the synchronous claim
+        // path so the first installs the replacement and the rest join it.
       }
 
       const now = Date.now();
@@ -452,12 +456,13 @@ export function createResponderSyncRowListMemo(
       // written delegation). Wait for older loads to settle, then issue a new
       // store read. Re-check in a loop so concurrent refreshes serialize rather
       // than racing two writers against the same cache key.
-      const pendingResult = awaitCompatibleGenerationInflight(
-        () => inflight.get(key),
-        options?.refreshGeneration,
-        options?.signal,
-      );
-      if (pendingResult !== NO_COMPATIBLE_INFLIGHT) {
+      while (true) {
+        const pendingResult = awaitCompatibleGenerationInflight(
+          () => inflight.get(key),
+          options?.refreshGeneration,
+          options?.signal,
+        );
+        if (pendingResult === NO_COMPATIBLE_INFLIGHT) break;
         const joined = await pendingResult;
         if (joined !== NO_COMPATIBLE_INFLIGHT) return joined;
       }
