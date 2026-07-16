@@ -274,8 +274,8 @@ function runDiff(baseRevision, headRevision) {
 }
 
 function listTrackedD1Files() {
-  return git(['ls-files'])
-    .split('\n')
+  return git(['ls-files', '-z'])
+    .split('\0')
     .filter(isD1ScannableFile);
 }
 
