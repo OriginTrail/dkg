@@ -242,6 +242,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       if (!snapshotSync.completed) {
+        // The responder was reachable, but the snapshot phase did not produce
+        // a complete, verified snapshot. Preserve any verified data prefix
+        // below, while keeping the overall sync result non-successful so the
+        // lifecycle scheduler retries instead of stamping this peer as caught
+        // up with dangling/missing public snapshot state.
+        summary.failedPhases += 1;
         if (validWsQuads.length > 0) {
           await ensureContextGraph(pid);
           await storeInsert(validWsQuads);
@@ -361,12 +367,25 @@ export async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
+  /**
+   * Optional recovery hook invoked only after the complete immutable snapshot
+   * has passed its signed digest/count check. Callers may make that one KA
+   * visible immediately; an unverified prefix never reaches this hook.
+   */
+  onSnapshotReady?: (
+    snapshot: PublicSnapshotMetadata,
+    source: 'cache' | 'network',
+  ) => Promise<void>;
 }): Promise<{
   bytesReceived: number;
   resumedPhases: number;
   timedOutPhases: number;
   completedPhases: number;
   checkpointAdvances: number;
+  /** Immutable snapshot refs already valid locally or fetched in this round. */
+  readySnapshots: number;
+  /** Total immutable snapshot refs declared by the verified SWM metadata. */
+  totalSnapshots: number;
   completed: boolean;
 }> {
   const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
@@ -377,6 +396,8 @@ export async function syncPublicSnapshotsForMeta(params: {
       timedOutPhases: 0,
       completedPhases: 0,
       checkpointAdvances: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
       completed: true,
     };
   }
@@ -391,8 +412,11 @@ export async function syncPublicSnapshotsForMeta(params: {
   let timedOutPhases = 0;
   let completedPhases = 0;
   let checkpointAdvances = 0;
+  let readySnapshots = 0;
   for (const snapshot of snapshots) {
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
+      await params.onSnapshotReady?.(snapshot, 'cache');
+      readySnapshots += 1;
       continue;
     }
 
@@ -409,9 +433,6 @@ export async function syncPublicSnapshotsForMeta(params: {
     bytesReceived += result.bytesReceived;
     resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     timedOutPhases += result.timedOut ? 1 : 0;
-    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
-      completedPhases += 1;
-    }
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
       // `fetchSyncPages` returns only the quads fetched during THIS call. We do
@@ -428,11 +449,33 @@ export async function syncPublicSnapshotsForMeta(params: {
         timedOutPhases,
         completedPhases,
         checkpointAdvances,
+        readySnapshots,
+        totalSnapshots: snapshots.length,
         completed: false,
       };
     }
 
     const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
+    if (snapshotQuads.length < snapshot.count) {
+      // A relayed stream can terminate cleanly after returning a prefix. The
+      // requester then sees `completed=true`, but the signed metadata gives us
+      // an authoritative expected count and proves that this is incomplete,
+      // not corrupt. Never cache or apply the prefix; retry it from offset zero
+      // in a later bounded recovery round. Equal-count digest mismatches remain
+      // fatal below so a complete but tampered snapshot is never softened into
+      // a transport retry.
+      params.deleteCheckpoint(result.checkpointKey);
+      return {
+        bytesReceived,
+        resumedPhases,
+        timedOutPhases,
+        completedPhases,
+        checkpointAdvances,
+        readySnapshots,
+        totalSnapshots: snapshots.length,
+        completed: false,
+      };
+    }
     const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
     if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
       throw new Error(
@@ -441,6 +484,9 @@ export async function syncPublicSnapshotsForMeta(params: {
       );
     }
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
+    await params.onSnapshotReady?.(snapshot, 'network');
+    completedPhases += 1;
+    readySnapshots += 1;
   }
 
   return {
@@ -449,6 +495,8 @@ export async function syncPublicSnapshotsForMeta(params: {
     timedOutPhases,
     completedPhases,
     checkpointAdvances,
+    readySnapshots,
+    totalSnapshots: snapshots.length,
     completed: true,
   };
 }

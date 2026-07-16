@@ -292,15 +292,17 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         : { kind: 'sinceBatchId', sinceBatchId };
 
       // A rootless full snapshot is a deterministic concatenation of complete
-      // exact graphs. When the deadline cuts the final graph mid-page, verify
-      // and persist only the preceding complete graphs, then checkpoint their
-      // absolute row boundary. The partial graph is deliberately discarded and
-      // retried. This gives large V2 snapshots bounded memory and monotonic
-      // progress without weakening legacy/mixed-layout fail-closed behaviour.
+      // exact graphs. Always compare a graph-scoped response with its verified
+      // metadata manifest: a relayed stream can close cleanly after a prefix
+      // and surface `completed=true` even though later graphs never arrived.
+      // Verify and persist only complete leading graphs, checkpoint their
+      // absolute row boundary, and call the phase complete only at the manifest
+      // total. A partial final graph is deliberately discarded and retried.
+      // This gives large V2 snapshots bounded memory and monotonic progress
+      // without weakening legacy/mixed-layout fail-closed behaviour.
       if (
         sinceBatchId === undefined
         && !isSystemContextGraph
-        && (dataResult.timedOut || dataResult.resumedFromOffset > 0)
       ) {
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
@@ -315,6 +317,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             ...dataResult,
             quads: bounded.dataQuads,
             nextOffset: bounded.safeNextOffset,
+            completed: dataResult.completed
+              && bounded.safeNextOffset === bounded.manifestRowCount,
           };
           verificationMode = {
             kind: 'changelogPage',
@@ -325,7 +329,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             `Rootless durable progress for "${pid}": `
               + `${bounded.completedGraphCount} complete graph(s), `
               + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
-              + `(raw ${dataResult.nextOffset})`,
+              + `of ${bounded.manifestRowCount} (raw ${dataResult.nextOffset})`,
           );
         }
       }

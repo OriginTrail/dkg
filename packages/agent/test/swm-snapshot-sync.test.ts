@@ -111,15 +111,24 @@ describe('SWM snapshot catch-up sync', () => {
     installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots, { omitSnapshots: true });
 
     const detailed = await (nodeB as unknown as {
-      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; failedPhases: number; insertedTriples: number }>;
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{
+        failedPeers: number;
+        failedPhases: number;
+        completedPhases: number;
+        insertedDataTriples: number;
+        insertedMetaTriples: number;
+        insertedTriples: number;
+      }>;
     }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
-    // The peer is reachable and responds; only its snapshot phase fails the
-    // digest/count check. That is a phase failure (failedPhases), not a peer
-    // reachability failure (failedPeers) — but it still suppresses the
-    // success-stamp/backoff via the lifecycle success-gate.
+    // The peer is reachable and its verified data phase can be retained, but
+    // the immutable snapshot is incomplete. Keep the snapshot phase failed so
+    // lifecycle readiness retries, while never making its metadata visible.
     expect(detailed.failedPeers).toBe(0);
     expect(detailed.failedPhases).toBe(1);
-    expect(detailed.insertedTriples).toBe(0);
+    expect(detailed.completedPhases).toBe(1);
+    expect(detailed.insertedDataTriples).toBe(1);
+    expect(detailed.insertedMetaTriples).toBe(0);
+    expect(detailed.insertedTriples).toBe(1);
 
     const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
     // RFC ka-metadata-trim Phase 2: the snapshot pointer is the digest row

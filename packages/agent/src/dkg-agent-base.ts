@@ -1167,6 +1167,13 @@ export class DKGAgentBase {
    */
   protected publishProfileTail: Promise<unknown> = Promise.resolve();
   /**
+   * Coalesces startup and first-join profile readiness checks. The regular
+   * publish tail serializes writes, but without this promise two concurrent
+   * readiness callers could still queue duplicate profile KAs while neither
+   * has observed the first result yet.
+   */
+  protected ensureProfilePublishedInFlight?: Promise<void>;
+  /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
    * Bounds the freemium-tier abuse vector: any wallet can broadcast

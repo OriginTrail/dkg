@@ -16,7 +16,10 @@ import {
 import {
   createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
-import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../../dkg-agent-constants.js';
+import {
+  SYNC_PAGE_SIZE,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -238,8 +241,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // A transient failure merely makes the remainder of this phase conservative;
   // it never changes offsets or responder-session identity.
   const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
   let activePageSize = syncPageSize;
   let successfulPageSize = syncPageSize;
+  let consecutiveSuccessfulPages = 0;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -297,8 +302,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         onRetry: (attempt, delay, err) => {
           const priorPageSize = activePageSize;
           if (activePageSize > safePageSize) {
+            // Adapt to the actual path capacity instead of falling all the way
+            // from 8192 rows to the 64-row emergency floor. A lossy relay can
+            // often carry 1k-4k rows reliably; halving finds that stable point
+            // within the existing retry budget without turning the remainder
+            // of the phase into hundreds of tiny round trips.
             activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
           }
+          consecutiveSuccessfulPages = 0;
           const pageSizeNote = activePageSize < priorPageSize
             ? `; reducing page size ${priorPageSize}->${activePageSize}`
             : '';
@@ -352,6 +363,19 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
+      // Keep the size that actually crossed the path. Probe upward only after
+      // three consecutive successful pages, and at most double at a time.
+      // This avoids the old 8192 -> 64 -> 8192 oscillation where every useful
+      // page paid for a doomed large request and its timeout first.
+      if (usesByteBudgetPagination && activePageSize < syncPageSize) {
+        consecutiveSuccessfulPages += 1;
+        if (consecutiveSuccessfulPages >= 3) {
+          activePageSize = Math.min(syncPageSize, activePageSize * 2);
+          consecutiveSuccessfulPages = 0;
+        }
+      } else {
+        consecutiveSuccessfulPages = 0;
+      }
 
       if (debugSyncProgress) {
         logInfo(
@@ -359,7 +383,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
         );
       }
-      if (parsed.totalQuads < successfulPageSize) break;
+      // A new responder may deliberately return a short prefix to stay inside
+      // its byte budget, while an old responder returns at most its legacy
+      // 500-row cap. Therefore short pages are not EOF in negotiated mode; an
+      // explicit empty response is. Legacy pagination keeps the old shortcut.
+      if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;

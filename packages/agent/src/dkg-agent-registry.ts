@@ -82,7 +82,6 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
-  type ProtocolOutboxMetadata,
   encryptV10PublishPayload,
   encryptChunked,
   buildCiphertextChunksRoot,
@@ -419,6 +418,29 @@ function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: bool
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
+  async ensureProfilePublished(this: DKGAgent): Promise<void> {
+    if (this.profileManager.profileKcId !== null) return;
+    if (this.ensureProfilePublishedInFlight) {
+      return this.ensureProfilePublishedInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // Re-check inside the coalesced operation in case another serialized
+      // publisher completed between the fast-path check and this turn.
+      if (this.profileManager.profileKcId === null) {
+        await this.publishProfile();
+      }
+    })();
+    tracked = publish.finally(() => {
+      if (this.ensureProfilePublishedInFlight === tracked) {
+        this.ensureProfilePublishedInFlight = undefined;
+      }
+    });
+    this.ensureProfilePublishedInFlight = tracked;
+    return tracked;
+  }
+
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
     // `publishProfile()` to settle (success or failure) before
@@ -1766,20 +1788,20 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Payload-bearing chat outbox snapshot retained for public API compatibility.
-   * Diagnostics should use `listMessageOutboxMetadata()` so retry payloads are
-   * not copied into memory.
+   * Snapshot of the substrate outbox for diagnostics. Used by the
+   * `GET /api/chat/outbox` route + the MCP `dkg_outbox_status` tool
+   * so operators can see what's pending after a long recipient
+   * outage. Returns the generic `ProtocolOutboxEntry` shape from
+   * the substrate (rc.9 PR-3) rather than the chat-specific
+   * `ChatOutboxRetryEntry` that rc.8 used — same fields are
+   * exposed (`peer`, `messageId`, `attempts`, `firstFailureAt`,
+   * `nextAttemptAt`, `lastError`), but filtered to the chat
+   * protocol so the existing operator surface still talks about
+   * "the chat outbox".
    */
   listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
     return this.messenger
       .listOutbox()
-      .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
-  }
-
-  /** Metadata-only chat outbox snapshot for payload-free diagnostics. */
-  listMessageOutboxMetadata(this: DKGAgent): ProtocolOutboxMetadata[] {
-    return this.messenger
-      .listOutboxMetadata()
       .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   }
 

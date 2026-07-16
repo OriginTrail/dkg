@@ -4735,6 +4735,54 @@ const rawTooLowAllowanceRevert = () => {
 
 describe('populateAndSignV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
 
+  it('applies 25% gas headroom to every concurrent V10 publish preparation', async () => {
+    const { a } = makeRecoveryAdapter();
+    const signerA = new ethers.Wallet(DEPLOYER_PK);
+    const signerB = new ethers.Wallet(OTHER_PK);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const populateAndSign = recorder(async (..._args: unknown[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { signedTx: '0xsigned', txHash: '0xhash' };
+    });
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await Promise.all([
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signerA, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label A',
+      ),
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signerB, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label B',
+      ),
+    ]);
+
+    expect(populateAndSign.calls).toHaveLength(2);
+    expect(maxInFlight).toBe(2);
+    for (const call of populateAndSign.calls) {
+      expect(call[4]).toBe('V10 publish');
+      expect(call[5]).toEqual({ gasLimitBufferBps: 2_500 });
+    }
+  });
+
+  it('applies the same 25% gas headroom to V10 update preparation', async () => {
+    const { a, signer } = makeRecoveryAdapter();
+    const populateAndSign = recorder(async (..._args: unknown[]) => (
+      { signedTx: '0xsigned', txHash: '0xhash' }
+    ));
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, {}, 'update', {}, V10_KA_ADDRESS, 1n, 'label',
+    );
+
+    expect(populateAndSign.calls).toHaveLength(1);
+    expect(populateAndSign.calls[0][4]).toBe('V10 update');
+    expect(populateAndSign.calls[0][5]).toEqual({ gasLimitBufferBps: 2_500 });
+  });
+
   // The 🔴 fix: BOTH write paths recover from a pre-broadcast
   // `TooLowAllowance` revert, not just publish.
   it.each(['publish', 'update'] as const)(

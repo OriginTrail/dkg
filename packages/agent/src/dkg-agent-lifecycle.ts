@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -239,7 +239,11 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
-import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
+import {
+  recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type RecoverContextGraphSwmResult,
+} from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
@@ -692,6 +696,7 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -833,6 +838,8 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     insertedDataQuads: 0,
     insertedMetaQuads: 0,
     droppedDataTriples: 0,
+    readySnapshots: 0,
+    totalSnapshots: 0,
     completed: true,
   };
 }
@@ -2079,6 +2086,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       configuredPriorities: configuredPriorityCounts,
       snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
     })}`);
+    // Keep one framed sync stream (and therefore its circuit-relay connection)
+    // alive across page requests. Old peers do not advertise this wire id and
+    // transparently fall back to PROTOCOL_SYNC. Set DKG_POOLED_SYNC=0 only as
+    // an emergency rollback; the hot path is enabled by default.
+    if (process.env.DKG_POOLED_SYNC !== '0') {
+      this.router.enablePooling(PROTOCOL_SYNC, {
+        protocolId: PROTOCOL_SYNC_POOLED,
+        keepaliveIntervalMs: 10_000,
+        idleTimeoutMs: 5 * 60_000,
+      });
+      this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
+    }
     registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
@@ -4583,6 +4602,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
+        isGraphAssetMaterialized: async (asset) => {
+          const result = await this.store.query(
+            `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+              `<${assertSafeIri(asset.headSubject)}> ` +
+              `<http://dkg.io/ontology/assertionGraph> ` +
+              `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+            {
+              priority: 'background',
+              source: 'agent.swmRecovery.isGraphAssetMaterialized',
+            },
+          );
+          return result.type === 'boolean' && result.value;
+        },
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
         markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -4705,7 +4737,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
           run: async (): Promise<SharedMemorySyncResult> => {
             try {
-              const recovered = await recoverPrivateContextGraph(contextGraphId);
+              const recovered = await recoverContextGraphSwmWithProgressRetries({
+                recover: () => recoverPrivateContextGraph(contextGraphId),
+                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+                  this.log.info(
+                    ctx,
+                    `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
+                    + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
+                  );
+                },
+              });
               const result = emptySharedMemorySyncResult();
               result.insertedDataTriples = recovered.insertedDataQuads;
               result.insertedMetaTriples = recovered.insertedMetaQuads;
@@ -4795,6 +4836,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,
+          isGraphAssetMaterialized: async (asset) => {
+            const result = await this.store.query(
+              `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+                `<${assertSafeIri(asset.headSubject)}> ` +
+                `<http://dkg.io/ontology/assertionGraph> ` +
+                `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.isGraphAssetMaterialized',
+              },
+            );
+            return result.type === 'boolean' && result.value;
+          },
           recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
           invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
           markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -7037,6 +7091,7 @@ async function runRecoverContextGraphSwmFromPeer(
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
     publicSnapshotStore: dependencies.publicSnapshotStore,
+    isGraphAssetMaterialized: dependencies.isGraphAssetMaterialized,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
