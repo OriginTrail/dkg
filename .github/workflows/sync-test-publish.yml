@@ -8,8 +8,7 @@ on:
     - cron: '17 * * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: sync-test-publish-with-main
@@ -20,15 +19,20 @@ jobs:
     name: Merge main into test/publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Check out test/publish
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: test/publish
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Merge and push latest main
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -42,4 +46,5 @@ jobs:
           fi
 
           git merge --no-edit origin/main
+          gh auth setup-git
           git push origin HEAD:test/publish
