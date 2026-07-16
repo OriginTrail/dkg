@@ -318,14 +318,61 @@ function semanticGrowthSelfTest() {
   }
 }
 
+function auditModesSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-audit-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const fixturePath = path.join(fixtureRoot, 'test/debt.test.ts');
+    mkdirSync(path.dirname(fixturePath), { recursive: true });
+    writeFileSync(fixturePath, "it.todo('audit debt');\n");
+    git('add', '-A');
+
+    const spawnAudit = (args) => spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), ...args],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const fileAudit = spawnAudit(['--files', fixturePath]);
+    const fullAudit = spawnAudit(['--all']);
+    const pass = fileAudit.status === 0
+      && fileAudit.stdout.trim() === `${fixturePath}:1:1: D1 it.todo`
+      && fullAudit.status === 0
+      && fullAudit.stdout.trim() === 'test/debt.test.ts:1:1: D1 it.todo';
+    if (!pass) {
+      process.stderr.write(
+        'SELF-TEST FAIL: audit modes did not report debt without failure\n'
+          + `--files exit=${fileAudit.status}\nstdout:\n${fileAudit.stdout}\nstderr:\n${fileAudit.stderr}`
+          + `--all exit=${fullAudit.status}\nstdout:\n${fullAudit.stdout}\nstderr:\n${fullAudit.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 function selfTest() {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
+  const auditsPass = auditModesSelfTest();
   process.stdout.write(
     `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
-      + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}.\n`,
+      + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
+      + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
   );
-  return movePasses && growthPasses ? 0 : 1;
+  return movePasses && growthPasses && auditsPass ? 0 : 1;
 }
 
 export function runCli(argv = process.argv.slice(2)) {
