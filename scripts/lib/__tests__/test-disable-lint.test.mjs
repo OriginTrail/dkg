@@ -49,6 +49,25 @@ test('analysis reports only static test-targeting Vitest discovery exclusions', 
   );
 });
 
+test('analysis resolves exclusion constants through lexical scope', () => {
+  const source = [
+    "import { defineConfig } from 'vitest/config';",
+    "const OUTER_EXCLUSION = 'tests/top-level/**';",
+    'export default defineConfig(() => {',
+    "  const NESTED_EXCLUSION = 'spec/callback/**';",
+    '  return { test: { exclude: [NESTED_EXCLUSION] } };',
+    '});',
+    'export const parameterized = defineConfig((OUTER_EXCLUSION) => ({',
+    '  test: { exclude: [OUTER_EXCLUSION] },',
+    '}));',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 5, value: 'spec/callback/**' }],
+  );
+});
+
 test('analysis recognizes custom Vitest configuration filenames', () => {
   const source = [
     "import { defineConfig } from 'vitest/config';",
