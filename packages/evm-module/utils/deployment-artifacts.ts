@@ -16,6 +16,18 @@ export type ContractDeployments = {
   contracts: Record<string, ContractDeployment>;
 };
 
+const DEPLOYMENT_CONFIG_FIELDS = new Set(['contracts']);
+const CONTRACT_DEPLOYMENT_FIELDS = new Set([
+  'evmAddress',
+  'version',
+  'deployed',
+  'gitBranch',
+  'gitCommitHash',
+  'deploymentBlock',
+  'deploymentTimestamp',
+  'migration',
+]);
+
 export function deploymentConfigPath(
   deploymentsDirectory: string,
   networkName: string,
@@ -25,6 +37,20 @@ export function deploymentConfigPath(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function assertOnlyFields(
+  value: Record<string, unknown>,
+  allowedFields: ReadonlySet<string>,
+  field: string,
+  source: string,
+): void {
+  const unknownFields = Object.keys(value).filter((key) => !allowedFields.has(key));
+  if (unknownFields.length > 0) {
+    throw new Error(
+      `Invalid ${source}: ${field} contains unknown field(s): ${unknownFields.join(', ')}`,
+    );
+  }
 }
 
 function optionalString(
@@ -58,12 +84,16 @@ export function parseDeploymentConfig(
   if (!isRecord(value) || !isRecord(value.contracts)) {
     throw new Error(`Invalid ${source}: contracts must be an object`);
   }
+  // Deployment registries are a closed schema. Rejecting unknown metadata
+  // prevents a read/modify/write cycle from silently discarding future fields.
+  assertOnlyFields(value, DEPLOYMENT_CONFIG_FIELDS, 'root', source);
 
   const contracts: Record<string, ContractDeployment> = {};
   for (const [contractName, deployment] of Object.entries(value.contracts)) {
     if (!isRecord(deployment)) {
       throw new Error(`Invalid ${source}: ${contractName} must be an object`);
     }
+    assertOnlyFields(deployment, CONTRACT_DEPLOYMENT_FIELDS, contractName, source);
     if (typeof deployment.evmAddress !== 'string' || deployment.evmAddress.length === 0) {
       throw new Error(`Invalid ${source}: ${contractName}.evmAddress must be a non-empty string`);
     }

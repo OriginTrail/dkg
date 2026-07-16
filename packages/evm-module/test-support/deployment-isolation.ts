@@ -1,4 +1,4 @@
-import { readContractDeploymentAddress } from './deployment-artifacts';
+import { readContractDeploymentAddress } from '../utils/deployment-artifacts';
 
 export const HARDHAT_DEPLOYMENTS_DIR_ENV = 'DKG_HARDHAT_DEPLOYMENTS_DIR';
 export const HARDHAT_LOCAL_NETWORK_NAME = 'localhost';

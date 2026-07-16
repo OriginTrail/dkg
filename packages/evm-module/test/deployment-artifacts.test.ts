@@ -86,4 +86,27 @@ describe('@unit deployment artifact schema', () => {
       rmSync(deploymentsDir, { recursive: true, force: true });
     }
   });
+
+  it('rejects unknown metadata instead of silently dropping it on write', () => {
+    const deploymentsDir = mkdtempSync(join(tmpdir(), 'dkg-deployment-artifact-unknown-'));
+    try {
+      writeFileSync(
+        deploymentConfigPath(deploymentsDir, 'localhost'),
+        JSON.stringify({
+          contracts: {
+            Hub: {
+              evmAddress: '0x1111111111111111111111111111111111111111',
+              version: '1.0.0',
+              deployed: true,
+              auditHash: 'future-metadata',
+            },
+          },
+        }),
+      );
+      expect(() => readDeploymentConfig(deploymentsDir, 'localhost'))
+        .to.throw(/Hub contains unknown field\(s\): auditHash/);
+    } finally {
+      rmSync(deploymentsDir, { recursive: true, force: true });
+    }
+  });
 });

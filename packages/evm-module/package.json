@@ -6,8 +6,7 @@
   "private": true,
   "exports": {
     "./abi/*.json": "./abi/*.json",
-    "./test-support/deployment-artifacts": "./utils/deployment-artifacts.ts",
-    "./test-support/deployment-isolation": "./utils/deployment-isolation.ts"
+    "./test-support": "./test-support/index.ts"
   },
   "scripts": {
     "clean": "hardhat clean",

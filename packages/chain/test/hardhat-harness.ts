@@ -15,7 +15,7 @@ import {
   createHardhatDeploymentIsolation,
   hardhatDeploymentProcessEnv,
   readIsolatedContractDeploymentAddress,
-} from '@origintrail-official/dkg-evm-module/test-support/deployment-isolation';
+} from '@origintrail-official/dkg-evm-module/test-support';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);

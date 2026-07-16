@@ -18,7 +18,7 @@ subtask(TASK_TEST_GET_TEST_FILES, async (_, { config }, runSuper) => {
 });
 
 import { Helpers } from './utils/helpers';
-import { hardhatDeploymentsDirectoryFromEnv } from './utils/deployment-isolation';
+import { hardhatDeploymentsDirectoryFromEnv } from './test-support/deployment-isolation';
 import { rpc, accounts, mainnetAccounts } from './utils/network';
 
 extendEnvironment((hre: HardhatRuntimeEnvironment) => {

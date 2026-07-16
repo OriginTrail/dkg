@@ -5,15 +5,13 @@ import { join } from 'node:path';
 import {
   type ContractDeployments,
   writeDeploymentConfig,
-} from '@origintrail-official/dkg-evm-module/test-support/deployment-artifacts';
-import {
   HARDHAT_DEPLOYMENTS_DIR_ENV,
   HARDHAT_LOCAL_NETWORK_NAME,
   type HardhatDeploymentIsolation,
   createHardhatDeploymentIsolation,
   hardhatDeploymentProcessEnv,
   hardhatDeploymentsDirectoryFromEnv,
-} from '@origintrail-official/dkg-evm-module/test-support/deployment-isolation';
+} from '@origintrail-official/dkg-evm-module/test-support';
 import { resolveSuccessfulHubDeployment } from './hardhat-harness.js';
 
 const HUB_ADDRESS = `0x${'1'.repeat(40)}`;
