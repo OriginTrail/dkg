@@ -940,6 +940,24 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          const storageAckPeerIds = [
+            ...new Set(
+              (Array.isArray(pub?.v10ACKs) ? pub.v10ACKs : [])
+                .map((ack: unknown) => (
+                  ack && typeof ack === 'object' && typeof (ack as { peerId?: unknown }).peerId === 'string'
+                    ? (ack as { peerId: string }).peerId.trim()
+                    : ''
+                ))
+                .filter(Boolean),
+            ),
+          ];
+          if (storageAckPeerIds.length > 0) {
+            // Query Remote must validate the protocol's actual durability
+            // guarantee: an ACK-signing core stored this KA. Expose only peer
+            // IDs (never signatures) so callers can read from those exact
+            // storage cores instead of guessing an unrelated random peer.
+            result.storageAckPeerIds = storageAckPeerIds;
+          }
           if (pub?.onChainResult?.convictionCostCovered) {
             result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
           }

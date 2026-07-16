@@ -89,6 +89,8 @@ export interface KnowledgeAssetCreateResponse {
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
+  /** Core peers whose StorageACKs backed a confirmed VM publish. */
+  storageAckPeerIds?: string[];
   errors?: KnowledgeAssetLifecycleError[];
   [key: string]: unknown;
 }
