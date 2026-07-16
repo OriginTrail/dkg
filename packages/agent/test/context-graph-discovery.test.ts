@@ -2924,6 +2924,12 @@ describe('runImmediatePostApprovalSync', () => {
       sharedMemorySynced: number;
       denied: boolean;
     };
+    runCatchupResults?: Array<{
+      peersSucceeded: number;
+      dataSynced: number;
+      sharedMemorySynced: number;
+      denied: boolean;
+    }>;
     runCatchupThrows?: Error;
     broadcastThrows?: Error;
     refreshMetaResults?: Array<boolean | Error>;
@@ -2990,14 +2996,16 @@ describe('runImmediatePostApprovalSync', () => {
         peers: peers.map((p) => p.toString()),
       });
       if (opts.runCatchupThrows) throw opts.runCatchupThrows;
+      const sequencedResult = opts.runCatchupResults?.[calls.runCatchupCalls.length - 1];
+      const configuredResult = sequencedResult ?? opts.runCatchupResult;
       return {
         connectedPeers: 1,
         syncCapablePeers: 1,
         peersTried: 1,
-        peersSucceeded: opts.runCatchupResult?.peersSucceeded ?? 0,
-        dataSynced: opts.runCatchupResult?.dataSynced ?? 0,
-        sharedMemorySynced: opts.runCatchupResult?.sharedMemorySynced ?? 0,
-        denied: opts.runCatchupResult?.denied ?? false,
+        peersSucceeded: configuredResult?.peersSucceeded ?? 0,
+        dataSynced: configuredResult?.dataSynced ?? 0,
+        sharedMemorySynced: configuredResult?.sharedMemorySynced ?? 0,
+        denied: configuredResult?.denied ?? false,
         diagnostics: { noProtocolPeers: 0 } as any,
       };
     };
@@ -3044,6 +3052,58 @@ describe('runImmediatePostApprovalSync', () => {
       peers: [CURATOR_PEER],
     });
     expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('retries curator directly while graph-aligned durable progress is increasing', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        { peersSucceeded: 0, dataSynced: 32_000, sharedMemorySynced: 50_000, denied: false },
+        { peersSucceeded: 1, dataSynced: 18_000, sharedMemorySynced: 0, denied: false },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-bounded-progress',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-bounded-progress', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toEqual([
+      { cg: 'test-cg-bounded-progress', includeSwm: true, peers: [CURATOR_PEER] },
+      { cg: 'test-cg-bounded-progress', includeSwm: false, peers: [CURATOR_PEER] },
+    ]);
+    expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('stops curator-direct retries and falls back when a round makes no progress', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        { peersSucceeded: 0, dataSynced: 32_000, sharedMemorySynced: 50_000, denied: false },
+        { peersSucceeded: 0, dataSynced: 0, sharedMemorySynced: 0, denied: false },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-no-progress',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-no-progress', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toHaveLength(2);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-no-progress',
+      includeSwm: true,
+    }]);
   }, 15000);
 
   it('falls back to broadcast when curator is not in connected peers after ensurePeerConnected', async () => {

@@ -292,6 +292,12 @@ import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-li
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
+// A large rootless VM snapshot may need more than one graph-aligned fetch
+// window. Keep the post-approval bootstrap on the authenticated curator while
+// every round makes verified progress, instead of falling into a broad peer
+// scan and then waiting for an unrelated periodic reconciler. The cap is a
+// hard safety bound; the no-progress guard below is the normal termination.
+const MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS = 64;
 
 // type alias so listPendingJoinApprovalRetries() retains its old
 // public shape while it stubs out to []. PR-12 rebuilds the operator
@@ -5412,36 +5418,67 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // authenticated this exact notification sender for this CG before
           // scheduling this method.
           await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
-          const result = await this.runCatchupOverPeers(contextGraphId, true, [curatorRemote]);
-          // A transient first meta read must not turn a successful payload/SWM
-          // transfer into a false-ready subscription. Retry once after the
-          // catchup and require a live metadata proof before declaring the
-          // curator-targeted bootstrap complete.
-          let hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
-            .catch(() => false);
-          if (!hasAuthoritativeMeta) {
-            await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
-            hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
+          let includeSharedMemory = true;
+          let totalDataSynced = 0;
+          let totalSharedMemorySynced = 0;
+          for (let round = 1; round <= MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS; round += 1) {
+            const result = await this.runCatchupOverPeers(
+              contextGraphId,
+              includeSharedMemory,
+              [curatorRemote],
+            );
+            totalDataSynced += result.dataSynced;
+            totalSharedMemorySynced += result.sharedMemorySynced;
+            if (result.sharedMemorySynced > 0) includeSharedMemory = false;
+
+            // A transient first meta read must not turn a successful payload/SWM
+            // transfer into a false-ready subscription. Retry once after each
+            // catchup round and require a live metadata proof before declaring
+            // the curator-targeted bootstrap complete.
+            let hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
               .catch(() => false);
-          }
-          if (hasAuthoritativeMeta) {
-            await this.refreshMetaSyncedFlags([contextGraphId]);
-          }
-          if (result.peersSucceeded > 0 && hasAuthoritativeMeta) {
+            if (!hasAuthoritativeMeta) {
+              await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
+              hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
+                .catch(() => false);
+            }
+            if (hasAuthoritativeMeta) {
+              await this.refreshMetaSyncedFlags([contextGraphId]);
+            }
+            if (result.peersSucceeded > 0 && hasAuthoritativeMeta) {
+              this.log.info(
+                ctx,
+                `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} fetched ${totalDataSynced} data + ${totalSharedMemorySynced} SWM triples in ${round} round(s)`,
+              );
+              curatorTargetSucceeded = true;
+              break;
+            }
+
+            const madeVerifiedProgress = result.dataSynced > 0 || result.sharedMemorySynced > 0;
+            if (
+              result.denied
+              || !hasAuthoritativeMeta
+              || !madeVerifiedProgress
+              || round === MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS
+            ) {
+              if (result.peersSucceeded === 0) {
+                this.log.warn(
+                  ctx,
+                  `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} produced no successful peer (denied=${result.denied}, progress=${madeVerifiedProgress}, round=${round}); falling back to broadcast catchup`,
+                );
+              } else {
+                this.log.warn(
+                  ctx,
+                  `Post-approval sync for "${contextGraphId}" transferred payload from curator ${curatorShort} but authoritative metadata is still absent; falling back to broadcast catchup`,
+                );
+              }
+              break;
+            }
+
             this.log.info(
               ctx,
-              `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} fetched ${result.dataSynced} data + ${result.sharedMemorySynced} SWM triples`,
-            );
-            curatorTargetSucceeded = true;
-          } else if (result.peersSucceeded === 0) {
-            this.log.warn(
-              ctx,
-              `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} produced no successful peer (denied=${result.denied}); falling back to broadcast catchup`,
-            );
-          } else {
-            this.log.warn(
-              ctx,
-              `Post-approval sync for "${contextGraphId}" transferred payload from curator ${curatorShort} but authoritative metadata is still absent; falling back to broadcast catchup`,
+              `Post-approval sync for "${contextGraphId}" made verified partial progress from curator ${curatorShort} `
+                + `(data=${result.dataSynced}, SWM=${result.sharedMemorySynced}, round=${round}); retrying curator directly`,
             );
           }
         } else {
