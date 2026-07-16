@@ -191,28 +191,63 @@ function git(args, cwd = process.cwd()) {
   });
 }
 
-function findingsAt(revision, cwd) {
-  return git(['ls-tree', '-r', '--name-only', revision], cwd)
-    .split('\n')
-    .filter(isD1ScannableFile)
-    .flatMap((filePath) => analyzeD1Source(
-      git(['show', `${revision}:${filePath}`], cwd),
-      filePath,
-    ));
+function changedD1Entries(baseRevision, headRevision, cwd) {
+  const entries = [];
+  const lines = git([
+    'diff',
+    '--name-status',
+    '--find-renames',
+    '--find-copies-harder',
+    '--diff-filter=ACDMR',
+    baseRevision,
+    headRevision,
+  ], cwd).split('\n');
+
+  for (const line of lines) {
+    if (!line) continue;
+    const [status, firstPath, secondPath] = line.split('\t');
+    if (status.startsWith('R')) {
+      if (isD1ScannableFile(firstPath) || isD1ScannableFile(secondPath)) {
+        entries.push({
+          basePath: isD1ScannableFile(firstPath) ? firstPath : null,
+          headPath: isD1ScannableFile(secondPath) ? secondPath : null,
+        });
+      }
+    } else if (status.startsWith('C')) {
+      if (isD1ScannableFile(secondPath)) {
+        entries.push({ basePath: null, headPath: secondPath });
+      }
+    } else if (isD1ScannableFile(firstPath)) {
+      entries.push({
+        basePath: status === 'A' ? null : firstPath,
+        headPath: status === 'D' ? null : firstPath,
+      });
+    }
+  }
+  return entries;
+}
+
+function findingsAt(revision, filePath, cwd) {
+  if (!filePath) return [];
+  return analyzeD1Source(git(['show', `${revision}:${filePath}`], cwd), filePath);
 }
 
 export function computeDiffFindings(baseRevision, headRevision, cwd = process.cwd()) {
+  const entries = changedD1Entries(baseRevision, headRevision, cwd);
   const baseline = new Map();
-  for (const finding of findingsAt(baseRevision, cwd)) {
-    baseline.set(finding.fingerprint, (baseline.get(finding.fingerprint) ?? 0) + 1);
+  for (const entry of entries) {
+    for (const finding of findingsAt(baseRevision, entry.basePath, cwd)) {
+      baseline.set(finding.fingerprint, (baseline.get(finding.fingerprint) ?? 0) + 1);
+    }
   }
 
-  const results = findingsAt(headRevision, cwd).map((finding) => {
-    const remaining = baseline.get(finding.fingerprint) ?? 0;
-    if (remaining === 0) return { ...finding, verdict: 'new' };
-    baseline.set(finding.fingerprint, remaining - 1);
-    return { ...finding, verdict: 'grandfathered' };
-  });
+  const results = entries.flatMap((entry) => findingsAt(headRevision, entry.headPath, cwd))
+    .map((finding) => {
+      const remaining = baseline.get(finding.fingerprint) ?? 0;
+      if (remaining === 0) return { ...finding, verdict: 'new' };
+      baseline.set(finding.fingerprint, remaining - 1);
+      return { ...finding, verdict: 'grandfathered' };
+    });
   return { results };
 }
 
