@@ -10,7 +10,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { readContractDeploymentAddress } from '../../evm-module/utils/deployment-artifacts.js';
+import {
+  type HardhatDeploymentIsolation,
+  createHardhatDeploymentIsolation,
+  hardhatDeploymentProcessEnv,
+  readIsolatedContractDeploymentAddress,
+} from '@origintrail-official/dkg-evm-module/test-support/deployment-isolation';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -65,7 +70,7 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
 }
 
 export function resolveSuccessfulHubDeployment(
-  deploymentsDir: string,
+  isolation: HardhatDeploymentIsolation,
   stdout: string,
   stderr: string,
   code: number | null,
@@ -76,11 +81,7 @@ export function resolveSuccessfulHubDeployment(
   }
 
   try {
-    const hubAddress = readContractDeploymentAddress(
-      deploymentsDir,
-      'localhost',
-      'Hub',
-    );
+    const hubAddress = readIsolatedContractDeploymentAddress(isolation, 'Hub');
     if (!ethers.isAddress(hubAddress)) {
       throw new Error(`invalid Hub address: ${hubAddress}`);
     }
@@ -88,28 +89,30 @@ export function resolveSuccessfulHubDeployment(
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Hub deployment artifact unavailable in ${deploymentsDir}: ${detail}\n` +
+      `Hub deployment artifact unavailable in ${isolation.deploymentsDir}: ${detail}\n` +
       `deploy stdout:\n${stdout}`,
     );
   }
 }
 
-export async function deployContracts(rpcUrl: string, deploymentsDir: string): Promise<string> {
+export async function deployContracts(
+  rpcUrl: string,
+  isolation: HardhatDeploymentIsolation,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
       paths: [EVM_MODULE_DIR],
     });
     const proc = spawn(
       process.execPath,
-      [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
+      [hardhatCli, 'deploy', '--network', isolation.networkName, '--config', 'hardhat.node.config.ts'],
       {
         cwd: EVM_MODULE_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
+        env: hardhatDeploymentProcessEnv(isolation, {
           ...process.env,
           RPC_LOCALHOST: rpcUrl,
-          DKG_HARDHAT_DEPLOYMENTS_DIR: deploymentsDir,
-        },
+        }),
       },
     );
 
@@ -123,7 +126,7 @@ export async function deployContracts(rpcUrl: string, deploymentsDir: string): P
         // A successful process plus the canonical isolated artifact proves
         // the whole deploy completed. Partial stdout alone is never accepted.
         resolve(resolveSuccessfulHubDeployment(
-          deploymentsDir,
+          isolation,
           stdout,
           stderr,
           code,
@@ -371,6 +374,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   const deploymentsDir = mkdtempSync(
     path.join(tmpdir(), `dkg-hardhat-deployments-${port}-`),
   );
+  const deploymentIsolation = createHardhatDeploymentIsolation(deploymentsDir);
 
   // Kill any orphaned process left on this port from a previous crashed run
   try {
@@ -397,7 +401,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
     {
       cwd: EVM_MODULE_DIR,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, DKG_HARDHAT_DEPLOYMENTS_DIR: deploymentsDir },
+      env: hardhatDeploymentProcessEnv(deploymentIsolation),
     },
   );
   hardhatProcess.stdout?.on('data', (d) => { stdoutOutput += d.toString(); });
@@ -420,7 +424,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
 
   try {
     const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
-    const hubAddress = await deployContracts(rpcUrl, deploymentsDir);
+    const hubAddress = await deployContracts(rpcUrl, deploymentIsolation);
 
     const coreProfileId = await createNodeProfile(
       provider, hubAddress,

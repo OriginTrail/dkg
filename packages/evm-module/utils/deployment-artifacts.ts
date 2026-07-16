@@ -27,6 +27,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function optionalString(
+  value: unknown,
+  field: string,
+  source: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid ${source}: ${field} must be a string`);
+  }
+  return value;
+}
+
+function optionalNumber(
+  value: unknown,
+  field: string,
+  source: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`Invalid ${source}: ${field} must be a finite number`);
+  }
+  return value;
+}
+
 export function parseDeploymentConfig(
   value: unknown,
   source = 'deployment config',
@@ -35,6 +59,7 @@ export function parseDeploymentConfig(
     throw new Error(`Invalid ${source}: contracts must be an object`);
   }
 
+  const contracts: Record<string, ContractDeployment> = {};
   for (const [contractName, deployment] of Object.entries(value.contracts)) {
     if (!isRecord(deployment)) {
       throw new Error(`Invalid ${source}: ${contractName} must be an object`);
@@ -48,9 +73,45 @@ export function parseDeploymentConfig(
     if (typeof deployment.deployed !== 'boolean') {
       throw new Error(`Invalid ${source}: ${contractName}.deployed must be a boolean`);
     }
+
+    const parsed: ContractDeployment = {
+      evmAddress: deployment.evmAddress,
+      version: deployment.version,
+      deployed: deployment.deployed,
+    };
+    const gitBranch = optionalString(
+      deployment.gitBranch,
+      `${contractName}.gitBranch`,
+      source,
+    );
+    const gitCommitHash = optionalString(
+      deployment.gitCommitHash,
+      `${contractName}.gitCommitHash`,
+      source,
+    );
+    const deploymentBlock = optionalNumber(
+      deployment.deploymentBlock,
+      `${contractName}.deploymentBlock`,
+      source,
+    );
+    const deploymentTimestamp = optionalNumber(
+      deployment.deploymentTimestamp,
+      `${contractName}.deploymentTimestamp`,
+      source,
+    );
+    if (deployment.migration !== undefined && typeof deployment.migration !== 'boolean') {
+      throw new Error(`Invalid ${source}: ${contractName}.migration must be a boolean`);
+    }
+
+    if (gitBranch !== undefined) parsed.gitBranch = gitBranch;
+    if (gitCommitHash !== undefined) parsed.gitCommitHash = gitCommitHash;
+    if (deploymentBlock !== undefined) parsed.deploymentBlock = deploymentBlock;
+    if (deploymentTimestamp !== undefined) parsed.deploymentTimestamp = deploymentTimestamp;
+    if (deployment.migration !== undefined) parsed.migration = deployment.migration;
+    contracts[contractName] = parsed;
   }
 
-  return value as ContractDeployments;
+  return { contracts };
 }
 
 export function readDeploymentConfig(

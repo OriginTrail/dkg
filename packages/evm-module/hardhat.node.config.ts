@@ -18,6 +18,7 @@ subtask(TASK_TEST_GET_TEST_FILES, async (_, { config }, runSuper) => {
 });
 
 import { Helpers } from './utils/helpers';
+import { hardhatDeploymentsDirectoryFromEnv } from './utils/deployment-isolation';
 import { rpc, accounts, mainnetAccounts } from './utils/network';
 
 extendEnvironment((hre: HardhatRuntimeEnvironment) => {
@@ -25,7 +26,7 @@ extendEnvironment((hre: HardhatRuntimeEnvironment) => {
 });
 
 const isCoverage = process.argv.includes('coverage');
-const isolatedDeploymentsDir = process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim();
+const isolatedDeploymentsDir = hardhatDeploymentsDirectoryFromEnv();
 
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',

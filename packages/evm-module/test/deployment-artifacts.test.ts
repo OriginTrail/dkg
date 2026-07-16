@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -12,6 +12,18 @@ import {
 } from '../utils/deployment-artifacts';
 
 describe('@unit deployment artifact schema', () => {
+  it('accepts every tracked network deployment registry', () => {
+    const deploymentsDir = join(__dirname, '../deployments');
+    const networkNames = readdirSync(deploymentsDir)
+      .filter((fileName) => fileName.endsWith('_contracts.json'))
+      .map((fileName) => fileName.slice(0, -'_contracts.json'.length));
+
+    expect(networkNames).not.to.be.empty;
+    for (const networkName of networkNames) {
+      expect(() => readDeploymentConfig(deploymentsDir, networkName)).not.to.throw();
+    }
+  });
+
   it('round-trips the canonical typed config and resolves contract addresses', () => {
     const deploymentsDir = mkdtempSync(join(tmpdir(), 'dkg-deployment-artifact-'));
     const config: ContractDeployments = {
@@ -47,6 +59,29 @@ describe('@unit deployment artifact schema', () => {
       );
       expect(() => readDeploymentConfig(deploymentsDir, 'localhost'))
         .to.throw(/Hub\.evmAddress must be a non-empty string/);
+    } finally {
+      rmSync(deploymentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed optional metadata instead of casting it to the typed schema', () => {
+    const deploymentsDir = mkdtempSync(join(tmpdir(), 'dkg-deployment-artifact-metadata-'));
+    try {
+      writeFileSync(
+        deploymentConfigPath(deploymentsDir, 'localhost'),
+        JSON.stringify({
+          contracts: {
+            Hub: {
+              evmAddress: '0x1111111111111111111111111111111111111111',
+              version: null,
+              deployed: true,
+              deploymentBlock: '1',
+            },
+          },
+        }),
+      );
+      expect(() => readDeploymentConfig(deploymentsDir, 'localhost'))
+        .to.throw(/Hub\.deploymentBlock must be a finite number/);
     } finally {
       rmSync(deploymentsDir, { recursive: true, force: true });
     }

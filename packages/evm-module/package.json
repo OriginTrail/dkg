@@ -5,7 +5,9 @@
   "license": "Apache-2.0",
   "private": true,
   "exports": {
-    "./abi/*.json": "./abi/*.json"
+    "./abi/*.json": "./abi/*.json",
+    "./test-support/deployment-artifacts": "./utils/deployment-artifacts.ts",
+    "./test-support/deployment-isolation": "./utils/deployment-isolation.ts"
   },
   "scripts": {
     "clean": "hardhat clean",
