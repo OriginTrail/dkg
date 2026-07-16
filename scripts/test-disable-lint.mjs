@@ -666,20 +666,107 @@ function staticD2ArraySelfTest() {
   return pass;
 }
 
+function opaqueD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-opaque-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, [
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      '      legacyExclusions(),',
+      '',
+      '      // test-disable-allow: D2 #123 -- generated test inventory',
+      '      allowedExclusions(),',
+      '',
+      '',
+      '',
+      '      // test-disable-allow: D1 #124 -- wrong rule cannot allow D2',
+      '      wrongRuleExclusions(),',
+      '',
+      '',
+      '',
+      '      newExclusions(),',
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const diagnostics = cli.stdout.trim().split('\n');
+    const expected = [
+      'vitest.config.ts:12:7: D2 vitest.exclude',
+      'vitest.config.ts:16:7: D2 vitest.exclude',
+    ];
+    const pass = cli.status === 1
+      && JSON.stringify(diagnostics) === JSON.stringify(expected);
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: opaque D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 function selfTest({ report = true } = {}) {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
   const staticD2ArraysPass = staticD2ArraySelfTest();
+  const opaqueD2RatchetPass = opaqueD2RatchetSelfTest();
   if (report) {
     process.stdout.write(
       `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
         + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
         + `audit modes ${auditsPass ? 'pass' : 'FAIL'}, `
-        + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}.\n`,
+        + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}, `
+        + `opaque D2 ratchet ${opaqueD2RatchetPass ? 'pass' : 'FAIL'}.\n`,
     );
   }
-  return movePasses && growthPasses && auditsPass && staticD2ArraysPass ? 0 : 1;
+  return movePasses
+    && growthPasses
+    && auditsPass
+    && staticD2ArraysPass
+    && opaqueD2RatchetPass
+    ? 0
+    : 1;
 }
 
 function validateScanner() {
