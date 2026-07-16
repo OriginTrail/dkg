@@ -303,6 +303,33 @@ describe('insertWithOversizeGuard', () => {
     expect(drops.every(({ seam }) => seam === 'swm-sync:blank-node-component-quarantine')).toBe(true);
   });
 
+  it('quarantines the whole VM graph when one blank-node component is over-bound', async () => {
+    const { drops, hooks } = collect();
+    const validVm = quad(lit(10), VM_GRAPH, 'http://ex.org/valid-vm-metadata');
+    const otherGraph = quad(lit(10), DATA_GRAPH, 'http://ex.org/unrelated');
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-vm-section', VM_GRAPH, 'http://ex.org/vm-doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, VM_GRAPH, '_:huge-vm-section'),
+        predicate: `http://ex.org/vm-detail-${index}`,
+      })),
+    ];
+    const batches: Quad[][] = [];
+
+    await expect(insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      [validVm, ...component, otherGraph],
+      hooks,
+      'vm-sync',
+    )).resolves.toEqual([otherGraph]);
+
+    expect(batches).toEqual([[otherGraph]]);
+    expect(drops).toHaveLength(component.length + 1);
+    expect(drops.every(({ drop }) => drop.kind === 'vm-quarantine')).toBe(true);
+    expect(drops.map(({ drop }) => drop.quad)).toEqual([validVm, ...component]);
+  });
+
   it('rethrows an oversize error the split cannot explain (real store bug, loud failure)', async () => {
     const { hooks } = collect();
     const smallButRejected = quad(lit(10));

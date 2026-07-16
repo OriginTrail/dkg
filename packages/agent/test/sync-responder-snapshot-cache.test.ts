@@ -176,6 +176,35 @@ describe('fresh SWM data graph-plan memo', () => {
     })).resolves.toMatchObject({ totalRows: 2 });
   });
 
+  it('does not inherit an older generation plan failure', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const oldGate = deferred<{ entries: []; totalRows: number }>();
+    const newGate = deferred<{ entries: []; totalRows: number }>();
+    let newLoads = 0;
+
+    const oldRequest = memo.get('peer/cg', () => oldGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const newRequest = memo.get('peer/cg', () => {
+      newLoads += 1;
+      return newGate.promise;
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    await Promise.resolve();
+    expect(newLoads).toBe(0);
+    oldGate.reject(new Error('older plan load failed'));
+    await expect(oldRequest).rejects.toThrow('older plan load failed');
+    await vi.waitFor(() => expect(newLoads).toBe(1));
+
+    const freshPlan = { entries: [] as [], totalRows: 2 };
+    newGate.resolve(freshPlan);
+    await expect(newRequest).resolves.toBe(freshPlan);
+  });
+
   it('coalesces same-generation refreshes after they wait behind an older generation', async () => {
     const memo = createResponderFreshSwmDataGraphPlanMemo();
     const oldGate = deferred<{ entries: []; totalRows: number }>();

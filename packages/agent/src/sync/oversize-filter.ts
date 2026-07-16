@@ -156,34 +156,57 @@ function buildSyncInsertUnits(quads: readonly Quad[]): SyncInsertUnit[] {
  * blank-node identity, so sync deliberately tombstones the complete component
  * and consumes the page instead of throwing before cursor advancement.
  */
-function quarantineOversizedBlankNodeComponents(quads: readonly Quad[]): OversizeFilterResult {
-  const kept: Quad[] = [];
-  const dropped: OversizeDrop[] = [];
-  for (const unit of buildSyncInsertUnits(quads)) {
+interface SyncInsertUnitFilterResult extends OversizeFilterResult {
+  keptUnits: SyncInsertUnit[];
+}
+
+function quarantineOversizedBlankNodeComponents(
+  units: readonly SyncInsertUnit[],
+): SyncInsertUnitFilterResult {
+  const oversizedUnits = new Set<SyncInsertUnit>();
+  const quarantinedVmGraphs = new Set<string>();
+  for (const unit of units) {
     if (
-      unit.blankNodeLabels.size > 0 &&
-      unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
-    ) {
+      unit.blankNodeLabels.size === 0 ||
+      unit.estimatedBytes <= SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) continue;
+    oversizedUnits.add(unit);
+    for (const quad of unit.quads) {
+      if (isVerifiableMemoryGraph(quad.graph)) quarantinedVmGraphs.add(quad.graph!);
+    }
+  }
+
+  const keptUnits: SyncInsertUnit[] = [];
+  const dropped: OversizeDrop[] = [];
+  for (const unit of units) {
+    const touchesQuarantinedVmGraph = unit.quads.some(
+      (quad) => quad.graph !== undefined && quarantinedVmGraphs.has(quad.graph),
+    );
+    if (oversizedUnits.has(unit) || touchesQuarantinedVmGraph) {
       for (const quad of unit.quads) {
         dropped.push({
           quad,
           bytes: estimateSyncStoreInsertQuadBytes(quad),
-          kind: 'blank-node-component-quarantine',
+          kind: touchesQuarantinedVmGraph
+            ? 'vm-quarantine'
+            : 'blank-node-component-quarantine',
         });
       }
     } else {
-      kept.push(...unit.quads);
+      keptUnits.push(unit);
     }
   }
-  return { kept, dropped };
+  return {
+    keptUnits,
+    kept: keptUnits.flatMap((unit) => unit.quads),
+    dropped,
+  };
 }
 
 async function insertInBoundedBatches(
   insert: (quads: Quad[]) => Promise<void>,
-  quads: readonly Quad[],
+  units: readonly SyncInsertUnit[],
 ): Promise<void> {
-  const units = buildSyncInsertUnits(quads);
-
   let batch: Quad[] = [];
   let batchBytes = 0;
   for (const unit of units) {
@@ -329,13 +352,15 @@ export async function insertWithOversizeGuard(
 ): Promise<Quad[]> {
   const literalFilter = filterOversizedSyncQuads(quads);
   if (literalFilter.dropped.length > 0) hooks.recordDrops(literalFilter.dropped, seam);
-  const componentFilter = quarantineOversizedBlankNodeComponents(literalFilter.kept);
+  const componentFilter = quarantineOversizedBlankNodeComponents(
+    buildSyncInsertUnits(literalFilter.kept),
+  );
   if (componentFilter.dropped.length > 0) {
     hooks.recordDrops(componentFilter.dropped, `${seam}:blank-node-component-quarantine`);
   }
   if (componentFilter.kept.length === 0) return componentFilter.kept;
   try {
-    await insertInBoundedBatches(insert, componentFilter.kept);
+    await insertInBoundedBatches(insert, componentFilter.keptUnits);
     return componentFilter.kept;
   } catch (err) {
     if (!isOversizedRdfLiteralError(err)) throw err;
@@ -344,7 +369,7 @@ export async function insertWithOversizeGuard(
     hooks.recordDrops(backstop.dropped, `${seam}:store-reject`);
     if (backstop.kept.length === 0) return [];
     // Second oversize throw here propagates — no loop, loud failure.
-    await insertInBoundedBatches(insert, backstop.kept);
+    await insertInBoundedBatches(insert, buildSyncInsertUnits(backstop.kept));
     return backstop.kept;
   }
 }
