@@ -25,6 +25,7 @@ import {
   filterOversizedSyncQuads,
   insertWithOversizeGuard,
   splitStoreRejectedQuads,
+  SyncInsertBlankNodeComponentTooLargeError,
   SYNC_STORE_INSERT_BATCH_MAX_BYTES,
   type OversizeDrop,
 } from '../src/sync/oversize-filter.js';
@@ -194,6 +195,70 @@ describe('insertWithOversizeGuard', () => {
       const bytes = batch.reduce((sum, q) => sum + estimateSyncStoreInsertQuadBytes(q), 0);
       expect(bytes).toBeLessThanOrEqual(SYNC_STORE_INSERT_BATCH_MAX_BYTES);
     }
+  });
+
+  it('keeps connected blank-node components within one bounded insert call', async () => {
+    const { hooks } = collect();
+    const detail = lit(50_000);
+    const componentA = [
+      quad('_:section-a', SWM_GRAPH, 'http://ex.org/doc-a'),
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:section-a'),
+        predicate: `http://ex.org/a-${index}`,
+      })),
+    ];
+    const componentB = [
+      quad('_:section-b', SWM_GRAPH, 'http://ex.org/doc-b'),
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:section-b'),
+        predicate: `http://ex.org/b-${index}`,
+      })),
+    ];
+    const input = componentA.flatMap((quadA, index) => (
+      index < componentB.length ? [quadA, componentB[index]!] : [quadA]
+    ));
+    const batches: Quad[][] = [];
+
+    await insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      input,
+      hooks,
+      'swm-sync',
+    );
+
+    expect(batches).toHaveLength(2);
+    for (const label of ['_:section-a', '_:section-b']) {
+      const containingBatches = batches.filter((batch) => batch.some(
+        (q) => q.subject === label || q.object === label || q.graph === label,
+      ));
+      expect(containingBatches).toHaveLength(1);
+    }
+    for (const batch of batches) {
+      const bytes = batch.reduce((sum, q) => sum + estimateSyncStoreInsertQuadBytes(q), 0);
+      expect(bytes).toBeLessThanOrEqual(SYNC_STORE_INSERT_BATCH_MAX_BYTES);
+    }
+  });
+
+  it('rejects an over-bound blank-node component before any insert mutation', async () => {
+    const { hooks } = collect();
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-section', SWM_GRAPH, 'http://ex.org/doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:huge-section'),
+        predicate: `http://ex.org/detail-${index}`,
+      })),
+    ];
+    const batches: Quad[][] = [];
+
+    await expect(insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      component,
+      hooks,
+      'swm-sync',
+    )).rejects.toBeInstanceOf(SyncInsertBlankNodeComponentTooLargeError);
+
+    expect(batches).toEqual([]);
   });
 
   it('rethrows an oversize error the split cannot explain (real store bug, loud failure)', async () => {

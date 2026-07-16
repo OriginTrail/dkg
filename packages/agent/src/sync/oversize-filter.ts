@@ -84,6 +84,21 @@ export const SYNC_STORE_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
 
 const SYNC_STORE_INSERT_QUAD_SYNTAX_BYTES = 256;
 
+export class SyncInsertBlankNodeComponentTooLargeError extends Error {
+  constructor(
+    public readonly estimatedBytes: number,
+    public readonly maxBytes: number,
+    public readonly quadCount: number,
+    public readonly blankNodeCount: number,
+  ) {
+    super(
+      `Sync insert blank-node component is too large: estimated ${estimatedBytes} bytes ` +
+      `across ${quadCount} quads and ${blankNodeCount} blank nodes (max ${maxBytes} bytes)`,
+    );
+    this.name = 'SyncInsertBlankNodeComponentTooLargeError';
+  }
+}
+
 /**
  * Conservative cross-adapter serialized-size estimate. Generic SPARQL and
  * Oxigraph use UTF-8; Blazegraph ASCII-escapes non-ASCII code points, so use
@@ -116,21 +131,134 @@ export function estimateSyncStoreInsertQuadBytes(quad: Quad): number {
   return bytes;
 }
 
+function quadBlankNodeLabels(quad: Quad): string[] {
+  const labels = new Set<string>();
+  for (const term of [quad.subject, quad.object, quad.graph]) {
+    if (term?.startsWith('_:')) labels.add(term);
+  }
+  return [...labels];
+}
+
+interface SyncInsertUnit {
+  quads: Quad[];
+  estimatedBytes: number;
+  firstIndex: number;
+  blankNodeLabels: Set<string>;
+}
+
+/**
+ * Turn a quad stream into indivisible insert units. Ground quads remain
+ * independent, while quads connected through blank-node labels are grouped
+ * transitively. Blank-node labels are scoped to one RDF load/update operation,
+ * so splitting one component across insert calls changes the represented RDF
+ * graph even when the same label text appears in both calls.
+ */
+function buildSyncInsertUnits(quads: readonly Quad[]): SyncInsertUnit[] {
+  const parents = quads.map((_, index) => index);
+  const ranks = quads.map(() => 0);
+  const labelsByQuad = quads.map(quadBlankNodeLabels);
+  const firstQuadByLabel = new Map<string, number>();
+
+  const find = (index: number): number => {
+    let root = index;
+    while (parents[root] !== root) root = parents[root]!;
+    while (parents[index] !== index) {
+      const next = parents[index]!;
+      parents[index] = root;
+      index = next;
+    }
+    return root;
+  };
+
+  const union = (left: number, right: number): void => {
+    let leftRoot = find(left);
+    let rightRoot = find(right);
+    if (leftRoot === rightRoot) return;
+    if (ranks[leftRoot]! < ranks[rightRoot]!) [leftRoot, rightRoot] = [rightRoot, leftRoot];
+    parents[rightRoot] = leftRoot;
+    if (ranks[leftRoot] === ranks[rightRoot]) ranks[leftRoot]! += 1;
+  };
+
+  for (let index = 0; index < quads.length; index += 1) {
+    for (const label of labelsByQuad[index]!) {
+      const firstIndex = firstQuadByLabel.get(label);
+      if (firstIndex === undefined) firstQuadByLabel.set(label, index);
+      else union(index, firstIndex);
+    }
+  }
+
+  const componentUnits = new Map<number, SyncInsertUnit>();
+  const units: SyncInsertUnit[] = [];
+  for (let index = 0; index < quads.length; index += 1) {
+    const quad = quads[index]!;
+    const labels = labelsByQuad[index]!;
+    const estimatedBytes = estimateSyncStoreInsertQuadBytes(quad);
+    if (labels.length === 0) {
+      units.push({
+        quads: [quad],
+        estimatedBytes,
+        firstIndex: index,
+        blankNodeLabels: new Set(),
+      });
+      continue;
+    }
+
+    const root = find(index);
+    let unit = componentUnits.get(root);
+    if (!unit) {
+      unit = {
+        quads: [],
+        estimatedBytes: 0,
+        firstIndex: index,
+        blankNodeLabels: new Set(),
+      };
+      componentUnits.set(root, unit);
+      units.push(unit);
+    }
+    unit.quads.push(quad);
+    unit.estimatedBytes += estimatedBytes;
+    for (const label of labels) unit.blankNodeLabels.add(label);
+  }
+
+  return units.sort((left, right) => left.firstIndex - right.firstIndex);
+}
+
 async function insertInBoundedBatches(
   insert: (quads: Quad[]) => Promise<void>,
   quads: readonly Quad[],
 ): Promise<void> {
+  const units = buildSyncInsertUnits(quads);
+
+  // Validate every indivisible blank-node component before the first durable
+  // mutation. A too-large component cannot be split safely, and inserting
+  // earlier units before rejecting it would leave a needless partial apply.
+  for (const unit of units) {
+    if (
+      unit.blankNodeLabels.size > 0 &&
+      unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) {
+      throw new SyncInsertBlankNodeComponentTooLargeError(
+        unit.estimatedBytes,
+        SYNC_STORE_INSERT_BATCH_MAX_BYTES,
+        unit.quads.length,
+        unit.blankNodeLabels.size,
+      );
+    }
+  }
+
   let batch: Quad[] = [];
   let batchBytes = 0;
-  for (const quad of quads) {
-    const quadBytes = estimateSyncStoreInsertQuadBytes(quad);
-    if (batch.length > 0 && batchBytes + quadBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES) {
+  for (const unit of units) {
+    if (
+      batch.length > 0 &&
+      batchBytes + unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) {
       await insert(batch);
       batch = [];
       batchBytes = 0;
     }
-    batch.push(quad);
-    batchBytes += quadBytes;
+    batch.push(...unit.quads);
+    batchBytes += unit.estimatedBytes;
   }
   if (batch.length > 0) await insert(batch);
 }
