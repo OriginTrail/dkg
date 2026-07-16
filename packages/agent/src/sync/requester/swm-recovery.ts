@@ -136,6 +136,7 @@ export interface RecoverContextGraphSwmResult {
 }
 
 export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
+export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
 
 /**
  * Repeat an authoritative private-SWM recovery while its immutable snapshot
@@ -147,8 +148,13 @@ export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
  * same catch-up job without weakening the all-or-nothing graph apply gate.
  *
  * One no-progress retry is allowed for a transient transport failure. Two
- * consecutive results with the same ready count stop the driver, and the hard
- * round cap prevents an arbitrarily large CG from monopolising a worker.
+ * consecutive results with the same ready count stop the driver. For the
+ * default policy, the first verified metadata response expands the six-round
+ * floor to at most one round per declared immutable snapshot plus a two-round
+ * transport cushion, bounded by an absolute ceiling. That lets a finite CG
+ * finish when a lossy relay yields only one new verified snapshot per round,
+ * without allowing an arbitrarily large CG to monopolise a worker. An explicit
+ * `maxRounds` remains authoritative for callers and tests.
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly recover: () => Promise<RecoverContextGraphSwmResult>;
@@ -159,10 +165,10 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     readonly totalSnapshots: number;
   }) => void;
 }): Promise<RecoverContextGraphSwmResult> {
-  const maxRounds = Math.max(
-    1,
-    Math.floor(params.maxRounds ?? DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS),
-  );
+  const explicitMaxRounds = params.maxRounds === undefined
+    ? undefined
+    : Math.max(1, Math.floor(params.maxRounds));
+  let maxRounds = explicitMaxRounds ?? DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS;
   let previousReadySnapshots = -1;
   let consecutiveNoProgressRounds = 0;
   let result: RecoverContextGraphSwmResult | undefined;
@@ -170,6 +176,13 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
   for (let round = 1; round <= maxRounds; round += 1) {
     result = await params.recover();
     if (result.completed) return result;
+
+    if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
+      maxRounds = Math.min(
+        ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS,
+        Math.max(maxRounds, result.totalSnapshots + 2),
+      );
+    }
 
     const madeProgress = result.readySnapshots > previousReadySnapshots;
     consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;

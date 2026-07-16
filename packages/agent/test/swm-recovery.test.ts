@@ -114,6 +114,32 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     expect(retries).toEqual(['1:5/20', '2:5/20', '3:10/20']);
   });
 
+  it('extends the default cap while declared snapshots keep making progress', async () => {
+    let calls = 0;
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => {
+        calls += 1;
+        return recoveryResult(calls, 20, calls === 20);
+      },
+    });
+
+    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
+    expect(calls).toBe(20);
+  });
+
+  it('keeps snapshot-aware progress retries under an absolute ceiling', async () => {
+    let calls = 0;
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => {
+        calls += 1;
+        return recoveryResult(calls, 100);
+      },
+    });
+
+    expect(result).toMatchObject({ completed: false, readySnapshots: 24, totalSnapshots: 100 });
+    expect(calls).toBe(24);
+  });
+
   it('honours the hard recovery-round cap while progress continues', async () => {
     let calls = 0;
     const result = await recoverContextGraphSwmWithProgressRetries({
