@@ -146,9 +146,9 @@ export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
  * reconnect/reconciler tick. This bounded driver consumes that progress in the
  * same catch-up job without weakening the all-or-nothing graph apply gate.
  *
- * One no-progress retry is allowed for a transient first-round transport
- * failure. A second result with the same ready count stops immediately, and the
- * hard round cap prevents an arbitrarily large CG from monopolising a worker.
+ * One no-progress retry is allowed for a transient transport failure. Two
+ * consecutive results with the same ready count stop the driver, and the hard
+ * round cap prevents an arbitrarily large CG from monopolising a worker.
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly recover: () => Promise<RecoverContextGraphSwmResult>;
@@ -164,6 +164,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     Math.floor(params.maxRounds ?? DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS),
   );
   let previousReadySnapshots = -1;
+  let consecutiveNoProgressRounds = 0;
   let result: RecoverContextGraphSwmResult | undefined;
 
   for (let round = 1; round <= maxRounds; round += 1) {
@@ -171,7 +172,8 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     if (result.completed) return result;
 
     const madeProgress = result.readySnapshots > previousReadySnapshots;
-    if (round >= maxRounds || !madeProgress) return result;
+    consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;
+    if (round >= maxRounds || consecutiveNoProgressRounds >= 2) return result;
 
     previousReadySnapshots = result.readySnapshots;
     params.onRetry?.({

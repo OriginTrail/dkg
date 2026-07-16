@@ -88,7 +88,29 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     });
 
     expect(result.completed).toBe(false);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
+  });
+
+  it('continues after one flat transport window when snapshot progress resumes', async () => {
+    const outcomes = [
+      recoveryResult(5, 20),
+      recoveryResult(5, 20),
+      recoveryResult(10, 20),
+      recoveryResult(20, 20, true),
+    ];
+    const retries: string[] = [];
+    let calls = 0;
+
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => outcomes[calls++]!,
+      onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+        retries.push(`${completedRound}:${readySnapshots}/${totalSnapshots}`);
+      },
+    });
+
+    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
+    expect(calls).toBe(4);
+    expect(retries).toEqual(['1:5/20', '2:5/20', '3:10/20']);
   });
 
   it('honours the hard recovery-round cap while progress continues', async () => {
