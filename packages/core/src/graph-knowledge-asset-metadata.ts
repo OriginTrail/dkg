@@ -224,9 +224,9 @@ export function buildGraphKnowledgeAssetMetadataQuery(ual: string): string {
       FILTER EXISTS {
         <${safeUal}> <${METADATA_PREDICATES.scopeVersion}> ?_scopeMarker .
       }
-      <${safeUal}> <${METADATA_PREDICATES.contextGraph}> ?_contextGraph .
     }
-    FILTER(STR(?g) = CONCAT(STR(?_contextGraph), "/_meta"))
+    FILTER(STRENDS(STR(?g), "/_meta"))
+    BIND(IRI(SUBSTR(STR(?g), 1, STRLEN(STR(?g)) - 6)) AS ?_contextGraph)
     ${buildTrustedRootContextGraphRegistrationFilter('?_contextGraph', '?g')}
   }`;
 }

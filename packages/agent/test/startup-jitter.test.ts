@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deterministicStartupJitterMs,
   resolveVmReconcileStartupMaxDelayMs,
+  scheduleAfterStartupJitter,
 } from '../src/startup-jitter.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('deterministicStartupJitterMs', () => {
   it('is stable, bounded, and separates a four-peer cold rollout', () => {
@@ -16,6 +21,32 @@ describe('deterministicStartupJitterMs', () => {
     expect(first.every((delay) => delay >= 0 && delay <= max)).toBe(true);
     expect(new Set(first).size).toBe(4);
     expect(deterministicStartupJitterMs('peer-a', 0)).toBe(0);
+  });
+
+  it('does not arm a shorter recurring interval before startup jitter expires', () => {
+    vi.useFakeTimers();
+    const runs: number[] = [];
+    let intervalTimer: ReturnType<typeof setInterval> | null = null;
+    const startupTimer = scheduleAfterStartupJitter(
+      () => { runs.push(Date.now()); },
+      23_000,
+      5_000,
+      (timer) => { intervalTimer = timer; },
+    );
+
+    vi.advanceTimersByTime(22_999);
+    expect(runs).toEqual([]);
+    expect(intervalTimer).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(runs).toHaveLength(1);
+    expect(intervalTimer).not.toBeNull();
+    vi.advanceTimersByTime(4_999);
+    expect(runs).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(runs).toHaveLength(2);
+
+    clearTimeout(startupTimer);
+    if (intervalTimer) clearInterval(intervalTimer);
   });
 });
 

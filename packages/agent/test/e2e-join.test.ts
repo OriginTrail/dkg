@@ -15,10 +15,13 @@
  * (`joiner.connectTo(curator multiaddr)`), shared EVMChainAdapter.
  */
 import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
-import { contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import {
   decodeReliableEnvelope,
   DKGEvent,
@@ -74,14 +77,19 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
   let rejectedAddr: string;
   let retryAddr: string;
   let preapprovedAddr: string;
+  const tempDirs: string[] = [];
   const joinerPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
 
   afterAll(async () => {
     try { await curator?.stop(); } catch { /* ignore */ }
     try { await joiner?.stop(); } catch { /* ignore */ }
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
   it('boots two real agents, connects them over libp2p, and registers the requesting agents', async () => {
+    const curatorDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-curator-'));
+    const joinerDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-join-joiner-'));
+    tempDirs.push(curatorDataDir, joinerDataDir);
     curator = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'Curator',
@@ -89,6 +97,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       skills: [],
       chainAdapter: sharedChain,
       nodeRole: 'core',
+      dataDir: curatorDataDir,
     });
     joiner = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -97,6 +106,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       skills: [],
       chainAdapter: sharedChain,
       nodeRole: 'edge',
+      dataDir: joinerDataDir,
       contextGraphSubscriptionStore: {
         loadAll: async () => [...joinerPersistedSubscriptions.values()],
         save: async (record) => { joinerPersistedSubscriptions.set(record.id, { ...record }); },
@@ -105,6 +115,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     });
 
     await curator.start();
+    await installHardhatACKProvider(curator, sharedChain);
     await joiner.start();
     await sleep(800);
 
@@ -133,6 +144,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
 
   it('the curator owns a CURATED context graph (join-gated)', async () => {
     await curator.createContextGraph({ id: CG, name: 'Curated Join E2E', description: '', accessPolicy: 1 });
+    await curator.registerContextGraph(CG);
     expect(await curator.isCuratorOf(CG), 'curator should curate the CG').toBe(true);
     // The joiner is NOT the curator → its join requests must go over the wire.
     expect(await joiner.isCuratorOf(CG)).toBe(false);
@@ -140,13 +152,21 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
 
   it('add-agent stays passive until request-join, then already-member approval catches up in the same cycle', async () => {
     const subject = 'urn:dkg:e2e-join:preapproved-catchup';
-    await curator.inviteAgentToContextGraph(CG, preapprovedAddr);
-    await curator.store.insert([{
+    // Seed a valid graph-scoped SWM asset. A raw triple in the legacy CG data
+    // bucket is intentionally rejected by durable sync because it has no
+    // Merkle-bound V2 descriptor. Create it before adding the remote member:
+    // until that member's join delegation arrives, the curator does not yet
+    // have its verified workspace encryption key.
+    await curator.assertion.create(CG, 'preapproved-catchup');
+    await curator.assertion.write(CG, 'preapproved-catchup', [{
       subject,
       predicate: 'http://schema.org/name',
       object: '"Preapproved Catchup"',
-      graph: contextGraphDataGraphUri(CG),
     }]);
+    await curator.assertion.promote(CG, 'preapproved-catchup');
+    const published = await curator.publishFromFinalizedAssertion(CG, 'preapproved-catchup');
+    expect(published.status).toBe('confirmed');
+    await curator.inviteAgentToContextGraph(CG, preapprovedAddr);
 
     // add-agent grants authorization on the curator. It is not local join
     // intent on the edge and must not install any subscription machinery.
@@ -166,16 +186,13 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
 
     const caughtUp = await pollUntil(
       async () => {
-        const data = await joiner.store.query(`
-          ASK WHERE {
-            GRAPH <${contextGraphDataGraphUri(CG)}> {
-              <${subject}> <http://schema.org/name> "Preapproved Catchup" .
-            }
-          }
-        `);
+        const data = await joiner.query(
+          `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`,
+          CG,
+        );
         return {
           subscribed: joiner.getSubscribedContextGraphs().get(CG)?.subscribed === true,
-          hasData: data.type === 'boolean' && data.value,
+          hasData: data.bindings.length > 0,
         };
       },
       (state) => state.subscribed && state.hasData,

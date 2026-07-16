@@ -31,6 +31,7 @@ const EXTENSION_FIXTURE = join(EXTENSION_FIXTURE_DIR, 'dist', 'index.js');
 const KAFKA_PLUGIN_PACKAGE_DIR = resolvePath(__dirname, '..');
 const KAFKA_PLUGIN_ENTRYPOINT = join(KAFKA_PLUGIN_PACKAGE_DIR, 'dist', 'index.js');
 const CORE_OP_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+const REC1_OP_ADDRESS = '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
 interface Daemon {
   home: string;
   apiPort: number;
@@ -103,8 +104,11 @@ async function copyFixtureWithoutDist(sourceDir: string): Promise<FixtureEntrypo
   return { tempRoot: packageDir, packageDir, entrypoint: join(packageDir, 'dist', 'index.js') };
 }
 interface DaemonOpts {
-  pluginPath: string;
-  cgId: string;
+  pluginPath?: string;
+  cgId?: string;
+  nodeRole?: 'core' | 'edge';
+  bootstrapPeers?: string[];
+  wallet?: { address: string; privateKey: string };
 }
 async function writeDaemonConfig(
   home: string,
@@ -113,15 +117,17 @@ async function writeDaemonConfig(
   opts: DaemonOpts,
 ): Promise<void> {
   const { rpcUrl, hubAddress } = getSharedContext();
+  const wallet = opts.wallet ?? { address: CORE_OP_ADDRESS, privateKey: HARDHAT_KEYS.CORE_OP };
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
-      name: 'kafka-plugin-e2e',
+      name: opts.pluginPath ? 'kafka-plugin-e2e' : 'kafka-plugin-ack-core-e2e',
       apiPort,
       listenPort,
       apiHost: '127.0.0.1',
-      nodeRole: 'edge',
+      nodeRole: opts.nodeRole ?? 'edge',
       relay: 'none',
+      ...(opts.bootstrapPeers?.length ? { bootstrapPeers: opts.bootstrapPeers } : {}),
       auth: { enabled: true },
       store: {
         backend: 'oxigraph-worker',
@@ -134,26 +140,28 @@ async function writeDaemonConfig(
         chainId: 'evm:31337',
       },
       contextGraphs: [],
-      publisher: { enabled: true },
+      publisher: { enabled: Boolean(opts.pluginPath) },
       sharedMemoryPublicSnapshotStorage: { enabled: false },
-      kafka: { contextGraphId: opts.cgId },
-      routePlugins: [opts.pluginPath],
+      ...(opts.cgId ? { kafka: { contextGraphId: opts.cgId } } : {}),
+      routePlugins: opts.pluginPath ? [opts.pluginPath] : [],
     }),
   );
   const walletEntry = JSON.stringify({
-    wallets: [{ address: CORE_OP_ADDRESS, privateKey: HARDHAT_KEYS.CORE_OP }],
+    wallets: [wallet],
   }, null, 2) + '\n';
   await writeFile(join(home, 'wallets.json'), walletEntry, { mode: 0o600 });
   await writeFile(join(home, 'publisher-wallets.json'), walletEntry, { mode: 0o600 });
 }
 async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
-  await ensureKafkaPluginFixtures();
+  if (opts.pluginPath) await ensureKafkaPluginFixtures();
   if (!existsSync(CLI_ENTRY)) {
     throw new Error(
       `CLI not built at ${CLI_ENTRY}. Run \`pnpm --filter @origintrail-official/dkg build\` first.`,
     );
   }
-  await ensureFixtureEntrypoint(dirname(dirname(opts.pluginPath)), opts.pluginPath);
+  if (opts.pluginPath) {
+    await ensureFixtureEntrypoint(dirname(dirname(opts.pluginPath)), opts.pluginPath);
+  }
   const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-plugin-e2e-'));
   const apiPort = uniquePort(API_PORT_BASE);
   const listenPort = uniquePort(LISTEN_PORT_BASE);
@@ -206,21 +214,23 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
     const token = raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#'));
     if (!token) throw new Error('No auth token found in auth.token');
     daemon.token = token;
-    let lastPublisherProbe = '';
-    for (let i = 0; i < 40; i++) {
-      const probe = await fetch(`http://127.0.0.1:${apiPort}/api/kafka/streams/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: '{}',
-      });
-      if (probe.status !== 503) break;
-      lastPublisherProbe = await probe.text().catch(() => '<could not read publisher readiness probe body>');
-      await sleep(500);
-      if (i === 39) {
-        throw new Error(
-          `Publisher runtime did not become ready within 20s (last probe=${lastPublisherProbe}).\n` +
-          `--- daemon stdio tail ---\n${await tail()}`,
-        );
+    if (opts.pluginPath) {
+      let lastPublisherProbe = '';
+      for (let i = 0; i < 40; i++) {
+        const probe = await fetch(`http://127.0.0.1:${apiPort}/api/kafka/streams/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: '{}',
+        });
+        if (probe.status !== 503) break;
+        lastPublisherProbe = await probe.text().catch(() => '<could not read publisher readiness probe body>');
+        await sleep(500);
+        if (i === 39) {
+          throw new Error(
+            `Publisher runtime did not become ready within 20s (last probe=${lastPublisherProbe}).\n` +
+            `--- daemon stdio tail ---\n${await tail()}`,
+          );
+        }
       }
     }
     return daemon;
@@ -235,6 +245,60 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
     }
     await logHandle.close().catch(() => {});
     await rm(home, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+}
+async function daemonStatus(d: Daemon): Promise<any> {
+  const res = await authed(d, 'GET', '/api/status');
+  if (!res.ok) throw new Error(`GET /api/status failed: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+async function daemonBootstrapAddress(d: Daemon): Promise<{ address: string; peerId: string }> {
+  const status = await daemonStatus(d);
+  const peerId = String(status.peerId ?? '');
+  const multiaddrs = Array.isArray(status.multiaddrs) ? status.multiaddrs.map(String) : [];
+  const raw = multiaddrs.find((address: string) =>
+    address.includes('/tcp/') && !address.includes('/p2p-circuit'),
+  );
+  if (!peerId || !raw) {
+    throw new Error(`Core daemon has no dialable address: ${JSON.stringify({ peerId, multiaddrs })}`);
+  }
+  return {
+    peerId,
+    address: raw.includes('/p2p/') ? raw : `${raw}/p2p/${peerId}`,
+  };
+}
+async function waitForConnectedPeer(d: Daemon, peerId: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: any = null;
+  while (Date.now() < deadline) {
+    last = await daemonStatus(d);
+    const connections = Array.isArray(last.connections) ? last.connections : [];
+    if (connections.some((connection: any) => connection?.peerId === peerId)) return;
+    if (Number(last.connectedPeers ?? 0) > 0) return;
+    await sleep(250);
+  }
+  throw new Error(`Daemon did not connect to ACK core ${peerId} within ${timeoutMs}ms (status=${JSON.stringify(last)})`);
+}
+async function startLiveKafkaTopology(pluginPath: string, cgId: string): Promise<{
+  core: Daemon;
+  edge: Daemon;
+}> {
+  const core = await startDaemon({
+    nodeRole: 'core',
+    wallet: { address: REC1_OP_ADDRESS, privateKey: HARDHAT_KEYS.REC1_OP },
+  });
+  try {
+    const bootstrap = await daemonBootstrapAddress(core);
+    const edge = await startDaemon({
+      pluginPath,
+      cgId,
+      bootstrapPeers: [bootstrap.address],
+    });
+    await waitForConnectedPeer(edge, bootstrap.peerId);
+    return { core, edge };
+  } catch (err) {
+    await stopDaemon(core);
     throw err;
   }
 }
@@ -263,14 +327,10 @@ async function authed(
   return fetch(`http://127.0.0.1:${d.apiPort}${path}`, init);
 }
 async function createContextGraph(d: Daemon, cgId: string): Promise<void> {
-  // GH #1013 — the e2e CG is deliberately LOCAL-ONLY (no on-chain
-  // registration). The kafka plugin registers streams as fully-PRIVATE KAs
-  // (`{ private: ka }`), and this harness is a single isolated daemon: a
-  // chain-registered CG can never collect the private-payload storage ACKs
-  // quorum here, so the async publish now fails HONESTLY (the old run only
-  // reached `finalized` through the fake local-finalization #1013 removed).
-  // A chainless CG finalizes locally as a legitimate, honest terminal state,
-  // which keeps this suite covering the full register→list→get pipeline.
+  // Start with a local CG; the publish path may register it on-chain when the
+  // VM job is processed. The separate staked core in startLiveKafkaTopology
+  // supplies the real storage ACK, so this suite cannot pass through the old
+  // fake same-node finalization path.
   const res = await authed(d, 'POST', '/api/context-graph/create', {
     id: cgId,
     name: cgId,
@@ -363,15 +423,20 @@ describe('pollUntilFinalized', () => {
   });
 });
 describe('kafka-plugin live daemon E2E — bare baseline', () => {
+  let core: Daemon | null = null;
   let daemon: Daemon | null = null;
   let bareUal: string | null = null;
   beforeAll(async () => {
-    daemon = await startDaemon({ pluginPath: BARE_FIXTURE, cgId: BARE_CG });
+    const topology = await startLiveKafkaTopology(BARE_FIXTURE, BARE_CG);
+    core = topology.core;
+    daemon = topology.edge;
     await createContextGraph(daemon, BARE_CG);
-  }, 90_000);
+  }, 120_000);
   afterAll(async () => {
     await stopDaemon(daemon);
+    await stopDaemon(core);
     daemon = null;
+    core = null;
   }, 20_000);
   it('POST /api/kafka/streams/register accepts a stream registration with 202 + captureID', async () => {
     const res = await authed(daemon!, 'POST', '/api/kafka/streams/register', BARE_BODY);
@@ -443,14 +508,19 @@ describe('kafka-plugin live daemon E2E — bare baseline', () => {
   });
 });
 describe('kafka-plugin live daemon E2E — extension', () => {
+  let core: Daemon | null = null;
   let daemon: Daemon | null = null;
   beforeAll(async () => {
-    daemon = await startDaemon({ pluginPath: EXTENSION_FIXTURE, cgId: EXT_CG });
+    const topology = await startLiveKafkaTopology(EXTENSION_FIXTURE, EXT_CG);
+    core = topology.core;
+    daemon = topology.edge;
     await createContextGraph(daemon, EXT_CG);
-  }, 90_000);
+  }, 120_000);
   afterAll(async () => {
     await stopDaemon(daemon);
+    await stopDaemon(core);
     daemon = null;
+    core = null;
   }, 20_000);
   it('POST with extension fields publishes a KA carrying both core + extension keys', async () => {
     const res = await authed(daemon!, 'POST', '/api/kafka/streams/register', EXT_BODY);

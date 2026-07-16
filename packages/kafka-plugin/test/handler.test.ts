@@ -91,8 +91,13 @@ describe('handler — POST /register happy path', () => {
     const [cgId, content] = publishAsync.mock.calls[0];
     expect(cgId).toBe('urn:cg:demo');
     expect(content).toHaveProperty('private');
+    expect(content).toHaveProperty('public');
     expect(content.private['@type']).toBe('dkg-streams:KafkaStream');
-    expect(content).not.toHaveProperty('public');
+    expect(content.private['@id']).toMatch(/^urn:dkg:kafka-stream:/);
+    expect(content.public).toMatchObject({
+      '@id': content.private['@id'],
+      'dkg:privateDataAnchor': 'true',
+    });
     expect(captured.body).toMatchObject({
       captureID: 'cap-123',
       contextGraphId: 'urn:cg:demo',
@@ -367,6 +372,18 @@ describe('handler — unmatched routes', () => {
   });
 });
 describe('handler — GET / (list)', () => {
+  const samplePageBindings = [
+    {
+      ual: 'did:dkg:1/0xaaa',
+      root: 'urn:entity:aaa',
+      contentGraph: 'did:dkg:context-graph:urn:cg:demo/_private/0xaaa/1/assertions/1',
+    },
+    {
+      ual: 'did:dkg:1/0xbbb',
+      root: 'urn:entity:bbb',
+      contentGraph: 'did:dkg:context-graph:urn:cg:demo/_private/0xbbb/2/assertions/1',
+    },
+  ];
   const sampleListBindings = [
     { ual: 'did:dkg:1/0xaaa', root: 'urn:entity:aaa', p: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', o: 'https://ontology.dkg.io/streams#KafkaStream' },
     { ual: 'did:dkg:1/0xaaa', root: 'urn:entity:aaa', p: 'https://schema.org/name', o: '"stream-a"' },
@@ -381,6 +398,7 @@ describe('handler — GET / (list)', () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams');
     const { ctx, query } = mockCtx();
     query.mockResolvedValueOnce({ bindings: [{ count: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] });
+    query.mockResolvedValueOnce({ bindings: samplePageBindings });
     query.mockResolvedValueOnce({ bindings: sampleListBindings });
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
     await handler({ ...ctx, req, res, path: '/api/kafka/streams' });
@@ -399,6 +417,8 @@ describe('handler — GET / (list)', () => {
       'dkg-streams:kafkaBootstrapUrl': 'kafka://a:9092',
       'dkg-streams:kafkaTopicName': 'topic-a',
     });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2][0]).toContain('VALUES (?ual ?root ?contentGraph)');
   });
   it('scopes both queries to the configured contextGraphId', async () => {
     const { req, res } = mockReqRes('GET', '/api/kafka/streams');
@@ -426,7 +446,9 @@ describe('handler — GET / (list)', () => {
     });
     for (const call of query.mock.calls) {
       expect(call[0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
-      expect(call[0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo>');
+      expect(call[0]).toContain(
+        '(<did:dkg:context-graph:urn:cg:demo> <did:dkg:context-graph:urn:cg:demo>',
+      );
     }
   });
   it('uses root meta and publishOptions.subGraphName data graph URIs for discovery queries', async () => {
@@ -443,7 +465,9 @@ describe('handler — GET / (list)', () => {
     expect(query).toHaveBeenCalledTimes(2);
     for (const call of query.mock.calls) {
       expect(call[0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
-      expect(call[0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/streams>');
+      expect(call[0]).toContain(
+        '(<did:dkg:context-graph:urn:cg:demo/streams> <did:dkg:context-graph:urn:cg:demo/streams>',
+      );
       expect(call[0]).not.toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/streams/_meta>');
     }
   });
@@ -546,7 +570,9 @@ describe('handler — GET /:ual (single)', () => {
     });
     expect(query.mock.calls[0][0]).toContain('<did:dkg:1/0xabc>');
     expect(query.mock.calls[0][0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
-    expect(query.mock.calls[0][0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo>');
+    expect(query.mock.calls[0][0]).toContain(
+      '(<did:dkg:context-graph:urn:cg:demo> <did:dkg:context-graph:urn:cg:demo>',
+    );
   });
   it('uses root meta and publishOptions.subGraphName data graph URIs for single-UAL discovery', async () => {
     const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/did:dkg:1/0xabc');
@@ -570,7 +596,9 @@ describe('handler — GET /:ual (single)', () => {
     });
     expect(captured.statusCode).toBe(200);
     expect(query.mock.calls[0][0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/_meta>');
-    expect(query.mock.calls[0][0]).toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/streams>');
+    expect(query.mock.calls[0][0]).toContain(
+      '(<did:dkg:context-graph:urn:cg:demo/streams> <did:dkg:context-graph:urn:cg:demo/streams>',
+    );
     expect(query.mock.calls[0][0]).not.toContain('GRAPH <did:dkg:context-graph:urn:cg:demo/streams/_meta>');
   });
   it('returns 404 StreamNotFound when no bindings are returned for the UAL', async () => {
@@ -635,7 +663,7 @@ describe('handler — discovery query failures', () => {
   ])('returns 503 QueryFailed when %s query rejects', async (_label, path) => {
     const { req, res, captured } = mockReqRes('GET', path);
     const { ctx, query } = mockCtx();
-    query.mockRejectedValueOnce(new Error('query backend down'));
+    query.mockRejectedValue(new Error('query backend down'));
     const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' });
     await handler({ ...ctx, req, res, path });
     expect(captured.statusCode).toBe(503);
@@ -652,10 +680,13 @@ describe('handler — register-to-discovery regression', () => {
     expect(captured.statusCode).toBe(202);
     const [, content] = publishAsync.mock.calls[0];
     expect(content).toHaveProperty('private');
-    expect(content).not.toHaveProperty('public');
+    expect(content).toHaveProperty('public');
     expect((content.private as Record<string, unknown>)['@type']).toBe('dkg-streams:KafkaStream');
-    const expectedPublicGraph = `GRAPH <did:dkg:context-graph:${cgId}>`;
-    const expectedPrivateGraph = `GRAPH <did:dkg:context-graph:${cgId}/_private>`;
+    expect((content.public as Record<string, unknown>)['@id']).toBe(
+      (content.private as Record<string, unknown>)['@id'],
+    );
+    const expectedPublicGraph = `(<did:dkg:context-graph:${cgId}> <did:dkg:context-graph:${cgId}>`;
+    const expectedPrivateGraph = `(<did:dkg:context-graph:${cgId}> <did:dkg:context-graph:${cgId}/_private>`;
     expect(buildListQuery({ contextGraphId: cgId, limit: 30, offset: 0 })).toContain(expectedPublicGraph);
     expect(buildListQuery({ contextGraphId: cgId, limit: 30, offset: 0 })).toContain(expectedPrivateGraph);
     expect(buildSingleByUalQuery({ contextGraphId: cgId, ual: 'did:dkg:1/0xabc' })).toContain(expectedPublicGraph);
@@ -689,7 +720,7 @@ describe('handler — POST /register with extension', () => {
     expect(publishAsync).toHaveBeenCalledTimes(1);
     const [, content] = publishAsync.mock.calls[0];
     expect(content).toHaveProperty('private');
-    expect(content).not.toHaveProperty('public');
+    expect(content).toHaveProperty('public');
     const ka = content.private as Record<string, unknown>;
     expect(ka['@type']).toBe('dkg-streams:KafkaStream');
     expect(ka['schema:name']).toBe('demo');

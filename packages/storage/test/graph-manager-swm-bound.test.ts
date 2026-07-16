@@ -537,6 +537,33 @@ describe('bounded SWM result materialization', () => {
       await store.close();
     }
   });
+
+  it('rejects a large retained result by bytes even while below the row budget', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('result-byte-budget');
+    const root = 'urn:budget:large-root';
+    try {
+      await store.insert([{
+        subject: root,
+        predicate: 'urn:p:large',
+        object: `"${'x'.repeat(2_048)}"`,
+        graph: swm,
+      }]);
+
+      await expect(loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 10, maxRows: 100, maxBytesEstimate: 128 } },
+      )).rejects.toMatchObject({
+        name: 'SharedMemoryResultBudgetError',
+        reason: 'bytes',
+        limit: 128,
+      });
+    } finally {
+      await store.close();
+    }
+  });
 });
 
 describe('a multi-KA range admits the interior, not just the endpoints (T8)', () => {
