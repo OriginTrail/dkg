@@ -24,6 +24,35 @@ const ENTITY_3 = 'urn:protocol:entity:3';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+async function stageRootlessAssertion(
+  node: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  quads: Array<{ subject: string; predicate: string; object: string }>,
+) {
+  await node.assertion.create(contextGraphId, name);
+  await node.assertion.write(contextGraphId, name, quads);
+  return node.assertion.promote(contextGraphId, name);
+}
+
+async function bindAndSubscribePublicContextGraph(
+  node: DKGAgent,
+  contextGraphId: string,
+  onChainId: string,
+) {
+  // Role-aware activation intentionally fails closed until the local label is
+  // bound to a live public on-chain CG. These protocol tests isolate SWM and
+  // finalization behavior, so bind the registration deterministically instead
+  // of racing background ontology discovery before subscribing the replicas.
+  await (node as any).store.insert([{
+    subject: `did:dkg:context-graph:${contextGraphId}`,
+    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+    object: `"${onChainId}"`,
+    graph: 'did:dkg:context-graph:ontology',
+  }]);
+  node.subscribeToContextGraph(contextGraphId);
+}
+
 async function pollUntil(
   queryFn: () => Promise<{ bindings: any[] }>,
   predicate: (bindings: any[]) => boolean,
@@ -115,20 +144,18 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
 
     await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Publish Protocol E2E', description: '' });
-    await nodeA.registerContextGraph(CONTEXT_GRAPH);
-    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
-    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
-    nodeC.subscribeToContextGraph(CONTEXT_GRAPH);
+    const registration = await nodeA.registerContextGraph(CONTEXT_GRAPH);
+    await bindAndSubscribePublicContextGraph(nodeA, CONTEXT_GRAPH, registration.onChainId);
+    await bindAndSubscribePublicContextGraph(nodeB, CONTEXT_GRAPH, registration.onChainId);
+    await bindAndSubscribePublicContextGraph(nodeC, CONTEXT_GRAPH, registration.onChainId);
     await sleep(1500);
   }, 20_000);
 
   it('A writes to workspace; B and C receive via GossipSub', async () => {
-    const quads = [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Protocol Entity"', graph: '' },
-      { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' },
-    ];
-
-    await nodeA.share(CONTEXT_GRAPH, quads);
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'protocol-entity', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Protocol Entity"' },
+      { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"' },
+    ]);
 
     const bBindings = await pollUntil(
       () => nodeB.query(
@@ -164,7 +191,8 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
      */
     const result = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
-      { rootEntities: [ENTITY_1] },
+      'all',
+      { clearSharedMemoryAfter: true },
     );
 
     expect(result.status).toBe('confirmed');
@@ -260,20 +288,19 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
 
     await nodeA.createContextGraph({ id: MCG, name: 'Design B Multi-Entity', description: '' });
-    await nodeA.registerContextGraph(MCG);
-    nodeA.subscribeToContextGraph(MCG);
-    nodeB.subscribeToContextGraph(MCG);
-    nodeC.subscribeToContextGraph(MCG);
+    const registration = await nodeA.registerContextGraph(MCG);
+    await bindAndSubscribePublicContextGraph(nodeA, MCG, registration.onChainId);
+    await bindAndSubscribePublicContextGraph(nodeB, MCG, registration.onChainId);
+    await bindAndSubscribePublicContextGraph(nodeC, MCG, registration.onChainId);
     await sleep(1500);
   }, 20_000);
 
   it('A shares a 3-entity file; B and C receive all three via GossipSub', async () => {
-    const quads = [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
-      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Bob"', graph: '' },
-      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Carol"', graph: '' },
-    ];
-    await nodeA.share(MCG, quads);
+    await stageRootlessAssertion(nodeA, MCG, 'multi-entity-file', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Alice"' },
+      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Bob"' },
+      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Carol"' },
+    ]);
 
     for (const node of [nodeB, nodeC]) {
       const bindings = await pollUntil(
@@ -291,7 +318,8 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
   it('publishes all three entities as ONE KA with cross-node ACKs (THE CANARY)', async () => {
     const result = await nodeA.publishFromSharedMemory(
       MCG,
-      { rootEntities: [ENTITY_1, ENTITY_2, ENTITY_3] },
+      'all',
+      { clearSharedMemoryAfter: true },
     );
 
     // Reaching 'confirmed' means: the multi-entity payload left node A (no
@@ -373,26 +401,25 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await sleep(2000);
 
     await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Context Graph Protocol E2E', description: '' });
-    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
-    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
 
     // Both A and B are participants
-    const result = await nodeA.registerContextGraphOnChain({
+    const result = await nodeA.registerContextGraph(CONTEXT_GRAPH, {
       accessPolicy: 0,
       publishPolicy: 1,
     });
-    contextGraphId = result.contextGraphId;
+    contextGraphId = result.onChainId;
     expect(Number(contextGraphId)).toBeGreaterThan(0);
+    await bindAndSubscribePublicContextGraph(nodeA, CONTEXT_GRAPH, contextGraphId);
+    await bindAndSubscribePublicContextGraph(nodeB, CONTEXT_GRAPH, contextGraphId);
+    await sleep(1500);
   }, 20_000);
 
   it('A writes to workspace, enshrines to context graph with both sig layers', async () => {
     const ctx = getSharedContext();
-    const quads = [
-      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"', graph: '' },
-    ];
-
-    await nodeA.share(CONTEXT_GRAPH, quads);
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-protocol-entity', [
+      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"' },
+    ]);
     await sleep(5000);
 
     /**
@@ -405,8 +432,9 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
      */
     const result = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
-      { rootEntities: [ENTITY_2] },
+      'all',
       {
+        clearSharedMemoryAfter: true,
         subContextGraphId: contextGraphId,
         contextGraphSignatures: [{
           identityId: BigInt(ctx.coreProfileId),
@@ -478,8 +506,8 @@ describe('E2E: Publish KC directly to context graph', () => {
     nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(500);
 
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Direct CG Publish"', graph: '' },
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'direct-cg-publish', [
+      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Direct CG Publish"' },
     ]);
     await sleep(2000);
 
@@ -496,7 +524,7 @@ describe('E2E: Publish KC directly to context graph', () => {
     // in the daemon log instead. The replicate-then-publish on-chain
     // path is covered by the multi-node §1 / §2 tests above.
     await expect(
-      nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_3] }),
+      nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
     ).rejects.toThrow(/ACK collection failed: no connected core peers/);
   }, 20_000);
 });
@@ -540,8 +568,8 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
     await nodeA.registerContextGraph(CONTEXT_GRAPH);
     nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
 
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"', graph: '' },
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'lonely-data', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"' },
     ]);
 
     /**
@@ -557,7 +585,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
-        { rootEntities: [ENTITY_1] },
+        'all',
       ),
     ).rejects.toThrow(/ACK collection failed: no connected core peers/);
   }, 20_000);
@@ -589,16 +617,15 @@ describe('E2E: Context graph registration rejected with insufficient participant
     await sleep(500);
 
     await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Participant Test', description: '' });
-    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
-
-    const cgResult = await nodeA.registerContextGraphOnChain({
+    const cgResult = await nodeA.registerContextGraph(CONTEXT_GRAPH, {
       accessPolicy: 0,
       publishPolicy: 1,
     });
-    const contextGraphId = cgResult.contextGraphId;
+    const contextGraphId = cgResult.onChainId;
+    await bindAndSubscribePublicContextGraph(nodeA, CONTEXT_GRAPH, contextGraphId);
 
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"', graph: '' },
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'needs-sigs', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"' },
     ]);
 
     // RC11 / PR1 (review fix): V10 + LU-2 still enforces the *global*
@@ -615,7 +642,7 @@ describe('E2E: Context graph registration rejected with insufficient participant
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
-        { rootEntities: [ENTITY_1] },
+        'all',
         { subContextGraphId: contextGraphId },
       ),
     ).rejects.toThrow(/ACK collection failed: no connected core peers/);
@@ -671,8 +698,6 @@ describe('E2E: Edge node participates in context graph governance', () => {
     await sleep(2000);
 
     await coreNode.createContextGraph({ id: CONTEXT_GRAPH, name: 'Edge Participant E2E', description: '' });
-    coreNode.subscribeToContextGraph(CONTEXT_GRAPH);
-    edgeNode.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
 
     // Both core and edge are participants
@@ -684,10 +709,13 @@ describe('E2E: Edge node participates in context graph governance', () => {
       publishPolicy: 1,
     });
     contextGraphId = cgResult.contextGraphId;
+    await bindAndSubscribePublicContextGraph(coreNode, CONTEXT_GRAPH, contextGraphId);
+    await bindAndSubscribePublicContextGraph(edgeNode, CONTEXT_GRAPH, contextGraphId);
+    await sleep(1500);
 
     // Core writes data
-    await coreNode.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Edge Governed Data"', graph: '' },
+    await stageRootlessAssertion(coreNode, CONTEXT_GRAPH, 'edge-governed-data', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Edge Governed Data"' },
     ]);
     await sleep(5000);
 
@@ -725,7 +753,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
     await expect(
       coreNode.publishFromSharedMemory(
         CONTEXT_GRAPH,
-        { rootEntities: [ENTITY_1] },
+        'all',
         {
           subContextGraphId: contextGraphId,
           contextGraphSignatures: [
