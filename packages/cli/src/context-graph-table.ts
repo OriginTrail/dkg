@@ -5,7 +5,10 @@ export interface ContextGraphTableRow {
   isSystem?: boolean;
 }
 
-export const CONTEXT_GRAPH_ID_MAX_WIDTH = 48;
+// Context graph IDs are valid up to 256 characters. Preserve every valid ID
+// so users can copy it into follow-up commands, while still bounding malformed
+// or hostile remote metadata.
+export const CONTEXT_GRAPH_ID_MAX_WIDTH = 256;
 export const CONTEXT_GRAPH_NAME_MAX_WIDTH = 40;
 
 function normalizeCell(value: unknown): string {

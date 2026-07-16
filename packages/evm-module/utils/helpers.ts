@@ -98,8 +98,7 @@ export class Helpers {
 
     this.repositoryPath = this._getGitRepositoryPath();
 
-    const deploymentsDirectory =
-      process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim() || './deployments';
+    const deploymentsDirectory = this.hre.config.paths.deployments;
     const deploymentsConfig = path.join(
       deploymentsDirectory,
       `${this.hre.network.name}_contracts.json`,
@@ -450,7 +449,7 @@ export class Helpers {
     };
   }
 
-  public saveDeploymentsJson(folder: string) {
+  public saveDeploymentsJson(_folder: string) {
     console.log(
       `New or redeployed contracts: ${JSON.stringify(this.newContracts)}`,
     );
@@ -470,8 +469,7 @@ export class Helpers {
       `Encoded data for parameters settings: ${JSON.stringify(this.setParametersEncodedData)}`,
     );
 
-    const deploymentsDirectory =
-      process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim() || folder;
+    const deploymentsDirectory = this.hre.config.paths.deployments;
     fs.mkdirSync(deploymentsDirectory, { recursive: true });
     fs.writeFileSync(
       path.join(deploymentsDirectory, `${this.hre.network.name}_contracts.json`),
