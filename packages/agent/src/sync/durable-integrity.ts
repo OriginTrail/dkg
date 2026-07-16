@@ -21,6 +21,7 @@ const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
+const RESERVED_UAL = `${DKG_NS}reservedUal`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG_NS}privateMerkleRoot`;
@@ -1129,7 +1130,16 @@ function isAuthenticatedSyncControl(
   // Admit only an exact copy of one verified descriptor's immutable scope;
   // a peer cannot use this path to introduce a different graph or version.
   const rows = metadata.metaBySubject.get(quad.subject) ?? [];
-  const owners = distinctObjects(rows, KA_UAL).map(stripLiteral);
+  // The immutable V2 descriptor is keyed directly by dkg:kaUal, while the
+  // named-KA lifecycle subject carries the same identity as dkg:reservedUal.
+  // Publishing re-points that lifecycle subject to the canonical VM graph;
+  // authenticate the repeated scope through either exact identity predicate.
+  // Combining them (rather than preferring one) makes conflicting peer input
+  // fail closed.
+  const owners = [...new Set([
+    ...distinctObjects(rows, KA_UAL),
+    ...distinctObjects(rows, RESERVED_UAL),
+  ].map(stripLiteral))];
   if (owners.length !== 1 || !authenticatedMetadataUals.has(owners[0]!)) return false;
   const descriptorRows = metadata.metaBySubject.get(owners[0]!) ?? [];
   try {
