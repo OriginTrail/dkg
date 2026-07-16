@@ -170,7 +170,21 @@ function staticConstantInitializer(node) {
   return undefined;
 }
 
+function unwrapTransparentExpression(node) {
+  let expression = node;
+  while (
+    ts.isParenthesizedExpression(expression)
+    || ts.isAsExpression(expression)
+    || ts.isSatisfiesExpression(expression)
+    || ts.isTypeAssertionExpression(expression)
+  ) {
+    expression = expression.expression;
+  }
+  return expression;
+}
+
 function exclusionEntries(node, sourceFile, arraysAllowed = false, seen = new Set()) {
+  node = unwrapTransparentExpression(node);
   if (ts.isOmittedExpression(node)) return [];
   if (ts.isStringLiteralLike(node)) return [{ value: node.text, opaque: false }];
   if (ts.isIdentifier(node)) {
@@ -373,8 +387,9 @@ export function analyzeD2Source(source, filePath) {
           && propertyNameText(property.name) === 'exclude',
       );
       if (exclude) {
-        const arrayInitializer = ts.isArrayLiteralExpression(exclude.initializer);
-        for (const element of exclusionElements(exclude.initializer)) {
+        const initializer = unwrapTransparentExpression(exclude.initializer);
+        const arrayInitializer = ts.isArrayLiteralExpression(initializer);
+        for (const element of exclusionElements(initializer)) {
           const entries = resolvedExclusionEntries(element, sourceFile, arrayInitializer);
           for (const entry of entries) {
             if (!entry.opaque && !isTestTargetingExclusion(entry.value)) continue;
