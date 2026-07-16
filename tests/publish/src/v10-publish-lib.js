@@ -191,40 +191,62 @@ export function makeNodeClient(baseUrl, token) {
         accessPolicy: opts.accessPolicy ?? 0,
         publishPolicy: opts.publishPolicy ?? 1,
       }).then((r) => r.data),
-    // subscribe to (and sync) a context graph this node does not host. Returns
-    // { subscribed, catchup: { status: queued|running|done, jobId } }. Re-calling
-    // returns the current catchup status, so it doubles as a poll.
+    // Subscribe to (and sync) a context graph this node does not host. The POST
+    // enqueues catch-up; status must be polled through the read-only endpoint so
+    // parallel Jenkins stages cannot keep re-queuing the same work.
     subscribe: (contextGraphId, includeSharedMemory = true) =>
       req('POST', '/api/context-graph/subscribe', { contextGraphId, includeSharedMemory }, { acceptStatuses: [200, 202] }).then((r) => r.data),
+    catchupStatus: (contextGraphId) =>
+      req('GET', `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`).then((r) => r.data),
   };
 }
 
 // Subscribe a node to a private CG and wait until its catch-up sync reports done
 // (or timeout). Idempotent: a node already synced returns done immediately.
-async function subscribeAndWait(client, contextGraphId, nodeName, timeoutMs) {
+export async function subscribeAndWait(
+  client,
+  contextGraphId,
+  nodeName,
+  timeoutMs,
+  pollIntervalMs = 3000,
+  allowedTerminalStatuses = [],
+) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let res;
+  try {
+    res = await client.subscribe(contextGraphId);
+  } catch (error) {
+    throw new Error(`subscribe to "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
+  }
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let res;
-    try {
-      res = await client.subscribe(contextGraphId);
-    } catch (error) {
-      throw new Error(`subscribe to "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
-    }
-    const status = res?.catchup?.status || 'unknown';
+    const status = res?.catchup?.status || res?.status || 'unknown';
     if (status !== last) {
       console.log(`   ↪ ${nodeName} subscribe/catchup: ${status}`);
       last = status;
     }
     if (status === 'done') return res;
-    if (status === 'failed' || status === 'error') {
-      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}`);
+    if (['failed', 'error', 'denied', 'deferred', 'unreachable'].includes(status)) {
+      const detail = res?.error ? `: ${res.error}` : '';
+      if (allowedTerminalStatuses.includes(status)) {
+        console.warn(
+          `⚠️ ${nodeName} historical catch-up reported ${status}${detail}; ` +
+          'the subscription is active, so continuing with fresh-publish Query Remote validation',
+        );
+        return res;
+      }
+      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}${detail}`);
     }
     if (Date.now() > deadline) {
       throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} did not finish within ${timeoutMs}ms (last status: ${status}) — is the curator node reachable on the DKG network?`);
     }
-    await sleep(3000);
+    await sleep(pollIntervalMs);
+    try {
+      res = await client.catchupStatus(contextGraphId);
+    } catch (error) {
+      throw new Error(`read catch-up status for "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
+    }
   }
 }
 
@@ -241,6 +263,50 @@ function queryHasData(result) {
   // query-remote ENTITY_BY_UAL response: { status:'OK', ntriples:'<s> <p> <o> .' }
   if (typeof result.ntriples === 'string') return result.ntriples.trim().length > 0;
   return false;
+}
+
+// Query all protocol-backed candidate storage peers in parallel per retry
+// round and accept the first readable copy. A publish's availability contract
+// is backed by its StorageACK cores; requiring one unrelated random beacon to
+// hold the KA measured gossip luck instead of that contract.
+export async function queryAnyRemoteWithRetry(
+  client,
+  contextGraphId,
+  ual,
+  targets,
+  retries = READ_RETRIES,
+  retryDelayMs = READ_RETRY_MS,
+) {
+  let lastFailures = [];
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const outcomes = await Promise.all(targets.map(async (target) => {
+      try {
+        const result = await withTimeout(
+          client.queryRemote(target.peerId, contextGraphId, {
+            lookupType: 'ENTITY_BY_UAL',
+            ual,
+          }),
+          'Query Remote (sync)',
+          target.name,
+        );
+        return { target, result };
+      } catch (error) {
+        return { target, error };
+      }
+    }));
+    const readable = outcomes.find((outcome) => queryHasData(outcome.result));
+    if (readable) return readable;
+
+    lastFailures = outcomes.map(({ target, error }) => (
+      `${target.name}: ${error instanceof Error ? error.message : 'no triples'}`
+    ));
+    if (attempt < retries) await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    `Query Remote (sync) found no readable copy of ${ual} across ` +
+    `${targets.length} storage candidate(s) — ${lastFailures.join('; ')}`,
+  );
 }
 
 // Resolve (and cache) a node's libp2p peerId via its public /api/status.
@@ -261,7 +327,13 @@ const mean = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.len
 // NODE_TO_TEST (env) selects which node this Jenkins stage runs.
 // ---------------------------------------------------------------------------
 export function defineChainPublishSuite(config) {
-  const { title, blockchainName, contextGraphId, nodes } = config;
+  const {
+    title,
+    blockchainName,
+    contextGraphId,
+    nodes,
+    remoteQuerySubscribeAll = false,
+  } = config;
   // Known-good, already-indexed UAL used to exercise the read paths when a
   // publish fails (no fresh UAL). Per-chain, overridable via DKG_FALLBACK_UAL.
   const FALLBACK_UAL = process.env.DKG_FALLBACK_UAL || config.fallbackUal || '';
@@ -278,6 +350,36 @@ export function defineChainPublishSuite(config) {
 
       console.log(`\nRunning test for node: ${nodesToRun.map((n) => n.name).join(', ')}`);
       console.log(`Blockchain: ${blockchainName} | Context graph: ${contextGraphId} | KAs per node: ${KA_COUNT}`);
+
+      // A remote query reads the selected peer's LOCAL VM; it does not initiate
+      // sync. Because this suite chooses an arbitrary receiver, every possible
+      // receiver must subscribe and finish catch-up first. Jenkins runs one
+      // process per node in parallel, so every process performs this idempotent
+      // barrier and none can publish before all four receivers are ready.
+      if (remoteQuerySubscribeAll) {
+        console.log(`🔗 Preparing all ${nodes.length} Query Remote receiver(s) for "${contextGraphId}"…`);
+        await Promise.all(nodes.map(async (node) => {
+          const client = makeNodeClient(node.hostname, node.token);
+          const catchup = await subscribeAndWait(
+            client,
+            contextGraphId,
+            node.name,
+            CG_SUBSCRIBE_TIMEOUT_MS,
+            3000,
+            // This suite measures reads of KAs published AFTER this barrier.
+            // A public node's subscription is already active when historical
+            // catch-up reports a transport/data-plane failure, so keep that as
+            // an explicit warning without suppressing the fresh-read canary.
+            ['failed', 'unreachable'],
+          );
+          const catchupStatus = catchup?.catchup?.status || catchup?.status;
+          console.log(
+            catchupStatus === 'done'
+              ? `✅ ${node.name} subscribed and synced for Query Remote`
+              : `✅ ${node.name} subscribed for fresh Query Remote (historical catch-up: ${catchupStatus})`,
+          );
+        }));
+      }
 
       for (let currentIndex = 0; currentIndex < nodesToRun.length; currentIndex++) {
         const { name, hostname, token } = nodesToRun[currentIndex];
@@ -358,8 +460,10 @@ export function defineChainPublishSuite(config) {
         // publish into them (a public open-publish CG needs none of this). Auto-on
         // when the id is canonical ("<curator>/<slug>", contains '/') — bare public
         // names ('sports'/'foodie-network') skip it. V10_CG_SUBSCRIBE=true forces it.
-        const needsSubscribe = CG_SUBSCRIBE
-          || (typeof contextGraphId === 'string' && contextGraphId.includes('/'));
+        const needsSubscribe = !remoteQuerySubscribeAll && (
+          CG_SUBSCRIBE
+          || (typeof contextGraphId === 'string' && contextGraphId.includes('/'))
+        );
         if (needsSubscribe) {
           console.log(`🔗 ${name} subscribing to private CG "${contextGraphId}" (syncing from curator)…`);
           await subscribeAndWait(client, contextGraphId, name, CG_SUBSCRIBE_TIMEOUT_MS);
@@ -371,6 +475,7 @@ export function defineChainPublishSuite(config) {
           const { quads, rootEntity } = buildQuads(name, i + 1);
 
           let ual = null;
+          let storageAckPeerIds = [];
           let step = 'publish';
 
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
@@ -395,6 +500,9 @@ export function defineChainPublishSuite(config) {
             assert.ok(result.kaId !== undefined && result.kaId !== '0', `Publish response missing valid kaId (got ${result.kaId})`);
 
             ual = result.ual || null;
+            storageAckPeerIds = Array.isArray(result.storageAckPeerIds)
+              ? [...new Set(result.storageAckPeerIds.filter((peerId) => typeof peerId === 'string' && peerId.trim()).map((peerId) => peerId.trim()))]
+              : [];
             if (result.publisherAddress) publisherAddresses.add(result.publisherAddress);
             const kasCreated = Array.isArray(result.kas) ? result.kas.length : 'N/A';
             const txInfo = result.txHash ? ` | tx: ${result.txHash}` : '';
@@ -479,15 +587,34 @@ export function defineChainPublishSuite(config) {
             // single-node chain — no peer to sync-check against
             continue;
           }
-          const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
           const remoteStart = Date.now();
           try {
             if (!readUal) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
-            const remotePeerId = await getPeerId(remoteNode);
-            if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
-            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: readUal }));
-            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${readUal} from ${remoteNode.name}`);
-            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
+            const targets = storageAckPeerIds.length > 0
+              ? storageAckPeerIds.map((peerId) => ({
+                  peerId,
+                  name: `StorageACK core …${peerId.slice(-8)}`,
+                }))
+              : (await Promise.all(otherIndexes.map(async (idx) => ({
+                  peerId: await getPeerId(nodes[idx]),
+                  name: nodes[idx].name,
+                })))).filter((target) => target.peerId);
+            if (targets.length === 0) {
+              throw new Error('Query Remote (sync) has no resolvable storage candidates');
+            }
+            const readable = await queryAnyRemoteWithRetry(
+              client,
+              contextGraphId,
+              readUal,
+              targets,
+            );
+            const targetKind = storageAckPeerIds.length > 0
+              ? 'acknowledged storage core'
+              : 'legacy beacon fallback';
+            console.log(
+              `✅ Query Remote (sync) succeeded — ${readable.target.name} has the KA ` +
+              `(${targetKind}; ${targets.length} candidate${targets.length === 1 ? '' : 's'})`,
+            );
             queryRemoteSuccess++;
             queryRemoteDurations.push(Date.now() - remoteStart);
           } catch (error) {

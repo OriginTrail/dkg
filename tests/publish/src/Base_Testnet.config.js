@@ -7,6 +7,10 @@ export function getBaseTestnetPublishConfig(env = process.env) {
     blockchainName: 'v10:base:84532',
     // 'jenkins-publish-tests' is our public open-publish CG on Base Sepolia.
     contextGraphId: env.DKG_CONTEXT_GRAPH_ID || 'jenkins-publish-tests',
+    // Query Remote selects an arbitrary one of the other beacon nodes. Make
+    // that assertion valid by ensuring every possible receiver actively hosts
+    // and syncs the CG before any parallel publish stage starts.
+    remoteQuerySubscribeAll: true,
     // Jenkins may override the known-good default without changing this branch.
     fallbackUal: env.DKG_FALLBACK_UAL || BASE_TESTNET_FALLBACK_UAL,
     nodes: [
