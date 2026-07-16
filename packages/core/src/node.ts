@@ -1792,6 +1792,10 @@ export class DKGNode {
             relayPeerId: relayPath.relayPeerId,
             remotePeerId: pid,
             durationMs,
+            // libp2p's connection:close event carries no reliable failure
+            // reason. A one-shot DKG request/response relay circuit normally
+            // closes in <1s, so duration alone must never poison the route.
+            confirmedFailure: false,
           });
           if (result.enteredQuarantine) {
             console.warn(

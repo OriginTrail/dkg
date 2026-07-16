@@ -1059,6 +1059,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           error: 'Missing curatorPeerId. Invite codes must include the curator peer id (V10 format: "<cgId>\\n<peerId>"). Ask the curator to share an updated invite code.',
         });
       }
+      try {
+        // Auto-approval is deliberately fail-closed when the curator cannot
+        // resolve an active encryption key. A cold joiner must therefore make
+        // its agent profile visible before sending the signed request instead
+        // of relying on the periodic profile heartbeat (which may be minutes
+        // away after a transient startup publish failure).
+        await agent.ensureProfilePublished();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return jsonResponse(res, 503, {
+          error: 'Agent profile is not ready; join request was not sent.',
+          cause: msg,
+        });
+      }
       const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
       if (result.delivered === 0) {
         // Surface per-peer errors so the joiner can see WHY (curator
