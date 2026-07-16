@@ -90,6 +90,83 @@ describe('durable sync control metadata admission', () => {
     ]);
   });
 
+  it('authenticates a named-KA lifecycle VM pointer through its reserved UAL', () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, '1');
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = [quad('urn:verified:entity', 'urn:example:value', '"verified"', assertionGraph)];
+    const descriptor = generateGraphKnowledgeAssetMetadata({
+      ual: UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(data, []),
+      publisherPeerId: 'verified-publisher',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: data.length,
+      assertionGraph,
+    }, 'tentative');
+    const lifecycle = `urn:dkg:assertion:${CONTEXT_GRAPH_ID}:0x00000000000000000000000000000000000000AB:asset`;
+    const lifecycleRows = [
+      quad(lifecycle, `${DKG}contentScopeVersion`, integer(2n)),
+      quad(lifecycle, `${DKG}reservedUal`, `"${UAL}"`),
+      quad(lifecycle, `${DKG}assertionVersion`, integer(1n)),
+      quad(lifecycle, `${DKG}assertionGraph`, assertionGraph),
+      quad(lifecycle, `${DKG}state`, '"published"'),
+    ];
+    const meta = [...descriptor, ...lifecycleRows];
+
+    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+
+    expect(selection.rejected).toBe(0);
+    expect(selection.droppedSyncControlTriples).toBe(0);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual(meta);
+  });
+
+  it('rejects lifecycle controls when kaUal and reservedUal identities conflict', () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, '1');
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = [quad('urn:verified:entity', 'urn:example:value', '"verified"', assertionGraph)];
+    const descriptor = generateGraphKnowledgeAssetMetadata({
+      ual: UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(data, []),
+      publisherPeerId: 'verified-publisher',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: data.length,
+      assertionGraph,
+    }, 'tentative');
+    const lifecycle = 'urn:dkg:assertion:conflicting-owner';
+    const descriptiveRows = [
+      quad(lifecycle, `${DKG}contentScopeVersion`, integer(2n)),
+      quad(lifecycle, `${DKG}kaUal`, UAL),
+      quad(lifecycle, `${DKG}reservedUal`, `"${UAL_B}"`),
+    ];
+    const controlRows = [
+      quad(lifecycle, `${DKG}assertionVersion`, integer(1n)),
+      quad(lifecycle, `${DKG}assertionGraph`, assertionGraph),
+    ];
+    const meta = [...descriptor, ...descriptiveRows, ...controlRows];
+
+    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+
+    expect(selection.rejected).toBe(0);
+    expect(selection.droppedSyncControlTriples).toBe(2);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([
+      ...descriptor,
+      ...descriptiveRows,
+    ]);
+  });
+
   it('drops orphaned controls from an otherwise unverified system-graph page', () => {
     const subject = 'urn:system:unverified-control';
     const descriptive = quad(subject, `${DKG}status`, '"keep"');

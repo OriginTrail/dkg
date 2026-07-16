@@ -214,6 +214,8 @@ TESTNET_MAX_ACCEPT_QUEUE="${TESTNET_MAX_ACCEPT_QUEUE:-128}"
 TESTNET_SERVICE="${TESTNET_SERVICE:-dkg-v9-node}"
 TESTNET_SSH_CONNECT_TIMEOUT="${TESTNET_SSH_CONNECT_TIMEOUT:-90}"
 INTEGRITY_PROGRESS_EVERY_KAS="${INTEGRITY_PROGRESS_EVERY_KAS:-10}"
+INTEGRITY_RATE_LIMIT_BACKOFF_S="${INTEGRITY_RATE_LIMIT_BACKOFF_S:-61}"
+INTEGRITY_RATE_LIMIT_MAX_RETRIES="${INTEGRITY_RATE_LIMIT_MAX_RETRIES:-3}"
 HEALTH_SAMPLE_EVERY_KAS="${HEALTH_SAMPLE_EVERY_KAS:-5}"
 HEALTH_SAMPLE_INTERVAL_S="${HEALTH_SAMPLE_INTERVAL_S:-15}"
 TESTNET_MAX_MEMORY_USED_PERCENT="${TESTNET_MAX_MEMORY_USED_PERCENT:-90}"
@@ -273,7 +275,9 @@ for numeric in \
   "$RECOVERY_TIMEOUT_S" "$POST_RESTART_TIMEOUT_S" \
   "$RECOVERY_EXACT_RECHECK_INTERVAL_S" \
   "$TESTNET_MAX_ACCEPT_QUEUE" "$TESTNET_SSH_CONNECT_TIMEOUT" \
-  "$INTEGRITY_PROGRESS_EVERY_KAS" "$HEALTH_SAMPLE_EVERY_KAS" \
+  "$INTEGRITY_PROGRESS_EVERY_KAS" \
+  "$INTEGRITY_RATE_LIMIT_BACKOFF_S" "$INTEGRITY_RATE_LIMIT_MAX_RETRIES" \
+  "$HEALTH_SAMPLE_EVERY_KAS" \
   "$HEALTH_SAMPLE_INTERVAL_S" "$TESTNET_MAX_MEMORY_USED_PERCENT" \
   "$TESTNET_MAX_LOAD_PER_CPU_PERCENT" \
   "$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
@@ -286,6 +290,10 @@ for numeric in \
 done
 [ "$INTEGRITY_PROGRESS_EVERY_KAS" -ge 1 ] \
   || { echo "INTEGRITY_PROGRESS_EVERY_KAS must be at least 1." >&2; exit 2; }
+[ "$INTEGRITY_RATE_LIMIT_BACKOFF_S" -ge 1 ] \
+  || { echo "INTEGRITY_RATE_LIMIT_BACKOFF_S must be at least 1." >&2; exit 2; }
+[ "$INTEGRITY_RATE_LIMIT_MAX_RETRIES" -ge 1 ] \
+  || { echo "INTEGRITY_RATE_LIMIT_MAX_RETRIES must be at least 1." >&2; exit 2; }
 [ "$VM_PUBLISH_POLL_INTERVAL_S" -ge 1 ] \
   || { echo "VM_PUBLISH_POLL_INTERVAL_S must be at least 1." >&2; exit 2; }
 [ "$VM_PUBLISH_PROGRESS_EVERY_KAS" -ge 1 ] \
@@ -1233,6 +1241,40 @@ curl "${args[@]}"'
   fi
 }
 
+# Integrity certification deliberately performs exact, per-KA reads. Testnet
+# cores rate-limit API clients to a fixed one-minute window, so a valid run can
+# otherwise misread the JSON 429 response as an empty SPARQL result. Retry only
+# this read-only certification traffic; keep all state-changing API calls and
+# negative-path assertions on the original fail-fast semantics.
+integrity_api_call() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local response attempt=0
+  while [ "$attempt" -le "$INTEGRITY_RATE_LIMIT_MAX_RETRIES" ]; do
+    if ! response="$(api_call "$node" "$method" "$path" "$data")"; then
+      return 1
+    fi
+    case "$response" in
+      *"Too many requests"*)
+        if [ "$attempt" -ge "$INTEGRITY_RATE_LIMIT_MAX_RETRIES" ]; then
+          printf '%s' "$response"
+          return 1
+        fi
+        attempt=$((attempt + 1))
+        printf '%s node=%s method=%s path=%s attempt=%s backoff_s=%s\n' \
+          "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$node" "$method" "$path" \
+          "$attempt" "$INTEGRITY_RATE_LIMIT_BACKOFF_S" \
+          >> "$RUN_DIR/integrity-rate-limit-retries.log"
+        sleep "$INTEGRITY_RATE_LIMIT_BACKOFF_S"
+        ;;
+      *)
+        printf '%s' "$response"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 node_ready() {
   local node="$1" body
   body="$(API_TIMEOUT_OVERRIDE=5 api_call "$node" GET /api/status 2>/dev/null || true)"
@@ -1493,7 +1535,7 @@ integrity_head_query() {
       ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
     }));
   ')"
-  api_call "$node" POST /api/query "$body"
+  integrity_api_call "$node" POST /api/query "$body"
 }
 
 validate_integrity_head_response() {
@@ -1566,7 +1608,7 @@ integrity_data_query() {
       ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
     }));
   ')"
-  api_call "$node" POST /api/query "$body"
+  integrity_api_call "$node" POST /api/query "$body"
 }
 
 validate_integrity_data_response() {
@@ -1618,7 +1660,7 @@ vm_integrity_data_query() {
       ...(process.env.LANE === "subgraph" ? { subGraphName: process.env.SUB } : {}),
     }));
   ')"
-  api_call "$node" POST /api/query "$body"
+  integrity_api_call "$node" POST /api/query "$body"
 }
 
 validate_vm_descriptor() {
@@ -1904,7 +1946,7 @@ knowledge_asset_descriptor() {
   if [ "$lane" = "subgraph" ]; then
     path="$path&subGraphName=$(urlencode "$SUB_GRAPH_NAME")"
   fi
-  api_call "$node" GET "$path"
+  integrity_api_call "$node" GET "$path"
 }
 
 epoch_ms() {
@@ -2115,6 +2157,7 @@ vm_publish_progress() {
       const missing = [];
       const failed = [];
       let terminal = 0;
+      let retryEligible = 0;
       for (const row of tracked) {
         const job = byId.get(row.jobId);
         if (!job) {
@@ -2124,6 +2167,13 @@ vm_publish_progress() {
         counts[job.status] = (counts[job.status] || 0) + 1;
         if (job.status === "finalized" || job.status === "failed") terminal += 1;
         if (job.status === "failed") {
+          if (
+            job.failure?.retryable === true &&
+            job.failure?.resolution !== "retry_recovery" &&
+            Number(job.retries?.retryCount || 0) < Number(job.retries?.maxRetries || 0)
+          ) {
+            retryEligible += 1;
+          }
           failed.push({
             ordinal: row.ordinal,
             jobId: row.jobId,
@@ -2137,6 +2187,8 @@ vm_publish_progress() {
         terminal,
         finalized: counts.finalized || 0,
         failed: counts.failed || 0,
+        retryEligible,
+        globalFailed: jobs.filter(job => job.status === "failed").length,
         missing,
         statuses: counts,
         failures: failed,
@@ -2240,7 +2292,7 @@ record_vm_publish_manifest_row() {
 
 publish_seed_manifest_to_vm() {
   [ "$VM_PUBLISH_MODE" = "async-all" ] || return 0
-  local row jobs_response progress previous_progress="" start now
+  local row jobs_response progress previous_progress="" retry_response retry_count start now
   local enqueue_row job_id job descriptor vm_row ordinal
   VM_PUBLISH_STARTED_AT_MS="$(epoch_ms)"
   while IFS= read -r row; do
@@ -2258,6 +2310,24 @@ publish_seed_manifest_to_vm() {
     if [ "$progress" != "$previous_progress" ]; then
       log "VM publisher progress: $(json_get "$progress" terminal)/$VM_PLANNED_KA_COUNT terminal; statuses=$(json_get "$progress" statuses)"
       previous_progress="$progress"
+    fi
+    if [ "$(json_get "$progress" failed)" != "0" ] \
+      && [ "$(json_get "$progress" retryEligible)" = "$(json_get "$progress" failed)" ]; then
+      # Lift jobs intentionally expose retryable failures as a durable failed
+      # state plus an explicit retry control-plane action. Exercise that path
+      # instead of treating a transient all-RPC outage as terminal. The retry
+      # endpoint currently operates on every failed publisher job, so fail
+      # closed if this dedicated harness edge has any unrelated failed job.
+      [ "$(json_get "$progress" globalFailed)" = "$(json_get "$progress" failed)" ] \
+        || fail "refusing global publisher retry while unrelated failed jobs exist: $progress"
+      retry_response="$(api_call "$CURATOR_NODE" POST /api/publisher/retry '{"status":"failed"}' 2>/dev/null || true)"
+      retry_count="$(json_get "$retry_response" retried 2>/dev/null || true)"
+      [ -n "$retry_count" ] && [ "$retry_count" != "0" ] \
+        || fail "publisher declined retry for tracked retryable VM jobs: response=$retry_response progress=$progress"
+      log "VM publisher control plane requeued $retry_count retryable job(s)"
+      maybe_sample_node_health vm-publish-retry
+      sleep "$VM_PUBLISH_POLL_INTERVAL_S"
+      continue
     fi
     # A publisher status transition currently replaces its RDF row as a
     # delete followed by an insert. A concurrent list call can therefore miss
@@ -2437,6 +2507,46 @@ assert_fixed_list_state() {
     || fail "recovered CG does not report subscribed=true: $row"
   [ "$(json_get "$row" synced)" = "true" ] \
     || fail "recovered CG does not report synced=true: $row"
+}
+
+reactivate_joiner_subscription_if_dormant() {
+  local subscriptions state response body
+  subscriptions="$(integrity_api_call "$JOINER_NODE" GET /api/context-graph/subscriptions 2>/dev/null || true)"
+  state="$(printf '%s' "$subscriptions" | CG="$CG_ID" node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const payload = JSON.parse(d);
+        const active = (payload.subscriptions || [])
+          .some(row => row?.contextGraphId === process.env.CG);
+        const dormant = (payload.rehydration?.dormantIds || [])
+          .includes(process.env.CG);
+        process.stdout.write(dormant ? "dormant" : active ? "active" : "absent");
+      } catch {
+        process.stdout.write("unreadable");
+      }
+    });
+  ')"
+  [ "$state" = "dormant" ] || return 0
+
+  # Testnet deliberately caps startup activation of non-hosted subscriptions
+  # to protect the store from a stale-backlog fan-out. Repeated harness runs
+  # can therefore leave this freshly verified CG persisted but dormant after
+  # restart. Explicit access is the documented reactivation path: exercise it
+  # and then let the normal recovery/durability assertions prove exact state.
+  save_artifact "post-restart-rehydration-before-reactivation.json" "$subscriptions"
+  body="$(CG="$CG_ID" node -e '
+    process.stdout.write(JSON.stringify({
+      contextGraphId: process.env.CG,
+      includeSharedMemory: true,
+    }));
+  ')"
+  response="$(api_call "$JOINER_NODE" POST /api/context-graph/subscribe "$body")"
+  save_artifact "post-restart-reactivation-response.json" "$response"
+  [ "$(json_get "$response" subscribed)" = "$CG_ID" ] \
+    || fail "joiner could not reactivate its persisted dormant subscription after restart: $response"
+  log "joiner reactivated the persisted CG after the configured startup subscription cap left it dormant"
 }
 
 snapshot_phase() {
@@ -3405,6 +3515,7 @@ wait_node_ready "$JOINER_NODE" 90 \
 JOINER_STOPPED=0
 
 if [ "$HARNESS_EXPECT" = "fixed" ]; then
+  reactivate_joiner_subscription_if_dormant
   wait_full_recovery "$POST_RESTART_TIMEOUT_S" \
     || { snapshot_phase post-restart-timeout; fail "fixed state did not survive/recover after joiner restart"; }
   assert_fixed_list_state
