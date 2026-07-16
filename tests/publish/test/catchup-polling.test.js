@@ -30,3 +30,19 @@ test('subscribeAndWait enqueues once and polls catch-up through the status endpo
   assert.equal(subscribeCalls, 1);
   assert.equal(statusCalls, 2);
 });
+
+test('subscribeAndWait includes the node catch-up error in a terminal failure', async () => {
+  const client = {
+    subscribe: async () => ({ catchup: { status: 'running', jobId: 'catchup-2' } }),
+    catchupStatus: async () => ({
+      status: 'failed',
+      jobId: 'catchup-2',
+      error: 'no sync-capable peers responded',
+    }),
+  };
+
+  await assert.rejects(
+    subscribeAndWait(client, 'jenkins-publish-tests', 'TestNode4', 1000, 0),
+    /reported failed: no sync-capable peers responded/,
+  );
+});

@@ -227,7 +227,8 @@ export async function subscribeAndWait(
     }
     if (status === 'done') return res;
     if (['failed', 'error', 'denied', 'deferred', 'unreachable'].includes(status)) {
-      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}`);
+      const detail = res?.error ? `: ${res.error}` : '';
+      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}${detail}`);
     }
     if (Date.now() > deadline) {
       throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} did not finish within ${timeoutMs}ms (last status: ${status}) — is the curator node reachable on the DKG network?`);
