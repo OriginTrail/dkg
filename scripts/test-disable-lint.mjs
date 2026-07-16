@@ -616,18 +616,39 @@ function auditModesSelfTest() {
   }
 }
 
+function staticD2ArraySelfTest() {
+  const source = [
+    "const TEST_EXCLUSIONS = ['tests/unit/**'];",
+    "const NESTED_EXCLUSIONS = ['coverage/**', ...TEST_EXCLUSIONS];",
+    "const EXCLUSIONS = [...NESTED_EXCLUSIONS, '**/*.spec.ts'];",
+    'export default { test: { exclude: EXCLUSIONS } };',
+  ].join('\n');
+  const values = analyzeD2Source(source, 'vitest.config.ts').map(({ value }) => value);
+  const expected = ['tests/unit/**', '**/*.spec.ts'];
+  const pass = JSON.stringify(values) === JSON.stringify(expected);
+  if (!pass) {
+    process.stderr.write(
+      `SELF-TEST FAIL: static D2 arrays expected ${JSON.stringify(expected)}, `
+        + `received ${JSON.stringify(values)}\n`,
+    );
+  }
+  return pass;
+}
+
 function selfTest({ report = true } = {}) {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
+  const staticD2ArraysPass = staticD2ArraySelfTest();
   if (report) {
     process.stdout.write(
       `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
         + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
-        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
+        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}, `
+        + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}.\n`,
     );
   }
-  return movePasses && growthPasses && auditsPass ? 0 : 1;
+  return movePasses && growthPasses && auditsPass && staticD2ArraysPass ? 0 : 1;
 }
 
 function validateScanner() {
