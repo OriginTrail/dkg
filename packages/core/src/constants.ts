@@ -43,6 +43,12 @@ export const PROTOCOL_GET_ASSERTION_ARTIFACT = '/dkg/10.0.2/get-assertion-artifa
 // PR-8+ migrate the remaining short-message protocols onto the
 // same 10.0.1 minor.
 export const PROTOCOL_MESSAGE = '/dkg/10.0.1/message';
+/**
+ * Hard inbound wire cap for the shared encrypted message protocol. The
+ * router-wide default is intentionally generous for sync/query protocols;
+ * chat and skill control messages must not inherit that 10 MiB allocation.
+ */
+export const PROTOCOL_MESSAGE_MAX_WIRE_BYTES = 512 * 1024;
 // rc.9 PR-8: bumped from /dkg/10.0.0/private-access to opt into the
 // Universal Messenger substrate (envelope wrapper, sender-side
 // idempotency cache, receiver-side dedup, durable SQLite outbox).

@@ -132,7 +132,7 @@ describe('ProtocolRouter', () => {
       }
     }
 
-    it('rejects non-admitted inbound peers after reading bounded request bytes but before handler dispatch', async () => {
+    it('rejects non-admitted inbound peers before reading request bytes or dispatching the handler', async () => {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       let handlerCalls = 0;
       const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
@@ -165,7 +165,7 @@ describe('ProtocolRouter', () => {
 
       expect(admittedCalls).toEqual([[REMOTE_PEER, PROTOCOL, 'inbound']]);
       expect(handlerCalls).toBe(0);
-      expect(stream.reads).toBe(2);
+      expect(stream.reads).toBe(0);
       expect(stream.sent).toBeNull();
       expect(stream.aborted?.message).toMatch(/handler error/);
     });

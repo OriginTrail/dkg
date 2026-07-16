@@ -78,7 +78,8 @@
     "test:devnet:pr1387-bulk-register-agents": "vitest run --config devnet/pr1387-bulk-register-agents/vitest.config.ts",
     "test:devnet:pr1384-preserve-agents-on-transfer": "vitest run --config devnet/pr1384-preserve-agents-on-transfer/vitest.config.ts",
     "test:devnet:pr1370-admin-op-wallet": "vitest run --config devnet/pr1370-admin-op-wallet/vitest.config.ts",
-    "test:devnet:manifest": "vitest run --config devnet/_bootstrap/vitest.manifest.config.ts"
+    "test:devnet:manifest": "vitest run --config devnet/_bootstrap/vitest.manifest.config.ts",
+    "test:devnet:chat-access-matrix": "vitest run --config devnet/chat-access-matrix/vitest.config.ts"
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",

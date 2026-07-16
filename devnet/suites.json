@@ -14,6 +14,7 @@
   "all": [
     "ack-candidate-isolation",
     "agent-provenance",
+    "chat-access-matrix",
     "conviction-emission-bell",
     "core-peers-features",
     "edge-update-flow",

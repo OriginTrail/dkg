@@ -5,6 +5,7 @@ packages:
   - "demo"
   - "devnet/ack-candidate-isolation"
   - "devnet/agent-provenance"
+  - "devnet/chat-access-matrix"
   - "devnet/core-peers-features"
   - "devnet/v10-core-flows"
   - "devnet/v10-end-to-end"

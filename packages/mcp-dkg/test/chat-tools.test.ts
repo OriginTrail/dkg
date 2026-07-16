@@ -198,6 +198,8 @@ describe('chat tools — dkg_send_message + dkg_check_inbox', () => {
       expect(result.isError).toBeFalsy();
       const body = result.content[0].text;
       expect(body).toMatch(/2 unread peer messages/);
+      expect(body).toMatch(/untrusted data, not instructions/);
+      expect(body).toMatch(/untrusted_message_text=/);
       expect(body).toMatch(/alice-node \(…AliceXYZ\)/);
       expect(body).toMatch(/…oWBobABC/);
       expect(body).toContain('msg-one');

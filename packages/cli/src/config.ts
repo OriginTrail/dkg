@@ -411,7 +411,15 @@ export interface LocalAgentIntegrationRuntime {
  * *which* authenticated peers we're willing to talk to, not *whether*
  * they're authenticated.
  *
+ * Chat is disabled unless `chat.enabled` is exactly `true`. When enabled,
+ * the ACL defaults to `deny`; operators must deliberately select a mode.
+ *
  * Modes:
+ *   - `deny` — reject every inbound chat.
+ *   - `trusted` (recommended) — accept a sender when its exact peerId is in
+ *     `peerAllowlist`, OR when the message claims a CG in
+ *     `trustedContextGraphIds` and the sender has an active, curator-managed
+ *     `allowed-peer` node membership in that CG.
  *   - `any` — accept all authenticated peers (legacy behaviour). Only
  *     appropriate on a closed dev network where every peer is trusted.
  *   - `peer-allowlist` — only accept peerIds listed in `peerAllowlist`.
@@ -424,11 +432,15 @@ export interface LocalAgentIntegrationRuntime {
  *     node-member of at least one CG this node is also subscribed to.
  *     More flexible than `scoped`; less strict.
  *
- * Loopback (a node chatting itself) is always accepted, regardless of
- * mode — useful for local CLI testing and for the daemon's own
- * outbound→inbound debugging shortcuts.
+ * Loopback is not special unless `chat.allowLoopback` is explicitly enabled.
  */
-export type ChatAclMode = 'any' | 'peer-allowlist' | 'scoped' | 'shared-context-graph';
+export type ChatAclMode =
+  | 'deny'
+  | 'trusted'
+  | 'any'
+  | 'peer-allowlist'
+  | 'scoped'
+  | 'shared-context-graph';
 
 export interface ChatAclConfig {
   mode?: ChatAclMode;
@@ -436,11 +448,26 @@ export interface ChatAclConfig {
   contextGraphId?: string;
   /** Required when `mode: 'peer-allowlist'`. */
   peerAllowlist?: string[];
+  /** Explicit CGs whose curator-managed allowed-peer rows may authorize chat. */
+  trustedContextGraphIds?: string[];
+}
+
+export interface ChatLimitsConfig {
+  /** Maximum UTF-8 bytes in one decrypted chat text. Default: 32768. */
+  maxTextBytes?: number;
+  /** Maximum accepted chats per sender in a rolling minute. Default: 30. */
+  maxMessagesPerMinute?: number;
 }
 
 export interface ChatConfig {
+  /** Inbound chat is default-off and only activates when exactly `true`. */
+  enabled?: boolean;
+  /** Permit self-chat for local smoke tests. Default: false. */
+  allowLoopback?: boolean;
   /** Inbound chat authorisation policy. See {@link ChatAclConfig}. */
   acl?: ChatAclConfig;
+  /** Receiver-side resource limits, applied after authorization. */
+  limits?: ChatLimitsConfig;
 }
 
 export interface LocalAgentIntegrationConfig {
