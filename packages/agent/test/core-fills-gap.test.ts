@@ -804,6 +804,76 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
+  it('deletes an upgraded ops-based durable miss and scans a matching child graph', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const deleteDurable = recorder(async (key: string) => { durable.delete(key); });
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: deleteDurable,
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const localCgId = '66';
+    const onChainCgId = 66n;
+    const kaId = 9066n;
+    const entity = 'urn:fact:upgraded-child-graph';
+    const value = 'Payload found after discarding a stale durable miss';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    const internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
+
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, kaId);
+    const cacheKey = (internals as any).vmReconcileCacheKey(localCgId, ual, root);
+    const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(localCgId);
+    const rootDataGraph = contextGraphWorkspaceGraphUri(localCgId);
+    durable.set(cacheKey, {
+      cacheKey,
+      localCgId,
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+      swmGen: `meta:${rootMetaGraph};data:${rootDataGraph};ops:1;opHash:legacy`,
+      candidateNamespaces: [{ metaGraph: rootMetaGraph, dataGraph: rootDataGraph }],
+      peerTopologyKey: await (internals as any).vmReconcilePeerTopologyKey(localCgId),
+    });
+
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      rootMetaGraph,
+      'upgraded-child-graph',
+      entity,
+      '2035-01-01T00:00:00.000Z',
+    );
+    await internals.store.insert([{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: `"${value}"`,
+      graph: `${rootDataGraph}/0x0000000000000000000000000000000000000000/${kaId}`,
+    }]);
+
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(deleteDurable.calls.some(([key]) => key === cacheKey)).toBe(true);
+    expect(durable.has(cacheKey)).toBe(false);
+  });
+
   it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
     const durable = new Map<string, VmReconcileNegativeRecord>();
     const subscriptionStore: ContextGraphSubscriptionStore = {

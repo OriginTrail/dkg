@@ -49,7 +49,10 @@ import {
   rdfLiteralTermMutf8ByteLength,
   isOversizedRdfLiteralError,
 } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  partitionConnectedBlankNodeComponents,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 
 // Match `_shared_memory` / `_verifiable_memory` as a full path SEGMENT — the
 // bucket graph (`…/_shared_memory`) and its per-KA descendants
@@ -61,7 +64,11 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 const SHARED_MEMORY_SEGMENT_RE = /\/_shared_memory(\/|$)/;
 const VERIFIABLE_MEMORY_SEGMENT_RE = /\/_verifiable_memory(\/|$)/;
 
-export type OversizeDropKind = 'oversize' | 'vm-quarantine' | 'store-reject';
+export type OversizeDropKind =
+  | 'oversize'
+  | 'vm-quarantine'
+  | 'store-reject'
+  | 'blank-node-component-quarantine';
 
 export interface OversizeDrop {
   quad: Quad;
@@ -116,21 +123,103 @@ export function estimateSyncStoreInsertQuadBytes(quad: Quad): number {
   return bytes;
 }
 
+interface SyncInsertUnit {
+  quads: Quad[];
+  estimatedBytes: number;
+  blankNodeLabels: Set<string>;
+}
+
+/**
+ * Turn a quad stream into indivisible insert units. Ground quads remain
+ * independent, while quads connected through blank-node labels are grouped
+ * transitively. Blank-node labels are scoped to one RDF load/update operation,
+ * so splitting one component across insert calls changes the represented RDF
+ * graph even when the same label text appears in both calls.
+ */
+function buildSyncInsertUnits(quads: readonly Quad[]): SyncInsertUnit[] {
+  return partitionConnectedBlankNodeComponents(
+    quads,
+    (quad) => [quad.subject, quad.object, quad.graph],
+  ).map((component) => ({
+    quads: component.items,
+    estimatedBytes: component.items.reduce(
+      (total, quad) => total + estimateSyncStoreInsertQuadBytes(quad),
+      0,
+    ),
+    blankNodeLabels: component.blankNodeLabels,
+  }));
+}
+
+/**
+ * Classify indivisible components before the first store mutation. A component
+ * larger than the adapter-neutral insert bound cannot be split without changing
+ * blank-node identity, so sync deliberately tombstones the complete component
+ * and consumes the page instead of throwing before cursor advancement.
+ */
+interface SyncInsertUnitFilterResult extends OversizeFilterResult {
+  keptUnits: SyncInsertUnit[];
+}
+
+function quarantineOversizedBlankNodeComponents(
+  units: readonly SyncInsertUnit[],
+): SyncInsertUnitFilterResult {
+  const oversizedUnits = new Set<SyncInsertUnit>();
+  const quarantinedVmGraphs = new Set<string>();
+  for (const unit of units) {
+    if (
+      unit.blankNodeLabels.size === 0 ||
+      unit.estimatedBytes <= SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) continue;
+    oversizedUnits.add(unit);
+    for (const quad of unit.quads) {
+      if (isVerifiableMemoryGraph(quad.graph)) quarantinedVmGraphs.add(quad.graph!);
+    }
+  }
+
+  const keptUnits: SyncInsertUnit[] = [];
+  const dropped: OversizeDrop[] = [];
+  for (const unit of units) {
+    const touchesQuarantinedVmGraph = unit.quads.some(
+      (quad) => quad.graph !== undefined && quarantinedVmGraphs.has(quad.graph),
+    );
+    if (oversizedUnits.has(unit) || touchesQuarantinedVmGraph) {
+      for (const quad of unit.quads) {
+        dropped.push({
+          quad,
+          bytes: estimateSyncStoreInsertQuadBytes(quad),
+          kind: touchesQuarantinedVmGraph
+            ? 'vm-quarantine'
+            : 'blank-node-component-quarantine',
+        });
+      }
+    } else {
+      keptUnits.push(unit);
+    }
+  }
+  return {
+    keptUnits,
+    kept: keptUnits.flatMap((unit) => unit.quads),
+    dropped,
+  };
+}
+
 async function insertInBoundedBatches(
   insert: (quads: Quad[]) => Promise<void>,
-  quads: readonly Quad[],
+  units: readonly SyncInsertUnit[],
 ): Promise<void> {
   let batch: Quad[] = [];
   let batchBytes = 0;
-  for (const quad of quads) {
-    const quadBytes = estimateSyncStoreInsertQuadBytes(quad);
-    if (batch.length > 0 && batchBytes + quadBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES) {
+  for (const unit of units) {
+    if (
+      batch.length > 0 &&
+      batchBytes + unit.estimatedBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES
+    ) {
       await insert(batch);
       batch = [];
       batchBytes = 0;
     }
-    batch.push(quad);
-    batchBytes += quadBytes;
+    batch.push(...unit.quads);
+    batchBytes += unit.estimatedBytes;
   }
   if (batch.length > 0) await insert(batch);
 }
@@ -261,20 +350,26 @@ export async function insertWithOversizeGuard(
   hooks: OversizeGuardHooks,
   seam: string,
 ): Promise<Quad[]> {
-  const { kept, dropped } = filterOversizedSyncQuads(quads);
-  if (dropped.length > 0) hooks.recordDrops(dropped, seam);
-  if (kept.length === 0) return kept;
+  const literalFilter = filterOversizedSyncQuads(quads);
+  if (literalFilter.dropped.length > 0) hooks.recordDrops(literalFilter.dropped, seam);
+  const componentFilter = quarantineOversizedBlankNodeComponents(
+    buildSyncInsertUnits(literalFilter.kept),
+  );
+  if (componentFilter.dropped.length > 0) {
+    hooks.recordDrops(componentFilter.dropped, `${seam}:blank-node-component-quarantine`);
+  }
+  if (componentFilter.kept.length === 0) return componentFilter.kept;
   try {
-    await insertInBoundedBatches(insert, kept);
-    return kept;
+    await insertInBoundedBatches(insert, componentFilter.keptUnits);
+    return componentFilter.kept;
   } catch (err) {
     if (!isOversizedRdfLiteralError(err)) throw err;
-    const backstop = splitStoreRejectedQuads(kept);
+    const backstop = splitStoreRejectedQuads(componentFilter.kept);
     if (backstop.dropped.length === 0) throw err; // not size-explicable → real error
     hooks.recordDrops(backstop.dropped, `${seam}:store-reject`);
     if (backstop.kept.length === 0) return [];
     // Second oversize throw here propagates — no loop, loud failure.
-    await insertInBoundedBatches(insert, backstop.kept);
+    await insertInBoundedBatches(insert, buildSyncInsertUnits(backstop.kept));
     return backstop.kept;
   }
 }

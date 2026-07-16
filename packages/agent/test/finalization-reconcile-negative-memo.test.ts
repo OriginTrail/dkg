@@ -32,6 +32,16 @@ const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(LOCAL_CG);
 const NAME_PRED = 'http://schema.org/name';
 const PRIVATE_ROOT_PRED = 'http://dkg.io/ontology/privateMerkleRoot';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /** Seed a local SWM snapshot for one KA and return its flat-KC merkle root. */
 async function seedSwmSnapshot(store: OxigraphStore, entity: string, value: string): Promise<Uint8Array> {
   await store.insert([
@@ -108,22 +118,165 @@ describe('#1609 — write-gen-gated negative memo (chain-reconcile backstop)', (
     const fh = new FinalizationHandler(store, new MockChainAdapter());
     const entity = 'urn:fact:finalization-singleflight';
     const merkleRoot = await seedSwmSnapshot(store, entity, 'shared value');
-    let acceptFactories = 0;
+    const queryGate = deferred<void>();
+    const originalQuery = store.query.bind(store);
+    let queryCalls = 0;
+    store.query = async (...args) => {
+      queryCalls += 1;
+      if (queryCalls === 1) await queryGate.promise;
+      return originalQuery(...args);
+    };
     const load = () => (fh as any).loadFinalizationSwmSlice(
       LOCAL_CG,
       [entity],
       undefined,
       undefined,
       merkleRoot,
-      async () => {
-        acceptFactories += 1;
-        return (quads: unknown[]) => quads;
-      },
+      [],
+      false,
     );
 
-    const [first, second] = await Promise.all([load(), load()]);
+    const firstLoad = load();
+    while (queryCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    const secondLoad = load();
+    await Promise.resolve();
+    expect(queryCalls).toBe(1);
+    queryGate.resolve(undefined);
+    const [first, second] = await Promise.all([firstLoad, secondLoad]);
     expect(first.quads).toEqual(second.quads);
-    expect(acceptFactories).toBe(1);
+  });
+
+  it('canonicalizes equivalent private-root sets in the finalization single-flight key', async () => {
+    const store = new OxigraphStore();
+    const fh = new FinalizationHandler(store, new MockChainAdapter());
+    const entity = 'urn:fact:finalization-private-root-order';
+    await seedSwmSnapshot(store, entity, 'shared value');
+    const privateA = Uint8Array.from({ length: 32 }, () => 0x11);
+    const privateB = Uint8Array.from({ length: 32 }, () => 0x22);
+    const merkleRoot = rootFor(entity, 'shared value', [privateA, privateB]);
+    const queryGate = deferred<void>();
+    const originalQuery = store.query.bind(store);
+    let queryCalls = 0;
+    const singleFlightKeys: string[] = [];
+    const originalSingleFlight = (fh as any).runScanSingleFlight.bind(fh);
+    vi.spyOn(fh as any, 'runScanSingleFlight').mockImplementation(
+      (key: string, work: () => Promise<unknown>) => {
+        singleFlightKeys.push(key);
+        return originalSingleFlight(key, work);
+      },
+    );
+    store.query = async (...args) => {
+      queryCalls += 1;
+      if (queryCalls === 1) await queryGate.promise;
+      return originalQuery(...args);
+    };
+    const load = (privateRoots: Uint8Array[]) => (fh as any).loadFinalizationSwmSlice(
+      LOCAL_CG,
+      [entity],
+      undefined,
+      undefined,
+      merkleRoot,
+      privateRoots,
+      false,
+    );
+
+    const firstLoad = load([privateA, privateB]);
+    while (queryCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    const secondLoad = load([privateB, privateA]);
+    await Promise.resolve();
+
+    expect(singleFlightKeys).toHaveLength(2);
+    expect(singleFlightKeys[0]).toBe(singleFlightKeys[1]);
+    expect(queryCalls).toBe(1);
+    queryGate.resolve(undefined);
+    const [first, second] = await Promise.all([firstLoad, secondLoad]);
+    expect(first.quads).toEqual(second.quads);
+  });
+
+  it('keeps different private-root sets on separate finalization single flights', async () => {
+    const store = new OxigraphStore();
+    const fh = new FinalizationHandler(store, new MockChainAdapter());
+    const entity = 'urn:fact:finalization-private-root-policy';
+    await seedSwmSnapshot(store, entity, 'shared value');
+    const privateA = Uint8Array.from({ length: 32 }, () => 0x33);
+    const privateB = Uint8Array.from({ length: 32 }, () => 0x44);
+    const merkleRoot = rootFor(entity, 'shared value', [privateA]);
+    const queryGate = deferred<void>();
+    const originalQuery = store.query.bind(store);
+    let queryCalls = 0;
+    const singleFlightKeys: string[] = [];
+    const originalSingleFlight = (fh as any).runScanSingleFlight.bind(fh);
+    vi.spyOn(fh as any, 'runScanSingleFlight').mockImplementation(
+      (key: string, work: () => Promise<unknown>) => {
+        singleFlightKeys.push(key);
+        return originalSingleFlight(key, work);
+      },
+    );
+    store.query = async (...args) => {
+      queryCalls += 1;
+      if (queryCalls === 1) await queryGate.promise;
+      return originalQuery(...args);
+    };
+    const load = (privateRoots: Uint8Array[]) => (fh as any).loadFinalizationSwmSlice(
+      LOCAL_CG,
+      [entity],
+      undefined,
+      undefined,
+      merkleRoot,
+      privateRoots,
+      false,
+    );
+
+    const firstLoad = load([privateA]);
+    while (queryCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    const secondLoad = load([privateB]);
+    while (queryCalls < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(singleFlightKeys).toHaveLength(2);
+    expect(singleFlightKeys[0]).not.toBe(singleFlightKeys[1]);
+    queryGate.resolve(undefined);
+    await Promise.all([firstLoad, secondLoad]);
+  });
+
+  it('does not coalesce finalization scans with different acceptance policies', async () => {
+    const store = new OxigraphStore();
+    const fh = new FinalizationHandler(store, new MockChainAdapter());
+    const entity = 'urn:fact:finalization-policy';
+    const merkleRoot = await seedSwmSnapshot(store, entity, 'shared value');
+    const queryGate = deferred<void>();
+    const originalQuery = store.query.bind(store);
+    let queryCalls = 0;
+    const singleFlightKeys: string[] = [];
+    const originalSingleFlight = (fh as any).runScanSingleFlight.bind(fh);
+    vi.spyOn(fh as any, 'runScanSingleFlight').mockImplementation(
+      (key: string, work: () => Promise<unknown>) => {
+        singleFlightKeys.push(key);
+        return originalSingleFlight(key, work);
+      },
+    );
+    store.query = async (...args) => {
+      queryCalls += 1;
+      if (queryCalls === 1) await queryGate.promise;
+      return originalQuery(...args);
+    };
+    const load = (allowGeneratedCatalogFloor: boolean) => (fh as any).loadFinalizationSwmSlice(
+      LOCAL_CG,
+      [entity],
+      undefined,
+      undefined,
+      merkleRoot,
+      [],
+      allowGeneratedCatalogFloor,
+    );
+
+    const strictLoad = load(false);
+    while (queryCalls === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    const floorLoad = load(true);
+    for (let i = 0; i < 3; i += 1) await Promise.resolve();
+    expect(singleFlightKeys).toHaveLength(2);
+    expect(singleFlightKeys[0]).not.toBe(singleFlightKeys[1]);
+    queryGate.resolve(undefined);
+    await Promise.all([strictLoad, floorLoad]);
   });
 
   it('single-flights concurrent equivalent never-match scans', async () => {

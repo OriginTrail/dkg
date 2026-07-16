@@ -1165,6 +1165,52 @@ describe('DashboardDB — context graph subscriptions', () => {
 });
 
 describe('DashboardDB — durable VM reconcile negative cache', () => {
+  it('migrates an existing schema-28 database before durable cache use', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP INDEX IF EXISTS idx_vm_reconcile_negative_cg;
+      DROP INDEX IF EXISTS idx_vm_reconcile_negative_retry;
+      DROP TABLE IF EXISTS vm_reconcile_negative_cache;
+    `);
+    raw.pragma('user_version = 28');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(29);
+    const schemaObjects = (db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE name IN (
+        'vm_reconcile_negative_cache',
+        'idx_vm_reconcile_negative_cg',
+        'idx_vm_reconcile_negative_retry'
+      )
+      ORDER BY name
+    `).all() as Array<{ name: string }>).map((row) => row.name);
+    expect(schemaObjects).toEqual([
+      'idx_vm_reconcile_negative_cg',
+      'idx_vm_reconcile_negative_retry',
+      'vm_reconcile_negative_cache',
+    ]);
+
+    db.upsertVmReconcileNegative({
+      cache_key: 'migrated-cg\0ual#root',
+      context_graph_id: 'migrated-cg',
+      failures: 1,
+      next_retry_at: 42_000,
+      swm_gen: 'migrated-generation',
+      candidate_namespaces: '[]',
+      peer_topology_key: 'migrated-peers',
+      updated_at: 41_000,
+    });
+    expect(db.getVmReconcileNegative('migrated-cg\0ual#root')).toMatchObject({
+      context_graph_id: 'migrated-cg',
+      swm_gen: 'migrated-generation',
+    });
+  });
+
   it('round-trips and deletes restart-durable generation-gated misses', () => {
     db.upsertVmReconcileNegative({
       cache_key: 'cg\0ual#root',

@@ -1,9 +1,12 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  createResponderFreshSwmDataGraphPlanMemo,
   createResponderSyncRowListMemo,
   readDurableMetaPage,
+  readSwmDataPage,
   SyncRowSnapshotLimitError,
+  type SyncRow,
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
@@ -113,7 +116,216 @@ describe('sync responder snapshot budget defaults', () => {
   });
 });
 
+describe('fresh SWM data graph-plan memo', () => {
+  it('coalesces concurrent loads from the same refresh generation', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const gate = deferred<{ entries: []; totalRows: number }>();
+    let loads = 0;
+    const load = () => {
+      loads += 1;
+      return gate.promise;
+    };
+
+    const first = memo.get('peer/cg', load, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const second = memo.get('peer/cg', load, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+
+    await Promise.resolve();
+    expect(loads).toBe(1);
+    const plan = { entries: [] as [], totalRows: 2 };
+    gate.resolve(plan);
+    await expect(first).resolves.toBe(plan);
+    await expect(second).resolves.toBe(plan);
+    expect(loads).toBe(1);
+  });
+
+  it('does not let a refreshed session join an older in-flight plan', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const firstGate = deferred<{ entries: []; totalRows: number }>();
+    const secondGate = deferred<{ entries: []; totalRows: number }>();
+    let secondLoads = 0;
+
+    const first = memo.get('peer/cg', () => firstGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const second = memo.get('peer/cg', () => {
+      secondLoads += 1;
+      return secondGate.promise;
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    await Promise.resolve();
+    expect(secondLoads).toBe(0);
+    firstGate.resolve({ entries: [], totalRows: 1 });
+    await expect(first).resolves.toMatchObject({ totalRows: 1 });
+    while (secondLoads === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    secondGate.resolve({ entries: [], totalRows: 2 });
+    await expect(second).resolves.toMatchObject({ totalRows: 2 });
+
+    await expect(memo.get('peer/cg', async () => ({ entries: [], totalRows: 3 }), {
+      refreshGeneration: 'session-b',
+      requireExisting: true,
+    })).resolves.toMatchObject({ totalRows: 2 });
+  });
+
+  it('does not inherit an older generation plan failure', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const oldGate = deferred<{ entries: []; totalRows: number }>();
+    const newGate = deferred<{ entries: []; totalRows: number }>();
+    let newLoads = 0;
+
+    const oldRequest = memo.get('peer/cg', () => oldGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const newRequest = memo.get('peer/cg', () => {
+      newLoads += 1;
+      return newGate.promise;
+    }, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    await Promise.resolve();
+    expect(newLoads).toBe(0);
+    oldGate.reject(new Error('older plan load failed'));
+    await expect(oldRequest).rejects.toThrow('older plan load failed');
+    await vi.waitFor(() => expect(newLoads).toBe(1));
+
+    const freshPlan = { entries: [] as [], totalRows: 2 };
+    newGate.resolve(freshPlan);
+    await expect(newRequest).resolves.toBe(freshPlan);
+  });
+
+  it('coalesces same-generation refreshes after they wait behind an older generation', async () => {
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const oldGate = deferred<{ entries: []; totalRows: number }>();
+    const newGate = deferred<{ entries: []; totalRows: number }>();
+    let newLoads = 0;
+    const loadNew = () => {
+      newLoads += 1;
+      return newGate.promise;
+    };
+
+    const oldRequest = memo.get('peer/cg', () => oldGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const firstNewRequest = memo.get('peer/cg', loadNew, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+    const secondNewRequest = memo.get('peer/cg', loadNew, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    await Promise.resolve();
+    expect(newLoads).toBe(0);
+    oldGate.resolve({ entries: [], totalRows: 1 });
+    await expect(oldRequest).resolves.toMatchObject({ totalRows: 1 });
+    await vi.waitFor(() => expect(newLoads).toBe(1));
+
+    const newPlan = { entries: [] as [], totalRows: 2 };
+    newGate.resolve(newPlan);
+    await expect(firstNewRequest).resolves.toBe(newPlan);
+    await expect(secondNewRequest).resolves.toBe(newPlan);
+    expect(newLoads).toBe(1);
+  });
+
+  it('threads the session generation through the fresh SWM data call site', async () => {
+    const cg = 'generation-aware-call-site';
+    const dataGraph = `did:dkg:context-graph:${cg}/_shared_memory`;
+    const metaGraph = `${dataGraph}_meta`;
+    const oldRootQuery = deferred<{
+      type: 'bindings';
+      bindings: [];
+    }>();
+    let rootQueryLoads = 0;
+    const store = {
+      query: async (sparql: string) => {
+        if (!sparql.includes('SELECT DISTINCT ?g ?root')) {
+          throw new Error(`unexpected query: ${sparql}`);
+        }
+        rootQueryLoads += 1;
+        if (rootQueryLoads === 1) return oldRootQuery.promise;
+        return { type: 'bindings' as const, bindings: [] };
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderFreshSwmDataGraphPlanMemo();
+    const request = (refreshGeneration: string) => readSwmDataPage({
+      store,
+      graphList: [dataGraph, metaGraph],
+      registeredSubGraphNames: [],
+      contextGraphId: cg,
+      cutoffIso: '2020-01-01T00:00:00.000Z',
+      offset: 0,
+      limit: 10,
+      rowListCacheKey: `${cg}:swm-data`,
+      refreshRowList: true,
+      refreshGeneration,
+      freshGraphPlanMemo: memo,
+    });
+
+    const oldRequest = request('session-a');
+    await vi.waitFor(() => expect(rootQueryLoads).toBe(1));
+    const newRequest = request('session-b');
+    await Promise.resolve();
+    expect(rootQueryLoads).toBe(1);
+
+    oldRootQuery.resolve({ type: 'bindings', bindings: [] });
+    await expect(oldRequest).resolves.toEqual([]);
+    await vi.waitFor(() => expect(rootQueryLoads).toBe(2));
+    await expect(newRequest).resolves.toEqual([]);
+  });
+});
+
 describe('sync responder snapshot cache and budget', () => {
+  it('coalesces same-generation snapshot reloads queued behind an older generation', async () => {
+    const memo = createResponderSyncRowListMemo(10_000);
+    const oldGate = deferred<readonly SyncRow[]>();
+    const newGate = deferred<readonly SyncRow[]>();
+    let newLoads = 0;
+    const loadNew = () => {
+      newLoads += 1;
+      return newGate.promise;
+    };
+    const oldRequest = memo.get('durable-meta:peer:cg', () => oldGate.promise, {
+      refresh: true,
+      refreshGeneration: 'session-a',
+    });
+    const firstNewRequest = memo.get('durable-meta:peer:cg', loadNew, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+    const secondNewRequest = memo.get('durable-meta:peer:cg', loadNew, {
+      refresh: true,
+      refreshGeneration: 'session-b',
+    });
+
+    oldGate.resolve([]);
+    await expect(oldRequest).resolves.toEqual([]);
+    await vi.waitFor(() => expect(newLoads).toBe(1));
+    const freshRows: readonly SyncRow[] = [{
+      s: 'urn:memo:fresh',
+      p: `${DKG_NS}label`,
+      o: '"fresh"',
+      g: 'urn:memo:graph',
+    }];
+    newGate.resolve(freshRows);
+    await expect(firstNewRequest).resolves.toBe(freshRows);
+    await expect(secondNewRequest).resolves.toBe(freshRows);
+    expect(newLoads).toBe(1);
+  });
+
   it('reloads a new session after an older snapshot load is already in flight', async () => {
     const memo = createResponderSyncRowListMemo(10_000);
     const oldLoad = deferred<readonly {

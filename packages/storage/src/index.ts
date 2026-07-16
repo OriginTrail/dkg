@@ -92,6 +92,11 @@ export {
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
+  isBlankNodeTerm,
+  partitionConnectedBlankNodeComponents,
+  type ConnectedBlankNodeComponent,
+} from './blank-node-components.js';
+export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';

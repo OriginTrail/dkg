@@ -196,6 +196,140 @@ describe('insertWithOversizeGuard', () => {
     }
   });
 
+  it('keeps connected blank-node components within one bounded insert call', async () => {
+    const { hooks } = collect();
+    const detail = lit(50_000);
+    const componentA = [
+      quad('_:section-a', SWM_GRAPH, 'http://ex.org/doc-a'),
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:section-a'),
+        predicate: `http://ex.org/a-${index}`,
+      })),
+    ];
+    const componentB = [
+      quad('_:section-b', SWM_GRAPH, 'http://ex.org/doc-b'),
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:section-b'),
+        predicate: `http://ex.org/b-${index}`,
+      })),
+    ];
+    const input = componentA.flatMap((quadA, index) => (
+      index < componentB.length ? [quadA, componentB[index]!] : [quadA]
+    ));
+    const batches: Quad[][] = [];
+
+    await insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      input,
+      hooks,
+      'swm-sync',
+    );
+
+    expect(batches).toHaveLength(2);
+    for (const label of ['_:section-a', '_:section-b']) {
+      const containingBatches = batches.filter((batch) => batch.some(
+        (q) => q.subject === label || q.object === label || q.graph === label,
+      ));
+      expect(containingBatches).toHaveLength(1);
+    }
+    for (const batch of batches) {
+      const bytes = batch.reduce((sum, q) => sum + estimateSyncStoreInsertQuadBytes(q), 0);
+      expect(bytes).toBeLessThanOrEqual(SYNC_STORE_INSERT_BATCH_MAX_BYTES);
+    }
+  });
+
+  it('keeps a transitive blank-node chain in one insert call across a batch boundary', async () => {
+    const { hooks } = collect();
+    const detail = lit(50_000);
+    const chainedComponent = [
+      { ...quad('_:b', SWM_GRAPH, '_:a'), predicate: 'http://ex.org/next' },
+      { ...quad('_:c', SWM_GRAPH, '_:b'), predicate: 'http://ex.org/next' },
+      ...Array.from({ length: 90 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:c'),
+        predicate: `http://ex.org/chain-detail-${index}`,
+      })),
+    ];
+    const groundQuads = Array.from({ length: 100 }, (_, index) => ({
+      ...quad(detail, SWM_GRAPH, `http://ex.org/ground-${index}`),
+      predicate: `http://ex.org/ground-detail-${index}`,
+    }));
+    const input = chainedComponent.flatMap((componentQuad, index) => (
+      index < groundQuads.length ? [componentQuad, groundQuads[index]!] : [componentQuad]
+    ));
+    const batches: Quad[][] = [];
+
+    await insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      input,
+      hooks,
+      'swm-sync',
+    );
+
+    expect(batches.length).toBeGreaterThan(1);
+    const chainBatches = batches.filter((batch) => batch.some((q) =>
+      ['_:a', '_:b', '_:c'].includes(q.subject) ||
+      ['_:a', '_:b', '_:c'].includes(q.object) ||
+      ['_:a', '_:b', '_:c'].includes(q.graph)));
+    expect(chainBatches).toHaveLength(1);
+    expect(chainBatches[0]!.filter((q) =>
+      ['_:a', '_:b', '_:c'].includes(q.subject) ||
+      ['_:a', '_:b', '_:c'].includes(q.object) ||
+      ['_:a', '_:b', '_:c'].includes(q.graph))).toHaveLength(chainedComponent.length);
+  });
+
+  it('quarantines an over-bound blank-node component before inserting an earlier valid unit', async () => {
+    const { drops, hooks } = collect();
+    const valid = quad(lit(10), SWM_GRAPH, 'http://ex.org/valid');
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-section', SWM_GRAPH, 'http://ex.org/doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:huge-section'),
+        predicate: `http://ex.org/detail-${index}`,
+      })),
+    ];
+    const batches: Quad[][] = [];
+
+    await expect(insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      [valid, ...component],
+      hooks,
+      'swm-sync',
+    )).resolves.toEqual([valid]);
+
+    expect(batches).toEqual([[valid]]);
+    expect(drops).toHaveLength(component.length);
+    expect(drops.every(({ drop }) => drop.kind === 'blank-node-component-quarantine')).toBe(true);
+    expect(drops.every(({ seam }) => seam === 'swm-sync:blank-node-component-quarantine')).toBe(true);
+  });
+
+  it('quarantines the whole VM graph when one blank-node component is over-bound', async () => {
+    const { drops, hooks } = collect();
+    const validVm = quad(lit(10), VM_GRAPH, 'http://ex.org/valid-vm-metadata');
+    const otherGraph = quad(lit(10), DATA_GRAPH, 'http://ex.org/unrelated');
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-vm-section', VM_GRAPH, 'http://ex.org/vm-doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, VM_GRAPH, '_:huge-vm-section'),
+        predicate: `http://ex.org/vm-detail-${index}`,
+      })),
+    ];
+    const batches: Quad[][] = [];
+
+    await expect(insertWithOversizeGuard(
+      async (batch) => { batches.push(batch); },
+      [validVm, ...component, otherGraph],
+      hooks,
+      'vm-sync',
+    )).resolves.toEqual([otherGraph]);
+
+    expect(batches).toEqual([[otherGraph]]);
+    expect(drops).toHaveLength(component.length + 1);
+    expect(drops.every(({ drop }) => drop.kind === 'vm-quarantine')).toBe(true);
+    expect(drops.map(({ drop }) => drop.quad)).toEqual([validVm, ...component]);
+  });
+
   it('rethrows an oversize error the split cannot explain (real store bug, loud failure)', async () => {
     const { hooks } = collect();
     const smallButRejected = quad(lit(10));
@@ -226,14 +360,18 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
   const goodA = quad(lit(10), DATA_GRAPH, 'http://ex.org/a');
   const goodB = quad(lit(10), DATA_GRAPH, 'http://ex.org/b');
 
-  function makeContext(storeInsert: (quads: Quad[]) => Promise<void>) {
+  function makeContext(
+    storeInsert: (quads: Quad[]) => Promise<void>,
+    dataQuads: Quad[] = [goodA, bad, goodB],
+  ) {
     const deletedCheckpoints: string[] = [];
     const setCheckpoints: Array<{ key: string; offset: number }> = [];
+    let dataFetchCalls = 0;
     const page = (phase: 'data' | 'meta'): SyncPageResult => ({
-      quads: phase === 'data' ? [goodA, bad, goodB] : [],
+      quads: phase === 'data' ? dataQuads : [],
       bytesReceived: 100,
       resumedFromOffset: 0,
-      nextOffset: 3,
+      nextOffset: dataQuads.length,
       checkpointKey: `cp|${phase}`,
       completed: true,
       timedOut: false,
@@ -241,12 +379,16 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
     return {
       deletedCheckpoints,
       setCheckpoints,
+      get dataFetchCalls() { return dataFetchCalls; },
       context: {
         ctx: createOperationContext('sync'),
         remotePeerId: 'peerR',
         contextGraphIds: ['agents'],
         createContextGraphSyncDeadline: () => Date.now() + 10_000,
-        fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => page(phase),
+        fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => {
+          if (phase === 'data') dataFetchCalls += 1;
+          return page(phase);
+        },
         processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
           verifiedData: dataQuads,
           verifiedMeta: metaQuads,
@@ -302,6 +444,41 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
       kind: 'oversize',
       seam: 'durable-sync',
       predicate: 'https://schema.org/description',
+    });
+  });
+
+  it('consumes a page containing an over-bound blank-node component instead of retrying it', async () => {
+    const valid = quad(lit(10), SWM_GRAPH, 'http://ex.org/valid-before-huge-component');
+    const detail = lit(50_000);
+    const component = [
+      quad('_:huge-section', SWM_GRAPH, 'http://ex.org/huge-doc'),
+      ...Array.from({ length: 170 }, (_, index) => ({
+        ...quad(detail, SWM_GRAPH, '_:huge-section'),
+        predicate: `http://ex.org/huge-detail-${index}`,
+      })),
+    ];
+    const stored: Quad[][] = [];
+    const tomb = new OversizeTombstoneLog({ logWarn: () => {} });
+    const guarded = async (quads: Quad[]) => {
+      await insertWithOversizeGuard(
+        async (kept) => { stored.push(kept); },
+        quads,
+        { recordDrops: (drops, seam) => tomb.record(drops, seam) },
+        'durable-sync',
+      );
+    };
+    const run = makeContext(guarded, [valid, ...component]);
+
+    const summary = await runDurableSync(run.context as never);
+
+    expect(summary.failedPhases).toBe(0);
+    expect(stored).toEqual([[valid]]);
+    expect(run.deletedCheckpoints).toEqual(expect.arrayContaining(['cp|meta', 'cp|data']));
+    expect(run.dataFetchCalls).toBe(1);
+    expect(tomb.size).toBe(component.length);
+    expect(tomb.list(component.length)[0]).toMatchObject({
+      kind: 'blank-node-component-quarantine',
+      seam: 'durable-sync:blank-node-component-quarantine',
     });
   });
 });

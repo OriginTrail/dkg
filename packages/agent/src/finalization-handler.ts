@@ -261,6 +261,20 @@ function finalizationSwmResultBudget(): SharedMemoryResultBudget {
   };
 }
 
+function finalizationAcceptancePolicyKey(
+  privateRoots: readonly Uint8Array[],
+  allowGeneratedCatalogFloor: boolean,
+): string {
+  const canonicalPrivateRoots = privateRoots
+    .map((root) => ethers.hexlify(root))
+    .sort()
+    .join('\u0001');
+  return [
+    canonicalPrivateRoots,
+    allowGeneratedCatalogFloor ? 'generated-catalog-floor' : 'strict-merkle',
+  ].join('\u0002');
+}
+
 type NegativeSnapshotMemoEntry = {
   /** Write generation for the CG's graph prefix observed BEFORE the scan. */
   writeGen: number;
@@ -476,23 +490,23 @@ export class FinalizationHandler {
       // unbounded read on empty-or-mismatch. All of the bound/widen policy — and the
       // reasoning for why it is safe — lives in storage's
       // `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen.
+      const privateRoots = await this.getPrivateRootsFromMeta(
+        contextGraphId,
+        msg.rootEntities,
+        subGraphName,
+      );
+      const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(
+        contextGraphId,
+        ctxGraphId,
+      );
       const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } = await this.loadFinalizationSwmSlice(
         contextGraphId,
         msg.rootEntities,
         subGraphName,
         swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
         msg.kcMerkleRoot,
-        async () => {
-          const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
-          const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
-          return (quads) => this.sharedMemoryQuadsMatchingMerkle(
-            contextGraphId,
-            quads,
-            privateRoots,
-            msg.kcMerkleRoot,
-            allowGeneratedCatalogFloor,
-          );
-        },
+        privateRoots,
+        allowGeneratedCatalogFloor,
       );
 
       if (sharedMemoryQuads.length > 0) {
@@ -1855,7 +1869,8 @@ export class FinalizationHandler {
     subGraphName: string | undefined,
     kaGraphBound: SwmKaGraphBound | undefined,
     expectedMerkleRoot: Uint8Array,
-    createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+    privateRoots: Uint8Array[],
+    allowGeneratedCatalogFloor: boolean,
   ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null };
@@ -1867,6 +1882,7 @@ export class FinalizationHandler {
       safeRoots.slice().sort().join('\u0001'),
       kaGraphBound ? `${kaGraphBound.agentAddress}:${kaGraphBound.startNumber}:${kaGraphBound.endNumber}` : '*',
       ethers.hexlify(expectedMerkleRoot),
+      finalizationAcceptancePolicyKey(privateRoots, allowGeneratedCatalogFloor),
       String(writeGen ?? 'unknown'),
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {
@@ -1881,7 +1897,13 @@ export class FinalizationHandler {
             widened: SWM_SLICE_SOURCE_WIDENED,
             unbounded: SWM_SLICE_SOURCE,
           },
-          createAccept,
+          createAccept: async () => (quads) => this.sharedMemoryQuadsMatchingMerkle(
+            contextGraphId,
+            quads,
+            privateRoots,
+            expectedMerkleRoot,
+            allowGeneratedCatalogFloor,
+          ),
           queryOptions: { priority: 'background' },
           resultBudget: finalizationSwmResultBudget(),
         },

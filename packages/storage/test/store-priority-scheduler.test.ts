@@ -192,6 +192,7 @@ describe('StorePriorityScheduler', () => {
       expect(scheduler.snapshot).toMatchObject({
         maxConcurrent: 2,
         ackReservedSlots: 0,
+        healthReservedSlots: 0,
         backgroundReservedSlots: 1,
         ackQueueLimit: 3,
         normalQueueLimit: 2,
@@ -260,6 +261,20 @@ describe('StorePriorityScheduler', () => {
       await Promise.allSettled(running);
       vi.useRealTimers();
     }
+  });
+
+  it('honors the deprecated seventh positional health reservation', () => {
+    const scheduler = new StorePriorityScheduler(
+      3,
+      1,
+      undefined,
+      0,
+      undefined,
+      1_000,
+      1,
+    );
+
+    expect(scheduler.snapshot.healthReservedSlots).toBe(1);
   });
 
   it('lets ACK work jump ahead of queued background work', async () => {

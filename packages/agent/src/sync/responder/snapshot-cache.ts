@@ -135,6 +135,140 @@ function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal | undefine
   });
 }
 
+interface GenerationAwareInflight<T> {
+  promise: Promise<T>;
+  refreshGeneration?: string;
+}
+
+type GenerationSingleFlightPreparation<T, R> =
+  | { kind: 'return'; value: R }
+  | { kind: 'load'; load: () => Promise<T> };
+
+/**
+ * Coalesce callers from the same responder-session generation while making a
+ * newer generation wait for, then supersede, an older in-flight load. Waiting
+ * is abortable per caller; the shared loader itself remains owner-independent.
+ * The helper owns the complete wait/re-check/claim loop and installs the new
+ * promise before invoking its loader, so same-generation waiters cannot race
+ * independent replacement loads.
+ */
+async function runGenerationAwareSingleFlight<T, R>(
+  inflight: Map<string, GenerationAwareInflight<T>>,
+  key: string,
+  requestedGeneration: string | undefined,
+  signal: AbortSignal | undefined,
+  prepare: () => GenerationSingleFlightPreparation<T, R>,
+  raceClaimedLoad = true,
+): Promise<T | R> {
+  while (true) {
+    const pending = inflight.get(key);
+    if (pending) {
+      const supersedesPending = requestedGeneration !== undefined &&
+        requestedGeneration !== pending.refreshGeneration;
+      if (!supersedesPending) return raceAgainstAbort(pending.promise, signal);
+      try {
+        await raceAgainstAbort(pending.promise, signal);
+      } catch {
+        // A newer generation owns an independent attempt. Do not inherit an
+        // older load failure, but preserve the waiting caller's local abort.
+        throwIfAborted(signal);
+      }
+      continue;
+    }
+
+    const prepared = prepare();
+    if (prepared.kind === 'return') return prepared.value;
+    const promise = Promise.resolve().then(prepared.load);
+    const entry: GenerationAwareInflight<T> = {
+      promise,
+      refreshGeneration: requestedGeneration,
+    };
+    inflight.set(key, entry);
+    void promise.finally(() => {
+      if (inflight.get(key) === entry) inflight.delete(key);
+    }).catch(() => {});
+    return raceClaimedLoad ? raceAgainstAbort(promise, signal) : promise;
+  }
+}
+
+export interface GenerationAwareTtlSingleFlightMemo<T> {
+  get(
+    key: string,
+    load: () => Promise<T>,
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
+  ): Promise<T | null>;
+}
+
+/**
+ * Small generation-aware TTL memo for responder plans and inventories. It
+ * centralizes the refresh/supersession protocol used by the row-snapshot memo
+ * without coupling scalar plan values to row retention budgets.
+ */
+export function createGenerationAwareTtlSingleFlightMemo<T>(
+  ttlMs: number,
+  maxEntries: number,
+): GenerationAwareTtlSingleFlightMemo<T> {
+  const cached = new Map<string, {
+    value: T;
+    cachedAt: number;
+    refreshGeneration?: string;
+  }>();
+  const inflight = new Map<string, GenerationAwareInflight<T>>();
+  const prune = (now = Date.now()) => {
+    for (const [key, entry] of cached) {
+      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
+    }
+  };
+
+  return {
+    async get(key, load, options) {
+      throwIfAborted(options?.signal);
+      const requestedGeneration = options?.refreshGeneration;
+      return runGenerationAwareSingleFlight(
+        inflight,
+        key,
+        requestedGeneration,
+        options?.signal,
+        () => {
+          const now = Date.now();
+          prune(now);
+          let existing = cached.get(key);
+          if (
+            existing &&
+            requestedGeneration !== undefined &&
+            existing.refreshGeneration !== requestedGeneration
+          ) {
+            cached.delete(key);
+            existing = undefined;
+          }
+          if (!options?.refresh && existing) {
+            cached.delete(key);
+            cached.set(key, { ...existing, cachedAt: now });
+            return { kind: 'return', value: existing.value };
+          }
+          if (options?.requireExisting) return { kind: 'return', value: null };
+          if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
+
+          return { kind: 'load', load: async () => {
+            const value = await load();
+            cached.set(key, {
+              value,
+              cachedAt: Date.now(),
+              refreshGeneration: requestedGeneration,
+            });
+            return value;
+          } };
+        },
+      );
+    },
+  };
+}
+
 /**
  * Session snapshot cache with coalesced loads, TTL expiry, immutable row-array
  * sharing, and optional process-wide retention budgeting. Returned arrays are
@@ -320,128 +454,116 @@ export function createResponderSyncRowListMemo(
       // coalescing onto that in-flight promise would return the OLD row set to
       // the new session (the private-CG approval race can then omit the freshly
       // written delegation). Wait for older loads to settle, then issue a new
-      // store read. Re-check in a loop so concurrent refreshes serialize rather
-      // than racing two writers against the same cache key.
-      while (true) {
-        const pending = inflight.get(key);
-        if (!pending) break;
-        const supersedesPending = options?.refreshGeneration !== undefined &&
-          options.refreshGeneration !== pending.refreshGeneration;
-        if (!supersedesPending) {
-          return raceAgainstAbort(pending.promise, options?.signal);
-        }
-        try {
-          await raceAgainstAbort(pending.promise, options?.signal);
-        } catch {
-          // A new session owns an independent attempt. An older session's
-          // query/budget failure must not be inherited, but caller abort still
-          // takes precedence.
-          throwIfAborted(options?.signal);
-        }
-      }
-
-      const now = Date.now();
-      pruneExpired(now);
-      const requestedGeneration = options?.refreshGeneration;
-      const priorExpiry = expired.get(key);
-      if (priorExpiry) {
-        if (
-          options?.refresh ||
-          (requestedGeneration !== undefined &&
-            priorExpiry.refreshGeneration !== requestedGeneration)
-        ) deleteExpired(key);
-        else throw new Error('Durable data sync session snapshot expired before page completion');
-      }
-      const priorRejection = rejected.get(key);
-      if (priorRejection) {
-        if (
-          options?.refresh ||
-          (requestedGeneration !== undefined &&
-            priorRejection.refreshGeneration !== requestedGeneration)
-        ) deleteRejected(key);
-        else throw priorRejection.error;
-      }
-
-      let existing = cached.get(key);
-      if (
-        existing &&
-        requestedGeneration !== undefined &&
-        existing.refreshGeneration !== requestedGeneration
-      ) {
-        // prepareResponderSession installs a new token before its page-zero
-        // snapshot finishes. If that request aborts while waiting for an older
-        // generation, or its own refresh load fails, the older snapshot can
-        // remain retained. A same-token retry has refresh=false, so generation
-        // validation must also happen on cache hits rather than only while an
-        // in-flight load exists.
-        deleteCached(key, 'replaced');
-        existing = undefined;
-      }
-      if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) {
-        const refreshed: CachedSnapshot = {
-          value: existing.value,
-          cachedAt: now,
-          cleanupTimer: scheduleCleanup(key, now, existing.refreshGeneration),
-          budgetEntryId: existing.budgetEntryId,
-          released: false,
-          refreshGeneration: existing.refreshGeneration,
-        };
-        clearTimeout(existing.cleanupTimer);
-        cached.delete(key);
-        cached.set(key, refreshed);
-        if (existing.budgetEntryId) memoOptions.budget?.touch(existing.budgetEntryId);
-        return existing.value;
-      }
-      if (options?.requireExisting) return null;
-      if (!cached.has(key) && cached.size + inflight.size >= maxEntries && !evictOneReleased()) {
-        throw new SyncRowSnapshotLimitError({
-          key,
-          maxEntries,
-          cachedEntries: cached.size,
-          inflightEntries: inflight.size,
-        });
-      }
-
-      const loadStartedAt = Date.now();
-      let loadOutcome: 'completed' | 'error' = 'completed';
-      recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_before_load');
-      const load = loadRows()
-        .then((rows) => {
-          // Loads are owner-independent and may finish after the first waiter
-          // aborts. Cache the complete result for surviving/coalesced waiters.
-          storeCached(key, rows, options?.refreshGeneration);
-          return rows;
-        })
-        .catch((error) => {
-          loadOutcome = 'error';
-          // A loader may reject before returning its array when a cheap store
-          // preflight or store-paged builder proves the full query would cross
-          // a response/heap safety bound. Remember intrinsic rejections exactly
-          // like storeCached() does, so later pages in this responder session go
-          // straight to bounded store paging instead of repeating the full load.
-          if (
-            error instanceof SyncRowSnapshotBudgetError &&
-            (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
-          ) {
-            const stale = cached.get(key);
-            if (stale) deleteCached(key, 'replaced');
-            rememberRejected(key, error, options?.refreshGeneration);
+      // store read. The shared primitive owns the wait/re-check/claim loop.
+      const rows = await runGenerationAwareSingleFlight<
+        readonly SyncRow[],
+        readonly SyncRow[] | null
+      >(
+        inflight,
+        key,
+        options?.refreshGeneration,
+        options?.signal,
+        () => {
+          const now = Date.now();
+          pruneExpired(now);
+          const requestedGeneration = options?.refreshGeneration;
+          const priorExpiry = expired.get(key);
+          if (priorExpiry) {
+            if (
+              options?.refresh ||
+              (requestedGeneration !== undefined &&
+                priorExpiry.refreshGeneration !== requestedGeneration)
+            ) deleteExpired(key);
+            else throw new Error('Durable data sync session snapshot expired before page completion');
           }
-          throw error;
-        })
-        .finally(() => {
-          getMetrics().syncResponderSnapshotLoadDurationMs.record(
-            Date.now() - loadStartedAt,
-            { phase: memoOptions.phase, outcome: loadOutcome },
-          );
-          recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_after_load');
-          if (inflight.get(key)?.promise === load) inflight.delete(key);
-        });
-      inflight.set(key, {
-        promise: load,
-        refreshGeneration: options?.refreshGeneration,
-      });
-      const rows = await load;
+          const priorRejection = rejected.get(key);
+          if (priorRejection) {
+            if (
+              options?.refresh ||
+              (requestedGeneration !== undefined &&
+                priorRejection.refreshGeneration !== requestedGeneration)
+            ) deleteRejected(key);
+            else throw priorRejection.error;
+          }
+
+          let existing = cached.get(key);
+          if (
+            existing &&
+            requestedGeneration !== undefined &&
+            existing.refreshGeneration !== requestedGeneration
+          ) {
+            // prepareResponderSession installs a new token before its page-zero
+            // snapshot finishes. If that request aborts while waiting for an older
+            // generation, or its own refresh load fails, the older snapshot can
+            // remain retained. A same-token retry has refresh=false, so generation
+            // validation must also happen on cache hits rather than only while an
+            // in-flight load exists.
+            deleteCached(key, 'replaced');
+            existing = undefined;
+          }
+          if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) {
+            const refreshed: CachedSnapshot = {
+              value: existing.value,
+              cachedAt: now,
+              cleanupTimer: scheduleCleanup(key, now, existing.refreshGeneration),
+              budgetEntryId: existing.budgetEntryId,
+              released: false,
+              refreshGeneration: existing.refreshGeneration,
+            };
+            clearTimeout(existing.cleanupTimer);
+            cached.delete(key);
+            cached.set(key, refreshed);
+            if (existing.budgetEntryId) memoOptions.budget?.touch(existing.budgetEntryId);
+            return { kind: 'return', value: existing.value };
+          }
+          if (options?.requireExisting) return { kind: 'return', value: null };
+          if (!cached.has(key) && cached.size + inflight.size >= maxEntries && !evictOneReleased()) {
+            throw new SyncRowSnapshotLimitError({
+              key,
+              maxEntries,
+              cachedEntries: cached.size,
+              inflightEntries: inflight.size,
+            });
+          }
+
+          return { kind: 'load', load: async () => {
+            const loadStartedAt = Date.now();
+            let loadOutcome: 'completed' | 'error' = 'completed';
+            recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_before_load');
+            try {
+              const loadedRows = await loadRows();
+              // Loads are owner-independent and may finish after the first waiter
+              // aborts. Cache the complete result for surviving/coalesced waiters.
+              storeCached(key, loadedRows, options?.refreshGeneration);
+              return loadedRows;
+            } catch (error) {
+              loadOutcome = 'error';
+              // A loader may reject before returning its array when a cheap store
+              // preflight or store-paged builder proves the full query would cross
+              // a response/heap safety bound. Remember intrinsic rejections exactly
+              // like storeCached() does, so later pages in this responder session go
+              // straight to bounded store paging instead of repeating the full load.
+              if (
+                error instanceof SyncRowSnapshotBudgetError &&
+                (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
+              ) {
+                const stale = cached.get(key);
+                if (stale) deleteCached(key, 'replaced');
+                rememberRejected(key, error, options?.refreshGeneration);
+              }
+              throw error;
+            } finally {
+              getMetrics().syncResponderSnapshotLoadDurationMs.record(
+                Date.now() - loadStartedAt,
+                { phase: memoOptions.phase, outcome: loadOutcome },
+              );
+              recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_after_load');
+            }
+          } };
+        },
+        false,
+      );
+      if (rows === null) return null;
       if (options?.signal?.aborted) {
         const completed = cached.get(key);
         if (completed) {

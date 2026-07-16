@@ -19,6 +19,7 @@ import {
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
+  createGenerationAwareTtlSingleFlightMemo,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
@@ -60,6 +61,11 @@ const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
+
+function rootClosureSparqlFilter(subjectVariable: string, rootVariable: string): string {
+  return `FILTER(sameTerm(${subjectVariable}, ${rootVariable}) || STRSTARTS(STR(${subjectVariable}), CONCAT(STR(${rootVariable}), "/.well-known/genid/")))`;
+}
+
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
   return { signal, priority: 'background', source };
 }
@@ -95,7 +101,12 @@ export interface FreshSwmDataGraphPlanMemo {
   get(
     key: string,
     load: () => Promise<FreshSwmDataGraphPlan>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<FreshSwmDataGraphPlan | null>;
 }
 
@@ -248,38 +259,7 @@ export function createResponderFreshSwmDataGraphPlanMemo(
   ttlMs = 10 * 60_000,
   maxEntries = 32,
 ): FreshSwmDataGraphPlanMemo {
-  const cached = new Map<string, { value: FreshSwmDataGraphPlan; cachedAt: number }>();
-  const inflight = new Map<string, Promise<FreshSwmDataGraphPlan>>();
-  const prune = (now = Date.now()) => {
-    for (const [key, entry] of cached) {
-      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
-    }
-  };
-  return {
-    async get(key, load, options) {
-      throwIfAborted(options?.signal);
-      const now = Date.now();
-      prune(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      const existing = cached.get(key);
-      if (!options?.refresh && existing) {
-        cached.delete(key);
-        cached.set(key, { value: existing.value, cachedAt: now });
-        return existing.value;
-      }
-      if (options?.requireExisting) return null;
-      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
-      const pendingLoad = load()
-        .then((value) => {
-          cached.set(key, { value, cachedAt: Date.now() });
-          return value;
-        })
-        .finally(() => inflight.delete(key));
-      inflight.set(key, pendingLoad);
-      return raceAgainstAbort(pendingLoad, options?.signal);
-    },
-  };
+  return createGenerationAwareTtlSingleFlightMemo<FreshSwmDataGraphPlan>(ttlMs, maxEntries);
 }
 
 /**
@@ -522,21 +502,22 @@ export async function readSwmDataPage(params: {
   }
 
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
-    const loadPlan = () => buildFreshSwmDataGraphPlan(
+    const loadPlan = (planSignal?: AbortSignal) => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
-      signal,
+      planSignal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
-      ? await params.freshGraphPlanMemo.get(params.rowListCacheKey, loadPlan, {
+      ? await params.freshGraphPlanMemo.get(params.rowListCacheKey, () => loadPlan(), {
         refresh: offset === 0 ? params.refreshRowList : false,
+        refreshGeneration: params.refreshGeneration,
         requireExisting: offset > 0,
         signal,
       })
-      : await loadPlan();
+      : await loadPlan(signal);
     if (!plan) {
       throw new Error('Shared-memory data sync session graph plan expired before page completion');
     }
@@ -2209,9 +2190,10 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
- *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
- *     entity present in the shared payload).
+ *  1. Join each concrete graph to its fresh metadata roots by either the root
+ *     subject or one of its generated descendants. Some valid closures contain
+ *     only generated rows, so requiring a direct root triple is not
+ *     set-equivalent to the canonical snapshot reader.
  *  2. Count the exact root closures per concrete graph without returning their
  *     large literal values.
  *  3. Cache only graph/root/count scalars for the responder session.
@@ -2254,7 +2236,8 @@ async function buildFreshSwmDataGraphPlan(
                 <${DKG_ROOT_ENTITY}> ?root .
             ${cutoffFilter}
           }
-          GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
+          GRAPH <${assertSafeIri(graph)}> { ?candidateSubject ?rootPredicate ?rootObject }
+          ${rootClosureSparqlFilter('?candidateSubject', '?root')}
         }
       }`);
     const rootResult = await store.query(`
@@ -2286,7 +2269,7 @@ async function buildFreshSwmDataGraphPlan(
             SELECT DISTINCT ?s ?p ?o WHERE {
               VALUES ?root { ${graphValues(roots)} }
               GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
-              FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+              ${rootClosureSparqlFilter('?s', '?root')}
             }
           }
         }
@@ -2329,11 +2312,12 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
+    // sparql-scan-allow: R3 -- exact-graph paging is bounded by the retained session plan row count
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
         VALUES ?root { ${graphValues(entry.roots)} }
         GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        ${rootClosureSparqlFilter('?s', '?root')}
       }
       ORDER BY ?s ?p ?o
       OFFSET ${skip}
