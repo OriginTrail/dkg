@@ -1,19 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deploymentConfigPath } from '../../evm-module/utils/deployment-artifacts.js';
+import {
+  type ContractDeployments,
+  writeDeploymentConfig,
+} from '../../evm-module/utils/deployment-artifacts.js';
 import { resolveSuccessfulHubDeployment } from './hardhat-harness.js';
 
 const HUB_ADDRESS = `0x${'1'.repeat(40)}`;
 const PARTIAL_OUTPUT = `deploying "Hub" ... deployed at ${HUB_ADDRESS}`;
 
 function writeHubArtifact(deploymentsDir: string, address = HUB_ADDRESS): void {
-  mkdirSync(deploymentsDir, { recursive: true });
-  writeFileSync(
-    deploymentConfigPath(deploymentsDir, 'localhost'),
-    JSON.stringify({ contracts: { Hub: { evmAddress: address } } }),
-  );
+  const config: ContractDeployments = {
+    contracts: {
+      Hub: {
+        evmAddress: address,
+        version: '1.0.0',
+        deployed: true,
+      },
+    },
+  };
+  writeDeploymentConfig(deploymentsDir, 'localhost', config);
 }
 
 describe('resolveSuccessfulHubDeployment', () => {

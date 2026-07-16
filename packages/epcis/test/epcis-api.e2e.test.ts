@@ -15,7 +15,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { loadTokens } from '../../cli/src/auth.js';
 import { readApiPort } from '../../cli/src/config.js';
-import { assertEpcisLiveNodeAvailable } from './e2e-prerequisites.js';
+import {
+  assertEpcisLiveNodeAvailable,
+  isEpcisLiveNodeRequired,
+} from './e2e-prerequisites.js';
 
 // ---------------------------------------------------------------------------
 // Test isolation: unique prefix per run
@@ -278,7 +281,7 @@ async function expectEventUals(path: string, expectedUals: string[]): Promise<Re
 // ---------------------------------------------------------------------------
 
 beforeAll(async () => {
-  const required = process.env.DKG_EPCIS_E2E_REQUIRED === '1';
+  const required = isEpcisLiveNodeRequired();
   try {
     const envPort = process.env.DKG_API_PORT ? parseInt(process.env.DKG_API_PORT, 10) : null;
     const port = envPort ?? (await readApiPort()) ?? 9200;

@@ -7,7 +7,12 @@ import { AddressLike, Contract } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { HubLib } from '../typechain/contracts/storage/Hub';
-import { deploymentConfigPath } from './deployment-artifacts';
+import {
+  type ContractDeployments,
+  deploymentConfigPath,
+  readDeploymentConfig,
+  writeDeploymentConfig,
+} from './deployment-artifacts';
 
 type AbiEntry = {
   inputs?: Array<{ internalType: string; name: string; type: string }>;
@@ -15,21 +20,6 @@ type AbiEntry = {
   outputs?: Array<{ internalType: string; name: string; type: string }>;
   stateMutability?: string;
   type: string;
-};
-
-type ContractDeployments = {
-  contracts: {
-    [contractName: string]: {
-      evmAddress: string;
-      version: string;
-      gitBranch: string;
-      gitCommitHash: string;
-      deploymentBlock: number;
-      deploymentTimestamp: number;
-      deployed: boolean;
-      migration?: boolean;
-    };
-  };
 };
 
 type DeploymentParameters = {
@@ -104,8 +94,9 @@ export class Helpers {
     );
 
     if (fs.existsSync(deploymentsConfig)) {
-      this.contractDeployments = JSON.parse(
-        fs.readFileSync(deploymentsConfig).toString(),
+      this.contractDeployments = readDeploymentConfig(
+        this.hre.config.paths.deployments,
+        this.hre.network.name,
       );
     } else {
       this.contractDeployments = { contracts: {} };
@@ -469,10 +460,10 @@ export class Helpers {
     );
 
     const deploymentsDirectory = this.hre.config.paths.deployments;
-    fs.mkdirSync(deploymentsDirectory, { recursive: true });
-    fs.writeFileSync(
-      deploymentConfigPath(deploymentsDirectory, this.hre.network.name),
-      JSON.stringify(this.contractDeployments, null, 4),
+    writeDeploymentConfig(
+      deploymentsDirectory,
+      this.hre.network.name,
+      this.contractDeployments,
     );
   }
 
