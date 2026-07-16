@@ -89,6 +89,13 @@ function lexicalBinding(scope, identifier) {
     if (parameter) return { declaration: parameter, isConst: false };
   }
   if (
+    ts.isCatchClause(scope)
+    && scope.variableDeclaration
+    && bindingNameIncludes(scope.variableDeclaration.name, identifier)
+  ) {
+    return { declaration: scope.variableDeclaration, isConst: false };
+  }
+  if (
     ts.isForStatement(scope)
     && scope.initializer
     && ts.isVariableDeclarationList(scope.initializer)
