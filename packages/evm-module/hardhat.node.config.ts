@@ -18,6 +18,7 @@ subtask(TASK_TEST_GET_TEST_FILES, async (_, { config }, runSuper) => {
 });
 
 import { Helpers } from './utils/helpers';
+import { hardhatDeploymentsDirectoryFromEnv } from './test-support/deployment-isolation';
 import { rpc, accounts, mainnetAccounts } from './utils/network';
 
 extendEnvironment((hre: HardhatRuntimeEnvironment) => {
@@ -25,6 +26,7 @@ extendEnvironment((hre: HardhatRuntimeEnvironment) => {
 });
 
 const isCoverage = process.argv.includes('coverage');
+const isolatedDeploymentsDir = hardhatDeploymentsDirectoryFromEnv();
 
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
@@ -124,6 +126,9 @@ const config: HardhatUserConfig = {
     tests: './test',
     cache: './cache',
     artifacts: './artifacts',
+    ...(isolatedDeploymentsDir
+      ? { deployments: isolatedDeploymentsDir }
+      : {}),
     // Pin deploy roots to deploy/active/ so hardhat-deploy's recursive
     // scan does NOT discover scripts under deploy/archive/ (V8/V9 legacy
     // stack archived). hardhat-deploy 0.12.4 walks the root

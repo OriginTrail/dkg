@@ -7,6 +7,12 @@ import { AddressLike, Contract } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { HubLib } from '../typechain/contracts/storage/Hub';
+import {
+  type ContractDeployments,
+  deploymentConfigPath,
+  readDeploymentConfig,
+  writeDeploymentConfig,
+} from './deployment-artifacts';
 
 type AbiEntry = {
   inputs?: Array<{ internalType: string; name: string; type: string }>;
@@ -14,21 +20,6 @@ type AbiEntry = {
   outputs?: Array<{ internalType: string; name: string; type: string }>;
   stateMutability?: string;
   type: string;
-};
-
-type ContractDeployments = {
-  contracts: {
-    [contractName: string]: {
-      evmAddress: string;
-      version: string;
-      gitBranch: string;
-      gitCommitHash: string;
-      deploymentBlock: number;
-      deploymentTimestamp: number;
-      deployed: boolean;
-      migration?: boolean;
-    };
-  };
 };
 
 type DeploymentParameters = {
@@ -97,11 +88,15 @@ export class Helpers {
 
     this.repositoryPath = this._getGitRepositoryPath();
 
-    const deploymentsConfig = `./deployments/${this.hre.network.name}_contracts.json`;
+    const deploymentsConfig = deploymentConfigPath(
+      this.hre.config.paths.deployments,
+      this.hre.network.name,
+    );
 
     if (fs.existsSync(deploymentsConfig)) {
-      this.contractDeployments = JSON.parse(
-        fs.readFileSync(deploymentsConfig).toString(),
+      this.contractDeployments = readDeploymentConfig(
+        this.hre.config.paths.deployments,
+        this.hre.network.name,
       );
     } else {
       this.contractDeployments = { contracts: {} };
@@ -183,7 +178,7 @@ export class Helpers {
       });
     } catch (error) {
       if (this.hre.network.config.environment !== 'development') {
-        this.saveDeploymentsJson('deployments');
+        this.saveDeploymentsJson();
       }
       let message;
       if (error instanceof Error) message = error.message;
@@ -252,7 +247,7 @@ export class Helpers {
       newContractName,
     );
 
-    this.saveDeploymentsJson('deployments');
+    this.saveDeploymentsJson();
 
     return this.hre.ethers.getContractAt(
       this.getAbi(newContractName),
@@ -444,7 +439,7 @@ export class Helpers {
     };
   }
 
-  public saveDeploymentsJson(folder: string) {
+  public saveDeploymentsJson() {
     console.log(
       `New or redeployed contracts: ${JSON.stringify(this.newContracts)}`,
     );
@@ -464,9 +459,11 @@ export class Helpers {
       `Encoded data for parameters settings: ${JSON.stringify(this.setParametersEncodedData)}`,
     );
 
-    fs.writeFileSync(
-      `${folder}/${this.hre.network.name}_contracts.json`,
-      JSON.stringify(this.contractDeployments, null, 4),
+    const deploymentsDirectory = this.hre.config.paths.deployments;
+    writeDeploymentConfig(
+      deploymentsDirectory,
+      this.hre.network.name,
+      this.contractDeployments,
     );
   }
 

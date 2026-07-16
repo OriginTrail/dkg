@@ -15,6 +15,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { loadTokens } from '../../cli/src/auth.js';
 import { readApiPort } from '../../cli/src/config.js';
+import {
+  assertEpcisLiveNodeAvailable,
+  isEpcisLiveNodeRequired,
+} from './e2e-prerequisites.js';
 
 // ---------------------------------------------------------------------------
 // Test isolation: unique prefix per run
@@ -277,6 +281,7 @@ async function expectEventUals(path: string, expectedUals: string[]): Promise<Re
 // ---------------------------------------------------------------------------
 
 beforeAll(async () => {
+  const required = isEpcisLiveNodeRequired();
   try {
     const envPort = process.env.DKG_API_PORT ? parseInt(process.env.DKG_API_PORT, 10) : null;
     const port = envPort ?? (await readApiPort()) ?? 9200;
@@ -287,7 +292,12 @@ beforeAll(async () => {
 
     const res = await fetch(`${BASE_URL}/api/status`, { signal: AbortSignal.timeout(5000) });
     nodeReachable = res.ok;
-  } catch {
+    if (!nodeReachable) {
+      throw new Error(`DKG node status check failed with HTTP ${res.status}`);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    assertEpcisLiveNodeAvailable(required, false, detail);
     console.warn('DKG node not reachable — all E2E tests will be skipped');
     nodeReachable = false;
   }

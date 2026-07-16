@@ -1,4 +1,4 @@
-import type { NotificationsFeedResponse } from '../api.js';
+import type { NotificationsFeedResponse, SubGraphInfo } from '../api.js';
 
 export const MOCK_STATUS = {
   name: 'my-dkg-node',
@@ -54,6 +54,12 @@ export const MOCK_CONTEXT_GRAPHS = {
     },
   ],
 };
+
+/** Per-context-graph fixtures consumed by the mock API's sub-graph endpoint. */
+export const MOCK_SUBGRAPHS: Record<
+  string,
+  { contextGraphId: string; subGraphs: SubGraphInfo[] }
+> = {};
 
 // Mock allow-lists keyed by CG id. Curator is intentionally a
 // `did:dkg:agent:` URI while participants are bare EVM addresses
