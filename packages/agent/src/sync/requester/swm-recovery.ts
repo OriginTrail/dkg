@@ -127,8 +127,62 @@ export interface RecoverContextGraphSwmResult {
   readonly insertedDataQuads: number;
   readonly insertedMetaQuads: number;
   readonly droppedDataTriples: number;
+  /** Verified immutable snapshot refs ready in the local cache after this round. */
+  readonly readySnapshots: number;
+  /** Total immutable snapshot refs declared by the recovered SWM metadata. */
+  readonly totalSnapshots: number;
   /** false if a phase hit the deadline without completing — partial, safe to retry. */
   readonly completed: boolean;
+}
+
+export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
+
+/**
+ * Repeat an authoritative private-SWM recovery while its immutable snapshot
+ * cache is making monotonic progress. A single recovery round is deliberately
+ * deadline-bounded; large rootless CGs can therefore finish several verified
+ * KAs and time out before the final one. Treating that first timeout as a
+ * terminal subscribe failure strands the safe cached progress until a later
+ * reconnect/reconciler tick. This bounded driver consumes that progress in the
+ * same catch-up job without weakening the all-or-nothing graph apply gate.
+ *
+ * One no-progress retry is allowed for a transient first-round transport
+ * failure. A second result with the same ready count stops immediately, and the
+ * hard round cap prevents an arbitrarily large CG from monopolising a worker.
+ */
+export async function recoverContextGraphSwmWithProgressRetries(params: {
+  readonly recover: () => Promise<RecoverContextGraphSwmResult>;
+  readonly maxRounds?: number;
+  readonly onRetry?: (progress: {
+    readonly completedRound: number;
+    readonly readySnapshots: number;
+    readonly totalSnapshots: number;
+  }) => void;
+}): Promise<RecoverContextGraphSwmResult> {
+  const maxRounds = Math.max(
+    1,
+    Math.floor(params.maxRounds ?? DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS),
+  );
+  let previousReadySnapshots = -1;
+  let result: RecoverContextGraphSwmResult | undefined;
+
+  for (let round = 1; round <= maxRounds; round += 1) {
+    result = await params.recover();
+    if (result.completed) return result;
+
+    const madeProgress = result.readySnapshots > previousReadySnapshots;
+    if (round >= maxRounds || !madeProgress) return result;
+
+    previousReadySnapshots = result.readySnapshots;
+    params.onRetry?.({
+      completedRound: round,
+      readySnapshots: result.readySnapshots,
+      totalSnapshots: result.totalSnapshots,
+    });
+  }
+
+  // The loop always executes at least once because maxRounds is clamped to 1.
+  return result!;
 }
 
 const DEFAULT_MAX_PAGES_PER_PHASE = 1000;
@@ -187,6 +241,8 @@ export async function recoverContextGraphSwm(
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
       completed: false,
     };
   }
@@ -227,6 +283,7 @@ export async function recoverContextGraphSwm(
   const hasGraphBackedSnapshots = graphScopedDescriptors.some(
     (descriptor) => descriptor.publicSnapshotGraph !== undefined,
   );
+  let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
 
   // Fetch store-backed snapshots before any aggregate data scan. Each completed
   // snapshot is persisted independently, so a deadline can make monotonic
@@ -247,6 +304,10 @@ export async function recoverContextGraphSwm(
       deleteCheckpoint: deps.deleteCheckpoint,
       setCheckpoint: deps.setCheckpoint,
     });
+    snapshotProgress = {
+      readySnapshots: snapshotSync.readySnapshots,
+      totalSnapshots: snapshotSync.totalSnapshots,
+    };
     if (!snapshotSync.completed) {
       deps.logInfo?.(
         deps.ctx,
@@ -259,6 +320,7 @@ export async function recoverContextGraphSwm(
         insertedDataQuads: 0,
         insertedMetaQuads: 0,
         droppedDataTriples: 0,
+        ...snapshotProgress,
         completed: false,
       };
     }
@@ -287,6 +349,7 @@ export async function recoverContextGraphSwm(
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
+      ...snapshotProgress,
       completed: false,
     };
   }
@@ -376,6 +439,7 @@ export async function recoverContextGraphSwm(
     insertedDataQuads: applied.insertedQuads + insertedGraphQuads,
     insertedMetaQuads: processed.verifiedMeta.length,
     droppedDataTriples: processed.droppedDataTriples,
+    ...snapshotProgress,
     completed: true,
   };
 }

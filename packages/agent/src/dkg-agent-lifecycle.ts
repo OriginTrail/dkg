@@ -239,7 +239,11 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
-import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
+import {
+  recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type RecoverContextGraphSwmResult,
+} from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
@@ -833,6 +837,8 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     insertedDataQuads: 0,
     insertedMetaQuads: 0,
     droppedDataTriples: 0,
+    readySnapshots: 0,
+    totalSnapshots: 0,
     completed: true,
   };
 }
@@ -4705,7 +4711,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
           run: async (): Promise<SharedMemorySyncResult> => {
             try {
-              const recovered = await recoverPrivateContextGraph(contextGraphId);
+              const recovered = await recoverContextGraphSwmWithProgressRetries({
+                recover: () => recoverPrivateContextGraph(contextGraphId),
+                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+                  this.log.info(
+                    ctx,
+                    `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
+                    + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
+                  );
+                },
+              });
               const result = emptySharedMemorySyncResult();
               result.insertedDataTriples = recovered.insertedDataQuads;
               result.insertedMetaTriples = recovered.insertedMetaQuads;

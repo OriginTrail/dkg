@@ -16,7 +16,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
+import {
+  recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type RecoverContextGraphSwmResult,
+} from '../src/sync/requester/swm-recovery.js';
 
 /**
  * integration. `recoverContextGraphSwm` fetches a CG's
@@ -33,6 +37,74 @@ const STATUS = 'http://schema.org/status';
 const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+
+function recoveryResult(
+  readySnapshots: number,
+  totalSnapshots: number,
+  completed = false,
+): RecoverContextGraphSwmResult {
+  return {
+    replacedRoots: 0,
+    replacedGraphs: completed ? totalSnapshots : 0,
+    insertedDataQuads: completed ? totalSnapshots : 0,
+    insertedMetaQuads: completed ? totalSnapshots : 0,
+    droppedDataTriples: 0,
+    readySnapshots,
+    totalSnapshots,
+    completed,
+  };
+}
+
+describe('recoverContextGraphSwmWithProgressRetries', () => {
+  it('consumes monotonic immutable-snapshot progress inside one bounded catch-up job', async () => {
+    const outcomes = [
+      recoveryResult(5, 20),
+      recoveryResult(10, 20),
+      recoveryResult(15, 20),
+      recoveryResult(20, 20, true),
+    ];
+    const retries: string[] = [];
+    let calls = 0;
+
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => outcomes[calls++]!,
+      onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+        retries.push(`${completedRound}:${readySnapshots}/${totalSnapshots}`);
+      },
+    });
+
+    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
+    expect(calls).toBe(4);
+    expect(retries).toEqual(['1:5/20', '2:10/20', '3:15/20']);
+  });
+
+  it('stops after one transient retry when snapshot progress is flat', async () => {
+    let calls = 0;
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      recover: async () => {
+        calls += 1;
+        return recoveryResult(0, 20);
+      },
+    });
+
+    expect(result.completed).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it('honours the hard recovery-round cap while progress continues', async () => {
+    let calls = 0;
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      maxRounds: 3,
+      recover: async () => {
+        calls += 1;
+        return recoveryResult(calls, 100);
+      },
+    });
+
+    expect(result).toMatchObject({ completed: false, readySnapshots: 3, totalSnapshots: 100 });
+    expect(calls).toBe(3);
+  });
+});
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
 const UAL_2 = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
 

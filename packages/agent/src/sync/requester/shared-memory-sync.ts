@@ -367,6 +367,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   timedOutPhases: number;
   completedPhases: number;
   checkpointAdvances: number;
+  /** Immutable snapshot refs already valid locally or fetched in this round. */
+  readySnapshots: number;
+  /** Total immutable snapshot refs declared by the verified SWM metadata. */
+  totalSnapshots: number;
   completed: boolean;
 }> {
   const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
@@ -377,6 +381,8 @@ export async function syncPublicSnapshotsForMeta(params: {
       timedOutPhases: 0,
       completedPhases: 0,
       checkpointAdvances: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
       completed: true,
     };
   }
@@ -391,8 +397,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   let timedOutPhases = 0;
   let completedPhases = 0;
   let checkpointAdvances = 0;
+  let readySnapshots = 0;
   for (const snapshot of snapshots) {
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
+      readySnapshots += 1;
       continue;
     }
 
@@ -428,6 +436,8 @@ export async function syncPublicSnapshotsForMeta(params: {
         timedOutPhases,
         completedPhases,
         checkpointAdvances,
+        readySnapshots,
+        totalSnapshots: snapshots.length,
         completed: false,
       };
     }
@@ -441,6 +451,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       );
     }
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
+    readySnapshots += 1;
   }
 
   return {
@@ -449,6 +460,8 @@ export async function syncPublicSnapshotsForMeta(params: {
     timedOutPhases,
     completedPhases,
     checkpointAdvances,
+    readySnapshots,
+    totalSnapshots: snapshots.length,
     completed: true,
   };
 }
