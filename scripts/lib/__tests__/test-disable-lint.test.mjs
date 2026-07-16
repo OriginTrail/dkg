@@ -94,6 +94,60 @@ test('full-tree audit reports tracked static D2 baseline without failing', (t) =
   ]);
 });
 
+test('diff mode fails only for net-new static D2 exclusions', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-d2-diff-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: fixtureRoot, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'diff@example.invalid');
+  git('config', 'user.name', 'diff');
+  fs.writeFileSync(path.join(fixtureRoot, 'vitest.config.ts'), [
+    "import { defineConfig } from 'vitest/config';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/existing.test.ts',",
+    "      '**/dist/**',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n'));
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  const base = git('rev-parse', 'HEAD');
+
+  fs.writeFileSync(path.join(fixtureRoot, 'vitest.config.ts'), [
+    "import { defineConfig } from 'vitest/config';",
+    'export default defineConfig({',
+    '  test: {',
+    '    exclude: [',
+    "      'test/existing.test.ts',",
+    "      '**/dist/**',",
+    "      'coverage/**',",
+    "      'test/new.test.ts',",
+    '    ],',
+    '  },',
+    '});',
+  ].join('\n'));
+  git('add', '-A');
+  git('commit', '-qm', 'head');
+  const head = git('rev-parse', 'HEAD');
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--diff', base, head], {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout.trim(), 'vitest.config.ts:8:7: D2 vitest.exclude');
+});
+
 test('analysis reports every conditional test suppression occurrence', () => {
   const source = [
     "test.skipIf(isWindows)('Windows test', () => {});",
