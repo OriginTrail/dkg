@@ -22,6 +22,9 @@ const ts = require('typescript');
 const SOURCE_EXTENSION = /\.[cm]?[jt]sx?$/i;
 const TEST_FILE_NAME = /(?:^|\.)(?:test|spec)\.[cm]?[jt]sx?$/i;
 const TEST_DIRECTORY = /(^|\/)(?:test|tests|__tests__|e2e)(?:\/|$)/;
+const VITEST_CONFIG_FILE = /(^|\/)vitest(?:\.[^/]+)*\.config\.[cm]?[jt]sx?$/i;
+const TEST_EXCLUSION_PATH = /(^|\/)(?:test|tests|__tests__|spec|e2e)(?:\/|$)/i;
+const TEST_EXCLUSION_FILE = /\.(?:test|spec)\.[^/]+$/i;
 const EXCLUDED_TREE = /(^|\/)(?:node_modules|dist|build|out|generated|coverage|\.nyc_output|\.turbo)(?:\/|$)/;
 const D1_ARCHIVE_TREE = /(^|\/)(?:test|tests)\/archive(?:\/|$)/;
 const DIRECT_BASES = new Set(['describe', 'it', 'suite', 'test']);
@@ -58,6 +61,43 @@ function d1Fingerprint(pattern, titleNode, fallbackNode, sourceFile) {
   const identity = normalizedStaticTitle(titleNode)
     ?? normalizedFragment(fallbackNode, sourceFile);
   return createHash('sha1').update(`D1:${pattern}:${identity}`).digest('hex');
+}
+
+function d2Fingerprint(value) {
+  return createHash('sha1').update(`D2:vitest.exclude:${value}`).digest('hex');
+}
+
+function propertyNameText(name) {
+  return name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name))
+    ? name.text
+    : undefined;
+}
+
+function staticStringConstants(sourceFile) {
+  const constants = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isVariableStatement(statement)
+      || !(statement.declarationList.flags & ts.NodeFlags.Const)
+    ) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && ts.isStringLiteralLike(declaration.initializer)) {
+        constants.set(declaration.name.text, declaration.initializer.text);
+      }
+    }
+  }
+  return constants;
+}
+
+function staticExclusionValue(node, constants) {
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isIdentifier(node)) return constants.get(node.text);
+  return undefined;
+}
+
+function isTestTargetingExclusion(value) {
+  const candidate = value.replaceAll('\\', '/');
+  return TEST_EXCLUSION_PATH.test(candidate) || TEST_EXCLUSION_FILE.test(candidate);
 }
 
 function sourceComments(source, sourceFile, filePath) {
@@ -180,6 +220,52 @@ export function analyzeD1Source(source, filePath) {
 
   visit(sourceFile);
   return findings.filter((finding) => !isAllowed(finding, comments));
+}
+
+export function analyzeD2Source(source, filePath) {
+  if (!VITEST_CONFIG_FILE.test(normalizedPath(filePath))) return [];
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(filePath),
+  );
+  const constants = staticStringConstants(sourceFile);
+  const findings = [];
+
+  const visit = (node) => {
+    if (
+      ts.isPropertyAssignment(node)
+      && propertyNameText(node.name) === 'test'
+      && ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const exclude = node.initializer.properties.find(
+        (property) => ts.isPropertyAssignment(property)
+          && propertyNameText(property.name) === 'exclude',
+      );
+      if (exclude && ts.isArrayLiteralExpression(exclude.initializer)) {
+        for (const element of exclude.initializer.elements) {
+          const value = staticExclusionValue(element, constants);
+          if (value === undefined || !isTestTargetingExclusion(value)) continue;
+          const location = sourceFile.getLineAndCharacterOfPosition(element.getStart(sourceFile));
+          findings.push({
+            rule: 'D2',
+            api: 'vitest.exclude',
+            value,
+            fingerprint: d2Fingerprint(value),
+            filePath,
+            line: location.line + 1,
+            column: location.character + 1,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return findings;
 }
 
 export function auditFiles(filePaths) {
