@@ -1018,7 +1018,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       .rejects.toThrow('exceeds');
   });
 
-  it('persists inline quads to staging graph before signing (crash safety)', async () => {
+  it('persists inline quads to a durable ACK snapshot before signing', async () => {
     const store = createRecordingStore([]);
     const handler = createHandler(store);
 
@@ -1043,7 +1043,8 @@ describe('V10 StorageACKHandler round-trip', () => {
     expect(store._insertCalls.length).toBeGreaterThan(0);
     const insertedQuads = store._insertCalls[0][0] as any[];
     expect(insertedQuads.length).toBeGreaterThan(0);
-    expect(insertedQuads[0].graph).toContain('/staging/');
+    expect(insertedQuads[0].graph).toContain('/_shared_memory/storage-ack/');
+    expect(insertedQuads[0].graph).not.toContain('/staging/');
   });
 
   it('uint64 overflow check for nodeIdentityId > 2^64', async () => {

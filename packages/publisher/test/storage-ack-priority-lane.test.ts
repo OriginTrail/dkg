@@ -256,7 +256,7 @@ describe('StorageACKHandler priority store lane', () => {
     expect(onDecline).toHaveBeenCalledOnce();
   });
 
-  it('passes ACK priority options through inline staging writes and flushes', async () => {
+  it('passes ACK priority options through durable inline snapshot writes and flushes', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
     const events: string[] = [];
     const store = new PriorityLaneStore(scheduler, events);
@@ -268,9 +268,11 @@ describe('StorageACKHandler priority store lane', () => {
     expect(isStorageACKDecline(decoded)).toBe(false);
     expect(store.ackQueries).toBe(0);
     expect(store.writeCalls.map((call) => call.source)).toEqual([
-      'storage-ack.persistStaging.dropGraph',
-      'storage-ack.persistStaging.insert',
-      'storage-ack.persistStaging.flush',
+      'storage-ack.persistLegacySnapshot.dropGraph',
+      'storage-ack.persistLegacySnapshot.insertData',
+      'storage-ack.persistLegacySnapshot.deleteMeta',
+      'storage-ack.persistLegacySnapshot.insertMeta',
+      'storage-ack.persistLegacySnapshot.flush',
     ]);
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
 

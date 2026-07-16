@@ -691,7 +691,7 @@ describe('StorageACKHandler inline verification', () => {
     expect(store.query.calls).toHaveLength(0);
   });
 
-  it('persists inline quads to staging graph before signing (crash safety)', async () => {
+  it('persists inline quads to a durable ACK snapshot before signing', async () => {
     const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
@@ -713,7 +713,8 @@ describe('StorageACKHandler inline verification', () => {
     expect(store.dropGraph.calls.length).toBeGreaterThan(0);
     expect(store.insert.calls.length).toBeGreaterThan(0);
     const insertedQuads = store.insert.calls[0][0];
-    expect(insertedQuads[0].graph).toContain('/staging/');
+    expect(insertedQuads[0].graph).toContain('/_shared_memory/storage-ack/');
+    expect(insertedQuads[0].graph).not.toContain('/staging/');
     expect(store.query.calls).toHaveLength(0);
   });
 
