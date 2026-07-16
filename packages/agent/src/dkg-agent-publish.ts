@@ -1304,6 +1304,21 @@ export class PublishMethods extends DKGAgentBase {
     if (publicQuads.length === 0 && privateQuads.length === 0) {
       throw new InvalidContentError('Content must include at least one public or private payload');
     }
+    // A V10 storage ACK proves possession through a public Merkle leaf. A
+    // private-only payload therefore needs one challengeable public triple;
+    // otherwise its public leaf count is zero and the ACK/contract path must
+    // reject it. Keep this independent of JSON-LD parsing so Quad envelopes
+    // and JSON-LD envelopes have identical semantics. This is deliberately
+    // NOT a legacy root entity: it is content in the KA's exact public graph,
+    // while the graph-scoped request continues to carry `roots: []`.
+    if (publicQuads.length === 0 && privateQuads.length > 0) {
+      publicQuads = [{
+        subject: `urn:dkg:private:${randomUUID()}`,
+        predicate: PRIVATE_DATA_ANCHOR,
+        object: '"true"',
+        graph: '',
+      }];
+    }
     rejectOversizedRdfLiterals(publicQuads, 'publishAsync.publicQuads');
     rejectOversizedRdfLiterals(privateQuads, 'publishAsync.privateQuads');
 
