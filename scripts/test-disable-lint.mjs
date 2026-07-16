@@ -754,19 +754,77 @@ function opaqueD2RatchetSelfTest() {
   }
 }
 
+function destructuredD2RatchetSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-destructured-d2-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    const configPath = path.join(fixtureRoot, 'vitest.config.ts');
+    const configSource = (exclusion) => [
+      'const [legacyExclusion, replacementExclusion] = loadExclusions();',
+      'export default {',
+      '  test: {',
+      '    exclude: [',
+      `      ${exclusion},`,
+      '    ],',
+      '  },',
+      '};',
+    ].join('\n');
+    writeFileSync(configPath, configSource('legacyExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    writeFileSync(configPath, configSource('replacementExclusion'));
+    git('add', '-A');
+    git('commit', '-qm', 'head');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const cli = spawnSync(
+      process.execPath,
+      [fileURLToPath(import.meta.url), '--diff', base, head],
+      {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: { ...process.env, TEST_DISABLE_LINT_NO_SELF_TEST: '1' },
+      },
+    );
+    const expected = 'vitest.config.ts:5:7: D2 vitest.exclude';
+    const pass = cli.status === 1 && cli.stdout.trim() === expected;
+    if (!pass) {
+      process.stderr.write(
+        `SELF-TEST FAIL: destructured D2 ratchet exit=${cli.status}\n`
+          + `stdout:\n${cli.stdout}\nstderr:\n${cli.stderr}`,
+      );
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
 function selfTest({ report = true } = {}) {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
   const staticD2ArraysPass = staticD2ArraySelfTest();
   const opaqueD2RatchetPass = opaqueD2RatchetSelfTest();
+  const destructuredD2RatchetPass = destructuredD2RatchetSelfTest();
   if (report) {
     process.stdout.write(
       `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
         + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
         + `audit modes ${auditsPass ? 'pass' : 'FAIL'}, `
         + `static D2 arrays ${staticD2ArraysPass ? 'pass' : 'FAIL'}, `
-        + `opaque D2 ratchet ${opaqueD2RatchetPass ? 'pass' : 'FAIL'}.\n`,
+        + `opaque D2 ratchet ${opaqueD2RatchetPass ? 'pass' : 'FAIL'}, `
+        + `destructured D2 ratchet ${destructuredD2RatchetPass ? 'pass' : 'FAIL'}.\n`,
     );
   }
   return movePasses
@@ -774,6 +832,7 @@ function selfTest({ report = true } = {}) {
     && auditsPass
     && staticD2ArraysPass
     && opaqueD2RatchetPass
+    && destructuredD2RatchetPass
     ? 0
     : 1;
 }
