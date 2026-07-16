@@ -73,3 +73,50 @@ test('file audit reports declarations only from active test sources', (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), `${activePath}:1:1: D1 test.skip`);
 });
+
+test('file audit accepts only nearby matching ticketed D1 pragmas with reasons', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-pragma-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const fixturePath = path.join(fixtureRoot, 'pragma.test.ts');
+  fs.writeFileSync(fixturePath, [
+    '// test-disable-allow: D1 #123 -- unavailable on the Windows runner',
+    "test.skip('ticket number', () => {});",
+    '',
+    '// test-disable-allow: D1 https://github.com/OriginTrail/dkg/issues/456 -- upstream fix pending',
+    "it.todo('issue URL');",
+    '',
+    '// test-disable-allow: D1 DKG-789 -- migration remains in progress',
+    "xdescribe('tracker key', () => {});",
+    '',
+    '// test-disable-allow: D2 #100 -- wrong rule',
+    "test.skip('wrong rule', () => {});",
+    '// test-disable-allow: D1 -- missing ticket',
+    "xit('missing ticket', () => {});",
+    '// test-disable-allow: D1 #101 --',
+    "xtest('missing reason', () => {});",
+    '// test-disable-allow: D1 #102 -- outside the allowed window',
+    '',
+    '',
+    '',
+    "describe.skip('distant pragma', () => {});",
+    '',
+    '// test-disable-allow: D1 #103 -- exactly three lines above',
+    '',
+    '',
+    "test.todo('window boundary');",
+  ].join('\n'));
+
+  const result = spawnSync(process.execPath, [LINT_SCRIPT, '--files', fixturePath], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), [
+    `${fixturePath}:11:1: D1 test.skip`,
+    `${fixturePath}:13:1: D1 xit`,
+    `${fixturePath}:15:1: D1 xtest`,
+    `${fixturePath}:20:1: D1 describe.skip`,
+  ]);
+});
