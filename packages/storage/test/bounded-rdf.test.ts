@@ -164,7 +164,7 @@ describe('readExactGraphPaged', () => {
     const rows = [
       { s: 'urn:test:s1', p: 'urn:test:p', o: 'urn:test:o1' },
       { s: 'urn:test:s2', p: 'urn:test:p', o: '"literal"' },
-      { s: '_:s3', p: 'urn:test:p', o: '_:o3' },
+      { s: 'urn:test:s3', p: 'urn:test:p', o: 'urn:test:o3' },
     ];
     const store = {
       query: async (sparql: string, options?: QueryOptions): Promise<QueryResult> => {
@@ -202,6 +202,88 @@ describe('readExactGraphPaged', () => {
       expect(options?.maxResponseBytes).toBeGreaterThan(0);
       expect(options?.maxResponseBytes).toBeLessThanOrEqual(10 * 1024 * 1024);
     }
+  });
+
+  it('preserves blank-node relationships in one bounded result document', async () => {
+    const graph = 'urn:test:paged-blank-node-graph';
+    const store = {
+      query: async (sparql: string): Promise<QueryResult> => {
+        if (sparql.includes('COUNT(*)')) {
+          return { type: 'bindings', bindings: [{ count: '"2"' }] };
+        }
+        if (sparql.includes('CONSTRUCT')) {
+          expect(sparql).toContain('LIMIT 3');
+          return {
+            type: 'quads',
+            quads: [
+              { subject: 'urn:root', predicate: 'urn:child', object: '_:stable', graph: '' },
+              { subject: '_:stable', predicate: 'urn:name', object: '"child"', graph: '' },
+            ],
+          };
+        }
+        const offset = Number(sparql.match(/OFFSET (\d+)/)?.[1] ?? 0);
+        return {
+          type: 'bindings',
+          bindings: offset === 0
+            ? [{ s: 'urn:root', p: 'urn:child', o: '_:page-one' }]
+            : offset === 1
+              ? [{ s: '_:page-two', p: 'urn:name', o: '"child"' }]
+              : [],
+        };
+      },
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    await expect(readExactGraphPaged(store, graph, {
+      expectedQuadCount: 2,
+      pageSize: 1,
+      outputGraph: 'urn:test:rewritten-blank-node-graph',
+    })).resolves.toEqual([
+      {
+        subject: 'urn:root',
+        predicate: 'urn:child',
+        object: '_:stable',
+        graph: 'urn:test:rewritten-blank-node-graph',
+      },
+      {
+        subject: '_:stable',
+        predicate: 'urn:name',
+        object: '"child"',
+        graph: 'urn:test:rewritten-blank-node-graph',
+      },
+    ]);
+  });
+
+  it('fails closed before materializing an oversized blank-node graph', async () => {
+    const graph = 'urn:test:oversized-blank-node-graph';
+    let constructCalled = false;
+    const store = {
+      query: async (sparql: string): Promise<QueryResult> => {
+        if (sparql.includes('COUNT(*)')) {
+          return { type: 'bindings', bindings: [{ count: '"257"' }] };
+        }
+        if (sparql.includes('CONSTRUCT')) {
+          constructCalled = true;
+          return { type: 'quads', quads: [] };
+        }
+        return {
+          type: 'bindings',
+          bindings: [{ s: '_:page-local', p: 'urn:p', o: '"value"' }],
+        };
+      },
+    } as Pick<TripleStore, 'query'> as TripleStore;
+
+    const error = await readExactGraphPaged(store, graph, {
+      expectedQuadCount: 257,
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ExactGraphReadError);
+    expect(error).toMatchObject({
+      kind: 'limit',
+      code: 'QUAD_COUNT_LIMIT_EXCEEDED',
+      actual: 257,
+      limit: 256,
+    });
+    expect(constructCalled).toBe(false);
   });
 
   it('fails with a typed limit error before materializing an oversized graph', async () => {

@@ -184,6 +184,25 @@ describe('graph-scoped finalization handler', () => {
     });
   }
 
+  function trustedRecoveryEvidence(
+    message: FinalizationMessageMsg,
+    accessPolicy: 'public' | 'ownerOnly' | 'allowList' = 'ownerOnly',
+    allowedPeers: string[] = [],
+  ) {
+    return {
+      assertionVersion: message.assertionVersion!,
+      publicTripleCount: message.publicTripleCount!,
+      ...(message.privateMerkleRoot
+        ? { privateMerkleRoot: `0x${Buffer.from(message.privateMerkleRoot).toString('hex')}` }
+        : {}),
+      privateTripleCount: message.privateTripleCount!,
+      publisherPeerId: '12D3KooWPublisher',
+      transactionHash: message.txHash,
+      accessPolicy,
+      allowedPeers,
+    };
+  }
+
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
 
@@ -398,7 +417,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('chain-reconciles a late joiner from the exact KA head without scanning legacy roots', async () => {
+  it('defers SWM-only chain reconciliation without transaction provenance', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
@@ -420,8 +439,8 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system'));
 
-    expect(outcome).toBe('promoted');
-    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(outcome).toBe('verified-vm-metadata-pending');
+    expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
@@ -473,6 +492,79 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
+  it('recognizes only exact confirmed Verifiable Memory metadata after the workspace head is lost', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toBeUndefined();
+
+    const internals = handler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+
+    const query = store.query.bind(store);
+    store.query = async (sparql, options) => {
+      if (sparql.includes('SELECT ?predicate ?object')) {
+        throw new Error('injected confirmed metadata outage');
+      }
+      return query(sparql, options);
+    };
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 125,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).rejects.toThrow('injected confirmed metadata outage');
+    store.query = query;
+
+    const vmResult = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    );
+    if (vmResult.type !== 'quads') throw new Error('expected finalized VM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(vmResult.quads.map((quad, index) => index === 0
+      ? { ...quad, object: '"same-count-corruption"', graph: vmGraph }
+      : { ...quad, graph: vmGraph }));
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 126,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('no-swm');
+  });
+
   it('advances sweep ordering without rewriting an exact VM graph', async () => {
     const { message, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
@@ -511,7 +603,7 @@ describe('graph-scoped finalization handler', () => {
     expect(version).toMatchObject({ type: 'boolean', value: true });
   });
 
-  it('repairs stale access metadata from the durable graph-scoped head', async () => {
+  it('repairs stale access metadata from trusted recovery evidence', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -562,6 +654,7 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 124,
       authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
 
     expect(bindingVerified).toBe(true);
@@ -660,6 +753,7 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 123,
       authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
     }, createOperationContext('system'));
 
     expect(outcome).toBe('already-confirmed');
@@ -711,6 +805,7 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 123,
       authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
 
     const repairedVersion = await store.query(
@@ -839,7 +934,7 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system'));
 
-    expect(outcome).toBe('already-confirmed');
+    expect(outcome).toBe('verified-vm-metadata-pending');
     expect(await store.countQuads(vmGraph)).toBe(2);
     const confirmedPolicy = await store.query(
       `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
@@ -888,6 +983,7 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 123,
       authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
     }, createOperationContext('system'));
 
     expect(outcome).toBe('already-confirmed');
@@ -905,7 +1001,7 @@ describe('graph-scoped finalization handler', () => {
     expect(repaired).toMatchObject({ type: 'boolean', value: true });
   });
 
-  it('fails closed when metadata is absent behind a newer same-root public head', async () => {
+  it('defers absent metadata behind a newer public head without transaction provenance', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
@@ -954,11 +1050,11 @@ describe('graph-scoped finalization handler', () => {
     await expect(handler.handleChainReconciledKC(
       reconcileInput,
       createOperationContext('system'),
-    )).resolves.toBe('already-confirmed');
+    )).resolves.toBe('verified-vm-metadata-pending');
     await expect(handler.handleChainReconciledKC(
       reconcileInput,
       createOperationContext('system'),
-    )).resolves.toBe('already-confirmed');
+    )).resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     const failClosedPolicy = await store.query(
@@ -968,7 +1064,7 @@ describe('graph-scoped finalization handler', () => {
           <http://dkg.io/ontology/status> "confirmed" .
       } }`,
     );
-    expect(failClosedPolicy).toMatchObject({ type: 'boolean', value: true });
+    expect(failClosedPolicy).toMatchObject({ type: 'boolean', value: false });
     const leakedPublicPolicy = await store.query(
       `ASK { GRAPH <${metaGraph}> {
         <${UAL}> <http://dkg.io/ontology/accessPolicy> "public" .
@@ -1043,14 +1139,14 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system'));
 
-    expect(outcome).toBe('promoted');
-    expect(await store.countQuads(nextVmGraph)).toBe(1);
+    expect(outcome).toBe('verified-vm-metadata-pending');
+    expect(await store.countQuads(nextVmGraph)).toBe(2);
     expect(await store.countQuads(nextSwmGraph)).toBe(1);
     const version = await store.query(
       `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
         <${UAL}> <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
       } }`,
     );
-    expect(version).toMatchObject({ type: 'boolean', value: true });
+    expect(version).toMatchObject({ type: 'boolean', value: false });
   });
 });

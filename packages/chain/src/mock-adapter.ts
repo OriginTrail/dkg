@@ -1937,6 +1937,12 @@ export class MockChainAdapter implements ChainAdapter {
     return entry.merkleRoot;
   }
 
+  async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
+    return entry.merkleRootCount;
+  }
+
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);

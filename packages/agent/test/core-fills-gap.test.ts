@@ -804,6 +804,80 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
+  it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const localCgId = '65';
+    const onChainCgId = 65n;
+    const kaId = 9065n;
+    const entity = 'urn:fact:child-after-restart';
+    const value = 'Payload persisted in a per-KA SWM graph';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    const publishedAt = '2035-01-01T00:00:00.000Z';
+
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
+    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri(localCgId),
+      'child-after-restart',
+      entity,
+      publishedAt,
+    );
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(durable.size).toBe(0);
+
+    await agent!.stop();
+    agent = null;
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
+    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri(localCgId),
+      'child-after-restart',
+      entity,
+      publishedAt,
+    );
+    await internals.store.insert([{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: `"${value}"`,
+      graph: `${contextGraphWorkspaceGraphUri(localCgId)}/0x0000000000000000000000000000000000000000/${kaId}`,
+    }]);
+
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(fetch.calls).toHaveLength(0);
+  });
+
   it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
     const internals = await boot();
     const onChainCgId = 54n;

@@ -448,9 +448,11 @@ describe('Sub-graph across memory layers (single agent)', () => {
 
     // Write using JSON-LD (auto-converted to quads)
     await agent.assertion.write('sg-jsonld-input', 'ld-test', {
-      '@id': 'urn:entity:alice',
-      'http://schema.org/name': 'Alice',
-      'http://schema.org/jobTitle': 'Engineer',
+      public: {
+        '@id': 'urn:entity:alice',
+        'http://schema.org/name': 'Alice',
+        'http://schema.org/jobTitle': 'Engineer',
+      },
     }, { subGraphName: 'entities' });
 
     const quads = await agent.assertion.query('sg-jsonld-input', 'ld-test', { subGraphName: 'entities' });

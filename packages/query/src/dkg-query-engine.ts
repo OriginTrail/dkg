@@ -26,6 +26,8 @@ import {
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
@@ -367,6 +369,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
             subGraphName
               ? contextGraphSubGraphPrivateUri(effectiveContextGraphId, subGraphName)
               : contextGraphPrivateUri(effectiveContextGraphId),
+            ...(await this.discoverGraphScopedPrivateGraphs(
+              effectiveContextGraphId,
+              subGraphName,
+            )),
           ]
         : [];
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
@@ -754,6 +760,80 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const rest = g.slice(base.length);
       return rest.length > 0 && !rest.includes('/');
     });
+  }
+
+  /**
+   * Resolve only the immutable private graphs referenced by valid current V2
+   * metadata in this exact context graph. The broad `/_private/` prefix also
+   * contains mutable WM drafts, so prefix-enumerating it would let an
+   * `includePrivate` query cross the draft/finalized boundary. Deriving each
+   * graph from the canonical UAL + assertion version keeps the allow-list
+   * fail-closed and makes GRAPH-variable discovery work for rootless KAs.
+   */
+  private async discoverGraphScopedPrivateGraphs(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): Promise<string[]> {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const subGraphClause = subGraphName
+      ? `?ual <http://dkg.io/ontology/subGraphName> "${escapeSparqlLiteral(subGraphName)}" .`
+      : `FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }`;
+    const result = await this.store.query(
+      `SELECT DISTINCT ?ual ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?privateCount WHERE {
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          ?ual <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion ;
+               <http://dkg.io/ontology/kaUal> ?kaUal ;
+               <http://dkg.io/ontology/assertionVersion> ?assertionVersion ;
+               <http://dkg.io/ontology/assertionGraph> ?assertionGraph ;
+               <http://dkg.io/ontology/privateTripleCount> ?privateCount ;
+               <http://dkg.io/ontology/status> ?status .
+          FILTER(?status IN ("confirmed", "tentative"))
+          ${subGraphClause}
+        }
+      }`,
+    );
+    if (result.type !== 'bindings') return [];
+
+    const privateRoot = subGraphName
+      ? contextGraphSubGraphPrivateUri(contextGraphId, subGraphName)
+      : contextGraphPrivateUri(contextGraphId);
+    const graphs = new Set<string>();
+    for (const row of result.bindings) {
+      const ual = row['ual'];
+      const metadataUal = row['kaUal'];
+      const assertionGraph = row['assertionGraph'];
+      const scopeVersion = parseCanonicalIntegerBinding(row['scopeVersion']);
+      const assertionVersion = parseCanonicalIntegerBinding(row['assertionVersion']);
+      const privateCount = parseCanonicalIntegerBinding(row['privateCount']);
+      if (
+        !ual
+        || metadataUal !== ual
+        || !assertionGraph
+        || scopeVersion !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)
+        || assertionVersion === undefined
+        || assertionVersion < 1n
+        || privateCount === undefined
+        || privateCount < 1n
+      ) {
+        continue;
+      }
+      try {
+        const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+        const expectedPublicGraph = knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          MemoryLayer.VerifiableMemory,
+          scope,
+          subGraphName,
+        );
+        if (assertionGraph !== expectedPublicGraph) continue;
+        graphs.add(assertSafeIri(
+          `${privateRoot}/${scope.agentAddress}/${scope.kaNumber}/assertions/${scope.assertionVersion}`,
+        ));
+      } catch {
+        // Invalid or non-canonical metadata never widens the private allow-list.
+      }
+    }
+    return [...graphs];
   }
 
   /**
@@ -1201,6 +1281,16 @@ function isStagingGraphTail(tail: string): boolean {
 function stripSparqlLiteralValue(value: string | undefined): string {
   if (!value) return '';
   return value.replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
+}
+
+function parseCanonicalIntegerBinding(value: string | undefined): bigint | undefined {
+  const lexical = stripSparqlLiteralValue(value);
+  if (!/^(?:0|[1-9][0-9]*)$/.test(lexical)) return undefined;
+  try {
+    return BigInt(lexical);
+  } catch {
+    return undefined;
+  }
 }
 
 function assertNoCallerDatasetClauses(sparql: string): void {

@@ -37,6 +37,22 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return ethers.getBytes(rootHex);
   }
 
+  async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    await this.init();
+    const kas = this.requireKCStorage();
+    const context = await this.readContract(
+      kas,
+      'kas.getKnowledgeAssetUpdateContext',
+      'getKnowledgeAssetUpdateContext',
+      kaId,
+    ) as { merkleRootsCount?: bigint } & readonly unknown[];
+    const rawCount = context.merkleRootsCount ?? context[0];
+    if (rawCount === undefined) {
+      throw new Error(`Missing Merkle-root count for KA ${kaId}`);
+    }
+    return BigInt(rawCount as string | number | bigint | boolean);
+  }
+
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();

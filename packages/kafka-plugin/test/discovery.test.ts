@@ -3,6 +3,7 @@ import {
   buildListQuery,
   buildCountQuery,
   buildSingleByUalQuery,
+  buildPageContentQuery,
   bindingsToKa,
 } from '../src/discovery.js';
 const META_URI = 'did:dkg:context-graph:urn:cg:demo/_meta';
@@ -28,56 +29,37 @@ function expectPublishableSubgraphMetaScope(q: string): void {
   expect(q).not.toContain('FILTER NOT EXISTS');
 }
 
-describe('discovery — buildListQuery', () => {
-  it('emits the exact SPARQL string joining KA meta (rootEntity/partOf/publishedAt) with data triples, ordered DESC by ?receivedAt', () => {
-    const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
-    expect(q).toBe(
-      `SELECT ?ual ?root ?receivedAt ?p ?o WHERE {
-  {
-    SELECT DISTINCT ?ual ?root ?receivedAt WHERE {
-      GRAPH <${META_URI}> {
-        { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
-        UNION
-        { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
-        ?ual <http://dkg.io/ontology/status> ?registrationStatus .
-        FILTER(?registrationStatus IN ("confirmed", "tentative"))
-        FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
-        ?ual <http://dkg.io/ontology/publishedAt> ?receivedAt .
-      }
-      {
-        GRAPH <${DATA_URI}> {
-          ?root a <https://ontology.dkg.io/streams#KafkaStream> .
-        }
-      }
-      UNION
-      {
-        GRAPH <${DATA_URI}> {
-          ?root <http://dkg.io/ontology/privateDataAnchor> "true" .
-        }
-        GRAPH <${PRIVATE_URI}> {
-          ?root a <https://ontology.dkg.io/streams#KafkaStream> .
-        }
-      }
-    }
-    ORDER BY DESC(?receivedAt)
-    LIMIT 30 OFFSET 0
-  }
-  {
-    GRAPH <${DATA_URI}> {
-      ?root a <https://ontology.dkg.io/streams#KafkaStream> .
-      ?root ?p ?o .
-    }
-  }
-  UNION
-  {
-    GRAPH <${DATA_URI}> {
-      ?root <http://dkg.io/ontology/privateDataAnchor> "true" .
-    }
-    GRAPH <${PRIVATE_URI}> { ?root ?p ?o . }
-  }
+function expectLegacyAndV2GraphResolution(
+  q: string,
+  dataUri = DATA_URI,
+  privateUri = PRIVATE_URI,
+): void {
+  expect(q).toContain('?ka <http://dkg.io/ontology/partOf>');
+  expect(q).toContain('<http://dkg.io/ontology/rootEntity> ?root');
+  expect(q).toContain(
+    `(<${dataUri}> <${dataUri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://ontology.dkg.io/streams#KafkaStream>)`,
+  );
+  expect(q).toContain(
+    `(<${dataUri}> <${privateUri}> <${PRIVATE_DATA_ANCHOR}> "true")`,
+  );
+  expect(q).toContain('<http://dkg.io/ontology/contentScopeVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+  expect(q).toContain('<http://dkg.io/ontology/kaUal>');
+  expect(q).toContain('<http://dkg.io/ontology/assertionGraph> ?assertionGraph');
+  expect(q).toContain('<http://dkg.io/ontology/privateTripleCount> ?privateCount');
+  expect(q).toContain('REPLACE(STR(?assertionGraph), "/_verifiable_memory/", "/_private/")');
+  expect(q).toContain('GRAPH ?publicGraph { ?root ?markerP ?markerO . }');
+  expect(q).toContain('GRAPH ?contentGraph { ?root a <https://ontology.dkg.io/streams#KafkaStream> . }');
 }
-ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o`,
-    );
+
+describe('discovery — buildListQuery', () => {
+  it('selects one bounded page of legacy or V2 stream targets without expanding payload triples', () => {
+    const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
+    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph WHERE/);
+    expect(q).toContain(`GRAPH <${META_URI}>`);
+    expect(q).not.toContain('SELECT ?ual ?root ?receivedAt ?p ?o');
+    expectLegacyAndV2GraphResolution(q);
+    expect(q).toContain('ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph');
+    expect(q).toContain('LIMIT 30 OFFSET 0');
   });
   it('substitutes custom limit and offset into the LIMIT/OFFSET line', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 1000, offset: 250 });
@@ -91,16 +73,13 @@ ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o`,
       offset: 0,
     });
     expect(q).toContain(`GRAPH <${META_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_DATA_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_PRIVATE_URI}>`);
+    expectLegacyAndV2GraphResolution(q, SUBGRAPH_DATA_URI, SUBGRAPH_PRIVATE_URI);
     expect(q).not.toContain(`GRAPH <${SUBGRAPH_META_URI}>`);
-    expect(q).not.toContain(`GRAPH <${PRIVATE_URI}>`);
+    expect(q).not.toContain(`<${PRIVATE_URI}>`);
   });
   it('lists private-default streams by joining public anchors to the private payload graph', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
-    expect(q).toContain(`GRAPH <${DATA_URI}>`);
-    expect(q).toContain(`GRAPH <${PRIVATE_URI}>`);
-    expect(q).toContain(`?root <${PRIVATE_DATA_ANCHOR}> "true" .`);
+    expectLegacyAndV2GraphResolution(q);
   });
   it('lists confirmed or tentative root-graph registrations when no subGraphName is configured', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
@@ -115,10 +94,11 @@ ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o`,
     });
     expectPublishableSubgraphMetaScope(q);
   });
-  it('keeps the outer joined rows sorted newest-first after each stream expands into triples', () => {
+  it('orders and paginates stream targets before the separate payload fetch', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
-    expect(q).toMatch(/^SELECT \?ual \?root \?receivedAt \?p \?o WHERE/);
-    expect(q).toContain('ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o');
+    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph WHERE/);
+    expect(q).toContain('ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph');
+    expect(q.trimEnd()).toMatch(/LIMIT 30 OFFSET 0$/);
   });
   it('rejects an unsafe contextGraphId to block SPARQL injection', () => {
     expect(() =>
@@ -132,28 +112,11 @@ ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o`,
   });
 });
 describe('discovery — buildCountQuery', () => {
-  it('emits the exact SPARQL string counting distinct UALs joined via KA partOf in the meta graph and KafkaStream type in the data graph', () => {
+  it('counts distinct legacy or V2 stream UALs through top-level scoped graph variables', () => {
     const q = buildCountQuery({ contextGraphId: 'urn:cg:demo' });
-    expect(q).toBe(
-      `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
-  GRAPH <${META_URI}> {
-    { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
-    UNION
-    { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
-    ?ual <http://dkg.io/ontology/status> ?registrationStatus .
-    FILTER(?registrationStatus IN ("confirmed", "tentative"))
-    FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
-  }
-  {
-    GRAPH <${DATA_URI}> { ?root a <https://ontology.dkg.io/streams#KafkaStream> . }
-  }
-  UNION
-  {
-    GRAPH <${DATA_URI}> { ?root <http://dkg.io/ontology/privateDataAnchor> "true" . }
-    GRAPH <${PRIVATE_URI}> { ?root a <https://ontology.dkg.io/streams#KafkaStream> . }
-  }
-}`,
-    );
+    expect(q).toMatch(/^SELECT \(COUNT\(DISTINCT \?ual\) AS \?count\) WHERE/);
+    expect(q).toContain(`GRAPH <${META_URI}>`);
+    expectLegacyAndV2GraphResolution(q);
   });
   it('rejects an unsafe contextGraphId to block SPARQL injection', () => {
     expect(() => buildCountQuery({ contextGraphId: 'urn:cg:demo> } DROP ALL {' })).toThrow();
@@ -164,15 +127,13 @@ describe('discovery — buildCountQuery', () => {
       subGraphName: 'streams',
     });
     expect(q).toContain(`GRAPH <${META_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_DATA_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_PRIVATE_URI}>`);
+    expectLegacyAndV2GraphResolution(q, SUBGRAPH_DATA_URI, SUBGRAPH_PRIVATE_URI);
     expect(q).not.toContain(`GRAPH <${SUBGRAPH_META_URI}>`);
-    expect(q).not.toContain(`GRAPH <${PRIVATE_URI}>`);
+    expect(q).not.toContain(`<${PRIVATE_URI}>`);
   });
   it('counts private-default streams by joining public anchors to the private payload graph', () => {
     const q = buildCountQuery({ contextGraphId: 'urn:cg:demo' });
-    expect(q).toContain(`GRAPH <${DATA_URI}> { ?root <${PRIVATE_DATA_ANCHOR}> "true" . }`);
-    expect(q).toContain(`GRAPH <${PRIVATE_URI}> { ?root a <https://ontology.dkg.io/streams#KafkaStream> . }`);
+    expectLegacyAndV2GraphResolution(q);
   });
   it('counts confirmed or tentative root-graph registrations when no subGraphName is configured', () => {
     const q = buildCountQuery({ contextGraphId: 'urn:cg:demo' });
@@ -187,36 +148,13 @@ describe('discovery — buildCountQuery', () => {
   });
 });
 describe('discovery — buildSingleByUalQuery', () => {
-  it('emits the exact SPARQL string resolving <UAL> via KA partOf in the meta graph then fetching content from the data graph', () => {
+  it('resolves an exact legacy or V2 UAL and fetches only its admitted content graph', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
-    expect(q).toBe(
-      `SELECT DISTINCT ?root ?p ?o WHERE {
-  GRAPH <${META_URI}> {
-    { ?ka <http://dkg.io/ontology/partOf> <did:dkg:1/0xabc> . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
-    UNION
-    { <did:dkg:1/0xabc> <http://dkg.io/ontology/rootEntity> ?root . }
-    <did:dkg:1/0xabc> <http://dkg.io/ontology/status> ?registrationStatus .
-    FILTER(?registrationStatus IN ("confirmed", "tentative"))
-    FILTER NOT EXISTS { <did:dkg:1/0xabc> <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
-  }
-  {
-    GRAPH <${DATA_URI}> {
-      ?root a <https://ontology.dkg.io/streams#KafkaStream> .
-      ?root ?p ?o .
-    }
-  }
-  UNION
-  {
-    GRAPH <${DATA_URI}> {
-      ?root <http://dkg.io/ontology/privateDataAnchor> "true" .
-    }
-    GRAPH <${PRIVATE_URI}> {
-      ?root a <https://ontology.dkg.io/streams#KafkaStream> .
-      ?root ?p ?o .
-    }
-  }
-}`,
-    );
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+    expect(q).toContain(`GRAPH <${META_URI}>`);
+    expect(q).toContain('<did:dkg:1/0xabc>');
+    expectLegacyAndV2GraphResolution(q);
+    expect(q).toContain('GRAPH ?contentGraph { ?root ?p ?o . }');
   });
   // Regression (read-both DISTINCT): on a pre-trim / mixed-version store the
   // bare UAL carries the collapsed `dkg:rootEntity` aggregate row AND the
@@ -276,16 +214,13 @@ describe('discovery — buildSingleByUalQuery', () => {
       ual: 'did:dkg:1/0xabc',
     });
     expect(q).toContain(`GRAPH <${META_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_DATA_URI}>`);
-    expect(q).toContain(`GRAPH <${SUBGRAPH_PRIVATE_URI}>`);
+    expectLegacyAndV2GraphResolution(q, SUBGRAPH_DATA_URI, SUBGRAPH_PRIVATE_URI);
     expect(q).not.toContain(`GRAPH <${SUBGRAPH_META_URI}>`);
-    expect(q).not.toContain(`GRAPH <${PRIVATE_URI}>`);
+    expect(q).not.toContain(`<${PRIVATE_URI}>`);
   });
   it('resolves private-default streams by joining public anchors to the private payload graph', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
-    expect(q).toContain(`GRAPH <${DATA_URI}>`);
-    expect(q).toContain(`GRAPH <${PRIVATE_URI}>`);
-    expect(q).toContain(`?root <${PRIVATE_DATA_ANCHOR}> "true" .`);
+    expectLegacyAndV2GraphResolution(q);
   });
   it('resolves confirmed or tentative root-graph registrations when no subGraphName is configured', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
@@ -305,6 +240,44 @@ describe('discovery — buildSingleByUalQuery', () => {
     expect(q).toContain('FILTER(?registrationStatus IN ("confirmed", "tentative"))');
     expect(q).toContain(`<did:dkg:1/0xabc> <${SUBGRAPH_NAME}> "streams" .`);
     expect(q).not.toContain('FILTER NOT EXISTS');
+  });
+});
+describe('discovery — buildPageContentQuery', () => {
+  it('fetches payload triples for only the already-paginated exact graph targets', () => {
+    const q = buildPageContentQuery([
+      {
+        ual: 'did:dkg:1/0xaaa',
+        root: 'urn:entity:aaa',
+        contentGraph: 'did:dkg:context-graph:urn:cg:demo/_private/0xaaa/1/assertions/1',
+      },
+      {
+        ual: 'did:dkg:1/0xbbb',
+        root: 'urn:entity:bbb',
+        contentGraph: 'did:dkg:context-graph:urn:cg:demo/_verifiable_memory/0xbbb/2',
+      },
+    ]);
+    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?p \?o WHERE/);
+    expect(q).toContain(
+      '(<did:dkg:1/0xaaa> <urn:entity:aaa> <did:dkg:context-graph:urn:cg:demo/_private/0xaaa/1/assertions/1>)',
+    );
+    expect(q).toContain(
+      '(<did:dkg:1/0xbbb> <urn:entity:bbb> <did:dkg:context-graph:urn:cg:demo/_verifiable_memory/0xbbb/2>)',
+    );
+    expect(q).toContain('GRAPH ?contentGraph { ?root ?p ?o . }');
+    expect(q).not.toContain('OFFSET');
+    expect(q).not.toContain('LIMIT');
+  });
+
+  it('deduplicates targets and rejects empty or unsafe target terms', () => {
+    const target = {
+      ual: 'did:dkg:1/0xaaa',
+      root: 'urn:entity:aaa',
+      contentGraph: 'did:dkg:context-graph:urn:cg:demo/_verifiable_memory/0xaaa/1',
+    };
+    const q = buildPageContentQuery([target, target]);
+    expect(q.match(/\(<did:dkg:1\/0xaaa>/g)).toHaveLength(1);
+    expect(() => buildPageContentQuery([])).toThrow(/at least one/i);
+    expect(() => buildPageContentQuery([{ ...target, root: 'urn:bad> } DROP ALL {' }])).toThrow();
   });
 });
 describe('discovery — bindingsToKa decodes real N-Quads literal binding values', () => {

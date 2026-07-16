@@ -23,6 +23,34 @@ const ENTITY_CTX_2 = 'urn:ctxgraph:entity:2';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+async function stageRootlessAssertion(
+  node: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  quads: Array<{ subject: string; predicate: string; object: string }>,
+) {
+  await node.assertion.create(contextGraphId, name);
+  await node.assertion.write(contextGraphId, name, quads);
+  return node.assertion.promote(contextGraphId, name);
+}
+
+async function bindAndSubscribePublicContextGraph(
+  node: DKGAgent,
+  contextGraphId: string,
+  onChainId: string,
+) {
+  // The public subscription gate intentionally requires a live on-chain
+  // binding. Pin it in this publish/finalization test instead of racing the
+  // background ontology-discovery loop.
+  await (node as any).store.insert([{
+    subject: `did:dkg:context-graph:${contextGraphId}`,
+    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+    object: `"${onChainId}"`,
+    graph: 'did:dkg:context-graph:ontology',
+  }]);
+  node.subscribeToContextGraph(contextGraphId);
+}
+
 let _fileSnapshot: string;
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
@@ -76,30 +104,29 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
     await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Context Graph E2E', description: '' });
-    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
-    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
   }, 15_000);
 
   it('creates a context graph on the shared chain', async () => {
-    const result = await nodeA.registerContextGraphOnChain({
+    const result = await nodeA.registerContextGraph(CONTEXT_GRAPH, {
       accessPolicy: 0,
       publishPolicy: 1,
     });
 
-    contextGraphId = result.contextGraphId;
+    contextGraphId = result.onChainId;
     expect(contextGraphId).toBeDefined();
     expect(Number(contextGraphId)).toBeGreaterThan(0);
+    await bindAndSubscribePublicContextGraph(nodeA, CONTEXT_GRAPH, contextGraphId);
+    await bindAndSubscribePublicContextGraph(nodeB, CONTEXT_GRAPH, contextGraphId);
+    await sleep(1500);
   }, 10_000);
 
   it('A writes to workspace; B receives via GossipSub', async () => {
-    const quads = [
-      { subject: ENTITY_CTX_1, predicate: 'http://schema.org/name', object: '"Context Graph Entity"', graph: '' },
-      { subject: ENTITY_CTX_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' },
-    ];
-
-    const wsResult = await nodeA.share(CONTEXT_GRAPH, quads);
-    expect(wsResult.shareOperationId).toBeDefined();
+    const wsResult = await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-entity-1', [
+      { subject: ENTITY_CTX_1, predicate: 'http://schema.org/name', object: '"Context Graph Entity"' },
+      { subject: ENTITY_CTX_1, predicate: 'http://schema.org/version', object: '"1"' },
+    ]);
+    expect(wsResult.promotedCount).toBeGreaterThan(0);
 
     const deadline = Date.now() + 15_000;
     let bWorkspace: any;
@@ -118,8 +145,8 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
   it('A enshrines to context graph; A has data in context graph URI', async () => {
     const result = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
-      { rootEntities: [ENTITY_CTX_1] },
-      { subContextGraphId: contextGraphId },
+      'all',
+      { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
     );
 
     expect(result.status).toBe('confirmed');
@@ -197,8 +224,8 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
   }, 5_000);
 
   it('second enshrine to same context graph accumulates data', async () => {
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_CTX_2, predicate: 'http://schema.org/name', object: '"Second Context Entity"', graph: '' },
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-entity-2', [
+      { subject: ENTITY_CTX_2, predicate: 'http://schema.org/name', object: '"Second Context Entity"' },
     ]);
 
     // Wait for workspace replication
@@ -214,7 +241,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
 
     const result = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
-      { rootEntities: [ENTITY_CTX_2] },
+      'all',
       { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
     );
     expect(result.status).toBe('confirmed');
@@ -261,15 +288,11 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
   // mirror that dual-write so label-scoped queries on replicas
   // converge. Pin that path here.
   //
-  // Setup nuance: the existing tests above register their CG on-chain
-  // via the bare `registerContextGraphOnChain` path which doesn't
-  // write the `_meta.registrationStatus="registered"` binding the
-  // publisher's same-graph guard checks (the remap tests skip that
-  // guard via `subContextGraphId`/`publishContextGraphId`). To take
-  // the same-graph branch we use a fresh label and the higher-level
-  // `registerContextGraph(id)` API, which binds the label, writes the
-  // registration status, and persists the on-chain id to ontology —
-  // matching the production daemon's CG registration flow.
+  // Use a fresh label so this block exercises the same-graph branch,
+  // while the tests above continue to exercise the explicit
+  // `subContextGraphId` remap branch. Both registrations use the
+  // production `registerContextGraph(id)` API so their public label is
+  // cryptographically bound to the on-chain name hash.
   describe('same-graph publish (keepRootCopyOnLabel=true) — recipient mirrors publisher root dual-write', () => {
     const SAMEG_LABEL = 'context-graph-e2e-sameg';
     const ENTITY_SAMEG = 'urn:ctxgraph:entity:sameg';
@@ -301,14 +324,14 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
         },
       ]);
 
-      nodeA.subscribeToContextGraph(SAMEG_LABEL);
-      nodeB.subscribeToContextGraph(SAMEG_LABEL);
+      await bindAndSubscribePublicContextGraph(nodeA, SAMEG_LABEL, samegOnChainId);
+      await bindAndSubscribePublicContextGraph(nodeB, SAMEG_LABEL, samegOnChainId);
       await sleep(1500);
     }, 30_000);
 
     it('A same-graph publish; B sees data in BOTH root <cg> and per-cgId partition', async () => {
-      await nodeA.share(SAMEG_LABEL, [
-        { subject: ENTITY_SAMEG, predicate: 'http://schema.org/name', object: '"Same-Graph Entity"', graph: '' },
+      await stageRootlessAssertion(nodeA, SAMEG_LABEL, 'same-graph-entity', [
+        { subject: ENTITY_SAMEG, predicate: 'http://schema.org/name', object: '"Same-Graph Entity"' },
       ]);
       const wsDeadline = Date.now() + 10_000;
       while (Date.now() < wsDeadline) {
@@ -326,7 +349,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
       // the wire so the recipient mirrors the dual-write.
       const result = await nodeA.publishFromSharedMemory(
         SAMEG_LABEL,
-        { rootEntities: [ENTITY_SAMEG] },
+        'all',
         { clearSharedMemoryAfter: true },
       );
       expect(result.status).toBe('confirmed');

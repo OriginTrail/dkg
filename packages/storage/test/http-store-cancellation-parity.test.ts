@@ -7,20 +7,20 @@ import {
 
 interface HttpStoreCase {
   name: string;
-  create(): TripleStore;
+  create(timeout?: number): TripleStore;
 }
 
 const cases: HttpStoreCase[] = [
   {
     name: 'Oxigraph-compatible SPARQL HTTP',
-    create: () => new SparqlHttpStore({
+    create: (timeout = 5) => new SparqlHttpStore({
       queryEndpoint: 'http://oxigraph.test/query',
-      timeout: 5,
+      timeout,
     }),
   },
   {
     name: 'Blazegraph',
-    create: () => new BlazegraphStore('http://blazegraph.test/sparql', { timeout: 5 }),
+    create: (timeout = 5) => new BlazegraphStore('http://blazegraph.test/sparql', { timeout }),
   },
 ];
 
@@ -72,4 +72,86 @@ describe.each(cases)('$name HTTP cancellation conformance', ({ create }) => {
     expect(maxActive).toBe(1);
     await store.close();
   });
+
+  for (const bodyPath of ['query JSON', 'update error text'] as const) {
+    it(`retains admission through delayed ${bodyPath} cleanup`, async () => {
+      let calls = 0;
+      let active = 0;
+      let maxActive = 0;
+      let bodiesStarted = 0;
+      let bodiesAborted = 0;
+      let resolveBodiesStarted!: () => void;
+      let resolveBodiesAborted!: () => void;
+      const allBodiesStarted = new Promise<void>((resolve) => { resolveBodiesStarted = resolve; });
+      const allBodiesAborted = new Promise<void>((resolve) => { resolveBodiesAborted = resolve; });
+
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        calls += 1;
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (calls > 2) {
+          active -= 1;
+          return bodyPath === 'query JSON'
+            ? new Response(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/sparql-results+json' },
+            })
+            : new Response(null, { status: 204 });
+        }
+
+        const delayedBody = () => {
+          bodiesStarted += 1;
+          if (bodiesStarted === 2) resolveBodiesStarted();
+          return new Promise<never>((_resolve, reject) => {
+            const settleAfterAbort = () => {
+              bodiesAborted += 1;
+              if (bodiesAborted === 2) resolveBodiesAborted();
+              setTimeout(() => {
+                active -= 1;
+                reject(init?.signal?.reason ?? new Error('aborted'));
+              }, 20);
+            };
+            if (init?.signal?.aborted) settleAfterAbort();
+            else init?.signal?.addEventListener('abort', settleAfterAbort, { once: true });
+          });
+        };
+        return {
+          ok: bodyPath === 'query JSON',
+          status: bodyPath === 'query JSON' ? 200 : 500,
+          json: delayedBody,
+          text: delayedBody,
+        } as unknown as Response;
+      }) as typeof fetch;
+
+      const store = create(1_000);
+      const firstAbort = new AbortController();
+      const secondAbort = new AbortController();
+      const invoke = (signal?: AbortSignal) => bodyPath === 'query JSON'
+        ? store.query('SELECT ?s WHERE { ?s ?p ?o }', { signal })
+        : store.update('INSERT DATA { <urn:s> <urn:p> "value" }', { signal });
+
+      const first = invoke(firstAbort.signal);
+      const second = invoke(secondAbort.signal);
+      const firstAttemptsSettled = Promise.allSettled([first, second]);
+      await allBodiesStarted;
+      firstAbort.abort(new Error('cancel first'));
+      secondAbort.abort(new Error('cancel second'));
+      await allBodiesAborted;
+
+      const retry = invoke();
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(calls).toBe(2);
+
+      const settled = await firstAttemptsSettled;
+      expect(settled.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+      if (bodyPath === 'query JSON') {
+        await expect(retry).resolves.toMatchObject({ type: 'bindings' });
+      } else {
+        await expect(retry).resolves.toBeUndefined();
+      }
+      expect(active).toBe(0);
+      expect(maxActive).toBe(2);
+      await store.close();
+    });
+  }
 });

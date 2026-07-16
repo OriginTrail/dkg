@@ -198,12 +198,20 @@ describe('publishJsonLd', () => {
     expect(publicName.type).toBe('boolean');
     if (publicName.type === 'boolean') expect(publicName.value).toBe(true);
 
-    const privateGraph = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:split-test/_private> { ?s ?p ?o } }`,
+    expect(result.contentScopeVersion).toBe(2);
+    expect(result.assertionVersion).toBeDefined();
+    const privatePayload = await new PrivateContentStore(
+      store,
+      new GraphManager(store),
+    ).getKnowledgeAssetPrivateTriples(
+      'split-test',
+      createGraphKnowledgeAssetScope(result.ual, result.assertionVersion!),
     );
-    if (privateGraph.type === 'boolean') {
-      expect(privateGraph.value).toBe(true);
-    }
+    expect(privatePayload.some(
+      (quad) => quad.subject === 'http://example.org/Carol'
+        && quad.predicate === 'http://schema.org/email'
+        && quad.object === '"carol@example.org"',
+    )).toBe(true);
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('private-only envelope generates synthetic public anchor', async () => {
@@ -281,7 +289,7 @@ describe('publishJsonLd', () => {
     expect(result.status).toBe('confirmed');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
-  it('async private-only JSON-LD enqueues one rootless KA and no root anchor', async () => {
+  it('async private-only JSON-LD enqueues one rootless KA with one non-root challenge anchor', async () => {
     const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
     await agent.createContextGraph({ id: 'async-priv-only', name: 'AsyncPrivateOnly', description: '' });
     await agent.registerContextGraph('async-priv-only');
@@ -312,18 +320,10 @@ describe('publishJsonLd', () => {
     expect(request.kaUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/\d+$/);
     expect(request.accessPolicy).toBe('allowList');
     expect(request.allowedPeers).toEqual(['peer-a', 'peer-b']);
-    const reResolved = await agent.resolveFinalizedAssertionVmPublishIntent(
-      'did:dkg:context-graph:async-priv-only',
-      request.name,
-      {
-        agentAddress: request.agentAddress,
-        accessPolicy: 'allowList',
-        allowedPeers: ['peer-b', 'peer-a'],
-      },
-    );
-    expect(reResolved.accessPolicy).toBe('allowList');
-    expect(reResolved.allowedPeers).toEqual(['peer-a', 'peer-b']);
-    expect(reResolved.intentKey).toBe(request.intentKey);
+    // With a positive public challenge leaf the local queue may complete and
+    // clean its mutable assertion lifecycle immediately. The immutable queued
+    // request above is the durable contract; do not race cleanup by resolving
+    // the already-promoted lifecycle a second time.
     // Keep this resilient to control-plane tuning (defaults changed in main).
     expect(job?.retries.maxRetries).toBeGreaterThan(0);
 
@@ -338,6 +338,12 @@ describe('publishJsonLd', () => {
     );
     expect(publicAnchor.type).toBe('boolean');
     if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(false);
+
+    const challengeAnchor = await store.query(
+      `ASK { GRAPH <${swmGraph}> { ?anchor <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
+    );
+    expect(challengeAnchor.type).toBe('boolean');
+    if (challengeAnchor.type === 'boolean') expect(challengeAnchor.value).toBe(true);
 
     const publicPayload = await store.query(
       `ASK { GRAPH <${swmGraph}> { <${root}> <http://schema.org/name> "Private Async" } }`,

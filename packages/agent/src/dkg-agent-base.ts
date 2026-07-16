@@ -479,6 +479,25 @@ export function createListContextGraphsCacheInvalidatingStore(
           () => markProjectionDirty?.(),
         )
       : undefined,
+    // Rootless KA materialization replaces the assertion graph and its UAL
+    // metadata subject in one backend transaction. Preserve that optional
+    // capability through the agent decorator just like replaceGraph/update;
+    // omitting it makes every capable production backend appear unsupported.
+    replaceGraphAndSubject: innerStore.replaceGraphAndSubject
+      ? (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options) =>
+          invalidateAfterMutation(
+            () => innerStore.replaceGraphAndSubject!(
+              graphUri,
+              graphQuads,
+              metaGraphUri,
+              metadataSubject,
+              metadataQuads,
+              options,
+            ),
+            () => true,
+            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
+          )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

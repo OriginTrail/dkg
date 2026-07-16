@@ -748,12 +748,12 @@ REMOTE
 }
 
 audit_testnet_health_samples() {
-  local baseline_file="$RUN_DIR/health-baselines.jsonl"
+  local baseline_file="$RUN_DIR/health-baselines.jsonl" restart_nodes="$*"
   BASELINES_FILE="$baseline_file" SAMPLES_FILE="$RUN_DIR/health-samples.jsonl" \
     MAX_QUEUE="$TESTNET_MAX_ACCEPT_QUEUE" MAX_MEMORY="$TESTNET_MAX_MEMORY_USED_PERCENT" \
     MAX_LOAD="$TESTNET_MAX_LOAD_PER_CPU_PERCENT" \
     MAX_CONSECUTIVE="$TESTNET_SATURATION_CONSECUTIVE_SAMPLES" \
-    CURATOR="$CURATOR_NODE" JOINER="$JOINER_NODE" node -e '
+    RESTART_NODES="$restart_nodes" node -e '
       const fs = require("node:fs");
       const readLines = file => fs.existsSync(file)
         ? fs.readFileSync(file, "utf8").split(/\n+/).filter(Boolean).map(line => JSON.parse(line))
@@ -764,7 +764,8 @@ audit_testnet_health_samples() {
       const maxMemory = Number(process.env.MAX_MEMORY);
       const maxLoad = Number(process.env.MAX_LOAD);
       const maxConsecutive = Number(process.env.MAX_CONSECUTIVE);
-      const restartNodes = new Set([Number(process.env.CURATOR), Number(process.env.JOINER)]);
+      const restartNodes = new Set(String(process.env.RESTART_NODES ?? "")
+        .split(/\s+/).filter(Boolean).map(Number));
       const state = new Map();
       const failures = [];
       for (const sample of samples) {
@@ -945,7 +946,7 @@ audit_node_health() {
     done
     [ "$findings" -eq 0 ] \
       || fail "$findings testnet node(s) logged an OOM, process crash, or Oxigraph fatal condition"
-    if ! health_report="$(audit_testnet_health_samples 2>&1)"; then
+    if ! health_report="$(audit_testnet_health_samples "$CURATOR_NODE" "$JOINER_NODE" 2>&1)"; then
       save_artifact "health-audit.json" "$health_report"
       fail "testnet health samples failed the OOM/sustained-saturation gate"
     fi
@@ -1625,7 +1626,34 @@ validate_integrity_data_response() {
         ?? payload?.results?.bindings
         ?? payload?.bindings
         ?? [];
-      const term = value => String(typeof value === "string" ? value : value?.value ?? "");
+      const shortEscapes = Object.freeze({
+        "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f",
+        "\r": "\\r", "\"": "\\\"", "\\": "\\\\",
+      });
+      const formatLiteral = (value, suffix = "") => {
+        const escaped = value.replace(/["\\\u0000-\u001F\u007F]/g, character =>
+          shortEscapes[character]
+            ?? `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
+        return `"${escaped}"${suffix}`;
+      };
+      const term = value => {
+        if (typeof value === "string") return value;
+        const lexical = String(value?.value ?? "");
+        if (value?.type === "bnode") return lexical.startsWith("_:") ? lexical : `_:${lexical}`;
+        if (value?.type === "literal" || value?.type === "typed-literal") {
+          if (value["xml:lang"]) return formatLiteral(lexical, `@${value["xml:lang"]}`);
+          if (value.datatype) {
+            return formatLiteral(
+              lexical,
+              value.datatype === "http://www.w3.org/2001/XMLSchema#string"
+                ? ""
+                : `^^<${value.datatype}>`,
+            );
+          }
+          return formatLiteral(lexical);
+        }
+        return lexical;
+      };
       const canonical = bindings
         .map(row => [term(row.s), term(row.p), term(row.o), ""])
         .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));

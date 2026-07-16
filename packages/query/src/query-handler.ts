@@ -1,5 +1,6 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
 import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -296,9 +297,9 @@ export class QueryHandler {
       // any other public CG existed on the node.
       const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
       if (denied) return { ...denied, operationId: opId };
-      const ntriples = resolved.quads
-        .map(q => `<${q.subject}> <${q.predicate}> ${formatObject(q.object)} .`)
-        .join('\n');
+      const ntriples = quadsToNQuads(
+        resolved.quads.map((quad) => ({ ...quad, graph: '' })),
+      );
 
       return {
         operationId: opId,
