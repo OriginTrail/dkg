@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

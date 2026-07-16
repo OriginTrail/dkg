@@ -2,24 +2,27 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import {
-  spawnHardhatEnv,
-  killHardhat,
   makeAdapterConfig,
   HARDHAT_KEYS,
-  type HardhatContext,
 } from './hardhat-harness.js';
+import {
+  getSharedContext,
+  revertSnapshot,
+  takeSnapshot,
+} from './evm-test-context.js';
 
-let ctx: HardhatContext;
+let snapshotId: string;
 
 describe('EVMChainAdapter.getMaxKaNumberForAuthor — on-chain view E2E (#1080)', () => {
   beforeAll(async () => {
-    ctx = await spawnHardhatEnv(8568);
-  }, 180_000);
-  afterAll(() => killHardhat(ctx));
+    snapshotId = await takeSnapshot();
+  });
+  afterAll(async () => revertSnapshot(snapshotId));
 
   it('reads the per-author high-water from the deployed int256 view over real RPC', async () => {
+    const { rpcUrl, hubAddress } = getSharedContext();
     const adapter = new EVMChainAdapter(
-      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
+      makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.DEPLOYER),
     );
     await (adapter as any).init();
 

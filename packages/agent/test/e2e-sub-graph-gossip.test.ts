@@ -17,6 +17,7 @@ import { ethers } from 'ethers';
 const CG_ID = 'sg-gossip-e2e';
 const SG_RESEARCH = 'research';
 const SG_CODE = 'code';
+const RESEARCH_KA = 'research-paper';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -93,10 +94,15 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
   });
 
   it('SWM write to sub-graph replicates via gossip', async () => {
-    await nodeA.share(CG_ID, [
-      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/name', object: '"DKG V10 Paper"', graph: '' },
-      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/author', object: '"Research Team"', graph: '' },
+    await nodeA.assertion.create(CG_ID, RESEARCH_KA, { subGraphName: SG_RESEARCH });
+    await nodeA.assertion.write(CG_ID, RESEARCH_KA, [
+      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/name', object: '"DKG V10 Paper"' },
+      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/author', object: '"Research Team"' },
     ], { subGraphName: SG_RESEARCH });
+    const promoted = await nodeA.assertion.promote(CG_ID, RESEARCH_KA, {
+      subGraphName: SG_RESEARCH,
+    });
+    expect(promoted.publishReady).toBe(true);
 
     const bBindings = await pollUntil(
       () => nodeB.query(
@@ -147,7 +153,7 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
   }, 25_000);
 
   it('publish sub-graph SWM → finalization → B promotes to data graph', async () => {
-    const result = await nodeA.publishFromSharedMemory(CG_ID, 'all', {
+    const result = await nodeA.publishFromFinalizedAssertion(CG_ID, RESEARCH_KA, {
       subGraphName: SG_RESEARCH,
     });
 
@@ -194,10 +200,14 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
   });
 
   it('concurrent SWM writes to different sub-graphs replicate correctly', async () => {
+    // All three test nodes deliberately use CORE_OP. They therefore represent
+    // one author and must share its monotonic KA-number allocation state; a
+    // fresh allocator per node would issue duplicate rootless graph identities.
+    const sharedAllocator = makeTestKaNumberAllocator();
     const nodes = await Promise.all(
       ['ConcA', 'ConcB', 'ConcC'].map(async (name) => {
         const agent = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+          kaNumberAllocator: sharedAllocator,
           name,
           listenPort: 0,
           chainAdapter: sharedChain,
@@ -212,10 +222,19 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
     const addrA = nodes[0].multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await nodes[1].connectTo(addrA);
     await nodes[2].connectTo(addrA);
+    // Form a real three-peer mesh. A star can legitimately leave the third
+    // peer outside the initial GossipSub mesh, making "C sees both" depend on
+    // a later heartbeat rather than the concurrent-write behavior under test.
+    const addrB = nodes[1].multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await nodes[2].connectTo(addrB);
     await sleep(2000);
 
     const CG = 'concurrent-sg-e2e';
-    await nodes[0].createContextGraph({ id: CG, name: 'Concurrent Sub-graph E2E' });
+    // This case tests concurrent sub-graph delivery, not CG discovery. Seed the
+    // same public CG metadata on every in-memory store so all three nodes can
+    // authorize and subscribe to its SWM topic before either write starts.
+    await Promise.all(nodes.map((node) =>
+      node.createContextGraph({ id: CG, name: 'Concurrent Sub-graph E2E' })));
     for (const n of nodes) n.subscribeToContextGraph(CG);
     await sleep(1500);
 
@@ -225,13 +244,23 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
 
     // Node A writes to alpha, Node B writes to beta
     await Promise.all([
-      nodes[0].share(CG, [
-        { subject: 'urn:conc:alpha:1', predicate: 'http://schema.org/name', object: '"Alpha Data"', graph: '' },
+      nodes[0].assertion.create(CG, 'alpha-ka', { subGraphName: 'alpha' }),
+      nodes[1].assertion.create(CG, 'beta-ka', { subGraphName: 'beta' }),
+    ]);
+    await Promise.all([
+      nodes[0].assertion.write(CG, 'alpha-ka', [
+        { subject: 'urn:conc:alpha:1', predicate: 'http://schema.org/name', object: '"Alpha Data"' },
       ], { subGraphName: 'alpha' }),
-      nodes[1].share(CG, [
-        { subject: 'urn:conc:beta:1', predicate: 'http://schema.org/name', object: '"Beta Data"', graph: '' },
+      nodes[1].assertion.write(CG, 'beta-ka', [
+        { subject: 'urn:conc:beta:1', predicate: 'http://schema.org/name', object: '"Beta Data"' },
       ], { subGraphName: 'beta' }),
     ]);
+    const [alphaShare, betaShare] = await Promise.all([
+      nodes[0].assertion.promote(CG, 'alpha-ka', { subGraphName: 'alpha' }),
+      nodes[1].assertion.promote(CG, 'beta-ka', { subGraphName: 'beta' }),
+    ]);
+    expect(alphaShare.publishReady).toBe(true);
+    expect(betaShare.publishReady).toBe(true);
 
     // Node C should eventually see both
     const cAlpha = await pollUntil(

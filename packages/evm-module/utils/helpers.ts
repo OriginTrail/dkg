@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 
 import { AddressLike, Contract } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
@@ -97,7 +98,12 @@ export class Helpers {
 
     this.repositoryPath = this._getGitRepositoryPath();
 
-    const deploymentsConfig = `./deployments/${this.hre.network.name}_contracts.json`;
+    const deploymentsDirectory =
+      process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim() || './deployments';
+    const deploymentsConfig = path.join(
+      deploymentsDirectory,
+      `${this.hre.network.name}_contracts.json`,
+    );
 
     if (fs.existsSync(deploymentsConfig)) {
       this.contractDeployments = JSON.parse(
@@ -464,8 +470,11 @@ export class Helpers {
       `Encoded data for parameters settings: ${JSON.stringify(this.setParametersEncodedData)}`,
     );
 
+    const deploymentsDirectory =
+      process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim() || folder;
+    fs.mkdirSync(deploymentsDirectory, { recursive: true });
     fs.writeFileSync(
-      `${folder}/${this.hre.network.name}_contracts.json`,
+      path.join(deploymentsDirectory, `${this.hre.network.name}_contracts.json`),
       JSON.stringify(this.contractDeployments, null, 4),
     );
   }

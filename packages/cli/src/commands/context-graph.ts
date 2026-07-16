@@ -81,6 +81,7 @@ import {
   stopDaemonIfRunning,
 } from '../cli-helpers.js';
 import type { ActionOpts, CatchupStatusCommandOptions } from '../cli-helpers.js';
+import { formatContextGraphTable } from '../context-graph-table.js';
 import {
   cliWithTimeout,
   isCliKnownTransactionError,
@@ -525,21 +526,7 @@ contextGraphCmd
         return;
       }
 
-      const idW = Math.max(4, ...contextGraphs.map(p => p.id.length));
-      const nameW = Math.max(4, ...contextGraphs.map(p => p.name.length));
-
-      const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
-      console.log(header);
-      console.log('  ' + '─'.repeat(header.length - 2));
-
-      for (const p of contextGraphs) {
-        const type = p.isSystem ? 'system' : 'user';
-        const creator = p.creator
-          ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
-          : '—';
-        console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
-      }
-      console.log(`\n  ${contextGraphs.length} context graph(s)`);
+      for (const line of formatContextGraphTable(contextGraphs)) console.log(line);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

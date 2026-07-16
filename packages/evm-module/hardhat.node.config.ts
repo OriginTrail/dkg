@@ -25,6 +25,7 @@ extendEnvironment((hre: HardhatRuntimeEnvironment) => {
 });
 
 const isCoverage = process.argv.includes('coverage');
+const isolatedDeploymentsDir = process.env.DKG_HARDHAT_DEPLOYMENTS_DIR?.trim();
 
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
@@ -124,6 +125,9 @@ const config: HardhatUserConfig = {
     tests: './test',
     cache: './cache',
     artifacts: './artifacts',
+    ...(isolatedDeploymentsDir
+      ? { deployments: isolatedDeploymentsDir }
+      : {}),
     // Pin deploy roots to deploy/active/ so hardhat-deploy's recursive
     // scan does NOT discover scripts under deploy/archive/ (V8/V9 legacy
     // stack archived). hardhat-deploy 0.12.4 walks the root
