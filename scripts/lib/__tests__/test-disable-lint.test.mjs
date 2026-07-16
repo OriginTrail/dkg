@@ -63,6 +63,20 @@ test('analysis recognizes custom Vitest configuration filenames', () => {
   );
 });
 
+test('analysis recognizes standard Vite configuration filenames', () => {
+  const source = [
+    "import { defineConfig } from 'vite';",
+    'export default defineConfig({',
+    "  test: { exclude: ['tests/integration/**'] },",
+    '});',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vite.config.ts').map(({ value }) => value),
+    ['tests/integration/**'],
+  );
+});
+
 test('full-tree audit reports tracked static D2 baseline without failing', (t) => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-d2-audit-'));
   t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
