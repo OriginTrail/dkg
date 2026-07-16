@@ -162,6 +162,99 @@ async function readExactGraphPagedInternal(
   const quads: Quad[] = [];
   const seenNQuadLines = new Set<string>();
   let nquadsBytes = 0;
+  const appendQuad = (subject: string, predicate: string, object: string): void => {
+    const quad: Quad = {
+      subject,
+      predicate,
+      object,
+      graph: options.outputGraph ?? graph,
+    };
+    const nquadLine = quadToNQuad(quad);
+    if (seenNQuadLines.has(nquadLine)) {
+      throw invalidQueryResult(
+        graph,
+        'Exact graph read received a duplicate triple',
+      );
+    }
+    seenNQuadLines.add(nquadLine);
+    nquadsBytes +=
+      (quads.length === 0 ? 0 : 1) +
+      UTF8_ENCODER.encode(nquadLine).byteLength;
+    if (nquadsBytes > maxNQuadsBytes) {
+      throw new ExactGraphReadError({
+        kind: 'limit',
+        code: 'NQUADS_BYTE_LIMIT_EXCEEDED',
+        graphIri: graph,
+        message: `Exact graph read exceeds N-Quads byte limit: found ${nquadsBytes}, limit ${maxNQuadsBytes}`,
+        actual: nquadsBytes,
+        limit: maxNQuadsBytes,
+      });
+    }
+    quads.push(quad);
+  };
+  const verifyPostflightCount = async (): Promise<void> => {
+    const postflightQuadCount = await queryExactGraphCount(
+      store,
+      graph,
+      maxQuadCount,
+      boundedQueryOptions,
+    );
+    if (postflightQuadCount !== expectedQuadCount) {
+      throw quadCountMismatch(graph, expectedQuadCount, postflightQuadCount);
+    }
+  };
+  const readBlankNodeGraph = async (): Promise<Quad[]> => {
+    const maxSingleDocumentQuadCount = Math.min(
+      maxQuadCount,
+      DEFAULT_EXACT_GRAPH_PAGE_SIZE,
+    );
+    if (expectedQuadCount > maxSingleDocumentQuadCount) {
+      throw new ExactGraphReadError({
+        kind: 'limit',
+        code: 'QUAD_COUNT_LIMIT_EXCEEDED',
+        graphIri: graph,
+        message: `Exact blank-node graph read exceeds the single-document quad limit: expected ${expectedQuadCount}, limit ${maxSingleDocumentQuadCount}`,
+        actual: expectedQuadCount,
+        limit: maxSingleDocumentQuadCount,
+      });
+    }
+    quads.length = 0;
+    seenNQuadLines.clear();
+    nquadsBytes = 0;
+    const result = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE {
+        GRAPH <${graph}> { ?s ?p ?o }
+      }
+      LIMIT ${expectedQuadCount + 1}`,
+      boundedQueryOptions,
+    );
+    if (result.type !== 'quads' || !Array.isArray(result.quads)) {
+      throw invalidQueryResult(graph, 'Exact blank-node graph read expected CONSTRUCT quads');
+    }
+    for (const rawQuad of result.quads) {
+      if (typeof rawQuad !== 'object' || rawQuad === null) {
+        throw invalidQueryResult(graph, 'Exact blank-node graph read received an invalid quad');
+      }
+      const { subject, predicate, object } = rawQuad as Partial<Quad>;
+      if (
+        typeof subject !== 'string'
+        || typeof predicate !== 'string'
+        || typeof object !== 'string'
+      ) {
+        throw invalidQueryResult(graph, 'Exact blank-node graph read received an incomplete quad');
+      }
+      appendQuad(subject, predicate, object);
+      if (quads.length > expectedQuadCount) {
+        throw quadCountMismatch(graph, expectedQuadCount, quads.length);
+      }
+    }
+    if (quads.length !== expectedQuadCount) {
+      throw quadCountMismatch(graph, expectedQuadCount, quads.length);
+    }
+    await verifyPostflightCount();
+    return quads;
+  };
+
   let offset = 0;
   for (;;) {
     const remainingWithOverflowSentinel = expectedQuadCount - quads.length + 1;
@@ -202,34 +295,10 @@ async function readExactGraphPagedInternal(
       ) {
         throw invalidQueryResult(graph, 'Exact graph read received an incomplete binding');
       }
-      const quad: Quad = {
-        subject,
-        predicate,
-        object,
-        graph: options.outputGraph ?? graph,
-      };
-      const nquadLine = quadToNQuad(quad);
-      if (seenNQuadLines.has(nquadLine)) {
-        throw invalidQueryResult(
-          graph,
-          'Exact graph read received a duplicate triple across ordered pages',
-        );
+      if (subject.startsWith('_:') || object.startsWith('_:')) {
+        return readBlankNodeGraph();
       }
-      seenNQuadLines.add(nquadLine);
-      nquadsBytes +=
-        (quads.length === 0 ? 0 : 1) +
-        UTF8_ENCODER.encode(nquadLine).byteLength;
-      if (nquadsBytes > maxNQuadsBytes) {
-        throw new ExactGraphReadError({
-          kind: 'limit',
-          code: 'NQUADS_BYTE_LIMIT_EXCEEDED',
-          graphIri: graph,
-          message: `Exact graph read exceeds N-Quads byte limit: found ${nquadsBytes}, limit ${maxNQuadsBytes}`,
-          actual: nquadsBytes,
-          limit: maxNQuadsBytes,
-        });
-      }
-      quads.push(quad);
+      appendQuad(subject, predicate, object);
     }
     if (quads.length > expectedQuadCount) {
       throw quadCountMismatch(graph, expectedQuadCount, quads.length);
@@ -241,15 +310,7 @@ async function readExactGraphPagedInternal(
   if (quads.length !== expectedQuadCount) {
     throw quadCountMismatch(graph, expectedQuadCount, quads.length);
   }
-  const postflightQuadCount = await queryExactGraphCount(
-    store,
-    graph,
-    maxQuadCount,
-    boundedQueryOptions,
-  );
-  if (postflightQuadCount !== expectedQuadCount) {
-    throw quadCountMismatch(graph, expectedQuadCount, postflightQuadCount);
-  }
+  await verifyPostflightCount();
   return quads;
 }
 

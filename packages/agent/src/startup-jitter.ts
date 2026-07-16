@@ -8,6 +8,19 @@ export function deterministicStartupJitterMs(seed: string, maxDelayMs: number): 
   return Math.floor((sample / 0x1_0000_0000) * (max + 1));
 }
 
+/** Arm the recurring cadence only after the jittered startup run fires. */
+export function scheduleAfterStartupJitter(
+  run: () => void,
+  startupDelayMs: number,
+  intervalMs: number,
+  onIntervalArmed: (timer: ReturnType<typeof setInterval>) => void,
+): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    run();
+    onIntervalArmed(setInterval(run, intervalMs));
+  }, startupDelayMs);
+}
+
 /**
  * Default the VM reconcile startup-jitter window to its sweep cadence. An
  * explicit zero remains meaningful for operators who intentionally want an

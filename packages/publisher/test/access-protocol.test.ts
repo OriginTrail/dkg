@@ -7,6 +7,7 @@ import {
   PROTOCOL_ACCESS,
   encodeAccessRequest,
   decodeAccessResponse,
+  contextGraphDataUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -31,6 +32,15 @@ const ENTITY = 'did:dkg:agent:TestBot';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+function trustedRootRegistration(contextGraphId: string): Quad {
+  return {
+    subject: contextGraphDataUri(contextGraphId),
+    predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    object: 'http://dkg.io/ontology/ContextGraph',
+    graph: contextGraphDataUri('ontology'),
+  };
 }
 
 describe('Access Protocol', () => {
@@ -88,6 +98,11 @@ describe('Access Protocol', () => {
       allowedPeers?: string[];
     },
   ) {
+    // Production nodes learn this trusted root registration through the
+    // ontology/control plane. The isolated publisher store must model the same
+    // invariant or the hardened metadata resolver correctly hides unanchored
+    // `_meta` rows as attacker-authored aliases.
+    await store.insert([trustedRootRegistration(CONTEXT_GRAPH)]);
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -468,6 +483,7 @@ describe('AccessHandler — collapsed multi-root private KA (review F3)', () => 
     // all directly on the UAL subject. The literal meta root values are
     // deliberately bogus so any blind meta pick is detectable.
     await store.insert([
+      trustedRootRegistration(CG),
       { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
       { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_B, graph: META },
       { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${'aa'.repeat(32)}"`, graph: META },
@@ -507,6 +523,7 @@ describe('AccessHandler — collapsed multi-root private KA (review F3)', () => 
     const store = new OxigraphStore();
     const metaRootHex = 'cd'.repeat(32);
     await store.insert([
+      trustedRootRegistration(CG),
       { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
       { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${metaRootHex}"`, graph: META },
       { subject: UAL, predicate: `${DKG_NS}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: META },

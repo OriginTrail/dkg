@@ -38,6 +38,7 @@ import {
 import {
   generateConfirmedFullMetadata,
   generateGraphKnowledgeAssetMetadata,
+  replaceLocallyTrustedKnowledgeAssetControls,
   buildDeterministicTokenRows,
   compareRootIris,
   generateOwnershipQuads,
@@ -722,13 +723,17 @@ function graphScopeTargetsChain(
   adapterChainId: string,
   evmChainId?: bigint,
 ): boolean {
+  // DKG chain labels are protocol namespaces, not necessarily EIP-155 aliases.
+  // For example, `otp:20430` identifies the NeuroWeb test network while the
+  // backing EVM currently reports chain id 31337.  An exact adapter-label match
+  // is therefore authoritative and must win before numeric alias comparison.
+  if (scopeChainId === adapterChainId) return true;
   const scopeNumericId = numericEvmChainId(scopeChainId);
-  // When the adapter exposes the live EIP-155 id, it is authoritative even
-  // if a stale configured label happens to match the UAL textually.
+  // If the raw labels differ, accept representation aliases only when their
+  // numeric EIP-155 ids agree (for example `31337` and `evm:31337`).
   if (scopeNumericId !== undefined && evmChainId !== undefined) {
     return scopeNumericId === evmChainId;
   }
-  if (scopeChainId === adapterChainId) return true;
   const adapterNumericId = evmChainId ?? numericEvmChainId(adapterChainId);
   return scopeNumericId !== undefined
     && adapterNumericId !== undefined
@@ -3553,6 +3558,16 @@ export class DKGPublisher implements Publisher {
           q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
         );
       }
+      if (graphPublish && !isAgentRegistryContextGraph(contextGraphId)) {
+        // Keep locally authored ACLs outside peer-sync-visible metadata. A
+        // later exact durable replacement can then preserve only trusted
+        // controls anchored to this assertion version and root.
+        await replaceLocallyTrustedKnowledgeAssetControls(
+          this.store,
+          graphPublish.scope.ual,
+          tentativeMeta,
+        );
+      }
       this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store (${reasonLog})`);
       if (graphPublish) {
         await this.replaceExactKnowledgeAssetGraph(
@@ -4033,6 +4048,13 @@ export class DKGPublisher implements Publisher {
           const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
           confirmedQuads = confirmedQuads.map((q) =>
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
+          );
+        }
+        if (graphPublish) {
+          await replaceLocallyTrustedKnowledgeAssetControls(
+            this.store,
+            graphPublish.scope.ual,
+            confirmedQuads,
           );
         }
         // RC11 / PR2: write the published public quads into the root
@@ -4742,6 +4764,7 @@ export class DKGPublisher implements Publisher {
               labelMeta,
               graphUpdate.scope.ual,
               version,
+              BigInt(graphUpdate.scope.assertionVersion),
             ))
           ) {
             this.log.info(
@@ -4801,6 +4824,11 @@ export class DKGPublisher implements Publisher {
             },
             provenance ? 'confirmed' : 'tentative',
             provenance,
+          );
+          await replaceLocallyTrustedKnowledgeAssetControls(
+            this.store,
+            graphUpdate.scope.ual,
+            metadata,
           );
           await this.convergeKnowledgeAssetMetadataRows(
             labelMeta,
@@ -8085,8 +8113,22 @@ export class DKGPublisher implements Publisher {
       layerResult.bindings[0]?.['layer'],
       'KA_LIFECYCLE_LAYER_CORRUPT',
     );
+    const hasCompletionMarker = await this.hasSwmShareComplete(
+      contextGraphId,
+      name,
+      agentAddress,
+      opts?.subGraphName,
+    );
     let resumingCommittedSwm = false;
     let preserveLegacyCompletionMarker = false;
+    if (assertionQuads.length > 0 && hasCompletionMarker) {
+      // A live WM source means this is either a reopened draft or an
+      // interrupted promote whose exact SWM write landed before WM cleanup.
+      // In both cases the old marker is not proof that the current durable
+      // tail is complete. Clear it before parsing fallible operation metadata
+      // so malformed recovery state can never leave a publishable marker.
+      await maintainMarker(false);
+    }
     if (assertionQuads.length === 0) {
       if (lifecycleLayer === MemoryLayer.VerifiableMemory) {
         // A confirmed publish consumes SWM and leaves WM empty. A stale retry
@@ -8112,12 +8154,6 @@ export class DKGPublisher implements Publisher {
 
       const existingSwmQuads = (await this.assertionScopedQuads(swmGraphUri)).filter(
         (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
-      );
-      const hasCompletionMarker = await this.hasSwmShareComplete(
-        contextGraphId,
-        name,
-        agentAddress,
-        opts?.subGraphName,
       );
       if (
         hasCompletionMarker
@@ -8267,6 +8303,31 @@ export class DKGPublisher implements Publisher {
     const durablePromoteIntent = durablePromoteIntentValue && durableShareOperationId
       ? parsePromoteOperationIntent(durablePromoteIntentValue, durableShareOperationId)
       : undefined;
+    if (assertionQuads.length > 0 && durableShareOperationId) {
+      // The exact SWM graph may have committed before a later snapshot/head
+      // write failed, while WM is intentionally retained for retry. Recognize
+      // that old-or-new atomic outcome only when it matches this sealed KA and
+      // a durable operation claim exists; an older mismatching SWM version is
+      // simply replaced by the normal path below.
+      const existingSwmQuads = (await this.assertionScopedQuads(swmGraphUri)).filter(
+        (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+      );
+      if (existingSwmQuads.length > 0) {
+        try {
+          await validateGraphScopedPayloadAgainstSeal(
+            seal,
+            existingSwmQuads,
+            immutablePrivateQuads.filter(
+              (quad) => !isReservedSubject(quad.subject) && !isTrustLevelQuad(quad),
+            ),
+            'shared-memory',
+          );
+          resumingCommittedSwm = true;
+        } catch {
+          // A previous SWM version is not an interrupted commit of this seal.
+        }
+      }
+    }
     if (assertionQuads.length === 0 && immutablePrivateQuads.length === 0) {
       await maintainMarker(false);
       throw Object.assign(
@@ -8674,11 +8735,11 @@ export class DKGPublisher implements Publisher {
     // state repairs the tail above before this marker can become visible.
     await maintainMarker(isFullCompletePromote);
 
-    // Only after every durable write above: consume the pending share
-    // operation and drop the WM source. A failure anywhere above leaves WM and
-    // the recovery pointer intact, so a retry re-promotes the exact same
-    // content instead of aborting on empty working memory.
-    await this.store.delete([operationIdQuad, operationIntentQuad]);
+    // Keep both the shareOperationId and immutable intent as durable replay
+    // metadata. The former is also the lifecycle identity written by
+    // generateAssertionPromotedMetadata; the latter is required to reproduce
+    // the exact timestamp, policy, and publisher on an idempotent retry.
+    // Reopened drafts explicitly wipe both rows in assertionCreateUnlocked.
     await this.dropAssertionScopedGraphs(graphUri);
 
     return {

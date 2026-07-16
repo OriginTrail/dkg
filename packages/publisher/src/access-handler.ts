@@ -282,7 +282,8 @@ export class AccessHandler {
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const legacyAliasBase = legacyTokenAliasBase(kaUal);
-    const canonicalUal = legacyAliasBase ?? kaUal;
+    const graphScopedAliasBase = canonicalDeterministicUal(legacyAliasBase);
+    const canonicalUal = graphScopedAliasBase ?? kaUal;
     // A token-form legacy alias must not bypass a V2 marker on the canonical
     // bare UAL. Resolve the canonical control plane before either legacy path.
     const resolved = await resolveGraphScopedOrLegacyMetadata(
@@ -292,6 +293,9 @@ export class AccessHandler {
       { source: 'publisher.access.metadata' },
     );
     if (resolved.kind === 'graph') {
+      // Numeric token suffixes are legacy compatibility addresses only. V2
+      // assets have one canonical UAL and must never be served through one.
+      if (graphScopedAliasBase) return null;
       return this.graphScopedKAMeta(resolved.metadata);
     }
     const workspaceMeta = await this.lookupWorkspaceHeadKAMeta(canonicalUal);
@@ -529,14 +533,21 @@ function isAccessPolicy(value: string | undefined): value is AccessPolicy {
 }
 
 function legacyTokenAliasBase(kaUal: string): string | undefined {
-  const match = /^(.+)\/\d+$/.exec(kaUal);
-  const candidate = match?.[1];
-  if (!candidate) return undefined;
   try {
-    return parseDeterministicKnowledgeAssetUal(candidate).ual;
+    parseDeterministicKnowledgeAssetUal(kaUal);
+    return undefined;
   } catch {
-    // A canonical bare UAL also ends in digits. Its prefix is not itself a
-    // deterministic KA UAL, so it must never be stripped as a token alias.
+    // Continue: non-deterministic legacy UALs may carry a token suffix.
+  }
+  const match = /^(.+)\/\d+$/.exec(kaUal);
+  return match?.[1];
+}
+
+function canonicalDeterministicUal(ual: string | undefined): string | undefined {
+  if (!ual) return undefined;
+  try {
+    return parseDeterministicKnowledgeAssetUal(ual).ual;
+  } catch {
     return undefined;
   }
 }

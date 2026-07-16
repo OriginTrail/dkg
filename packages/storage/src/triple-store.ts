@@ -136,6 +136,19 @@ export interface TripleStore {
    * and fail closed when it is unavailable.
    */
   replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
+  /**
+   * Atomically replace one complete named graph and every row for one subject
+   * in a second named graph. Implementations MUST guarantee one commit boundary
+   * for both replacements; generic update() support is not sufficient.
+   */
+  replaceGraphAndSubject?(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -222,6 +235,45 @@ export async function tryReplaceGraphAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceGraph'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic complete-graph + metadata-subject replacement.
+ *
+ * `false` is a clean capability refusal raised before mutation. Execution
+ * failures propagate because a remote response can be indeterminate.
+ */
+export async function tryReplaceGraphAndSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  graphQuads: Quad[],
+  metaGraphUri: string,
+  metadataSubject: string,
+  metadataQuads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replace = store.replaceGraphAndSubject;
+  if (typeof replace !== 'function') return false;
+  try {
+    await replace.call(
+      store,
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+      options,
+    );
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceGraphAndSubject'
     ) {
       return false;
     }

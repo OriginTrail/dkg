@@ -476,7 +476,10 @@ describe('graph-scoped assertion finalization recovery', () => {
     expect(await agent.store.countQuads(wmGraph)).toBe(1);
 
     const retried = await agent.assertion.promote(contextGraphId, name);
-    expect(retried).toMatchObject({ promotedCount: 1 });
+    // The exact SWM graph committed before the injected post-swap failure.
+    // Recovery repairs the remaining durable tail and replays the immutable
+    // operation; it must not report the already-written triple as newly moved.
+    expect(retried).toMatchObject({ promotedCount: 0, publishReady: true });
     expect(await agent.store.countQuads(swmGraph)).toBe(1);
     expect(await agent.store.countQuads(wmGraph)).toBe(0);
   }, 60_000);

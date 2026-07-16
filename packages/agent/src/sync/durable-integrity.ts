@@ -21,6 +21,7 @@ const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
+const STATUS = `${DKG_NS}status`;
 const RESERVED_UAL = `${DKG_NS}reservedUal`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
@@ -624,9 +625,9 @@ function verifyGraphScopedCandidates(
 
   for (const candidate of graphScopedCandidates) {
     const { ual, descriptor } = candidate;
-    let inScope: boolean;
+    let scope: ReturnType<typeof classifyGraphScopedCandidateScope>;
     try {
-      inScope = graphScopedCandidateIsInScope(ual, descriptor.assertionGraph, metadata, mode);
+      scope = classifyGraphScopedCandidateScope(ual, descriptor.assertionGraph, metadata, mode);
     } catch (error) {
       rejectedKcUals.add(ual);
       fatalUnscopedFailure = true;
@@ -639,11 +640,14 @@ function verifyGraphScopedCandidates(
     // Changelog and since-batch responses carry complete shared metadata but
     // only a scoped data payload. Out-of-scope descriptors are structurally
     // valid, yet their peer-supplied rows are not authenticated by this page.
-    if (!inScope) {
+    if (scope !== 'in-scope') {
       // The shared metadata record includes descriptors for unchanged assets.
       // They are structurally valid but not authenticated by this page's
       // payload, so never select their peer-supplied rows for replacement.
       // System graphs retain their explicit unverified-data override.
+      if (scope === 'tentative-without-batch') {
+        graphVerification.set(descriptor.assertionGraph, false);
+      }
       if (acceptUnverified) admittedMetadataUals.add(ual);
       continue;
     }
@@ -870,15 +874,23 @@ function verifyLegacyCandidates(
   };
 }
 
-function graphScopedCandidateIsInScope(
+function classifyGraphScopedCandidateScope(
   ual: string,
   assertionGraph: string,
   metadata: IntegrityMetadataIndex,
   mode: DurableIntegrityVerificationMode,
-): boolean {
-  if (mode.kind === 'fullSnapshot') return true;
-  if (mode.kind === 'changelogPage') return mode.changedDataGraphs.has(assertionGraph);
-  return candidateIsNewerThan(metadata.metaBySubject.get(ual) ?? [], mode.sinceBatchId);
+): 'in-scope' | 'out-of-scope' | 'tentative-without-batch' {
+  if (mode.kind === 'fullSnapshot') return 'in-scope';
+  if (mode.kind === 'changelogPage') {
+    return mode.changedDataGraphs.has(assertionGraph) ? 'in-scope' : 'out-of-scope';
+  }
+  const rows = metadata.metaBySubject.get(ual) ?? [];
+  const batchIds = distinctObjects(rows, BATCH_ID);
+  const statuses = distinctObjects(rows, STATUS);
+  if (batchIds.length === 0 && statuses.length === 1 && statuses[0] === 'tentative') {
+    return 'tentative-without-batch';
+  }
+  return candidateIsNewerThan(rows, mode.sinceBatchId) ? 'in-scope' : 'out-of-scope';
 }
 
 function candidateIsNewerThan(rows: readonly Quad[], sinceBatchId: bigint): boolean {

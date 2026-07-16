@@ -22,6 +22,7 @@ import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import {
   assertionLifecycleUri,
   contextGraphMetaUri,
+  contextGraphSharedMemoryMetaUri,
   contextGraphAssertionUri,
   contextGraphLayerUri,
   ASSERTION_SEAL_PREDICATES,
@@ -665,13 +666,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(receiptUal).not.toBe(intent.kaUal);
     const recoveryPublisher = (agent as any).publisher;
     const recoveryCleanup = vi.spyOn(recoveryPublisher, 'clearPublishedKnowledgeAssetSwm');
+    const recoveryRequest = { ...intent, clearSharedMemoryAfter: true } as const;
     const recoveryInput = {
       walletId: 'wallet-1',
-      request: intent,
+      request: recoveryRequest,
       job: {
         jobId: 'recovery-job',
         jobSlug: 'recovery-job',
-        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: recoveryRequest },
         status: 'broadcast',
         broadcast: {
           txHash,
@@ -731,7 +733,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
       intent.kaUal!,
       intent.assertionVersion!,
     );
+    const wrongLocalChain = queuedScope.chainId === 'evm:1' ? 'evm:2' : 'evm:1';
     for (const invalidGraphUal of [
+      `did:dkg:${wrongLocalChain}/${queuedScope.agentAddress}/${queuedScope.kaNumber}`,
       `did:dkg:${queuedScope.chainId}/0x0000000000000000000000000000000000000001/${queuedScope.kaNumber}`,
       `did:dkg:${queuedScope.chainId}/${queuedScope.agentAddress}/${BigInt(queuedScope.kaNumber) + 1n}`,
     ]) {
@@ -740,6 +744,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
         request: { ...recoveryInput.request, kaUal: invalidGraphUal },
       } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     }
+
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: {
+        ...recoveryInput.request,
+        publicTripleCount: recoveryInput.request.publicTripleCount! + 1,
+      },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
 
     await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
@@ -776,6 +788,31 @@ describe('rootless graph-scoped KA lifecycle', () => {
       },
     } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
     expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+
+    const snapshotOutage = new Error('operation snapshot store unavailable');
+    const originalQuery = store.query.bind(store);
+    const snapshotQuery = vi.spyOn(store, 'query').mockImplementation(
+      async (sparql: string, ...args: unknown[]) => {
+        if (sparql.includes('publicSnapshotRef')) throw snapshotOutage;
+        return originalQuery(sparql, ...args);
+      },
+    );
+    await expect(
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+    ).rejects.toBe(snapshotOutage);
+    snapshotQuery.mockRestore();
+
+    const operationSubject = `urn:dkg:share:${CG_ID}:${intent.shareOperationId}`;
+    await store.deleteByPattern({
+      graph: contextGraphSharedMemoryMetaUri(CG_ID),
+      subject: operationSubject,
+    });
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any)).rejects.toMatchObject({
+      code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
+    });
 
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
@@ -818,11 +855,64 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.finalize(CG_ID, name);
     await agent.assertion.promote(CG_ID, name);
     const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
-    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
-    expect(updated.status).toBe('confirmed');
     expect(updateIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
 
+    // The v1 chain transaction remains recoverable after an unpublished v2
+    // advances the mutable workspace head. Recovery stamps its lost receipt
+    // without regressing the current v2 SWM lifecycle back to published v1.
+    for (const predicate of Object.values(ASSERTION_PUBLISH_RECEIPT_PREDICATES)) {
+      await store.deleteByPattern({ subject: assertionUri, predicate, graph: metaGraph });
+    }
+    const beforeStagedRecovery = await agent.assertion.history(CG_ID, name);
+    expect(beforeStagedRecovery?.state).toBe('promoted');
+    expect(beforeStagedRecovery?.swmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+    expect(beforeStagedRecovery?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+
+    // Simulate a crash between the workspace-head delete and insert. The named
+    // lifecycle has already advanced to v2, so v1 recovery must use that
+    // independent signal and refuse to stamp the lifecycle backward.
+    const sharedMetaGraph = contextGraphSharedMemoryMetaUri(CG_ID);
+    const workspaceHeadSubject = `${intent.kaUal}#dkg-swm-head`;
+    const workspaceHeadRows = await store.query(
+      `CONSTRUCT { <${workspaceHeadSubject}> ?p ?o } WHERE { GRAPH <${sharedMetaGraph}> {
+        <${workspaceHeadSubject}> ?p ?o
+      } }`,
+    );
+    if (workspaceHeadRows.type !== 'quads' || workspaceHeadRows.quads.length === 0) {
+      throw new Error('expected staged v2 workspace head');
+    }
+    await store.deleteByPattern({ graph: sharedMetaGraph, subject: workspaceHeadSubject });
+
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+
+    const afterStagedRecovery = await agent.assertion.history(CG_ID, name);
+    expect(afterStagedRecovery?.state).toBe('promoted');
+    expect(afterStagedRecovery?.swmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+    expect(afterStagedRecovery?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+    const recoveredStagedReceipt = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> "${txHash}" .
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_BLOCK}> ?block .
+    } }`);
+    expect(recoveredStagedReceipt).toMatchObject({ type: 'boolean', value: true });
+
+    await store.insert(workspaceHeadRows.quads);
+
+    const updated = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(updated.status).toBe('confirmed');
+
+    const actualContextGraphId = BigInt((await agent.getContextGraphOnChainId(CG_ID))!);
+    const contextGraphBinding = vi.spyOn((agent as any).chain, 'getKAContextGraphId')
+      .mockResolvedValueOnce(actualContextGraphId + 1n);
+    await expect(
+      agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any),
+    ).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    contextGraphBinding.mockRestore();
+
+    const currentFinalizer = agent.getOrCreateFinalizationHandler();
+    const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(supersededReconcile).not.toHaveBeenCalled();
+    supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
     expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
   }, 90_000);
@@ -991,7 +1081,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(noopShare.shareOperationId).toBeUndefined();
 
     const history = await agent.assertion.history(CG_ID, name);
-    expect(history?.currentShareOperationId).not.toBe(share.shareOperationId);
+    // VM retries are non-mutating and retain the original durable operation
+    // identity for audit/replay; they do not create a new SWM operation.
+    expect(history?.currentShareOperationId).toBe(share.shareOperationId);
     await expect(
       agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name),
     ).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
@@ -1529,7 +1621,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const full = await agent.assertion.promote(CG_ID, name);
     expect(full.sealed).toBe(true);
 
-    // 2. Discard the (now-sealed-in-SWM) asset, then recreate the same name.
+    // 2. Re-open the exact immutable SWM version, discard that mutable draft,
+    // then create a replacement. Direct mutation/discard of sealed SWM is blocked.
+    await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
     await agent.assertion.discard(CG_ID, name);
     await agent.assertion.create(CG_ID, name);
     await writeAB();
@@ -1618,7 +1712,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const first = await agent.assertion.promote(CG_ID, name);
     expect(first.sealed).toBe(true);
 
-    // Recreate the same lifecycle name with the replacement atomic graph {A,B}.
+    // Re-open and discard the immutable SWM version, then write {A,B} as the
+    // next atomic graph. This is the sanctioned replacement lifecycle.
+    await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
     await agent.assertion.discard(CG_ID, name);
     await agent.assertion.create(CG_ID, name);
     await agent.assertion.write(CG_ID, name, [
@@ -1944,11 +2040,10 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(swmAfter.bindings.length).toBe(0);
   }, 30_000);
 
-  // round 11 (reviewer 🔴 #1): the non-sealing seal-clear is TRANSACTIONAL — it
-  // runs only AFTER assertionPromote COMMITS. A non-sealing share whose promote
-  // THROWS must NOT clear a prior full-share seal (the old SWM content + seal stay
-  // valid, so the asset stays publishable until a share actually succeeds).
-  it('round 11: a non-sealing share whose PROMOTE FAILS does NOT clear the prior seal', async () => {
+  // A failed atomic promote must leave both the new WM draft and the last exact
+  // SWM recovery version intact. This is the rootless replacement for the old
+  // selective/non-sealing lifecycle test: partial shares no longer exist.
+  it('a failed atomic promote preserves the draft and the prior exact SWM recovery version', async () => {
     const agent = await createAgent('TxnSealClearFailBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Txn Seal Clear Fail E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -1964,9 +2059,10 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open (no discard) + write, then a SUBSET (non-sealing) share whose
-    // assertionPromote THROWS (simulate a curator-unconfirmed / payload failure).
-    await agent.assertion.create(CG_ID, name);
+    // Enter the sanctioned edit loop. pullFrom archives the exact SWM seal,
+    // clears the active seal, and re-opens a verified WM draft.
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(reopened.seeded).toBe(2);
     await agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
@@ -1975,13 +2071,18 @@ describe('rootless graph-scoped KA lifecycle', () => {
       .spyOn(agent.publisher, 'assertionPromote')
       .mockRejectedValue(new Error('simulated promote failure (curator unconfirmed)'));
     try {
-      await expect(agent.assertion.promote(CG_ID, name, { entities: [A] })).rejects.toThrow(/simulated promote failure/);
+      await expect(agent.assertion.promote(CG_ID, name)).rejects.toThrow(/simulated promote failure/);
     } finally {
       spy.mockRestore();
     }
 
-    // The prior seal MUST survive the failed non-sealing share (round 11 fix).
-    expect(await sealExists(agent, CG_ID, name)).toBe(true);
+    // The failed commit leaves WM untouched. Recovery can still select the
+    // archived exact seal and restore the prior two-triple SWM version.
+    expect(await agent.assertion.query(CG_ID, name)).toHaveLength(4);
+    const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
+    expect(recovered.seeded).toBe(2);
+    expect((await agent.assertion.query(CG_ID, name)).map((quad) => quad.object).sort())
+      .toEqual(['"A"', '"B"']);
   }, 30_000);
 
   it('a selective share is rejected before commit and cannot clear the prior seal', async () => {

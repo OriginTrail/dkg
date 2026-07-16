@@ -526,6 +526,45 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(processed.verifiedMetaIndexes).toEqual([]);
   });
 
+  it('skips only tentative graph-scoped KAs without a batchId in sinceBatchId deltas', () => {
+    const pending = fixture();
+    const confirmedMeta = pending.meta.map((entry) => (
+      entry.predicate === `${DKG}status`
+        ? { ...entry, object: '"confirmed"' }
+        : entry
+    ));
+
+    const tentative = processDurableBatchForWire(
+      pending.payload,
+      pending.meta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '10' },
+    );
+    const malformedConfirmed = processDurableBatchForWire(
+      pending.payload,
+      confirmedMeta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '10' },
+    );
+    const olderConfirmed = fixture({ batchId: 5n });
+    const ordinaryOutOfScope = processDurableBatchForWire(
+      olderConfirmed.payload,
+      olderConfirmed.meta,
+      false,
+      { kind: 'sinceBatchId', sinceBatchId: '10' },
+    );
+
+    expect(tentative.rejectedKcs).toBe(0);
+    expect(tentative.verifiedDataIndexes).toEqual([]);
+    expect(tentative.verifiedMetaIndexes).toEqual([]);
+    expect(malformedConfirmed.rejectedKcs).toBe(1);
+    expect(malformedConfirmed.verifiedDataIndexes).toEqual([]);
+    expect(malformedConfirmed.verifiedMetaIndexes).toEqual([]);
+    expect(ordinaryOutOfScope.rejectedKcs).toBe(1);
+    expect(ordinaryOutOfScope.verifiedDataIndexes).toEqual([]);
+    expect(ordinaryOutOfScope.verifiedMetaIndexes).toEqual([]);
+  });
+
   it('scopes a V2 changelog delta past unchanged legacy metadata while full sync stays strict', () => {
     const legacyRoot = 'urn:legacy:mixed-page-root';
     const legacyPayload = [

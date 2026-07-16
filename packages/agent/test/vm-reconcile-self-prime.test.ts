@@ -31,6 +31,7 @@ interface AgentInternals {
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: {
+    dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
     tryTriggerPeriodic: (cg: string) => boolean;
@@ -77,6 +78,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const triggered: string[] = [];
     internals.vmReconcileDispatcher = {
+      dispatch: async (cg: string, reason: 'live' | 'periodic') => {
+        triggered.push(`${reason}:${cg}`);
+        return true;
+      },
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
       tryTriggerPeriodic: (cg: string) => {
@@ -159,6 +164,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const triggered: string[] = [];
     internals.vmReconcileDispatcher = {
+      dispatch: async () => true,
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
       tryTriggerPeriodic: () => true,
@@ -190,6 +196,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const triggered: string[] = [];
     internals.vmReconcileDispatcher = {
+      dispatch: async () => true,
       triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
       triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
       tryTriggerPeriodic: () => true,
