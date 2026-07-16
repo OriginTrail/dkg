@@ -83,6 +83,23 @@ test('analysis resolves exclusion constants declared in for initializers', () =>
   );
 });
 
+test('analysis resolves exclusion constants declared in switch cases', () => {
+  const source = [
+    "const EXCLUSION = 'tests/outer/**';",
+    'switch (mode) {',
+    "  case 'unit':",
+    "    const EXCLUSION = 'spec/case/**';",
+    '    const config = { test: { exclude: [EXCLUSION] } };',
+    '    break;',
+    '}',
+  ].join('\n');
+
+  assert.deepEqual(
+    analyzeD2Source(source, 'vitest.config.ts').map(({ line, value }) => ({ line, value })),
+    [{ line: 5, value: 'spec/case/**' }],
+  );
+});
+
 test('analysis recognizes custom Vitest configuration filenames', () => {
   const source = [
     "import { defineConfig } from 'vitest/config';",
