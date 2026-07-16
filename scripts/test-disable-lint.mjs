@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -180,7 +182,58 @@ export function auditFiles(filePaths) {
   });
 }
 
+function semanticMoveSelfTest() {
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: fixtureRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'test-disable-lint-selftest');
+    mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
+    writeFileSync(
+      path.join(fixtureRoot, 'test/original.test.ts'),
+      "test.skip('existing debt', () => {});\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD').trim();
+
+    git('mv', 'test/original.test.ts', 'test/moved.test.ts');
+    writeFileSync(
+      path.join(fixtureRoot, 'test/moved.test.ts'),
+      "\n\ntest.skip('existing debt', () => {});\n",
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'move disabled test');
+    const head = git('rev-parse', 'HEAD').trim();
+
+    const results = computeDiffFindings(base, head, fixtureRoot).results;
+    const pass = results.filter(({ verdict }) => verdict === 'new').length === 0
+      && results.filter(({ verdict }) => verdict === 'grandfathered').length === 1;
+    if (!pass) {
+      process.stderr.write(`SELF-TEST FAIL: semantic move produced ${JSON.stringify(results)}\n`);
+    }
+    return pass;
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function selfTest() {
+  const movePasses = semanticMoveSelfTest();
+  process.stdout.write(
+    `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}.\n`,
+  );
+  return movePasses ? 0 : 1;
+}
+
 export function runCli(argv = process.argv.slice(2)) {
+  if (argv[0] === '--self-test') return selfTest();
   if (argv[0] !== '--files' || argv.length === 1) {
     process.stderr.write('Usage: node scripts/test-disable-lint.mjs --files <path...>\n');
     return 2;
