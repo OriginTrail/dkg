@@ -154,6 +154,10 @@ export function isD2ScannableFile(filePath) {
   return VITEST_CONFIG_FILE.test(candidate) && !EXCLUDED_TREE.test(candidate);
 }
 
+function isScannableFile(filePath) {
+  return isD1ScannableFile(filePath) || isD2ScannableFile(filePath);
+}
+
 export function analyzeD1Source(source, filePath) {
   const sourceFile = ts.createSourceFile(
     filePath,
@@ -295,7 +299,7 @@ function git(args, cwd = process.cwd()) {
   });
 }
 
-function changedD1Entries(baseRevision, headRevision, cwd) {
+function changedEntries(baseRevision, headRevision, cwd) {
   const entries = [];
   const fields = git([
     'diff',
@@ -315,17 +319,17 @@ function changedD1Entries(baseRevision, headRevision, cwd) {
       ? fields[index++]
       : undefined;
     if (status.startsWith('R')) {
-      if (isD1ScannableFile(firstPath) || isD1ScannableFile(secondPath)) {
+      if (isScannableFile(firstPath) || isScannableFile(secondPath)) {
         entries.push({
-          basePath: isD1ScannableFile(firstPath) ? firstPath : null,
-          headPath: isD1ScannableFile(secondPath) ? secondPath : null,
+          basePath: isScannableFile(firstPath) ? firstPath : null,
+          headPath: isScannableFile(secondPath) ? secondPath : null,
         });
       }
     } else if (status.startsWith('C')) {
-      if (isD1ScannableFile(secondPath)) {
+      if (isScannableFile(secondPath)) {
         entries.push({ basePath: null, headPath: secondPath });
       }
-    } else if (isD1ScannableFile(firstPath)) {
+    } else if (isScannableFile(firstPath)) {
       entries.push({
         basePath: status === 'A' ? null : firstPath,
         headPath: status === 'D' ? null : firstPath,
@@ -337,11 +341,15 @@ function changedD1Entries(baseRevision, headRevision, cwd) {
 
 function findingsAt(revision, filePath, cwd) {
   if (!filePath) return [];
-  return analyzeD1Source(git(['show', `${revision}:${filePath}`], cwd), filePath);
+  const source = git(['show', `${revision}:${filePath}`], cwd);
+  return [
+    ...(isD1ScannableFile(filePath) ? analyzeD1Source(source, filePath) : []),
+    ...(isD2ScannableFile(filePath) ? analyzeD2Source(source, filePath) : []),
+  ];
 }
 
 export function computeDiffFindings(baseRevision, headRevision, cwd = process.cwd()) {
-  const entries = changedD1Entries(baseRevision, headRevision, cwd);
+  const entries = changedEntries(baseRevision, headRevision, cwd);
   const baseline = new Map();
   for (const entry of entries) {
     for (const finding of findingsAt(baseRevision, entry.basePath, cwd)) {
@@ -373,7 +381,7 @@ function runDiff(baseRevision, headRevision) {
 function listTrackedFiles() {
   return git(['ls-files', '-z'])
     .split('\0')
-    .filter((filePath) => isD1ScannableFile(filePath) || isD2ScannableFile(filePath));
+    .filter(isScannableFile);
 }
 
 function semanticMoveSelfTest() {
