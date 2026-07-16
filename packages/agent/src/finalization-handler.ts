@@ -2620,7 +2620,12 @@ export class FinalizationHandler {
     // reuse the memoized root only when the op's current content still hashes to the
     // same cheap digest; any content change flips the digest → full recompute → the
     // op is re-evaluated and re-stamped. No op can be stranded by a stale stamp.
-    type OpMemo = { roots: string[]; memoRoot?: string; memoDigest?: string };
+    type OpMemo = {
+      roots: string[];
+      privateRoots: Uint8Array[];
+      memoRoot?: string;
+      memoDigest?: string;
+    };
     const opsBySubject = new Map<string, OpMemo>();
     try {
       const memoPatterns = useStampIndex
@@ -2638,7 +2643,7 @@ export class FinalizationHandler {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
           const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
           if (!op || !isSafeIri(root)) continue;
-          const memo = opsBySubject.get(op) ?? { roots: [] };
+          const memo = opsBySubject.get(op) ?? { roots: [], privateRoots: [] };
           if (!memo.roots.includes(root)) memo.roots.push(root);
           if (memo.memoRoot === undefined && typeof row['memoRoot'] === 'string') {
             memo.memoRoot = row['memoRoot'].replace(/^"(.*)".*$/, '$1');
@@ -2647,6 +2652,30 @@ export class FinalizationHandler {
             memo.memoDigest = row['memoDigest'].replace(/^"(.*)".*$/, '$1');
           }
           opsBySubject.set(op, memo);
+        }
+      }
+
+      // Folded-private legacy ACK snapshots attach their private roots to the
+      // operation, rather than to a reusable entity. Keep this as a separate
+      // lookup so the established operation-enumeration query remains stable
+      // for store adapters and instrumentation that identify the full scan.
+      const privateResult = await this.store.query(`SELECT ?op ?privateRoot WHERE {
+        GRAPH <${assertSafeIri(wsMetaGraph)}> {
+          ?op <${DKG_NS}privateMerkleRoot> ?privateRoot .
+        }
+      }`);
+      if (privateResult.type === 'bindings') {
+        for (const row of privateResult.bindings) {
+          const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
+          const memo = opsBySubject.get(op);
+          const privateRoot = this.privateMerkleRootFromBinding(row['privateRoot']);
+          if (
+            memo
+            && privateRoot
+            && !memo.privateRoots.some((existing) => equalBytes(existing, privateRoot))
+          ) {
+            memo.privateRoots.push(privateRoot);
+          }
         }
       }
     } catch { /* SWM meta may not exist yet */ }
@@ -2666,7 +2695,9 @@ export class FinalizationHandler {
       const roots = memo.roots;
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
       if (sharedMemoryQuads.length === 0) continue;
-      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
+      const privateRoots = memo.privateRoots.length > 0
+        ? memo.privateRoots
+        : await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
       if (useStampIndex) {
         const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
         let computedHex: string;
@@ -2764,7 +2795,7 @@ export class FinalizationHandler {
     subGraphName?: string,
   ): Promise<{ rootEntities: string[]; sharedMemoryQuads: Quad[] } | null> {
     const targetHex = ethers.hexlify(merkleRoot);
-    const rootsByOp = new Map<string, string[]>();
+    const snapshotsByOp = new Map<string, { roots: string[]; privateRoots: Uint8Array[] }>();
     try {
       const result = await this.store.query(`SELECT ?op ?root WHERE {
         GRAPH <${assertSafeIri(wsMetaGraph)}> {
@@ -2777,17 +2808,41 @@ export class FinalizationHandler {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
           const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
           if (!op || !isSafeIri(root)) continue;
-          const list = rootsByOp.get(op) ?? [];
-          list.push(root);
-          rootsByOp.set(op, list);
+          const snapshot = snapshotsByOp.get(op) ?? { roots: [], privateRoots: [] };
+          if (!snapshot.roots.includes(root)) snapshot.roots.push(root);
+          snapshotsByOp.set(op, snapshot);
+        }
+      }
+
+      const privateResult = await this.store.query(`SELECT ?op ?privateRoot WHERE {
+        GRAPH <${assertSafeIri(wsMetaGraph)}> {
+          ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> "${targetHex}" .
+          ?op <${DKG_NS}privateMerkleRoot> ?privateRoot .
+        }
+      }`);
+      if (privateResult.type === 'bindings') {
+        for (const row of privateResult.bindings) {
+          const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
+          const snapshot = snapshotsByOp.get(op);
+          const privateRoot = this.privateMerkleRootFromBinding(row['privateRoot']);
+          if (
+            snapshot
+            && privateRoot
+            && !snapshot.privateRoots.some((existing) => equalBytes(existing, privateRoot))
+          ) {
+            snapshot.privateRoots.push(privateRoot);
+          }
         }
       }
     } catch { return null; }
 
-    for (const [op, roots] of rootsByOp) {
+    for (const [op, snapshot] of snapshotsByOp) {
+      const { roots } = snapshot;
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
       if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
+        const privateRoots = snapshot.privateRoots.length > 0
+          ? snapshot.privateRoots
+          : await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
         if (this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, merkleRoot)) {
           return { rootEntities: roots, sharedMemoryQuads };
         }
@@ -2800,6 +2855,13 @@ export class FinalizationHandler {
       } catch { /* best-effort self-heal */ }
     }
     return null;
+  }
+
+  private privateMerkleRootFromBinding(value: unknown): Uint8Array | null {
+    if (typeof value !== 'string') return null;
+    const hex = value.replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) return null;
+    return ethers.getBytes(`0x${hex}`);
   }
 
   private async verifyOnChain(

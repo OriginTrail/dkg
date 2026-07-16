@@ -29,6 +29,7 @@ import {
   computePublishACKDigest,
   computeUpdateACKDigest,
   assertSafeIri,
+  isSafeIri,
   assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
   DEFAULT_SEND_TIMEOUT_MS,
@@ -57,6 +58,11 @@ import { validateKnowledgeAssetPublishRequest } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
+
+const LEGACY_ACK_SNAPSHOT_MERKLE_ROOT_PREDICATE =
+  'http://dkg.io/ontology/snapshotMerkleRoot';
+const LEGACY_ACK_ROOT_ENTITY_PREDICATE = 'http://dkg.io/ontology/rootEntity';
+const LEGACY_ACK_PRIVATE_ROOT_PREDICATE = 'http://dkg.io/ontology/privateMerkleRoot';
 
 type GraphScopedPublishIntent = {
   scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
@@ -813,33 +819,99 @@ export class StorageACKHandler {
   }
 
   /**
-   * Persist merkle-verified inline quads to a scoped staging graph before the
-   * ACK is signed (crash-safety durability invariant: an on-chain KC implies
-   * at least one core stored the data, so a failed persist MUST decline rather
-   * than sign anyway). `dropGraph` (idempotent replace) then `insert`.
+   * Persist a legacy (pre graph-scoped-intent) public ACK payload as a durable,
+   * discoverable SWM snapshot before signing.
+   *
+   * The old implementation put these quads under `/staging/<root-prefix>` and
+   * deleted them after ten minutes. SWM readers intentionally exclude staging
+   * graphs, so an ACK-signing core that was not also a member subscriber could
+   * never match the chain root, promote the KA, or answer ENTITY_BY_UAL. That
+   * violated the StorageACK durability contract even though the bytes had been
+   * written successfully.
+   *
+   * Keep the payload under a normal SWM child graph and add the minimal legacy
+   * WorkspaceOperation index (`rootEntity` + authoritative snapshot root) used
+   * by the chain reconciler. The full root is part of both identifiers, making
+   * retries idempotent and avoiding truncated-prefix collisions. Data remains
+   * in SWM after VM promotion so this storage core can serve later catch-up.
    */
-  private async persistStagingOrDecline(
+  private async persistLegacyAckSnapshotOrDecline(
     cgId: string,
-    stagingGraphUri: string,
+    swmGraphId: string,
+    swmGraphUri: string,
+    merkleRoot: Uint8Array,
     parsed: Quad[],
+    rootEntities: string[],
+    privateMerkleRoots: Uint8Array[],
+    subGraphName?: string,
     signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     // Malformed terms are a bad request, not a store outage — validate BEFORE
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
+    const rootHex = ethers.hexlify(merkleRoot);
+    const snapshotGraphUri = `${swmGraphUri}/storage-ack/${rootHex.slice(2)}`;
+    const operationSubject = `urn:dkg:storage-ack:${rootHex.slice(2)}`;
+    const metaGraphUri = this.graphManager.sharedMemoryMetaUri(swmGraphId, subGraphName);
+    assertSafeIri(snapshotGraphUri);
+    assertSafeIri(operationSubject);
+    assertSafeIri(metaGraphUri);
+
+    const uniqueRoots = [...new Set(rootEntities)].filter(isSafeIri);
+    if (uniqueRoots.length === 0) {
+      throw new Error('StorageACK: legacy inline payload has no recoverable root entities');
+    }
+    const metadata: Quad[] = uniqueRoots.map((rootEntity) => ({
+      subject: operationSubject,
+      predicate: LEGACY_ACK_ROOT_ENTITY_PREDICATE,
+      object: rootEntity,
+      graph: metaGraphUri,
+    }));
+    metadata.push({
+      subject: operationSubject,
+      predicate: LEGACY_ACK_SNAPSHOT_MERKLE_ROOT_PREDICATE,
+      object: `"${rootHex}"`,
+      graph: metaGraphUri,
+    });
+    // Legacy folded-private intents carry an unordered bag of private roots.
+    // Store the bag on this operation, not on an entity that may be reused by
+    // later KAs. The reconciler prefers operation-scoped roots and falls back
+    // to historical entity-scoped metadata for old snapshots.
+    for (const privateRoot of privateMerkleRoots) {
+      metadata.push({
+        subject: operationSubject,
+        predicate: LEGACY_ACK_PRIVATE_ROOT_PREDICATE,
+        object: `"${ethers.hexlify(privateRoot)}"`,
+        graph: metaGraphUri,
+      });
+    }
+
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       await this.store.dropGraph(
-        stagingGraphUri,
-        ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
+        snapshotGraphUri,
+        ackStoreOptions('storage-ack.persistLegacySnapshot.dropGraph', signal),
       );
-      const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
+      const graphedQuads = parsed.map((q) => ({ ...q, graph: snapshotGraphUri }));
+      await this.store.insert(
+        graphedQuads,
+        ackStoreOptions('storage-ack.persistLegacySnapshot.insertData', signal),
+      );
+      await this.store.deleteByPattern(
+        { graph: metaGraphUri, subject: operationSubject },
+        ackStoreOptions('storage-ack.persistLegacySnapshot.deleteMeta', signal),
+      );
+      await this.store.insert(
+        metadata,
+        ackStoreOptions('storage-ack.persistLegacySnapshot.insertMeta', signal),
+      );
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
+      await this.store.flush?.(
+        ackStoreOptions('storage-ack.persistLegacySnapshot.flush', signal),
+      );
     }, signal);
     return result.ok ? { ok: true } : result;
   }
@@ -1477,18 +1549,14 @@ export class StorageACKHandler {
         );
       }
 
-      // Root verified — persist to a scoped staging graph so the data is
-      // durable before we sign the ACK (crash safety: on-chain KC implies
-      // at least one core node stored the data). The staging graph is keyed
-      // by merkle root prefix and cleaned up during finalization. A store
+      // Root verified — persist a discoverable graph-scoped or legacy SWM
+      // snapshot so the data is durable before we sign the ACK (crash safety:
+      // on-chain KC implies at least one core node stored the data). A store
       // outage during the apply (closed / restarting worker) returns the
       // transient decline instead of resetting the stream — the durability
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
-      const stagingGraphUri = graphPublish
-        ? swmGraphUri
-        : `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      const persistedStaging = graphPublish
+      const persistedSnapshot = graphPublish
         ? await this.persistGraphScopedWorkspaceOrDecline(
             cgId,
             swmGraphId,
@@ -1500,17 +1568,19 @@ export class StorageACKHandler {
             true,
             signal,
           )
-        : await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
-      if (!persistedStaging.ok) return persistedStaging.decline;
+        : await this.persistLegacyAckSnapshotOrDecline(
+            cgId,
+            swmGraphId,
+            swmGraphUri,
+            merkleRoot,
+            parsed,
+            [...rootSubjects],
+            privateMerkleRoots,
+            subGraphName,
+            signal,
+          );
+      if (!persistedSnapshot.ok) return persistedSnapshot.decline;
       swmQuads = parsed;
-
-      // Schedule cleanup: remove staging graph after 10 minutes.
-      // Finalization may promote data to LTM before this fires.
-      if (!graphPublish) {
-        setTimeout(async () => {
-          try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
-        }, 10 * 60 * 1000);
-      }
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory path).
       // Both the "no data" and "data but wrong merkle root" cases below are

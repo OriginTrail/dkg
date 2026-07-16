@@ -34,15 +34,24 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
+  StorageACKHandler,
+} from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
+  TypedEventBus,
   contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
+  decodeStorageACK,
+  encodePublishIntent,
+  isStorageACKDecline,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
 import type {
   ReplicationEvent,
   ContextGraphSubscriptionRecord,
@@ -1910,7 +1919,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(sources).toEqual(['periodic', 'live', 'manual']);
   });
 
-  it('a host-only reconcile promotes the missed KA to VM and emits core-fill', async () => {
+  it('an unsubscribed StorageACK signer promotes its durable snapshot to VM and emits core-fill', async () => {
     const captured: ReplicationEvent[] = [];
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -1926,10 +1935,46 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       publishPolicy: 1,
     });
     const localCgId = ON_CHAIN_CG.toString();
-    // The Core already has the SWM snapshot locally (simulating a pull from
-    // another Core), but never member-subscribed — it only hosts the CG.
-    const root = await seedSwmSnapshot(internals.store, localCgId, 'urn:fact:monday', 'Monday fun fact');
-    const { ethers } = await import('ethers');
+
+    // Exercise the real legacy inline StorageACK receiver path. This core is
+    // deliberately NOT member-subscribed: the ACK itself is what creates its
+    // durable storage obligation and discoverable SWM snapshot.
+    const publicQuads = [{
+      subject: 'urn:fact:monday',
+      predicate: 'http://schema.org/name',
+      object: '"Monday fun fact"',
+      graph: '',
+    }];
+    const root = computeFlatKCRootV10(publicQuads, []);
+    const stagingQuads = new TextEncoder().encode(
+      '<urn:fact:monday> <http://schema.org/name> "Monday fun fact" .',
+    );
+    const ackHandler = new StorageACKHandler(internals.store, {
+      nodeRole: 'core',
+      nodeIdentityId: 42n,
+      signerWallet: ethers.Wallet.createRandom(),
+      contextGraphSharedMemoryUri: contextGraphWorkspaceGraphUri,
+      chainId: await chain.getEvmChainId(),
+      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      ackHandlerDeadlineMs: 0,
+      isSignerRegistered: async () => true,
+      isCgCurated: async () => false,
+    }, new TypedEventBus());
+    const ack = decodeStorageACK(await ackHandler.handler(encodePublishIntent({
+      merkleRoot: root,
+      contextGraphId: localCgId,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: stagingQuads.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:fact:monday'],
+      stagingQuads,
+      epochs: 1,
+      tokenAmountStr: '1',
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(publicQuads, []),
+    }), { toString: () => 'publisher-peer' }));
+    expect(isStorageACKDecline(ack)).toBe(false);
+
     chain.__registerKC({ kaId: 4242n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
 
     await internals.recordCoreHostedPublicCg(localCgId);

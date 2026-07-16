@@ -160,6 +160,60 @@ describe('StorageACKHandler', () => {
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
   });
 
+  it('keeps a legacy inline ACK payload discoverable for host-only chain reconciliation', async () => {
+    const inlineQuads: Quad[] = [
+      makeQuad('urn:entity:ack-root', 'urn:p', 'urn:o1', 'urn:publisher:source'),
+      makeQuad('urn:entity:ack-root', 'urn:p', 'urn:o2', 'urn:publisher:source'),
+    ];
+    const inlineRoot = computeFlatKCRoot(inlineQuads, []);
+    const inlineLeafCount = computeFlatKCMerkleLeafCountV10(inlineQuads, []);
+    const stagingQuads = new TextEncoder().encode(
+      inlineQuads
+        .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+        .join('\n'),
+    );
+    const handler = await createHandler([]);
+
+    const response = await handler.handler(encodePublishIntent({
+      merkleRoot: inlineRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingQuads.length,
+      isPrivate: false,
+      kaCount: 1,
+      // Exercise the compatibility fallback used by the named-KA publisher
+      // that exposed the live testnet failure: infer top-level roots from data.
+      rootEntities: [],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: inlineLeafCount,
+      stagingQuads,
+    }), fakePeerId);
+
+    expect(isStorageACKDecline(decodeStorageACK(response))).toBe(false);
+
+    const store = (handler as unknown as { store: TripleStore }).store;
+    const rootHex = ethers.hexlify(inlineRoot);
+    const expectedDataGraph =
+      `did:dkg:context-graph:${contextGraphId}/_shared_memory/storage-ack/${rootHex.slice(2)}`;
+    const graphs = await store.listGraphs();
+    expect(graphs).toContain(expectedDataGraph);
+    expect(graphs.some((graph) => graph.includes('/staging/'))).toBe(false);
+
+    const storedData = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${expectedDataGraph}> { ?s ?p ?o } }`,
+    );
+    expect(storedData.type).toBe('quads');
+    if (storedData.type === 'quads') expect(storedData.quads).toHaveLength(2);
+
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+    const indexed = await store.query(`ASK { GRAPH <${metaGraph}> {
+      ?op <http://dkg.io/ontology/rootEntity> <urn:entity:ack-root> ;
+          <http://dkg.io/ontology/snapshotMerkleRoot> "${rootHex}" .
+    } }`);
+    expect(indexed).toEqual({ type: 'boolean', value: true });
+  });
+
   it('does not emit a canonical lifecycle assetUal from an unverified PublishIntent field', async () => {
     const handler = await createHandler(swmQuads, {
       ackHandlerDeadlineMs: 0,
