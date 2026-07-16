@@ -227,6 +227,12 @@ function runDiff(baseRevision, headRevision) {
   return blocking.length === 0 ? 0 : 1;
 }
 
+function listTrackedD1Files() {
+  return git(['ls-files'])
+    .split('\n')
+    .filter(isD1ScannableFile);
+}
+
 function semanticMoveSelfTest() {
   const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'test-disable-lint-move-'));
   const git = (...args) => execFileSync('git', args, {
@@ -363,16 +369,22 @@ function auditModesSelfTest() {
   }
 }
 
-function selfTest() {
+function selfTest({ report = true } = {}) {
   const movePasses = semanticMoveSelfTest();
   const growthPasses = semanticGrowthSelfTest();
   const auditsPass = auditModesSelfTest();
-  process.stdout.write(
-    `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
-      + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
-      + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
-  );
+  if (report) {
+    process.stdout.write(
+      `test-disable-lint self-test: semantic move ${movePasses ? 'pass' : 'FAIL'}, `
+        + `semantic growth ${growthPasses ? 'pass' : 'FAIL'}, `
+        + `audit modes ${auditsPass ? 'pass' : 'FAIL'}.\n`,
+    );
+  }
   return movePasses && growthPasses && auditsPass ? 0 : 1;
+}
+
+function validateScanner() {
+  return process.env.TEST_DISABLE_LINT_NO_SELF_TEST ? 0 : selfTest({ report: false });
 }
 
 export function runCli(argv = process.argv.slice(2)) {
@@ -385,17 +397,30 @@ export function runCli(argv = process.argv.slice(2)) {
       );
       return 2;
     }
-    if (!process.env.TEST_DISABLE_LINT_NO_SELF_TEST) {
-      const selfTestResult = selfTest();
-      if (selfTestResult !== 0) return selfTestResult;
-    }
+    const selfTestResult = validateScanner();
+    if (selfTestResult !== 0) return selfTestResult;
     return runDiff(baseRevision, headRevision);
   }
+  if (argv[0] === '--all') {
+    const selfTestResult = validateScanner();
+    if (selfTestResult !== 0) return selfTestResult;
+    for (const finding of auditFiles(listTrackedD1Files())) {
+      process.stdout.write(
+        `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
+      );
+    }
+    return 0;
+  }
   if (argv[0] !== '--files' || argv.length === 1) {
-    process.stderr.write('Usage: node scripts/test-disable-lint.mjs --files <path...>\n');
+    process.stderr.write(
+      'Usage: node scripts/test-disable-lint.mjs '
+        + '--diff <base> <head> | --all | --files <path...> | --self-test\n',
+    );
     return 2;
   }
 
+  const selfTestResult = validateScanner();
+  if (selfTestResult !== 0) return selfTestResult;
   for (const finding of auditFiles(argv.slice(1))) {
     process.stdout.write(
       `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
