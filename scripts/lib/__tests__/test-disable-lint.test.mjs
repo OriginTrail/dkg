@@ -35,6 +35,41 @@ test('analysis reports every conditional test suppression occurrence', () => {
   );
 });
 
+test('analysis reports indirect skip references with stable fallback fingerprints', () => {
+  const source = [
+    'const skippedTest = test.skip;',
+    'const maybeTest = disabled ? it.skip : it;',
+    'const maybeSuite = enabled ? describe : describe.skip;',
+  ].join('\n');
+  const reformattedSource = [
+    'const skippedTest=test . skip;',
+    'const maybeTest = disabled',
+    '  ? it . skip',
+    '  : it;',
+    'const maybeSuite=enabled?describe:describe . skip;',
+  ].join('\n');
+  const findings = analyzeD1Source(source, 'test/indirect.test.ts');
+  const reformattedFindings = analyzeD1Source(reformattedSource, 'test/indirect.test.ts');
+
+  assert.deepEqual({
+    references: findings.map(({ api, line }) => ({ api, line })),
+    fingerprintsPresent: findings.every(
+      ({ fingerprint }) => typeof fingerprint === 'string' && fingerprint.length > 0,
+    ),
+    stableAfterFormatting: findings.map(
+      ({ fingerprint }, index) => fingerprint === reformattedFindings[index]?.fingerprint,
+    ),
+  }, {
+    references: [
+      { api: 'test.skip', line: 1 },
+      { api: 'it.skip', line: 2 },
+      { api: 'describe.skip', line: 3 },
+    ],
+    fingerprintsPresent: true,
+    stableAfterFormatting: [true, true, true],
+  });
+});
+
 test('file audit reports direct disabled declarations at their source locations', (t) => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-disable-lint-'));
   t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
