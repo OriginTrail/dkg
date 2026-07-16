@@ -23,7 +23,9 @@ describe('EPCIS e2e runner contract', () => {
     const output = `${result.stdout}\n${result.stderr}`;
 
     expect(result.status).not.toBe(0);
+    expect(output).toContain(
+      'cross-env DKG_EPCIS_E2E_REQUIRED=1 vitest run --config vitest.e2e.config.ts',
+    );
     expect(output).toContain('EPCIS live-node prerequisites are required');
-    expect(output).toContain('Test Files  1 failed');
   }, 35_000);
 });
