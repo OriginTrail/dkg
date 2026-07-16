@@ -149,6 +149,11 @@ export function isD1ScannableFile(filePath) {
     && (TEST_FILE_NAME.test(path.posix.basename(candidate)) || TEST_DIRECTORY.test(candidate));
 }
 
+export function isD2ScannableFile(filePath) {
+  const candidate = normalizedPath(filePath);
+  return VITEST_CONFIG_FILE.test(candidate) && !EXCLUDED_TREE.test(candidate);
+}
+
 export function analyzeD1Source(source, filePath) {
   const sourceFile = ts.createSourceFile(
     filePath,
@@ -223,7 +228,7 @@ export function analyzeD1Source(source, filePath) {
 }
 
 export function analyzeD2Source(source, filePath) {
-  if (!VITEST_CONFIG_FILE.test(normalizedPath(filePath))) return [];
+  if (!isD2ScannableFile(filePath)) return [];
   const sourceFile = ts.createSourceFile(
     filePath,
     source,
@@ -270,8 +275,14 @@ export function analyzeD2Source(source, filePath) {
 
 export function auditFiles(filePaths) {
   return filePaths.flatMap((filePath) => {
-    if (!isD1ScannableFile(filePath)) return [];
-    return analyzeD1Source(readFileSync(filePath, 'utf8'), filePath);
+    const scansD1 = isD1ScannableFile(filePath);
+    const scansD2 = isD2ScannableFile(filePath);
+    if (!scansD1 && !scansD2) return [];
+    const source = readFileSync(filePath, 'utf8');
+    return [
+      ...(scansD1 ? analyzeD1Source(source, filePath) : []),
+      ...(scansD2 ? analyzeD2Source(source, filePath) : []),
+    ];
   });
 }
 
@@ -359,10 +370,10 @@ function runDiff(baseRevision, headRevision) {
   return blocking.length === 0 ? 0 : 1;
 }
 
-function listTrackedD1Files() {
+function listTrackedFiles() {
   return git(['ls-files', '-z'])
     .split('\0')
-    .filter(isD1ScannableFile);
+    .filter((filePath) => isD1ScannableFile(filePath) || isD2ScannableFile(filePath));
 }
 
 function semanticMoveSelfTest() {
@@ -551,7 +562,7 @@ export function runCli(argv = process.argv.slice(2)) {
   if (argv[0] === '--all') {
     const selfTestResult = validateScanner();
     if (selfTestResult !== 0) return selfTestResult;
-    for (const finding of auditFiles(listTrackedD1Files())) {
+    for (const finding of auditFiles(listTrackedFiles())) {
       process.stdout.write(
         `${finding.filePath}:${finding.line}:${finding.column}: ${finding.rule} ${finding.api}\n`,
       );
