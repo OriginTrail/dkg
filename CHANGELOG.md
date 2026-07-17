@@ -4,6 +4,30 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.8] - 2026-07-17
+
+Durable-sync materialization hardening for large private Context Graphs. This release makes durable catch-up survive transport drops, responder restarts, and multi-million-quad snapshots without discarding verified work, and fixes the relay and dial paths that stalled fan-out under load. Validated by a 500-Knowledge-Asset private-CG late-join scale test on Gnosis mainnet (5,337,721 unique quads, exact per-graph digest verification). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.7).
+
+### Fixed
+
+- **Durable sync survives transport drops without losing verified work** (#1775): a requester now retains its verified prefix and accepted-session checkpoints when a stream drops mid-transfer, resuming the same responder row list instead of restarting the snapshot. Responder sessions are persisted with their checkpoints, expired sessions rotate immediately, and store-fallback session expiry slides while a transfer makes progress.
+- **Snapshots beyond one million rows no longer fail integrity verification** (#1775): the responder clamped any requested cursor to 1,000,000, which silently replayed the row slice at the clamp boundary while the requester kept advancing — producing duplicates and failing manifest verification on any snapshot larger than the cap. Valid non-negative cursors are now accepted in full; exact-graph paging still bounds the response by returning an empty page past the plan.
+- **Durable settlement is serialized per graph** (#1775): concurrent settlement for the same graph no longer interleaves, and a catch-up round that fails against every peer surfaces the failure instead of reporting a silent no-op success.
+- **Catch-up honors its durable time budget** (#1775), and durable-only recovery is supported as a safe path.
+- **Rootless chain identities reconcile during sync** (#1775).
+- **Relay fan-out no longer stalls behind stale direct dials** (#1775): pooled messages reuse a live relay connection, and the dial path falls back to a live relay after a stale direct dial rather than blocking.
+
+### Changed
+
+- **Publisher wallet jobs run concurrently** (#1775): each configured wallet owns an independent nonce stream, so a cycle now dispatches one job per wallet in parallel and waits for all to settle. Adding publisher wallets now actually increases throughput. Errors propagate only after every wallet in the cycle settles.
+- **Rootless durable batches skip legacy partitioning** (#1775).
+- **Dashboard SQLite schema 29 → 30** (#1775): `sync_checkpoints` gains nullable `responder_session_id` and `responder_session_expires_at` columns, added idempotently on upgrade. The migration is additive, so rolling back to 10.0.7 is safe — the older schema guard ignores a newer database and leaves the extra columns in place.
+- **Release version set:** all workspace packages move together to 10.0.8.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.7; nodes can upgrade through the normal npm release path.
+
 ## [10.0.7] - 2026-07-16
 
 Rootless Knowledge Assets and production hardening for private Context Graphs. New Knowledge Assets are stored and synchronized by their canonical UAL-derived named graph without synthetic `rootEntity` triples; legacy V10 assets remain readable but are no longer rewritten through the legacy lifecycle. The release also completes private-CG auto-approval, late-join recovery, and scalable SWM/VM fan-out, including the fixes validated by the multi-network testnet harness. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.6).
