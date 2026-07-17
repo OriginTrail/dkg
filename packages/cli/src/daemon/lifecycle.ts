@@ -886,12 +886,14 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      // GH#1778 — register the CG under the CALLER (operator/token) identity,
-      // not the resolved KA author (request.agentAddress may be a member the
-      // curator is publishing for). Fall back to agentAddress for older intents
-      // that predate callerAgentAddress (author == caller on the self-publish path).
-      const registrationAgentAddress =
-        request.callerAgentAddress ?? request.agentAddress ?? agent.getDefaultAgentAddress();
+      // GH#1778 — auto-register the CG under the NODE's own operational identity,
+      // NOT the persisted request's author/caller. The async worker is the node
+      // processing its queue: `request.agentAddress` is the resolved KA author (a
+      // member the curator is publishing for), and different callers of the same
+      // resolved author/name share one deduped job — so keying registration on
+      // the request identity would register under a member, or under whichever
+      // caller enqueued first. The node identity is well-defined and collapse-proof.
+      const registrationAgentAddress = agent.getDefaultAgentAddress();
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
         ...(registrationAgentAddress ? { callerAgentAddress: registrationAgentAddress } : {}),
       });

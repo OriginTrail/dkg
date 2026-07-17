@@ -245,10 +245,6 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     contextGraphId: expectString(record, 'contextGraphId', path),
     name: expectString(record, 'name', path),
     ...optionalStringField(record, 'agentAddress', path),
-    // GH#1778 — the caller identity must survive the persisted-job round-trip,
-    // or CG auto-registration in the async worker falls back to the resolved
-    // author (a member) instead of the operator who enqueued the publish.
-    ...optionalStringField(record, 'callerAgentAddress', path),
     ...optionalStringField(record, 'subGraphName', path),
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),

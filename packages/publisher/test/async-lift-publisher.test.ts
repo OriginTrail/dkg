@@ -416,24 +416,6 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
-  it('preserves callerAgentAddress across the persisted queue round-trip (GH#1778)', async () => {
-    // The caller identity (curator) is distinct from the resolved author
-    // (member). It must survive the strict persisted-job parser, or the async
-    // worker's CG auto-registration falls back to the author instead of the
-    // operator who enqueued the publish.
-    const publisher = createPublisher();
-    const member = `0x${'22'.repeat(20)}`;
-    const curator = `0x${'11'.repeat(20)}`;
-    const job = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
-      agentAddress: member,
-      callerAgentAddress: curator,
-      subGraphName: 'research',
-    }));
-    const persisted = (await publisher.getStatus(job))?.request.knowledgeAssetVmPublish;
-    expect(persisted?.agentAddress).toBe(member);
-    expect(persisted?.callerAgentAddress).toBe(curator);
-  });
-
   it('scopes active knowledge asset VM publish duplicate detection by agent address', async () => {
     const publisher = createPublisher();
     const agentA = `0x${'aa'.repeat(20)}`;

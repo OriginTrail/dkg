@@ -4193,10 +4193,6 @@ export class PublishMethods extends DKGAgentBase {
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
-    // GH#1778 — carry the CALLER identity separately from the resolved author,
-    // so the async job registers an unregistered CG under the operator's own
-    // identity (not the KA author's). Mirrors the effective publish identity.
-    const callerAgentAddress = opts?.callerAgentAddress ?? opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -4359,9 +4355,6 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       name,
       agentAddress,
-      // GH#1778 — NOT in canonicalIntent/intentKey (caller must not fork job
-      // identity/dedup); carried only for caller-scoped async execution.
-      ...(callerAgentAddress ? { callerAgentAddress } : {}),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
       roots: [],

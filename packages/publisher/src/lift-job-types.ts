@@ -44,13 +44,6 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly name: string;
   /** Resolved assertion AUTHOR (may differ from the caller — GH#1778 curator publish). */
   readonly agentAddress?: string;
-  /**
-   * Token/caller identity that enqueued this publish (GH#1778). Distinct from
-   * `agentAddress` (the resolved author): used for caller-scoped decisions on
-   * the async job, notably CG auto-registration on `CG_NOT_REGISTERED`, which
-   * must register under the operator's own identity, not the KA author's.
-   */
-  readonly callerAgentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];

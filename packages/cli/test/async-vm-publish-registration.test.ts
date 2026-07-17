@@ -3,14 +3,15 @@ import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js
 
 /**
  * GH#1778 — a curator async-publishes a member-authored KA. The queued intent's
- * `agentAddress` is the resolved AUTHOR (the member), but CG auto-registration on
- * `CG_NOT_REGISTERED` must use the CALLER (the operator/token holder) carried in
- * `callerAgentAddress`, not the author. Before the fix, registration used the
- * member author and could register under / authorize the wrong identity.
+ * `agentAddress` is the resolved AUTHOR (the member). CG auto-registration on
+ * `CG_NOT_REGISTERED` must use the NODE's own operational identity, NOT the
+ * request's author (a member) — and it must be independent of the request
+ * identity so that different callers of the same deduped job cannot collapse
+ * onto one caller's registration actor.
  */
 
-const CURATOR = `0x${'11'.repeat(20)}`;
-const MEMBER = `0x${'22'.repeat(20)}`;
+const NODE = `0x${'11'.repeat(20)}`; // the node's own default identity
+const MEMBER = `0x${'22'.repeat(20)}`; // resolved KA author (not the registrant)
 const CG = 'construction';
 
 function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefined>) {
@@ -27,36 +28,22 @@ function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefi
       registrationCalls.push(opts);
     },
     getDefaultAgentAddress() {
-      return CURATOR;
+      return NODE;
     },
   } as any;
 }
 
 describe('GH#1778 async VM publish CG auto-registration', () => {
-  it('registers under the caller (curator), not the resolved member author', async () => {
+  it('registers under the node identity, not the resolved member author', async () => {
     const registrationCalls: Array<Record<string, unknown> | undefined> = [];
     const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls));
 
-    const request: any = {
-      contextGraphId: CG,
-      name: 'report',
-      agentAddress: MEMBER, // resolved AUTHOR
-      callerAgentAddress: CURATOR, // token/caller identity
-    };
+    // The intent's agentAddress is the resolved AUTHOR (member); registration
+    // must not use it, and must not depend on any per-request caller identity.
+    const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
     const result = await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
 
     expect(result.status).toBe('confirmed');
-    expect(registrationCalls).toHaveLength(1);
-    expect(registrationCalls[0]).toEqual({ callerAgentAddress: CURATOR });
-  });
-
-  it('falls back to agentAddress for an older intent without callerAgentAddress', async () => {
-    const registrationCalls: Array<Record<string, unknown> | undefined> = [];
-    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls));
-
-    const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
-    await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
-
-    expect(registrationCalls[0]).toEqual({ callerAgentAddress: MEMBER });
+    expect(registrationCalls).toEqual([{ callerAgentAddress: NODE }]);
   });
 });

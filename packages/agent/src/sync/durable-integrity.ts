@@ -1109,6 +1109,12 @@ function selectAdmittedMetadataIndexes(
       continue;
     }
 
+    // A self-consistent graph-seal assertionVersion is descriptive metadata,
+    // not a sync control — admit it via the descriptive path.
+    if (isGraphSealDescriptiveVersion(quad, metadata)) {
+      indexes.push(index);
+      continue;
+    }
     if (DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)) {
       if (isAuthenticatedSyncControl(
         quad,
@@ -1139,6 +1145,7 @@ function selectSystemOverrideMetadataIndexes(
     const quad = metaQuads[index]!;
     if (
       DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
+      && !isGraphSealDescriptiveVersion(quad, metadata)
       && !isAuthenticatedSyncControl(
         quad,
         metadata,
@@ -1155,29 +1162,27 @@ function selectSystemOverrideMetadataIndexes(
 }
 
 /**
- * GH#1778 — a graph-scoped author seal (subject carries `dkg:assertionMerkleRoot`)
- * is descriptive author metadata, NOT a delta/routing control. Its 13 sibling
- * quads (Merkle root, EIP-712 attestation, `dkg:kaUal`, triple counts) already
- * sync unauthenticated through the descriptive path, and the seal's authenticity
- * is established at PUBLISH time (`parseAssertionSealQuads` + a Merkle recompute
- * against the signed root), not here. Only `dkg:assertionVersion` collides with
- * the sync-control set, so for a not-yet-published KA (no on-chain UAL
- * descriptor to authenticate against) it was being stripped — leaving 13/14
- * quads and making `parseAssertionSealQuads` throw "Partial graph-scoped
- * assertion seal", i.e. the KA is unpublishable.
+ * GH#1778 — classify a `dkg:assertionVersion` row as DESCRIPTIVE author-seal
+ * metadata rather than a delta/routing control. A graph-scoped author seal
+ * (subject carries `dkg:assertionMerkleRoot`) is descriptive: its 13 sibling
+ * quads (Merkle root, EIP-712 attestation, `dkg:kaUal`, counts) already sync
+ * unauthenticated, and the seal's authenticity is established at PUBLISH time
+ * (`parseAssertionSealQuads` + a Merkle recompute), not here. Only
+ * `dkg:assertionVersion` collides with the sync-control set, so for a
+ * not-yet-published KA it was being stripped — leaving 13/14 quads and making
+ * `parseAssertionSealQuads` throw "Partial graph-scoped assertion seal".
  *
- * The self-consistency check (v2 seal whose kaUal author == authorAddress ==
- * `.../assertion/<addr>/…` coordinate) lives in core beside the seal vocabulary
- * (`graphScopedSealAuthor`) so this integrity layer does not re-declare seal
- * predicates. A peer that forges a version value gains nothing the sibling quads
- * didn't already allow — a tampered version derives the wrong graph scope and
- * fails closed at publish on the Merkle recheck.
+ * Classifying it here (via the core `graphScopedSealAuthor` self-consistency
+ * check — v2 seal whose kaUal author == authorAddress == `.../assertion/<addr>/…`
+ * coordinate) keeps the control-authentication abstraction honest: the seal
+ * field follows the descriptive path instead of being smuggled through
+ * `isAuthenticatedSyncControl` as an "authenticated control". A peer that forges
+ * a version value gains nothing the sibling quads didn't already allow — a
+ * tampered version derives the wrong graph scope and fails closed at publish.
  */
-function isSelfConsistentGraphSeal(
-  subject: string,
-  metadata: IntegrityMetadataIndex,
-): boolean {
-  return graphScopedSealAuthor(metadata.metaBySubject.get(subject) ?? [], subject) !== undefined;
+function isGraphSealDescriptiveVersion(quad: Quad, metadata: IntegrityMetadataIndex): boolean {
+  return quad.predicate === ASSERTION_VERSION
+    && graphScopedSealAuthor(metadata.metaBySubject.get(quad.subject) ?? [], quad.subject) !== undefined;
 }
 
 function isAuthenticatedSyncControl(
@@ -1187,10 +1192,6 @@ function isAuthenticatedSyncControl(
   kaToKc: ReadonlyMap<string, string>,
 ): boolean {
   if (authenticatedMetadataUals.has(quad.subject)) return true;
-  if (quad.predicate === ASSERTION_VERSION
-    && isSelfConsistentGraphSeal(quad.subject, metadata)) {
-    return true;
-  }
   const legacyOwner = kaToKc.get(quad.subject);
   if (legacyOwner && authenticatedMetadataUals.has(legacyOwner)) return true;
   if (quad.predicate === BATCH_ID) return false;
