@@ -4193,6 +4193,13 @@ export class PublishMethods extends DKGAgentBase {
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
+    // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
+    // explicit author selector for a direct caller), persisted alongside the
+    // resolved author so the async worker stamps the CG curator with the caller
+    // (matching the sync lane), NOT the resolved member author. Left undefined
+    // for a tokenless enqueue so `stampAddressCurator` falls back to the node
+    // default — again exactly as the sync lane does.
+    const callerAgentAddress = opts?.callerAgentAddress ?? opts?.agentAddress;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -4355,6 +4362,11 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       name,
       agentAddress,
+      // GH#1778 — carried for caller-scoped async execution (CG-register curator
+      // stamp). Deliberately NOT part of canonicalIntent/intentKey above: the
+      // caller must not fork job dedup, so deduped jobs share one caller (the
+      // first enqueuer), matching the sync lane's first-writer-wins registration.
+      ...(callerAgentAddress ? { callerAgentAddress } : {}),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
       roots: [],

@@ -395,12 +395,6 @@ export interface AssertionSeal {
 }
 
 /**
- * Parse a `_meta` quad slice (already filtered to subject =
- * assertionUri) into a typed seal record. Returns `undefined` when
- * the assertion has not been finalized (no merkle root present).
- * Throws on partial seals — those signal store corruption.
- */
-/**
  * The single low-level seal-field collector, shared by
  * {@link parseAssertionSealQuads} and {@link parseGraphScopedAssertionSealCandidate}. Filters to
  * `subject === assertionUri`, normalises/validates root-entity IRIs, and returns
@@ -443,6 +437,12 @@ function collectSealFieldObjects(
   return { fields, rootEntities };
 }
 
+/**
+ * Parse a `_meta` quad slice (already filtered to subject =
+ * assertionUri) into a typed seal record. Returns `undefined` when
+ * the assertion has not been finalized (no merkle root present).
+ * Throws on partial seals — those signal store corruption.
+ */
 export function parseAssertionSealQuads(
   quads: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   assertionUri: string,

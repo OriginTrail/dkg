@@ -172,4 +172,22 @@ describe('GH#1778 durable-sync retains the seal assertionVersion', () => {
     expect(kept.filter((q) => q.subject === ASSERTION_URI).length).toBe(seal.length);
     expect(kept.some((q) => q.subject === orphan)).toBe(false);
   });
+
+  it('drops the seal assertionVersion when a `merkleRoot` quad is planted on the subject (adversarial, fail-closed)', () => {
+    // A malicious CG member appends a bare `dkg:merkleRoot` (NOT `assertionMerkleRoot`)
+    // to the victim's seal subject, routing ALL its rows into the descriptor
+    // branch, where the subject is rejected as a malformed KA descriptor and the
+    // descriptive-version classifier never runs. Documents the current
+    // fail-closed behaviour: the seal is not admitted (so it cannot mis-publish),
+    // at the cost of that seal becoming unsyncable until a clean batch heals it.
+    const seal = buildSeal();
+    const plantedMerkleRoot: Quad = {
+      subject: ASSERTION_URI,
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${'00'.repeat(32)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`,
+      graph: META_GRAPH,
+    };
+    const kept = keptMeta([...seal, plantedMerkleRoot], { kind: 'fullSnapshot' }).filter((q) => q.subject === ASSERTION_URI);
+    expect(kept.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)).toBe(false);
+  });
 });

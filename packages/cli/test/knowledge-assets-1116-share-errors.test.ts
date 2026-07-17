@@ -1009,7 +1009,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const intent = {
       contextGraphId: CG_ID,
       name: ASSERTION_NAME,
+      // agentAddress = resolved AUTHOR; callerAgentAddress = enqueuing operator.
       agentAddress: '0x00000000000000000000000000000000000000b2',
+      callerAgentAddress: '0x00000000000000000000000000000000000000c3',
       shareOperationId: rootless.shareOperationId,
       roots: [],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -1093,11 +1095,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(processed?.status).toBe('finalized');
       expect(calls).toEqual([
         'publish#1',
-        // GH#1778 — CG auto-registration uses the NODE's own identity
-        // (getDefaultAgentAddress = ...a1), NOT the intent's resolved author
-        // (agentAddress = ...b2), so a member-authored curator publish registers
-        // under the operator and cannot collapse onto another caller's identity.
-        'register:0x00000000000000000000000000000000000000a1',
+        // GH#1778 — CG auto-registration stamps the curator with the ENQUEUING
+        // CALLER (callerAgentAddress = ...c3), matching the sync vm/publish lane,
+        // NOT the intent's resolved author (agentAddress = ...b2).
+        'register:0x00000000000000000000000000000000000000c3',
         'publish#2',
       ]);
       expect(publishAttempts).toBe(2);

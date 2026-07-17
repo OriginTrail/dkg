@@ -886,19 +886,19 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      // GH#1778 — auto-register the CG under the NODE's own operational identity,
-      // NOT the persisted request's author/caller. The async worker is the node
-      // processing its queue: `request.agentAddress` is the resolved KA author (a
-      // member the curator is publishing for), and different callers of the same
-      // resolved author/name share one deduped job — so keying registration on
-      // the request identity would register under a member, or under whichever
-      // caller enqueued first. The node identity is well-defined and collapse-proof.
-      // Fall back to the request author ONLY when the node has no default identity
-      // (a degenerate deployment) so a self-authored publish — where author ==
-      // caller — still has an EVM registration actor, as it did before this change.
-      const registrationAgentAddress = agent.getDefaultAgentAddress() ?? request.agentAddress;
+      // GH#1778 — auto-register the CG under the ENQUEUING CALLER (the token
+      // holder / operator who requested the publish), stamped as the CG curator by
+      // `stampAddressCurator`. This matches the synchronous `vm/publish` lane
+      // (`knowledge-assets.ts` passes `callerAgentAddress: requestAgentAddress`), so
+      // the same CG gets the same curator regardless of which lane registers it.
+      // NOT `request.agentAddress` (the resolved KA author — a member the curator
+      // is publishing for). When the caller was not captured (tokenless enqueue /
+      // pre-#1778 job), `stampAddressCurator` falls back to the node's default
+      // identity — again exactly as the sync lane does when `requestAgentAddress`
+      // is undefined. Deduped jobs stamp under the first enqueuer's caller, which
+      // is the same first-writer-wins the sync lane already has.
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
-        ...(registrationAgentAddress ? { callerAgentAddress: registrationAgentAddress } : {}),
+        ...(request.callerAgentAddress ? { callerAgentAddress: request.callerAgentAddress } : {}),
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,
