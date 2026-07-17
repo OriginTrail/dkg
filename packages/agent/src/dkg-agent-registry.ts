@@ -418,6 +418,29 @@ function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: bool
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
+  async ensureProfilePublished(this: DKGAgent): Promise<void> {
+    if (this.profileManager.profileKcId !== null) return;
+    if (this.ensureProfilePublishedInFlight) {
+      return this.ensureProfilePublishedInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // Re-check inside the coalesced operation in case another serialized
+      // publisher completed between the fast-path check and this turn.
+      if (this.profileManager.profileKcId === null) {
+        await this.publishProfile();
+      }
+    })();
+    tracked = publish.finally(() => {
+      if (this.ensureProfilePublishedInFlight === tracked) {
+        this.ensureProfilePublishedInFlight = undefined;
+      }
+    });
+    this.ensureProfilePublishedInFlight = tracked;
+    return tracked;
+  }
+
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
     // `publishProfile()` to settle (success or failure) before

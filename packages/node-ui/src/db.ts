@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 29;
+const SCHEMA_VERSION = 30;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -299,11 +299,29 @@ export class DashboardDB {
           );
       `);
     };
+    const ensureSyncCheckpointResponderSessionColumns = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'sync_checkpoints'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has('responder_session_id')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_id TEXT;`);
+      }
+      if (!columns.has('responder_session_expires_at')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
+      }
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
       // but lost an idempotent schema adjunct.
       ensureJoinApprovalRepairMarker();
+      ensureSyncCheckpointResponderSessionColumns();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -1168,6 +1186,12 @@ export class DashboardDB {
         CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_retry
           ON vm_reconcile_negative_cache(next_retry_at);
       `);
+    }
+    if (version < 30) {
+      // OFFSET pagination is scoped to an immutable responder row list. Keep
+      // the opaque responder token beside the verified offset so a requester
+      // restart can resume that same list instead of discarding durable work.
+      ensureSyncCheckpointResponderSessionColumns();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -3224,20 +3248,46 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string): { offset: number; updatedAtMs: number; expiresAtMs: number } | undefined {
+  get(key: string): {
+    offset: number;
+    updatedAtMs: number;
+    expiresAtMs: number;
+    responderSessionId?: string;
+    responderSessionExpiresAtMs?: number;
+  } | undefined {
     const now = this.clock();
     const row = this.db.prepare(
-      `SELECT offset, updated_at, expires_at FROM sync_checkpoints WHERE key = ?`,
-    ).get(key) as { offset: number; updated_at: number; expires_at: number } | undefined;
+      `SELECT offset, updated_at, expires_at,
+              responder_session_id, responder_session_expires_at
+         FROM sync_checkpoints WHERE key = ?`,
+    ).get(key) as {
+      offset: number;
+      updated_at: number;
+      expires_at: number;
+      responder_session_id: string | null;
+      responder_session_expires_at: number | null;
+    } | undefined;
     if (!row) return undefined;
     if (row.expires_at < now) {
       this.delete(key);
       return undefined;
     }
+    const hasFreshResponderSession = Boolean(row.responder_session_id)
+      && Number.isSafeInteger(row.responder_session_expires_at)
+      && (row.responder_session_expires_at ?? 0) > now;
+    if (row.responder_session_id && !hasFreshResponderSession) {
+      this.clearResponderSession(key);
+    }
     return {
       offset: row.offset,
       updatedAtMs: row.updated_at,
       expiresAtMs: row.expires_at,
+      ...(hasFreshResponderSession
+        ? {
+            responderSessionId: row.responder_session_id!,
+            responderSessionExpiresAtMs: row.responder_session_expires_at!,
+          }
+        : {}),
     };
   }
 
@@ -3253,6 +3303,39 @@ export class SqliteSyncCheckpointStore {
         updated_at = excluded.updated_at,
         expires_at = excluded.expires_at
     `).run(key, value, nowMs, nowMs + this.ttlMs);
+  }
+
+  setResponderSession(
+    key: string,
+    sessionId: string,
+    expiresAtMs: number,
+    nowMs = this.clock(),
+  ): void {
+    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
+      throw new Error(`Invalid sync responder session for ${key}`);
+    }
+    if (expiresAtMs <= nowMs) {
+      this.clearResponderSession(key);
+      return;
+    }
+    this.db.prepare(`
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at
+      ) VALUES (?, 0, ?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        responder_session_id = excluded.responder_session_id,
+        responder_session_expires_at = excluded.responder_session_expires_at
+    `).run(key, nowMs, nowMs + this.ttlMs, sessionId, expiresAtMs);
+  }
+
+  clearResponderSession(key: string): void {
+    this.db.prepare(`
+      UPDATE sync_checkpoints
+         SET responder_session_id = NULL,
+             responder_session_expires_at = NULL
+       WHERE key = ?
+    `).run(key);
   }
 
   delete(key: string): void {

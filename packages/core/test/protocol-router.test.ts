@@ -929,7 +929,7 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(3);
     });
 
-    it('uses one one-shot attempt for a single-use payload and skips pooling', async () => {
+    it('uses one pooled attempt for a single-use payload without replaying it', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
       let poolCalls = 0;
@@ -952,18 +952,43 @@ describe('ProtocolRouter', () => {
         },
       });
 
-      await expect(
-        router.send(
-          FAKE_PEER_ID,
-          protocolId,
-          new Uint8Array([1, 2, 3]),
-          { timeoutMs: 5_000, payloadReuse: 'single-use' },
-        ),
-      ).rejects.toThrow(/timeout/);
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).resolves.toEqual(new Uint8Array([0xFF]));
 
-      expect(poolCalls).toBe(0);
-      expect(dialCalls).toBe(1);
-      expect(resolveCalls).toBe(1);
+      expect(poolCalls).toBe(1);
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
+    });
+
+    it('never replays a single-use payload after an ambiguous pooled failure', async () => {
+      let dialCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => { throw new Error('pooled stream reset after write'); },
+        },
+      });
+
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).rejects.toThrow(/pooled stream reset/);
+      expect(dialCalls).toBe(0);
     });
 
     it('rejects multi-path fan-out for a single-use payload before any wire attempt', async () => {
@@ -1343,6 +1368,73 @@ describe('ProtocolRouter', () => {
       expect(out).toEqual(new Uint8Array([0x66]));
       expect(limitedNewStream).toBe(0);
       expect(dialCalls).toBe(1);
+    });
+
+    it('falls back to a live limited candidate after cached direct-address dialing fails', async () => {
+      let limitedNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x67])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({
+          addresses: [
+            { multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } },
+          ],
+        }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('All multiaddr dials failed');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x67]));
+      expect(dialCalls).toBe(1);
+      expect(limitedNewStream).toBe(1);
+    });
+
+    it('prefers an open direct candidate even when a limited candidate is listed first', async () => {
+      let limitedNewStream = 0;
+      let directNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x68])) as any;
+            },
+          },
+          {
+            status: 'open',
+            newStream: async () => {
+              directNewStream += 1;
+              return makeStubStream(new Uint8Array([0x69])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({ addresses: [] }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('dialProtocol must not be called when direct is open');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x69]));
+      expect(directNewStream).toBe(1);
+      expect(limitedNewStream).toBe(0);
+      expect(dialCalls).toBe(0);
     });
 
     // The Window D shape this fast path is meant to heal: a single

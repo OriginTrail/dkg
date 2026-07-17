@@ -7,6 +7,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+} from '../../dkg-agent-constants.js';
+import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -25,6 +30,7 @@ import {
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
+  serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 import {
@@ -518,11 +524,30 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
-    const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+    // A durable rootless snapshot can legitimately contain millions of rows.
+    // Never clamp a valid cursor: doing so silently replays the row slice at
+    // the clamp boundary forever while the requester keeps advancing its local
+    // offset. That produces duplicates and makes an otherwise valid manifest
+    // fail integrity verification once the snapshot crosses the old 1M cap.
+    // Exact-graph paging already rejects offsets beyond the plan with an empty
+    // page, so accepting every non-negative safe integer remains bounded.
+    const requestedOffset = Number(request.offset);
+    const offset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+      ? requestedOffset
+      : 0;
     const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : syncPageSize, syncPageSize));
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
+    const hintedPageRows = typeof request.pageRowsHint === 'number' &&
+      Number.isSafeInteger(request.pageRowsHint)
+      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
+      : 0;
+    const usesByteBudgetPage = !isWorkspace &&
+      phase === 'data' &&
+      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
+      hintedPageRows > limit;
+    const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -763,17 +788,23 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit,
+          limit: durableDataLimit,
           signal,
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,
+          // A byte-bounded response may contain only a prefix of the row slice
+          // loaded above. Do not release the immutable session snapshot merely
+          // because that slice was short; the explicit empty request is EOF.
+          releaseCacheOnShortPage: !usesByteBudgetPage,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
+        const serialized = usesByteBudgetPage
+          ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+          : serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
         logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);

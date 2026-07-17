@@ -130,6 +130,8 @@ export interface BoundedGraphScopedDurableBatch {
   safeNextOffset: number;
   /** Number of positive-size assertion graphs completed in this round. */
   completedGraphCount: number;
+  /** Total public rows declared by the verified graph-scoped manifest. */
+  manifestRowCount: number;
 }
 
 function compareUnicodeCodePoints(leftValue: string, rightValue: string): number {
@@ -264,6 +266,7 @@ export function planBoundedGraphScopedDurableBatch(
     changedDataGraphs: [...completeGraphs],
     safeNextOffset,
     completedGraphCount,
+    manifestRowCount: manifestOffset,
   };
 }
 
@@ -719,6 +722,24 @@ function verifyLegacyCandidates(
   let fatalUnscopedFailure = false;
   const logs: DurableIntegrityLogEntry[] = [];
 
+  // Rootless V2 batches have no legacy root-entity ownership to reconstruct.
+  // `skolemizeByEntity` is intentionally a legacy compatibility index whose
+  // implementation scans the full dataset once per distinct root entity. On a
+  // graph-scoped KA with thousands of ordinary subjects that turns otherwise
+  // linear verification into O(subjects * triples) work even though the result
+  // is never read. Return the empty legacy outcome before building that index.
+  if (legacyKcUals.size === 0) {
+    return {
+      verifiedKcUals,
+      authenticatedKcUals,
+      rejectedKcUals,
+      kaToKc: new Map(),
+      kcRootEntities: new Map(),
+      fatalUnscopedFailure,
+      logs,
+    };
+  }
+
   // Legacy read-only verification. Token rows use partOf; collapsed legacy
   // rows self-map from the merkle-bearing UAL to their rootEntity rows.
   const kaToKc = new Map<string, string>();
@@ -1014,7 +1035,12 @@ function selectVerifiedQuads(
       rejected,
       droppedSyncControlTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
-      verifiedGraphScopedDataGraphs,
+      // Keep this list aligned with the selected data + metadata indexes.
+      // A fatal batch deliberately selects neither. Returning the names of
+      // individually verified graphs here makes the requester attempt exact
+      // materialization without their selected descriptors, which masks the
+      // original integrity failure as a misleading "0 metadata owners" error.
+      verifiedGraphScopedDataGraphs: [],
       logs,
     };
   }

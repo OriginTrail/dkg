@@ -23,6 +23,10 @@ export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
 // (sync is a self-healing catch-up net, so the brief mixed-version
 // window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
+// Framed, long-lived transport overlay for PROTOCOL_SYNC. The logical request
+// and response bytes are unchanged; the distinct wire id lets upgraded peers
+// negotiate stream reuse while older peers cleanly fall back to one-shot sync.
+export const PROTOCOL_SYNC_POOLED = '/dkg/10.0.3/sync';
 // OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
 // PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
 // structured (era, headSeq, nextSeq, records) head cannot ride the existing

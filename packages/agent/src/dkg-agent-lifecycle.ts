@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -239,7 +239,11 @@ import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
-import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
+import {
+  recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type RecoverContextGraphSwmResult,
+} from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
@@ -467,6 +471,7 @@ type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeer
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
+const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 
 async function runAlreadyMemberDelegationRefresh<T>(
   agent: DKGAgent,
@@ -478,6 +483,40 @@ async function runAlreadyMemberDelegationRefresh<T>(
     chains = new Map<string, Promise<void>>();
     alreadyMemberDelegationRefreshChains.set(agent, chains);
   }
+  const previous = chains.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const settled = run.then(() => undefined, () => undefined);
+  chains.set(key, settled);
+  try {
+    return await run;
+  } finally {
+    if (chains.get(key) === settled) {
+      chains.delete(key);
+    }
+  }
+}
+
+/**
+ * Serialize physical durable streams for one peer + Context Graph while still
+ * allowing callers with different budgets/callback semantics to run as
+ * distinct operations. Responder sessions are keyed by this same identity;
+ * overlapping a 120s automatic pass with a 300s recovery pass can otherwise
+ * supersede the immutable snapshot, duplicate transport work, and race the
+ * safe checkpoint. The wait happens outside global admission so queued work
+ * does not consume one of the scarce active sync slots.
+ */
+async function runSerializedDurableContextGraphSync<T>(
+  agent: DKGAgent,
+  remotePeerId: string,
+  contextGraphId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let chains = durableContextGraphSyncChains.get(agent);
+  if (!chains) {
+    chains = new Map<string, Promise<void>>();
+    durableContextGraphSyncChains.set(agent, chains);
+  }
+  const key = JSON.stringify([remotePeerId, contextGraphId]);
   const previous = chains.get(key) ?? Promise.resolve();
   const run = previous.catch(() => undefined).then(operation);
   const settled = run.then(() => undefined, () => undefined);
@@ -575,6 +614,7 @@ function durableSyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
+  totalTimeoutMs: number;
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
   hasAccessDeniedCallback: boolean;
@@ -587,6 +627,7 @@ function durableSyncSingleFlightKey(params: {
     remotePeerId: params.remotePeerId,
     contextGraphIds: params.contextGraphIds,
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    totalTimeoutMs: params.totalTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
   });
 }
@@ -692,6 +733,7 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -703,6 +745,25 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 }
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
+
+export type DurableSyncOptions = {
+  stopOnBackoffWorthyFailure?: boolean;
+  /**
+   * Total wall-clock budget for the legacy durable lane. The agent clamps this
+   * independently so an API caller cannot create an unbounded sync operation.
+   */
+  totalTimeoutMs?: number;
+};
+
+const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
+
+function normalizeDurableSyncTotalTimeoutMs(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
+  return Math.min(
+    MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+    Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
+  );
+}
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -833,6 +894,8 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     insertedDataQuads: 0,
     insertedMetaQuads: 0,
     droppedDataTriples: 0,
+    readySnapshots: 0,
+    totalSnapshots: 0,
     completed: true,
   };
 }
@@ -2079,6 +2142,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       configuredPriorities: configuredPriorityCounts,
       snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
     })}`);
+    // Keep one framed sync stream (and therefore its circuit-relay connection)
+    // alive across page requests. Old peers do not advertise this wire id and
+    // transparently fall back to PROTOCOL_SYNC. Set DKG_POOLED_SYNC=0 only as
+    // an emergency rollback; the hot path is enabled by default.
+    if (process.env.DKG_POOLED_SYNC !== '0') {
+      this.router.enablePooling(PROTOCOL_SYNC, {
+        protocolId: PROTOCOL_SYNC_POOLED,
+        keepaliveIntervalMs: 10_000,
+        idleTimeoutMs: 5 * 60_000,
+      });
+      this.log.info(ctx, `[sync] pooled wire variant ${PROTOCOL_SYNC_POOLED} enabled`);
+    }
     registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
@@ -3884,8 +3959,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[] = [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
     onAccessDenied?: (contextGraphId: string) => void,
+    options?: DurableSyncOptions,
   ): Promise<number> {
-    const result = await this.syncFromPeerDetailed(remotePeerId, contextGraphIds, onPhase, onAccessDenied);
+    const result = await this.syncFromPeerDetailed(
+      remotePeerId,
+      contextGraphIds,
+      onPhase,
+      onAccessDenied,
+      undefined,
+      options,
+    );
     return result.insertedTriples;
   }
 
@@ -3897,7 +3980,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Phase C — optional gap-safe per-CG delta high-water mark resolver. Backed
     // by a CONTIGUOUS watermark when supplied; omitted ⇒ full scan (default).
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    options?: { stopOnBackoffWorthyFailure?: boolean },
+    options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
@@ -3947,10 +4030,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onPhase?: PhaseCallback,
     onAccessDenied?: (contextGraphId: string) => void,
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    options?: { stopOnBackoffWorthyFailure?: boolean },
+    options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const totalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
@@ -3970,16 +4054,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           onAccessDenied,
           sinceBatchIdFor,
           stopOnBackoffWorthyFailure,
+          undefined,
+          totalTimeoutMs,
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: emptyDurableSyncResult,
-      runWithAdmission: (item, work) => this.runContextGraphSyncWithBackpressure(
-        ctx,
+      runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
+        this,
+        remotePeerId,
         item.contextGraphId,
-        item.lane,
-        item.operationId,
-        work,
+        () => this.runContextGraphSyncWithBackpressure(
+          ctx,
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          work,
+        ),
       ),
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({
@@ -3999,6 +4090,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphIds: orderedContextGraphIds,
       stopOnBackoffWorthyFailure,
+      totalTimeoutMs,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
@@ -4018,6 +4110,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     stopOnBackoffWorthyFailure?: boolean,
     onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
+    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     return runDurableSync({
@@ -4027,7 +4120,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
+        remainingContextGraphs,
+        totalTimeoutMs,
+      ),
       fetchSyncPages: (
         opCtx,
         peerId,
@@ -4583,6 +4679,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
+        isGraphAssetMaterialized: async (asset) => {
+          const result = await this.store.query(
+            `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+              `<${assertSafeIri(asset.headSubject)}> ` +
+              `<http://dkg.io/ontology/assertionGraph> ` +
+              `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+            {
+              priority: 'background',
+              source: 'agent.swmRecovery.isGraphAssetMaterialized',
+            },
+          );
+          return result.type === 'boolean' && result.value;
+        },
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
         markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -4705,7 +4814,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
           run: async (): Promise<SharedMemorySyncResult> => {
             try {
-              const recovered = await recoverPrivateContextGraph(contextGraphId);
+              const recovered = await recoverContextGraphSwmWithProgressRetries({
+                recover: () => recoverPrivateContextGraph(contextGraphId),
+                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+                  this.log.info(
+                    ctx,
+                    `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
+                    + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
+                  );
+                },
+              });
               const result = emptySharedMemorySyncResult();
               result.insertedDataTriples = recovered.insertedDataQuads;
               result.insertedMetaTriples = recovered.insertedMetaQuads;
@@ -4795,6 +4913,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,
+          isGraphAssetMaterialized: async (asset) => {
+            const result = await this.store.query(
+              `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+                `<${assertSafeIri(asset.headSubject)}> ` +
+                `<http://dkg.io/ontology/assertionGraph> ` +
+                `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.isGraphAssetMaterialized',
+              },
+            );
+            return result.type === 'boolean' && result.value;
+          },
           recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
           invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
           markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection.markDirtyFromQuads(quads),
@@ -4815,9 +4946,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  createContextGraphSyncDeadline(this: DKGAgent, remainingContextGraphs: number): number {
+  createContextGraphSyncDeadline(this: DKGAgent,
+    remainingContextGraphs: number,
+    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+  ): number {
     const divisor = Math.max(1, remainingContextGraphs);
-    const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
+    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
+    const budgetMs = Math.max(
+      SYNC_MIN_GRAPH_BUDGET_MS,
+      Math.floor(normalizedTotalTimeoutMs / divisor),
+    );
     return Date.now() + budgetMs;
   }
 
@@ -7037,6 +7175,7 @@ async function runRecoverContextGraphSwmFromPeer(
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
     publicSnapshotStore: dependencies.publicSnapshotStore,
+    isGraphAssetMaterialized: dependencies.isGraphAssetMaterialized,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.

@@ -683,12 +683,16 @@ WHERE {
       });
     }
 
-    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only. The durable
+    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only by default. The durable
     // (knowledge-collection) layer has its own publish-time
     // commit->fanout->ACK protocol and a separate sync substrate; it's
     // out of scope for the catchup endpoint and would otherwise compound
     // the request budget (240s vs 120s). Opt-in via includeDurable=true
-    // for callers that want the full data leg in the same call.
+    // for callers that want the full data leg in the same call. Recovery
+    // operators may additionally pass includeSharedMemory=false to resume
+    // only the durable leg without replaying an already-complete SWM
+    // snapshot first.
+    const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
     // Per-peer hard cap on the catchup duration. Keeps the endpoint
@@ -715,6 +719,14 @@ WHERE {
     };
     const PER_PEER_SWM_BUDGET_MS = boundedBudget(parsed.perPeerBudgetMs, DEFAULT_PER_PEER_SWM_BUDGET_MS);
     const PER_PEER_DURABLE_BUDGET_MS = boundedBudget(parsed.perPeerDurableBudgetMs, DEFAULT_PER_PEER_DURABLE_BUDGET_MS);
+    // Finish the agent's internal durable deadline just before the HTTP wrapper
+    // expires. Previously this route could request a five-minute operation while
+    // the agent silently stopped useful work after its fixed two-minute default.
+    const DURABLE_BUDGET_HEADROOM_MS = 1_000;
+    const INTERNAL_DURABLE_BUDGET_MS = Math.max(
+      MIN_BUDGET_MS,
+      PER_PEER_DURABLE_BUDGET_MS - DURABLE_BUDGET_HEADROOM_MS,
+    );
 
     const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
       new Promise<T>((resolve, reject) => {
@@ -821,7 +833,8 @@ WHERE {
     };
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
-      const canUseSharedMemory = await canUseSharedMemoryForContextGraph(cgId);
+      const canUseSharedMemory = includeSharedMemory
+        && await canUseSharedMemoryForContextGraph(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -880,10 +893,23 @@ WHERE {
           }
           if (durableSelected.has(candidate)) {
             try {
-              durable = await withTimeout(
-                (agent as any).syncFromPeer?.(candidate, [cgId]) ?? Promise.resolve(0),
-                PER_PEER_DURABLE_BUDGET_MS,
-                `Durable catchup from ${candidate} for ${cgId}`,
+              // The agent deadline bounds network fetching, but exact graph
+              // verification and atomic store materialization must settle
+              // afterward. Racing that promise against an HTTP timer does not
+              // cancel it; it only returns a false terminal response while the
+              // write continues invisibly and lets another recovery overlap
+              // the same responder session. Await the correctness-critical
+              // settlement and report its real inserted count. The serialized
+              // peer+CG durable lane prevents automatic recovery from racing
+              // this tail.
+              durable = await (
+                (agent as any).syncFromPeer?.(
+                  candidate,
+                  [cgId],
+                  undefined,
+                  undefined,
+                  { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
+                ) ?? Promise.resolve(0)
               );
             } catch (err: any) {
               durableError = err?.message ?? String(err);
@@ -932,7 +958,7 @@ WHERE {
     //  - The host-catchup leg has its own internal time budget
     //    (sendReliable + a few rounds per peer); CGs are processed
     //    serially to keep wire load low.
-    const hostCatchupOpted = parsed.hostCatchupFallback !== false;
+    const hostCatchupOpted = includeSharedMemory && parsed.hostCatchupFallback !== false;
     const hostCatchupSupported = typeof (agent as any).catchupSwmFromConnectedHosts === 'function';
     type HostCatchupLeg = {
       contextGraphId: string;
@@ -1026,9 +1052,32 @@ WHERE {
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
     }));
 
-    return jsonResponse(res, 200, {
+    // A durable-only operator request must not look successful when every
+    // selected peer failed before producing a terminal sync result. The
+    // detailed `durableError` fields have always been preserved below, but an
+    // HTTP 200 + zero aggregate is easy for scripts and dashboards to mistake
+    // for an already-synchronized no-op. Keep successful zero-insert no-ops at
+    // 200, and keep mixed SWM+durable responses backward-compatible; only the
+    // unambiguous all-peer durable-only failure is a retryable 503.
+    const durableAttempts = includeDurable
+      ? perCgLegs.flatMap((cg) => cg.perPeer)
+      : [];
+    const durableOnlyAllPeersFailed = includeDurable
+      && !includeSharedMemory
+      && durableAttempts.length > 0
+      && durableAttempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
+    const responseStatus = durableOnlyAllPeersFailed ? 503 : 200;
+
+    return jsonResponse(res, responseStatus, {
+      ok: !durableOnlyAllPeersFailed,
+      ...(durableOnlyAllPeersFailed ? {
+        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+        error: 'Durable catchup failed for every selected peer',
+        retryable: true,
+      } : {}),
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
+      includeSharedMemory,
       includeDurable,
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,

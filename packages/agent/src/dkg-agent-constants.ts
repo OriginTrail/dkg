@@ -17,8 +17,8 @@ import {
 export const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
 
 // ── Sync ──────────────────────────────────────────────────────────────
-/** Legacy responder-side maximum accepted row limit. Keep at 500 so a new
- * responder remains compatible with requesters from an older rolling node. */
+/** Legacy signed responder-side maximum accepted row limit. Keep at 500 so a
+ * new responder remains compatible with requesters from an older rolling node. */
 export const SYNC_PAGE_SIZE = 500;
 /**
  * Requester page size derived from the wire frame cap, not only row count.
@@ -28,11 +28,14 @@ export const SYNC_PAGE_SIZE = 500;
  * tripped ProtocolRouter's 10 MiB read limit before page parsing. Reserve six
  * MiB for subjects, predicates, graph IRIs, N-Quads syntax, and framing; the
  * remaining four MiB admits 64 maximum-sized literal rows. That value remains
- * the retry floor for pathological payloads. Normal RDF rows are far smaller,
- * so request 256 rows first and let the requester halve the limit on transport
- * retries (256 -> 128 -> 64). New requesters work with old responders because
- * `limit` was already part of the wire request; keeping SYNC_PAGE_SIZE above
- * unchanged preserves old-requester compatibility.
+ * the retry floor for pathological payloads.
+ *
+ * Upgraded authenticated peers negotiate a byte-budgeted page through
+ * additive unsigned hints. The signed `limit` stays capped at the legacy 500,
+ * so an old responder authenticates the request and simply returns 500 rows;
+ * a new responder may return up to the row hint but serializes only a bounded
+ * response body. EOF-only pagination makes both responses unambiguous. A
+ * transport failure retries at the conservative 64-row floor.
  */
 export const SYNC_RESPONSE_FRAME_HEADROOM_BYTES = 6 * 1024 * 1024;
 export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
@@ -42,10 +45,14 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
     JAVA_WRITE_UTF_MAX_BYTES,
   ),
 );
-export const SYNC_REQUEST_PAGE_SIZE = Math.min(
-  SYNC_PAGE_SIZE,
-  Math.max(SYNC_REQUEST_SAFE_PAGE_SIZE, 256),
-);
+/** Additive wire capability understood by upgraded authenticated responders. */
+export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
+/** Maximum rows a responder may materialize for one byte-budgeted durable page. */
+export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/** Target serialized body. Six MiB of the 10 MiB router cap remains as headroom. */
+export const SYNC_BYTE_BUDGET_RESPONSE_BYTES = DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES;
+/** Throughput-oriented requested row hint; the signed legacy limit remains 500. */
+export const SYNC_REQUEST_PAGE_SIZE = SYNC_BYTE_BUDGET_MAX_ROWS;
 export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */

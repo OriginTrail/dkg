@@ -67,6 +67,14 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
       message.includes('snapshot limit exceeded') ||
       message.includes('busy')
     )) ||
+    // These libp2p/router surfaces are transport interruptions too, but an
+    // outer retry/span boundary can occasionally recreate the Error and lose
+    // our non-enumerable syncTransportFailure tag. Keep the message fallback
+    // aligned with Messenger's recoverable dial classifier so a successfully
+    // received durable prefix is not discarded merely because the final page
+    // lost its relay stream.
+    message.includes('peer-closed-stream') ||
+    message.includes('all multiaddr dials failed') ||
     message.includes('stream reset') ||
     message.includes('connection reset') ||
     message.includes('econnreset') ||
