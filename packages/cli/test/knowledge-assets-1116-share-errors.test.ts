@@ -1179,6 +1179,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
               status: 'confirmed',
               ual: 'did:dkg:test/1/44',
               kaId: '44',
+              v10ACKs: [
+                { peerId: ' 12D3KooWStorageCore1 ' },
+                { peerId: '12D3KooWStorageCore1' },
+                { peerId: '12D3KooWStorageCore2' },
+              ],
               seal: { authorAddress: tokenAgentAddress },
             };
           },
@@ -1204,6 +1209,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.status).toBe('vm-confirmed');
+      expect(res.body.storageAckPeerIds).toEqual([
+        '12D3KooWStorageCore1',
+        '12D3KooWStorageCore2',
+      ]);
       expect(seenOpts).toHaveLength(1);
       expect(seenOpts[0]).toMatchObject({
         agentAddress: tokenAgentAddress,
@@ -1484,6 +1493,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
               status: 'confirmed',
               ual: 'did:dkg:test/1/43',
               kaId: '43',
+              v10ACKs: [{ peerId: '12D3KooWStorageCore3' }],
               seal: { authorAddress: tokenAgentAddress },
             };
           },
@@ -1494,6 +1504,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       const res = await post('vm/publish', { contextGraphId: CG_ID });
 
       expect(res.status).toBe(200);
+      expect(res.body.storageAckPeerIds).toEqual(['12D3KooWStorageCore3']);
       expect(seenOpts).toHaveLength(1);
       expect(seenOpts[0]).toMatchObject({ agentAddress: tokenAgentAddress });
     });

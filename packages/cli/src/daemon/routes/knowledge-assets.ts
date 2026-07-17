@@ -80,8 +80,16 @@ import {
   parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
+import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
+type FinalizedPublishResult = Awaited<
+  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
+> & {
+  /** Backward-compatible response aliases still accepted by the HTTP route. */
+  authorAddress?: string;
+  kas?: unknown[];
+};
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
@@ -932,7 +940,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
         try {
-          const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
+          const pub: FinalizedPublishResult = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
             ...alsoPublishVmOptions,
             ...atomicAuthorLane,
@@ -940,6 +948,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
+          if (storageAckPeerIds.length > 0) {
+            result.storageAckPeerIds = storageAckPeerIds;
+          }
           if (pub?.onChainResult?.convictionCostCovered) {
             result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
           }
@@ -1450,7 +1462,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // first; ONLY if the sole remaining blocker is an unregistered CG do we
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
-        let pub: any;
+        let pub: FinalizedPublishResult;
         const publishStorageLane = scopedTokenStorageLane(writePreflightCallerAgentAddress);
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
@@ -1477,6 +1489,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
         recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
+        const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
@@ -1492,6 +1505,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
           ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
+          ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
