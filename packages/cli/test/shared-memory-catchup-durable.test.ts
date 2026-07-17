@@ -151,6 +151,85 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     }
   });
 
+  it('returns a retryable 503 when every durable-only peer fails', async () => {
+    const failure = new Error('All multiaddr dials failed for peer-curator');
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({
+        curatorIsLocal: false,
+        peerIds: ['peer-curator'],
+      })),
+      syncFromPeer: vi.fn(async () => { throw failure; }),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'private-durable-failure-cg',
+        peerId: 'peer-curator',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body).toMatchObject({
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+      totalDurableInsertedTriples: 0,
+      results: [
+        {
+          peerId: 'peer-curator',
+          durableInsertedTriples: 0,
+          durableError: failure.message,
+        },
+      ],
+    });
+  });
+
+  it('keeps a successful durable zero-insert no-op at HTTP 200', async () => {
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({
+        curatorIsLocal: false,
+        peerIds: ['peer-curator'],
+      })),
+      syncFromPeer: vi.fn(async () => 0),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'private-durable-complete-cg',
+        peerId: 'peer-curator',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      totalDurableInsertedTriples: 0,
+      results: [
+        {
+          peerId: 'peer-curator',
+          durableInsertedTriples: 0,
+        },
+      ],
+    });
+  });
+
   it('still runs includeDurable when SWM is not currently usable for the CG', async () => {
     const syncSharedMemoryFromPeerDetailed = vi.fn();
     const syncSharedMemoryFromPeer = vi.fn();

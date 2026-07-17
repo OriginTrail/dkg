@@ -1052,7 +1052,29 @@ WHERE {
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
     }));
 
-    return jsonResponse(res, 200, {
+    // A durable-only operator request must not look successful when every
+    // selected peer failed before producing a terminal sync result. The
+    // detailed `durableError` fields have always been preserved below, but an
+    // HTTP 200 + zero aggregate is easy for scripts and dashboards to mistake
+    // for an already-synchronized no-op. Keep successful zero-insert no-ops at
+    // 200, and keep mixed SWM+durable responses backward-compatible; only the
+    // unambiguous all-peer durable-only failure is a retryable 503.
+    const durableAttempts = includeDurable
+      ? perCgLegs.flatMap((cg) => cg.perPeer)
+      : [];
+    const durableOnlyAllPeersFailed = includeDurable
+      && !includeSharedMemory
+      && durableAttempts.length > 0
+      && durableAttempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
+    const responseStatus = durableOnlyAllPeersFailed ? 503 : 200;
+
+    return jsonResponse(res, responseStatus, {
+      ok: !durableOnlyAllPeersFailed,
+      ...(durableOnlyAllPeersFailed ? {
+        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+        error: 'Durable catchup failed for every selected peer',
+        retryable: true,
+      } : {}),
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
       includeSharedMemory,
