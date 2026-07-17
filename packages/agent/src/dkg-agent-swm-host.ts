@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -148,6 +148,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { buildReconciledKnowledgeAssetUal } from './ka-identity.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -3644,7 +3645,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ? await this.chain.getDKGKnowledgeAssetsAddress()
         : undefined;
       if (!storageAddr) return { status: 'skip' };
-      ual = buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
 
