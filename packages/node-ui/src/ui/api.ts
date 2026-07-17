@@ -1451,11 +1451,14 @@ export const promoteAssertion = (
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
-  const subGraphName =
+  const options: AtomicShareOptions =
     optionsOrLegacyEntities === undefined || typeof optionsOrLegacyEntities === 'string'
-      ? legacySubGraphName
-      : optionsOrLegacyEntities.subGraphName ?? legacySubGraphName;
-  return knowledgeAssetShare(contextGraphId, assertionName, { subGraphName });
+      ? { subGraphName: legacySubGraphName }
+      : {
+          ...optionsOrLegacyEntities,
+          subGraphName: optionsOrLegacyEntities.subGraphName ?? legacySubGraphName,
+        };
+  return knowledgeAssetShare(contextGraphId, assertionName, options);
 };
 
 // Issue #864 — central UI translator for `promoteAssertion` outcomes so

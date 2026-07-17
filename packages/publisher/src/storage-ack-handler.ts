@@ -53,7 +53,7 @@ import { replaceCatalogQuads } from './catalog-persistence.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -2002,7 +2002,7 @@ export class StorageACKHandler {
             `intent=${graphUpdate.publicTripleCount}, local=${publicQuads.length}`,
         );
       }
-      const validation = validateKnowledgeAssetPublishRequest(
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
         inlineByteLength === undefined
           ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
           : publicQuads,
@@ -2014,11 +2014,6 @@ export class StorageACKHandler {
         // unrelated graph.
         inlineByteLength === undefined ? swmGraphUri : inlineVmGraphUri!,
         graphUpdate.publicTripleCount,
-        // ACK verification operates on a canonical graph-scoped payload. The
-        // exact c14n form is legitimate protocol output (for example Markdown
-        // section nodes); the validator still rejects arbitrary/private uses
-        // of the reserved namespace before signing an ACK.
-        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         return this.encodeDecline(

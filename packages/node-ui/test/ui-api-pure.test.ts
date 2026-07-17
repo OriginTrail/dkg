@@ -602,6 +602,24 @@ describe('UI API tests', () => {
       expect(requestLog).toHaveLength(0);
     });
 
+    it('knowledgeAssetShare preserves an explicit curator-ACK opt-out and rejects invalid values', async () => {
+      await knowledgeAssetShare('cg-1', 'asset', {
+        subGraphName: 'sg',
+        awaitCuratorAck: false,
+      });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: false,
+      });
+
+      requestLog.length = 0;
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { awaitCuratorAck: 'false' } as any),
+      ).toThrow('awaitCuratorAck must be a boolean');
+      expect(requestLog).toHaveLength(0);
+    });
+
     it('promoteAssertion shares the complete owning KA and never silently widens a legacy subset', async () => {
       await promoteAssertion('cg-1', 'asset', { subGraphName: 'sg' });
       const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
@@ -609,6 +627,17 @@ describe('UI API tests', () => {
         contextGraphId: 'cg-1',
         subGraphName: 'sg',
         awaitCuratorAck: true,
+      });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'explicit-opt-out', {
+        subGraphName: 'sg-no-ack',
+        awaitCuratorAck: false,
+      });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-no-ack',
+        awaitCuratorAck: false,
       });
 
       requestLog.length = 0;

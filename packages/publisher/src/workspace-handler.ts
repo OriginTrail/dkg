@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -1315,16 +1315,10 @@ export class SharedMemoryHandler {
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
         onPhase?.('validate', 'start');
-        const validation = validateKnowledgeAssetPublishRequest(
+        const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
           quads,
           expectedWireGraph,
           publicTripleCount ?? 0,
-          // Graph-scoped senders canonicalize blank nodes before putting the
-          // complete KA on the wire. Markdown section nodes therefore arrive
-          // as exact protocol-owned c14n IRIs, never as blank nodes. Keep the
-          // narrow canonical form valid here while the validator continues to
-          // reject every other use of the reserved namespace.
-          { allowCanonicalSkolemTerms: true },
         );
         if (!validation.valid) {
           const reason = validation.errors.join('; ');
