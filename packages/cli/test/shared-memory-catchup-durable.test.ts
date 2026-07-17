@@ -66,6 +66,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         peerId,
         includeSharedMemory: false,
         includeDurable: true,
+        perPeerDurableBudgetMs: 300_000,
       },
       agent,
     );
@@ -78,7 +79,13 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncSharedMemoryFromPeer).not.toHaveBeenCalled();
     expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
     expect(syncFromPeer).toHaveBeenCalledTimes(1);
-    expect(syncFromPeer).toHaveBeenCalledWith(peerId, [cgId]);
+    expect(syncFromPeer).toHaveBeenCalledWith(
+      peerId,
+      [cgId],
+      undefined,
+      undefined,
+      { totalTimeoutMs: 299_000 },
+    );
 
     const body = JSON.parse(res.body);
     expect(body.includeSharedMemory).toBe(false);
@@ -123,7 +130,13 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncSharedMemoryFromPeerDetailed).not.toHaveBeenCalled();
     expect(syncSharedMemoryFromPeer).not.toHaveBeenCalled();
     expect(syncFromPeer).toHaveBeenCalledTimes(1);
-    expect(syncFromPeer).toHaveBeenCalledWith('peer-a', ['review-cg']);
+    expect(syncFromPeer).toHaveBeenCalledWith(
+      'peer-a',
+      ['review-cg'],
+      undefined,
+      undefined,
+      { totalTimeoutMs: 109_000 },
+    );
 
     const body = JSON.parse(res.body);
     expect(body.totalInsertedTriples).toBe(0);
@@ -269,8 +282,20 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       negativePeer,
       unknownPeer,
     ].sort());
-    expect(syncFromPeer).toHaveBeenCalledWith(negativePeer, [cgId]);
-    expect(syncFromPeer).toHaveBeenCalledWith(unknownPeer, [cgId]);
+    expect(syncFromPeer).toHaveBeenCalledWith(
+      negativePeer,
+      [cgId],
+      undefined,
+      undefined,
+      { totalTimeoutMs: 109_000 },
+    );
+    expect(syncFromPeer).toHaveBeenCalledWith(
+      unknownPeer,
+      [cgId],
+      undefined,
+      undefined,
+      { totalTimeoutMs: 109_000 },
+    );
 
     const body = JSON.parse(second.res.body);
     expect(body.peersAttempted).toBe(2);

@@ -719,6 +719,14 @@ WHERE {
     };
     const PER_PEER_SWM_BUDGET_MS = boundedBudget(parsed.perPeerBudgetMs, DEFAULT_PER_PEER_SWM_BUDGET_MS);
     const PER_PEER_DURABLE_BUDGET_MS = boundedBudget(parsed.perPeerDurableBudgetMs, DEFAULT_PER_PEER_DURABLE_BUDGET_MS);
+    // Finish the agent's internal durable deadline just before the HTTP wrapper
+    // expires. Previously this route could request a five-minute operation while
+    // the agent silently stopped useful work after its fixed two-minute default.
+    const DURABLE_BUDGET_HEADROOM_MS = 1_000;
+    const INTERNAL_DURABLE_BUDGET_MS = Math.max(
+      MIN_BUDGET_MS,
+      PER_PEER_DURABLE_BUDGET_MS - DURABLE_BUDGET_HEADROOM_MS,
+    );
 
     const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
       new Promise<T>((resolve, reject) => {
@@ -886,7 +894,13 @@ WHERE {
           if (durableSelected.has(candidate)) {
             try {
               durable = await withTimeout(
-                (agent as any).syncFromPeer?.(candidate, [cgId]) ?? Promise.resolve(0),
+                (agent as any).syncFromPeer?.(
+                  candidate,
+                  [cgId],
+                  undefined,
+                  undefined,
+                  { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
+                ) ?? Promise.resolve(0),
                 PER_PEER_DURABLE_BUDGET_MS,
                 `Durable catchup from ${candidate} for ${cgId}`,
               );
