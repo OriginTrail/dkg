@@ -400,18 +400,10 @@ export interface AssertionSeal {
  * the assertion has not been finalized (no merkle root present).
  * Throws on partial seals — those signal store corruption.
  */
-/**
- * Collect a `_meta` quad slice (filtered to `subject === assertionUri`) into a
- * predicate→object map plus the multi-valued root-entity list. The SINGLE seal
- * field collector, shared by {@link parseAssertionSealQuads} (full validation)
- * and {@link graphScopedSealAuthor} (durable-sync admission), so both interpret
- * the seal vocabulary from one place with the same last-writer-wins semantics.
- * Throws only on an unsafe root-entity IRI (store corruption).
- */
-function collectAssertionSealFields(
+export function parseAssertionSealQuads(
   quads: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   assertionUri: string,
-): { seen: Map<string, string>; rootEntities: string[] } {
+): AssertionSeal | undefined {
   const seen = new Map<string, string>();
   const rootEntities: string[] = [];
   for (const q of quads) {
@@ -437,14 +429,6 @@ function collectAssertionSealFields(
     }
     seen.set(q.predicate, q.object);
   }
-  return { seen, rootEntities };
-}
-
-export function parseAssertionSealQuads(
-  quads: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
-  assertionUri: string,
-): AssertionSeal | undefined {
-  const { seen, rootEntities } = collectAssertionSealFields(quads, assertionUri);
   if (!seen.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return undefined;
 
   const required = [
@@ -616,19 +600,28 @@ export function graphScopedSealAuthor(
   rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   subject: string,
 ): string | undefined {
+  const own = rows.filter((q) => q.subject === subject);
+  // Admission policy is fail-closed on ambiguity: read DISTINCT objects for each
+  // identity predicate and require exactly one (NOT last-writer-wins — a peer
+  // that supplies two conflicting kaUal/authorAddress values must not be
+  // silently collapsed to one). Reuses the canonical seal vocabulary + literal
+  // decoders rather than re-declaring them.
+  const distinctObjectsOf = (predicate: string): string[] =>
+    [...new Set(own.filter((q) => q.predicate === predicate).map((q) => q.object))];
+  if (!own.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) {
+    return undefined;
+  }
   try {
-    const { seen } = collectAssertionSealFields(rows, subject);
-    if (!seen.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return undefined;
-    const scopeVersion = seen.get(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION);
-    if (scopeVersion === undefined
-      || integerLiteralToValue(scopeVersion) !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+    const scopeVersions = distinctObjectsOf(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION);
+    if (scopeVersions.length !== 1
+      || integerLiteralToValue(scopeVersions[0]!) !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
       return undefined;
     }
-    const kaUalObject = seen.get(ASSERTION_SEAL_PREDICATES.KA_UAL);
-    const authorObject = seen.get(ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS);
-    if (kaUalObject === undefined || authorObject === undefined) return undefined;
-    const author = stringLiteralToValue(authorObject);
-    const ualAuthor = parseDeterministicKnowledgeAssetUal(iriObjectToValue(kaUalObject)).agentAddress;
+    const kaUals = distinctObjectsOf(ASSERTION_SEAL_PREDICATES.KA_UAL);
+    const authors = distinctObjectsOf(ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS);
+    if (kaUals.length !== 1 || authors.length !== 1) return undefined;
+    const author = stringLiteralToValue(authors[0]!);
+    const ualAuthor = parseDeterministicKnowledgeAssetUal(iriObjectToValue(kaUals[0]!)).agentAddress;
     const coordinate = parseContextGraphAssertionUri(subject);
     if (!coordinate) return undefined;
     const lc = author.toLowerCase();

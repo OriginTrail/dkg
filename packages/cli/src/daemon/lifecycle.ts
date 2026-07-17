@@ -886,9 +886,14 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      // GH#1778 — register the CG under the CALLER (operator/token) identity,
+      // not the resolved KA author (request.agentAddress may be a member the
+      // curator is publishing for). Fall back to agentAddress for older intents
+      // that predate callerAgentAddress (author == caller on the self-publish path).
+      const registrationAgentAddress =
+        request.callerAgentAddress ?? request.agentAddress ?? agent.getDefaultAgentAddress();
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
-        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+        ...(registrationAgentAddress ? { callerAgentAddress: registrationAgentAddress } : {}),
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,

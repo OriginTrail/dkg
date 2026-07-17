@@ -103,6 +103,20 @@ describe('GH#1778 durable-sync retains the seal assertionVersion', () => {
     expect(kept).toHaveLength(0);
   });
 
+  it('drops assertionVersion when a peer supplies two conflicting kaUal values (ambiguity fails closed)', () => {
+    // A second, different kaUal on the same seal subject must not be silently
+    // collapsed (last-writer-wins) — admission requires exactly one identity.
+    const seal = buildSeal();
+    const forkedKaUal: Quad = {
+      subject: ASSERTION_URI,
+      predicate: ASSERTION_SEAL_PREDICATES.KA_UAL,
+      object: `<did:dkg:84532/0x${'cd'.repeat(20)}/7>`,
+      graph: META_GRAPH,
+    };
+    const kept = keptMeta([...seal, forkedKaUal], { kind: 'fullSnapshot' }).filter((q) => q.subject === ASSERTION_URI);
+    expect(kept.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)).toBe(false);
+  });
+
   it('drops assertionVersion when the seal author disagrees with the kaUal author (fail-closed)', () => {
     // Seal at AUTHOR's coordinate but kaUal names a DIFFERENT author.
     const mismatched = buildSeal({ kaUal: `did:dkg:84532/0x${'cd'.repeat(20)}/7` });
