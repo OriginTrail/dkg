@@ -13,7 +13,11 @@ type SealQuad = { subject: string; predicate: string; object: string };
 
 /** Minimal structural view of the store this resolver needs. */
 export interface AssertionAuthorQueryStore {
-  query(sparql: string): Promise<{ type: string; quads?: ReadonlyArray<SealQuad> }>;
+  query(sparql: string): Promise<{
+    type: string;
+    bindings?: ReadonlyArray<Record<string, string>>;
+    quads?: ReadonlyArray<SealQuad>;
+  }>;
 }
 
 export interface ResolveFinalizedAssertionAuthorParams {
@@ -60,37 +64,42 @@ export async function resolveFinalizedAssertionAuthor(
   const { scope: expectedScope, prefix, suffix } = contextGraphAssertionQueryBounds(
     contextGraphId, name, subGraphName,
   );
-  // Fetch the FULL `_meta` rows of every subject at this name coordinate that
-  // carries a Merkle root, so each candidate can be validated against a complete
-  // seal before it influences selection. `assertionMerkleRoot` alone is NOT
-  // proof of a publishable assertion — durable `_meta` may hold stale/partial
-  // rows or unauthenticated fragments, and counting those would either false-409
-  // a legitimate publish or select an unusable author (GH#1778 review).
-  const result = await store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE {
+  // Phase 1 — find the candidate seal subject(s) at this name coordinate. This
+  // is a bound-predicate lookup fenced by the exact coordinate prefix/suffix
+  // (NOT an all-variable `?s ?p ?o` scan of the growing `_meta` graph), and the
+  // result is the ~1 subject finalized under this name.
+  const subjectsResult = await store.query(
+    `SELECT DISTINCT ?s WHERE {
       GRAPH <${metaGraph}> {
         ?s <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root .
-        ?s ?p ?o .
         FILTER(STRSTARTS(STR(?s), "${escapeSparqlLiteral(prefix)}"))
         FILTER(STRENDS(STR(?s), "${escapeSparqlLiteral(suffix)}"))
       }
     }`,
   );
-  const rowsBySubject = new Map<string, SealQuad[]>();
-  if (result.type === 'quads') {
-    for (const quad of result.quads ?? []) {
-      const rows = rowsBySubject.get(quad.subject);
-      if (rows) rows.push(quad);
-      else rowsBySubject.set(quad.subject, [quad]);
-    }
-  }
-  // Admit only subjects that are a complete, self-consistent graph-scoped seal —
-  // the SAME canonical definition durable-sync uses (`parseGraphScopedAssertionSealCandidate`):
-  // a partial/corrupt subject, or a complete seal whose `authorAddress`/`kaUal`
-  // disagree with its `/assertion/<addr>/…` coordinate, is NOT a publish
-  // candidate (it is treated as not-finalized rather than silently trusted).
+  const subjects = subjectsResult.type === 'bindings'
+    ? (subjectsResult.bindings ?? []).map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
+    : [];
+
+  // Phase 2 — read each candidate's rows by EXACT subject (a bounded per-subject
+  // read, not a graph scan) and admit only a complete, self-consistent
+  // graph-scoped seal — the SAME canonical definition durable-sync uses
+  // (`parseGraphScopedAssertionSealCandidate`). `assertionMerkleRoot` alone is
+  // NOT proof of a publishable assertion: a partial/corrupt subject, or a
+  // complete seal whose `authorAddress`/`kaUal` disagree with its
+  // `/assertion/<addr>/…` coordinate, is treated as not-finalized (GH#1778 review).
   const candidates: string[] = [];
-  for (const [subject, rows] of rowsBySubject) {
+  for (const subject of subjects) {
+    let safeSubject: string;
+    try {
+      safeSubject = assertSafeIri(subject);
+    } catch {
+      continue; // unsafe/corrupt subject IRI — cannot be a valid candidate
+    }
+    const rowsResult = await store.query(
+      `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${safeSubject}> ?p ?o } }`,
+    );
+    const rows = rowsResult.type === 'quads' ? (rowsResult.quads ?? []) : [];
     const candidate = parseGraphScopedAssertionSealCandidate(rows, subject);
     if (!candidate
       || candidate.coordinate.scope !== expectedScope
