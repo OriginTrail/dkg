@@ -14,7 +14,10 @@ const NODE = `0x${'11'.repeat(20)}`; // the node's own default identity
 const MEMBER = `0x${'22'.repeat(20)}`; // resolved KA author (not the registrant)
 const CG = 'construction';
 
-function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefined>) {
+function makeMockAgent(
+  registrationCalls: Array<Record<string, unknown> | undefined>,
+  defaultAgentAddress: string | undefined,
+) {
   let attempts = 0;
   return {
     async publishQueuedKnowledgeAssetVmPublish() {
@@ -28,7 +31,7 @@ function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefi
       registrationCalls.push(opts);
     },
     getDefaultAgentAddress() {
-      return NODE;
+      return defaultAgentAddress;
     },
   } as any;
 }
@@ -36,7 +39,7 @@ function makeMockAgent(registrationCalls: Array<Record<string, unknown> | undefi
 describe('GH#1778 async VM publish CG auto-registration', () => {
   it('registers under the node identity, not the resolved member author', async () => {
     const registrationCalls: Array<Record<string, unknown> | undefined> = [];
-    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls));
+    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls, NODE));
 
     // The intent's agentAddress is the resolved AUTHOR (member); registration
     // must not use it, and must not depend on any per-request caller identity.
@@ -45,5 +48,18 @@ describe('GH#1778 async VM publish CG auto-registration', () => {
 
     expect(result.status).toBe('confirmed');
     expect(registrationCalls).toEqual([{ callerAgentAddress: NODE }]);
+  });
+
+  it('falls back to the request author when the node has no default identity', async () => {
+    // Degenerate deployment: no node default. A self-authored publish (author ==
+    // caller) must still supply an EVM registration actor rather than register
+    // with no address at all.
+    const registrationCalls: Array<Record<string, unknown> | undefined> = [];
+    const handler = createKnowledgeAssetVmPublishHandler(makeMockAgent(registrationCalls, undefined));
+
+    const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
+    await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
+
+    expect(registrationCalls).toEqual([{ callerAgentAddress: MEMBER }]);
   });
 });

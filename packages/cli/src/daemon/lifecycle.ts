@@ -893,7 +893,10 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       // resolved author/name share one deduped job — so keying registration on
       // the request identity would register under a member, or under whichever
       // caller enqueued first. The node identity is well-defined and collapse-proof.
-      const registrationAgentAddress = agent.getDefaultAgentAddress();
+      // Fall back to the request author ONLY when the node has no default identity
+      // (a degenerate deployment) so a self-authored publish — where author ==
+      // caller — still has an EVM registration actor, as it did before this change.
+      const registrationAgentAddress = agent.getDefaultAgentAddress() ?? request.agentAddress;
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
         ...(registrationAgentAddress ? { callerAgentAddress: registrationAgentAddress } : {}),
       });
