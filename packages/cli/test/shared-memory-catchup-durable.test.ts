@@ -101,6 +101,56 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
+  it('awaits durable verification and store settlement after the fetch budget', async () => {
+    vi.useFakeTimers();
+    let resolveDurable!: (inserted: number) => void;
+    const syncFromPeer = vi.fn(() => new Promise<number>((resolve) => {
+      resolveDurable = resolve;
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({
+        curatorIsLocal: false,
+        peerIds: ['peer-curator'],
+      })),
+      syncFromPeer,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'private-settlement-cg',
+        peerId: 'peer-curator',
+        includeSharedMemory: false,
+        includeDurable: true,
+        perPeerDurableBudgetMs: 1_000,
+      },
+      agent,
+    );
+
+    try {
+      const request = handleMemoryRoutes(ctx);
+      await vi.advanceTimersByTimeAsync(1_500);
+      // The fetch deadline may have elapsed, but returning now would be a false
+      // terminal: exact verification/atomic storage still owns the operation.
+      expect(res.writableEnded).toBe(false);
+
+      resolveDurable(23);
+      await request;
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).totalDurableInsertedTriples).toBe(23);
+      expect(syncFromPeer).toHaveBeenCalledWith(
+        'peer-curator',
+        ['private-settlement-cg'],
+        undefined,
+        undefined,
+        { totalTimeoutMs: 1_000 },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('still runs includeDurable when SWM is not currently usable for the CG', async () => {
     const syncSharedMemoryFromPeerDetailed = vi.fn();
     const syncSharedMemoryFromPeer = vi.fn();

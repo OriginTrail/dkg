@@ -471,6 +471,7 @@ type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeer
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
+const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 
 async function runAlreadyMemberDelegationRefresh<T>(
   agent: DKGAgent,
@@ -482,6 +483,40 @@ async function runAlreadyMemberDelegationRefresh<T>(
     chains = new Map<string, Promise<void>>();
     alreadyMemberDelegationRefreshChains.set(agent, chains);
   }
+  const previous = chains.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const settled = run.then(() => undefined, () => undefined);
+  chains.set(key, settled);
+  try {
+    return await run;
+  } finally {
+    if (chains.get(key) === settled) {
+      chains.delete(key);
+    }
+  }
+}
+
+/**
+ * Serialize physical durable streams for one peer + Context Graph while still
+ * allowing callers with different budgets/callback semantics to run as
+ * distinct operations. Responder sessions are keyed by this same identity;
+ * overlapping a 120s automatic pass with a 300s recovery pass can otherwise
+ * supersede the immutable snapshot, duplicate transport work, and race the
+ * safe checkpoint. The wait happens outside global admission so queued work
+ * does not consume one of the scarce active sync slots.
+ */
+async function runSerializedDurableContextGraphSync<T>(
+  agent: DKGAgent,
+  remotePeerId: string,
+  contextGraphId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let chains = durableContextGraphSyncChains.get(agent);
+  if (!chains) {
+    chains = new Map<string, Promise<void>>();
+    durableContextGraphSyncChains.set(agent, chains);
+  }
+  const key = JSON.stringify([remotePeerId, contextGraphId]);
   const previous = chains.get(key) ?? Promise.resolve();
   const run = previous.catch(() => undefined).then(operation);
   const settled = run.then(() => undefined, () => undefined);
@@ -4025,12 +4060,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       })),
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: emptyDurableSyncResult,
-      runWithAdmission: (item, work) => this.runContextGraphSyncWithBackpressure(
-        ctx,
+      runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
+        this,
+        remotePeerId,
         item.contextGraphId,
-        item.lane,
-        item.operationId,
-        work,
+        () => this.runContextGraphSyncWithBackpressure(
+          ctx,
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          work,
+        ),
       ),
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({

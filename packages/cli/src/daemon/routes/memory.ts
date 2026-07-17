@@ -893,16 +893,23 @@ WHERE {
           }
           if (durableSelected.has(candidate)) {
             try {
-              durable = await withTimeout(
+              // The agent deadline bounds network fetching, but exact graph
+              // verification and atomic store materialization must settle
+              // afterward. Racing that promise against an HTTP timer does not
+              // cancel it; it only returns a false terminal response while the
+              // write continues invisibly and lets another recovery overlap
+              // the same responder session. Await the correctness-critical
+              // settlement and report its real inserted count. The serialized
+              // peer+CG durable lane prevents automatic recovery from racing
+              // this tail.
+              durable = await (
                 (agent as any).syncFromPeer?.(
                   candidate,
                   [cgId],
                   undefined,
                   undefined,
                   { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                ) ?? Promise.resolve(0),
-                PER_PEER_DURABLE_BUDGET_MS,
-                `Durable catchup from ${candidate} for ${cgId}`,
+                ) ?? Promise.resolve(0)
               );
             } catch (err: any) {
               durableError = err?.message ?? String(err);

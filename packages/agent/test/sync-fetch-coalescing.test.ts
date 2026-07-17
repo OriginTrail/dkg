@@ -361,6 +361,61 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('serializes different-budget durable syncs for the same peer and Context Graph', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 2, syncGlobalQueueLimit: 2 },
+    );
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+      fetchCalls++;
+      const phase = String(args[4]);
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    };
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const automatic = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 120_000 },
+      );
+      const recovery = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 299_000 },
+      );
+      await waitFor(() => fetchCalls === 1);
+      // Different budgets remain separate operations, but the second physical
+      // stream must wait instead of racing/superseding the first session.
+      expect(fetchCalls).toBe(1);
+
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+      const [automaticResult, recoveryResult] = await Promise.all([automatic, recovery]);
+      expect(automaticResult).not.toBe(recoveryResult);
+      expect(fetchCalls).toBe(4);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not join direct durable syncs with callback side effects', async () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
