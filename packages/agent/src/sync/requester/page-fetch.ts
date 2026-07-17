@@ -4,7 +4,7 @@ import {
   sendSyncRequest,
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
-import { markSyncPeerResponded } from '../error-tags.js';
+import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
@@ -506,6 +506,39 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         );
       }
     }
+    // A durable data prefix that already crossed the wire is still useful when
+    // a later page loses its stream. Return it through the same bounded,
+    // incomplete-result contract as a deadline so the caller can verify whole
+    // graph boundaries, materialize only exact KAs, and advance to the last
+    // certified offset. Throwing here discarded every accepted page and made
+    // an unstable relay replay the entire round forever. Keep this narrowly on
+    // durable DATA transport failures: denials, parse/integrity failures,
+    // responder-session invalidation, metadata, and recovery retain their
+    // existing fail-closed error semantics.
+    if (
+      !includeSharedMemory
+      && phase === 'data'
+      && !recovery
+      && responsePages > 0
+      && allQuads.length > 0
+      && isSyncBackoffWorthyError(err)
+    ) {
+      logWarn(
+        ctx,
+        `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
+      );
+      phaseTelemetry.finish('timed_out', allQuads.length);
+      return {
+        quads: allQuads,
+        bytesReceived,
+        resumedFromOffset,
+        nextOffset: offset,
+        checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
+
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
   }

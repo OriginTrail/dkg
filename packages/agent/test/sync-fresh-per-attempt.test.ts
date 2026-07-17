@@ -1205,7 +1205,17 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
           observedBuilds.push({ offset, syncSessionId });
           return new TextEncoder().encode(`request-${offset}`);
         },
-        parseAndFilter: singleQuadParser,
+        parseAndFilter: async (nquadsText) => nquadsText
+          ? {
+              quads: [{
+                subject: 'urn:test:s',
+                predicate: 'urn:test:p',
+                object: '"value"',
+                graph: GRAPH_URI,
+              }],
+              totalQuads: 1,
+            }
+          : { quads: [], totalQuads: 0 },
         send: async () => {
           callsThisRound += 1;
           if (sendMode === 'timeout') {
@@ -1235,15 +1245,25 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     // immediate-token supersession and deleting the durable checkpoint.
     sendMode = 'page-then-drop';
     const before = deletedCheckpoints.length;
-    await expect(runFetch()).rejects.toThrow('peer-closed-stream');
+    const interrupted = await runFetch();
+    expect(interrupted).toMatchObject({
+      completed: false,
+      timedOut: true,
+      resumedFromOffset: first.nextOffset,
+      nextOffset: first.nextOffset + 1,
+    });
+    expect(interrupted.quads).toHaveLength(1);
     expect(deletedCheckpoints.slice(before)).not.toContain(checkpointKey);
     expect(checkpointValues.get(checkpointKey)?.offset).toBe(first.nextOffset);
 
+    // Model the durable caller certifying the complete prefix and committing
+    // its safe boundary before the next bounded round.
+    checkpointValues.set(checkpointKey, freshCheckpoint(interrupted.nextOffset));
     sendMode = 'complete';
     const resumed = await runFetch();
-    expect(resumed.resumedFromOffset).toBe(first.nextOffset);
+    expect(resumed.resumedFromOffset).toBe(interrupted.nextOffset);
     expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({
-      offset: first.nextOffset,
+      offset: interrupted.nextOffset,
       syncSessionId: establishedSessionId,
     });
   });
