@@ -3,8 +3,33 @@ import test from 'node:test';
 
 import {
   queryAnyRemoteWithRetry,
+  storageAckTargetsForFreshPublish,
   subscribeAndWait,
 } from '../src/v10-publish-lib.js';
+
+test('fresh Query Remote targets only the cores that signed StorageACKs', () => {
+  assert.deepEqual(
+    storageAckTargetsForFreshPublish(
+      'did:dkg:base:84532/0xabc/1',
+      ['ack-peer-1', 'ack-peer-2'],
+    ),
+    [
+      { peerId: 'ack-peer-1', name: 'StorageACK core …k-peer-1' },
+      { peerId: 'ack-peer-2', name: 'StorageACK core …k-peer-2' },
+    ],
+  );
+});
+
+test('fresh Query Remote fails closed when the publish API omits ACK peers', () => {
+  assert.throws(
+    () => storageAckTargetsForFreshPublish('did:dkg:base:84532/0xabc/1', []),
+    /confirmed publish response did not include storageAckPeerIds/,
+  );
+});
+
+test('fallback UAL reads may use the legacy receiver list after publish fails', () => {
+  assert.deepEqual(storageAckTargetsForFreshPublish(null, []), []);
+});
 
 test('subscribeAndWait enqueues once and polls catch-up through the status endpoint', async () => {
   let subscribeCalls = 0;

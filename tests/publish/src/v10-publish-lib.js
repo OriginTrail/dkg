@@ -346,6 +346,23 @@ export async function queryAnyRemoteWithRetry(
   );
 }
 
+// A fresh confirmed publish must be read from one of the cores that signed its
+// StorageACK. Falling back to an unrelated beacon would make Query Remote green
+// without proving the protocol's durability guarantee. The legacy fallback is
+// reserved for runs where publish failed and the suite uses DKG_FALLBACK_UAL.
+export function storageAckTargetsForFreshPublish(ual, storageAckPeerIds) {
+  if (!ual) return [];
+  if (!Array.isArray(storageAckPeerIds) || storageAckPeerIds.length === 0) {
+    throw new Error(
+      'Query Remote (sync): confirmed publish response did not include storageAckPeerIds',
+    );
+  }
+  return storageAckPeerIds.map((peerId) => ({
+    peerId,
+    name: `StorageACK core …${peerId.slice(-8)}`,
+  }));
+}
+
 // Resolve (and cache) a node's libp2p peerId via its public /api/status.
 const peerIdCache = new Map();
 async function getPeerId(node) {
@@ -631,11 +648,9 @@ export function defineChainPublishSuite(config) {
           const remoteStart = Date.now();
           try {
             if (!readUal) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
-            const targets = storageAckPeerIds.length > 0
-              ? storageAckPeerIds.map((peerId) => ({
-                  peerId,
-                  name: `StorageACK core …${peerId.slice(-8)}`,
-                }))
+            const storageTargets = storageAckTargetsForFreshPublish(ual, storageAckPeerIds);
+            const targets = storageTargets.length > 0
+              ? storageTargets
               : (await Promise.all(otherIndexes.map(async (idx) => ({
                   peerId: await getPeerId(nodes[idx]),
                   name: nodes[idx].name,
@@ -649,7 +664,7 @@ export function defineChainPublishSuite(config) {
               readUal,
               targets,
             );
-            const targetKind = storageAckPeerIds.length > 0
+            const targetKind = storageTargets.length > 0
               ? 'acknowledged storage core'
               : 'legacy beacon fallback';
             console.log(
