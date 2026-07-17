@@ -6,6 +6,13 @@ export interface SyncCheckpointEntry {
   offset: number;
   updatedAtMs: number;
   expiresAtMs: number;
+  /**
+   * Opaque responder snapshot token paired with this offset. OFFSET is only
+   * meaningful while the responder still owns the same immutable row list;
+   * persisting the token lets a requester resume safely across its own restart.
+   */
+  responderSessionId?: string;
+  responderSessionExpiresAtMs?: number;
 }
 
 export interface SyncCheckpointStore {
@@ -16,6 +23,10 @@ export interface SyncCheckpointStore {
    */
   get(key: string, nowMs?: number): SyncCheckpointEntry | undefined;
   set(key: string, value: number, nowMs?: number): void;
+  /** Persist the responder snapshot token without advancing the verified offset. */
+  setResponderSession?(key: string, sessionId: string, expiresAtMs: number, nowMs?: number): void;
+  /** Forget only the snapshot token while retaining the verified offset. */
+  clearResponderSession?(key: string): void;
   delete(key: string): void;
   pruneExpired?(nowMs?: number): number;
 }
@@ -37,6 +48,18 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       this.entries.delete(key);
       return undefined;
     }
+    if (
+      entry.responderSessionId
+      && (entry.responderSessionExpiresAtMs ?? 0) <= nowMs
+    ) {
+      const withoutExpiredSession: SyncCheckpointEntry = {
+        offset: entry.offset,
+        updatedAtMs: entry.updatedAtMs,
+        expiresAtMs: entry.expiresAtMs,
+      };
+      this.entries.set(key, withoutExpiredSession);
+      return withoutExpiredSession;
+    }
     return entry;
   }
 
@@ -44,10 +67,51 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
     }
+    const existing = this.entries.get(key);
     this.entries.set(key, {
       offset: value,
       updatedAtMs: nowMs,
       expiresAtMs: nowMs + this.ttlMs,
+      ...(existing?.responderSessionId
+        && (existing.responderSessionExpiresAtMs ?? 0) > nowMs
+        ? {
+            responderSessionId: existing.responderSessionId,
+            responderSessionExpiresAtMs: existing.responderSessionExpiresAtMs,
+          }
+        : {}),
+    });
+  }
+
+  setResponderSession(
+    key: string,
+    sessionId: string,
+    expiresAtMs: number,
+    nowMs = this.clock(),
+  ): void {
+    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
+      throw new Error(`Invalid sync responder session for ${key}`);
+    }
+    if (expiresAtMs <= nowMs) {
+      this.clearResponderSession(key);
+      return;
+    }
+    const existing = this.entries.get(key);
+    this.entries.set(key, {
+      offset: existing?.offset ?? 0,
+      updatedAtMs: existing?.updatedAtMs ?? nowMs,
+      expiresAtMs: existing?.expiresAtMs ?? nowMs + this.ttlMs,
+      responderSessionId: sessionId,
+      responderSessionExpiresAtMs: expiresAtMs,
+    });
+  }
+
+  clearResponderSession(key: string): void {
+    const existing = this.entries.get(key);
+    if (!existing) return;
+    this.entries.set(key, {
+      offset: existing.offset,
+      updatedAtMs: existing.updatedAtMs,
+      expiresAtMs: existing.expiresAtMs,
     });
   }
 

@@ -49,6 +49,44 @@ function rememberUnfinishedSyncResponderSession(checkpointKey: string, session: 
   unfinishedSyncResponderSessions.set(checkpointKey, session);
 }
 
+function getPersistedSyncResponderSession(
+  checkpoint: ReturnType<SyncCheckpointStore['get']>,
+  now = Date.now(),
+): UnfinishedSyncResponderSession | undefined {
+  if (
+    !checkpoint?.responderSessionId
+    || !Number.isSafeInteger(checkpoint.responderSessionExpiresAtMs)
+    || (checkpoint.responderSessionExpiresAtMs ?? 0) <= now
+  ) return undefined;
+  return {
+    syncSessionId: checkpoint.responderSessionId,
+    expiresAt: checkpoint.responderSessionExpiresAtMs!,
+  };
+}
+
+function persistUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+  session: UnfinishedSyncResponderSession,
+  now = Date.now(),
+): void {
+  rememberUnfinishedSyncResponderSession(checkpointKey, session, now);
+  checkpointStore.setResponderSession?.(
+    checkpointKey,
+    session.syncSessionId,
+    session.expiresAt,
+    now,
+  );
+}
+
+function forgetUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+): void {
+  unfinishedSyncResponderSessions.delete(checkpointKey);
+  checkpointStore.clearResponderSession?.(checkpointKey);
+}
+
 function isSyncResponderSessionSupersededError(err: unknown): boolean {
   return err instanceof Error && err.message.includes('sync session was superseded');
 }
@@ -221,11 +259,21 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
   }
-  let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
+  const checkpoint = checkpointStore.get(checkpointKey);
+  let offset = checkpoint?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
+  // A successful caller deletes the checkpoint after verification/storage.
+  // The process-local cache can outlive that synchronous delete, so never let
+  // a cache-only token resurrect a completed snapshot at offset zero.
+  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
   const savedResponderSession = usesPageSession
-    ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+    ? (
+        (checkpoint
+          ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+          : undefined)
+        ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
+      )
     : undefined;
   if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
@@ -233,6 +281,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
+  let responsePages = 0;
   let timedOut = false;
   // Start with the throughput-oriented page size, but reduce it within the
   // existing bounded retry budget if a response cannot traverse the wire.
@@ -318,6 +367,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       });
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
+      responsePages += 1;
       phaseTelemetry.recordPage();
 
       let parsed: { quads: Quad[]; totalQuads: number };
@@ -426,7 +476,21 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // Fresh round (no resume) — keep the session so a retry can resume from
         // where it got to. Recovery never persists a responder session to
         // resume (see the timeout branch below + Codex #1173).
-        rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+        const refreshedResponderSession = responsePages > 0
+          ? {
+              ...responderSession,
+              // The responder touches both its token and immutable row-list
+              // TTL on every successfully served page. Mirror that sliding
+              // expiry locally so a long, progressing snapshot is not forced
+              // back to offset zero merely because it crossed ten minutes.
+              expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+            }
+          : responderSession;
+        persistUnfinishedSyncResponderSession(
+          checkpointStore,
+          checkpointKey,
+          refreshedResponderSession,
+        );
       }
     }
     phaseTelemetry.finish('error', allQuads.length);
@@ -442,8 +506,28 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     // the session TTL old) instead of current state, because the responder's
     // `refreshRowList` only fires on a NEW syncSessionId (Codex #1173). Drop the
     // session so the retry mints a fresh id and the responder re-reads.
-    if (timedOut && !recovery) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
-    else unfinishedSyncResponderSessions.delete(checkpointKey);
+    if (!recovery) {
+      // Durable rootless verification may safely reclassify a transport-
+      // complete response as an incomplete manifest prefix. Retain the token
+      // until that higher layer deletes the checkpoint after a truly complete
+      // verified/store commit, otherwise its safe offset cannot be resumed
+      // even without a process restart. Persistent stores additionally write
+      // the token through setResponderSession(); the process-local path keeps
+      // older/custom checkpoint stores correct within one daemon lifetime.
+      const refreshedResponderSession = responsePages > 0
+        ? {
+            ...responderSession,
+            expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+          }
+        : responderSession;
+      persistUnfinishedSyncResponderSession(
+        checkpointStore,
+        checkpointKey,
+        refreshedResponderSession,
+      );
+    } else {
+      forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
+    }
   }
 
   if (timedOut) {
