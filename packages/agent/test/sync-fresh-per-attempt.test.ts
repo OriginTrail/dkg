@@ -1094,6 +1094,96 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(abortedSessionId);
   });
 
+  it('preserves a resumed checkpoint when the responder accepted a page before a transport drop', async () => {
+    vi.setSystemTime(1_700_100_000_000);
+    const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
+    const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
+    const deletedCheckpoints: string[] = [];
+    const checkpointKey = `${REMOTE_PEER_ID}|accepted-page-then-drop-cg|durable|data`;
+    let sendMode: 'timeout' | 'page-then-drop' | 'complete' = 'timeout';
+    let callsThisRound = 0;
+
+    const checkpointStore = {
+      get: (key: string) => checkpointValues.get(key),
+      set: (key: string, value: number) => { checkpointValues.set(key, freshCheckpoint(value)); },
+      delete: (key: string) => { deletedCheckpoints.push(key); checkpointValues.delete(key); },
+    };
+
+    const runFetch = () => {
+      callsThisRound = 0;
+      return runFetchWithFakeTimers(fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'accepted-page-then-drop-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore,
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          callsThisRound += 1;
+          if (sendMode === 'timeout') {
+            vi.setSystemTime(1_700_100_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          if (sendMode === 'page-then-drop') {
+            if (callsThisRound === 1) return new TextEncoder().encode('one-quad-line');
+            throw new Error('peer-closed-stream; All multiaddr dials failed');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }));
+    };
+
+    // Establish a resumable offset/session pair.
+    const first = await runFetch();
+    expect(first.completed).toBe(false);
+    checkpointValues.set(checkpointKey, freshCheckpoint(first.nextOffset));
+    const establishedSessionId = observedBuilds[0].syncSessionId;
+
+    // The resumed token is accepted for one page before the transport drops.
+    // Keep the previously certified offset rather than treating this as an
+    // immediate-token supersession and deleting the durable checkpoint.
+    sendMode = 'page-then-drop';
+    const before = deletedCheckpoints.length;
+    await expect(runFetch()).rejects.toThrow('peer-closed-stream');
+    expect(deletedCheckpoints.slice(before)).not.toContain(checkpointKey);
+    expect(checkpointValues.get(checkpointKey)?.offset).toBe(first.nextOffset);
+
+    sendMode = 'complete';
+    const resumed = await runFetch();
+    expect(resumed.resumedFromOffset).toBe(first.nextOffset);
+    expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({
+      offset: first.nextOffset,
+      syncSessionId: establishedSessionId,
+    });
+  });
+
   it('restarts durable data checkpoints at offset zero with a stable sync session', async () => {
     const contextGraphId = 'orphaned-offset-without-session-cg';
     const observedBuilds: Array<{

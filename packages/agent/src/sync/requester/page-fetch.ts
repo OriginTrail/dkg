@@ -449,7 +449,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
     } else if (usesPageSession && responderSession && !recovery && !denied) {
-      if (resumedFromOffset > 0) {
+      if (resumedFromOffset > 0 && responsePages === 0) {
         // R1 fix (2026-07-07 sync storm). This round RESUMED a saved session at
         // offset>0 and then aborted. The responder supersedes any resume whose
         // session token it no longer holds (a concurrent flow to the same
@@ -469,13 +469,20 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // likely valid, and a supersede there just costs one wasted resume
         // attempt before this branch catches it next round. Precise
         // per-supersede handling that never loses resume is the
-        // in-band-sentinel follow-up.
+        // in-band-sentinel follow-up. This inference is valid only when the
+        // responder accepted ZERO pages in this round. Once at least one page
+        // has succeeded, the responder demonstrably accepted this exact token;
+        // a later stream/dial failure is therefore safe to retry from the last
+        // previously certified checkpoint. At worst, a concurrent supersession
+        // after that accepted page costs one extra retry: its zero-page failure
+        // reaches this branch and then rotates the session safely.
         unfinishedSyncResponderSessions.delete(checkpointKey);
         checkpointStore.delete(checkpointKey);
       } else {
-        // Fresh round (no resume) — keep the session so a retry can resume from
-        // where it got to. Recovery never persists a responder session to
-        // resume (see the timeout branch below + Codex #1173).
+        // Fresh round, or a resumed round that demonstrably delivered at least
+        // one page with this token: keep the session so a retry can resume from
+        // the last certified checkpoint. Recovery never persists a responder
+        // session to resume (see the timeout branch below + Codex #1173).
         const refreshedResponderSession = responsePages > 0
           ? {
               ...responderSession,
