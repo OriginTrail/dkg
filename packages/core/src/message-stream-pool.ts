@@ -106,6 +106,13 @@ export interface PoolNode {
       protocols: string | string[],
       options?: { runOnLimitedConnection?: boolean; signal?: AbortSignal },
     ) => Promise<Stream>;
+    /**
+     * Raw connection-table walk used as a post-dial fallback. libp2p's
+     * peerId-keyed dial path can report "no valid addresses" while an
+     * inbound relay connection to the same peer is already open. Optional
+     * for structural test stubs; production DKGNode always exposes it.
+     */
+    getConnections?: () => ReadonlyArray<PoolReusableConnection>;
     handle: (
       protocolId: string,
       handler: (stream: Stream, connection: { remotePeer: { toString: () => string } }) => void,
@@ -113,6 +120,19 @@ export interface PoolNode {
     ) => void;
     unhandle: (protocolId: string) => void;
   };
+}
+
+interface PoolReusableConnection {
+  status?: string;
+  limits?: unknown;
+  remotePeer?: {
+    equals?: (other: unknown) => boolean;
+    toString?: () => string;
+  };
+  newStream: (
+    protocols: string | string[],
+    options?: { runOnLimitedConnection?: boolean; signal?: AbortSignal },
+  ) => Promise<Stream>;
 }
 
 /**
@@ -647,9 +667,30 @@ export class MessageStreamPool {
         }
       }
       const peerId = await this.resolvePeerId(peerIdStr);
-      const stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
-        runOnLimitedConnection: true,
-      });
+      let stream: Stream;
+      try {
+        stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
+          runOnLimitedConnection: true,
+        });
+      } catch (dialError) {
+        // A healthy inbound circuit-relay connection can exist in libp2p's
+        // raw connection table while dialProtocol still fails because its
+        // peerStore address view is empty or stale. This exact split-brain
+        // state was observed during the mainnet 500-KA fan-out gate: peer
+        // diagnostics showed two open relayed connections, yet the pooled
+        // inbox returned "no valid addresses for peer".
+        //
+        // No application bytes have been written yet, so it is safe to open
+        // the pooled protocol directly on an existing connection. We only do
+        // this AFTER the normal dial fails: that preserves direct-dial/DCUtR
+        // preference and avoids pruning a working limited connection during
+        // an automatic direct upgrade. If every live candidate misses, keep
+        // the original dial error so retry classification and diagnostics do
+        // not lose the root cause.
+        const reused = await this.openOnLiveConnection(peerIdStr, peerId);
+        if (!reused) throw dialError;
+        stream = reused;
+      }
       // Race-with-close guard. Codex PR #560 round-4 caught: while
       // `dialProtocol` was awaiting, `pool.close()` may have run.
       // `installState` after close would re-create per-peer state
@@ -691,6 +732,68 @@ export class MessageStreamPool {
       this.peerIdFromString = mod.peerIdFromString;
     }
     return this.peerIdFromString(peerIdStr);
+  }
+
+  /**
+   * Open the pooled protocol on an already-live connection to the target.
+   * Walk the raw table and filter locally: libp2p's peer-keyed lookup is the
+   * stale view in the failure mode this fallback exists to heal.
+   */
+  private async openOnLiveConnection(
+    peerIdStr: string,
+    peerId: unknown,
+  ): Promise<Stream | null> {
+    if (!this.node.libp2p.getConnections) return null;
+
+    let candidates: PoolReusableConnection[];
+    try {
+      // Invoke through `libp2p` rather than an unbound method reference;
+      // some libp2p implementations read private connection-manager state
+      // through `this`.
+      candidates = [...this.node.libp2p.getConnections()].filter((connection) => {
+        const remotePeer = connection.remotePeer;
+        if (!remotePeer) return false;
+        try {
+          if (remotePeer.equals?.(peerId) === true) return true;
+        } catch {
+          // Fall through to the stable string comparison below.
+        }
+        try {
+          return remotePeer.toString?.() === peerIdStr;
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return null;
+    }
+
+    // Raw ordering is unspecified. Prefer direct connections, then relay-
+    // limited ones, while retaining freshness order inside each class.
+    candidates.sort((a, b) => Number(Boolean(a.limits)) - Number(Boolean(b.limits)));
+
+    for (const connection of candidates) {
+      if (connection.status && connection.status !== 'open') continue;
+      try {
+        const stream = await connection.newStream(this.protocolId, {
+          runOnLimitedConnection: true,
+          signal: this.node.stopSignal,
+        });
+        if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
+          try {
+            stream.abort(new Error('reused pooled stream returned in closed state'));
+          } catch {
+            // It is already unusable; try the next live connection.
+          }
+          continue;
+        }
+        return stream;
+      } catch {
+        // The connection may have closed between the table walk and
+        // newStream. Continue across other direct/relay paths.
+      }
+    }
+    return null;
   }
 
   private installState(peerIdStr: string, stream: Stream): PerPeerState {
