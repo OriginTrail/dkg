@@ -39,6 +39,61 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
 }
 
 describe('POST /api/shared-memory/catchup durable leg', () => {
+  it('supports durable-only recovery without starting either SWM catchup path', async () => {
+    const cgId = 'private-durable-only-cg';
+    const peerId = 'peer-curator';
+    const syncSharedMemoryFromPeerDetailed = vi.fn();
+    const syncSharedMemoryFromPeer = vi.fn();
+    const catchupSwmFromConnectedHosts = vi.fn();
+    const syncFromPeer = vi.fn(async () => 19);
+    const agent = {
+      peerId: 'self-peer',
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({
+        curatorIsLocal: false,
+        peerIds: [peerId],
+      })),
+      syncSharedMemoryFromPeerDetailed,
+      syncSharedMemoryFromPeer,
+      catchupSwmFromConnectedHosts,
+      syncFromPeer,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        peerId,
+        includeSharedMemory: false,
+        includeDurable: true,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.canUseSharedMemoryForContextGraph).not.toHaveBeenCalled();
+    expect(syncSharedMemoryFromPeerDetailed).not.toHaveBeenCalled();
+    expect(syncSharedMemoryFromPeer).not.toHaveBeenCalled();
+    expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
+    expect(syncFromPeer).toHaveBeenCalledTimes(1);
+    expect(syncFromPeer).toHaveBeenCalledWith(peerId, [cgId]);
+
+    const body = JSON.parse(res.body);
+    expect(body.includeSharedMemory).toBe(false);
+    expect(body.includeDurable).toBe(true);
+    expect(body.totalInsertedTriples).toBe(0);
+    expect(body.totalDurableInsertedTriples).toBe(19);
+    expect(body.hostCatchup).toEqual({
+      ranFallback: false,
+      triggeredForContextGraphIds: [],
+      appliedTotal: 0,
+      appliedEnvelopes: 0,
+      perContextGraph: [],
+    });
+  });
+
   it('still runs includeDurable when SWM is not currently usable for the CG', async () => {
     const syncSharedMemoryFromPeerDetailed = vi.fn();
     const syncSharedMemoryFromPeer = vi.fn();

@@ -683,12 +683,16 @@ WHERE {
       });
     }
 
-    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only. The durable
+    // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only by default. The durable
     // (knowledge-collection) layer has its own publish-time
     // commit->fanout->ACK protocol and a separate sync substrate; it's
     // out of scope for the catchup endpoint and would otherwise compound
     // the request budget (240s vs 120s). Opt-in via includeDurable=true
-    // for callers that want the full data leg in the same call.
+    // for callers that want the full data leg in the same call. Recovery
+    // operators may additionally pass includeSharedMemory=false to resume
+    // only the durable leg without replaying an already-complete SWM
+    // snapshot first.
+    const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
     // Per-peer hard cap on the catchup duration. Keeps the endpoint
@@ -821,7 +825,8 @@ WHERE {
     };
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
-      const canUseSharedMemory = await canUseSharedMemoryForContextGraph(cgId);
+      const canUseSharedMemory = includeSharedMemory
+        && await canUseSharedMemoryForContextGraph(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -932,7 +937,7 @@ WHERE {
     //  - The host-catchup leg has its own internal time budget
     //    (sendReliable + a few rounds per peer); CGs are processed
     //    serially to keep wire load low.
-    const hostCatchupOpted = parsed.hostCatchupFallback !== false;
+    const hostCatchupOpted = includeSharedMemory && parsed.hostCatchupFallback !== false;
     const hostCatchupSupported = typeof (agent as any).catchupSwmFromConnectedHosts === 'function';
     type HostCatchupLeg = {
       contextGraphId: string;
@@ -1029,6 +1034,7 @@ WHERE {
     return jsonResponse(res, 200, {
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
+      includeSharedMemory,
       includeDurable,
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,

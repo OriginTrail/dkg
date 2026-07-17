@@ -1035,7 +1035,12 @@ function selectVerifiedQuads(
       rejected,
       droppedSyncControlTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
-      verifiedGraphScopedDataGraphs,
+      // Keep this list aligned with the selected data + metadata indexes.
+      // A fatal batch deliberately selects neither. Returning the names of
+      // individually verified graphs here makes the requester attempt exact
+      // materialization without their selected descriptors, which masks the
+      // original integrity failure as a misleading "0 metadata owners" error.
+      verifiedGraphScopedDataGraphs: [],
       logs,
     };
   }
