@@ -87,8 +87,13 @@ function forgetUnfinishedSyncResponderSession(
   checkpointStore.clearResponderSession?.(checkpointKey);
 }
 
-function isSyncResponderSessionSupersededError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes('sync session was superseded');
+function isSyncResponderSessionInvalidError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message.toLowerCase();
+  return message.includes('sync session') && (
+    message.includes('superseded')
+    || message.includes('expired')
+  );
 }
 
 function usesResponderSession(includeSharedMemory: boolean, phase: SyncPhase): boolean {
@@ -441,11 +446,12 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
-    if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
-      // Exact-message match — only fires IN-PROCESS (same-node tests). Over the
-      // wire the responder's "superseded" text is destroyed by the router's
-      // stream.abort (it becomes a generic reset), which is why the
-      // `resumedFromOffset > 0` branch below is the real network-path fix.
+    if (usesPageSession && isSyncResponderSessionInvalidError(err)) {
+      // A responder-declared superseded/expired token can never make progress.
+      // Rotate it immediately even at offset zero instead of re-saving the
+      // terminal token until its requester-side TTL elapses. Some transports
+      // still destroy a responder's text and expose a generic reset, which is
+      // why the zero-accepted-page fallback below remains necessary.
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
     } else if (usesPageSession && responderSession && !recovery && !denied) {

@@ -1000,6 +1000,70 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(supersededSessionId);
   });
 
+  it('rotates an expired responder session immediately even when its checkpoint offset is zero', async () => {
+    vi.setSystemTime(1_700_100_000_000);
+    const contextGraphId = 'expired-offset-zero-session-cg';
+    const checkpointKey = `${REMOTE_PEER_ID}|${contextGraphId}|durable|data`;
+    const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
+    checkpointStore.set(checkpointKey, 0);
+    checkpointStore.setResponderSession(
+      checkpointKey,
+      'expired-responder-token',
+      Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    );
+    const observedSessionIds: Array<string | undefined> = [];
+    let expired = true;
+
+    const runFetch = () => runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedSessionIds.push(syncSessionId);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        if (expired) throw new Error('Durable data sync session snapshot expired before page completion');
+        return new TextEncoder().encode('');
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    await expect(runFetch()).rejects.toThrow('snapshot expired before page completion');
+    expect(observedSessionIds.at(-1)).toBe('expired-responder-token');
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+    expired = false;
+    const fresh = await runFetch();
+    expect(fresh.resumedFromOffset).toBe(0);
+    expect(observedSessionIds.at(-1)).not.toBe('expired-responder-token');
+  });
+
   it('drops a RESUMED session that aborts with a GENERIC transport error (network-path R1 fix)', async () => {
     // 2026-07-07 sync storm. Over the wire the responder's "superseded" message
     // is destroyed by the router's stream.abort, so the requester sees a
