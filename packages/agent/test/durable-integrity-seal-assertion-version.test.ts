@@ -135,4 +135,41 @@ describe('GH#1778 durable-sync retains the seal assertionVersion', () => {
     const kept = keptMeta(planted, { kind: 'fullSnapshot' }).filter((q) => q.subject === plantedUri);
     expect(kept.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)).toBe(false);
   });
+
+  it('drops ALL assertionVersion rows when the seal carries two conflicting versions (fail-closed)', () => {
+    // The admitted field itself must be single-valued: a peer that appends a
+    // second, conflicting assertionVersion must not have either row admitted
+    // (else the full parser's last-writer-wins could pick the tampered value).
+    const seal = buildSeal();
+    const forkedVersion: Quad = {
+      subject: ASSERTION_URI,
+      predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+      object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      graph: META_GRAPH,
+    };
+    const kept = keptMeta([...seal, forkedVersion], { kind: 'fullSnapshot' }).filter((q) => q.subject === ASSERTION_URI);
+    expect(kept.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)).toBe(false);
+    expect(() => parseAssertionSealQuads(kept, ASSERTION_URI)).toThrow(/Partial graph-scoped assertion seal/);
+  });
+
+  it('retains the seal assertionVersion on the system-override path (acceptUnverified) while dropping orphan controls', () => {
+    // acceptUnverified=true + a rejected/orphan control routes selection through
+    // selectSystemOverrideMetadataIndexes; the seal-version classifier must apply
+    // there too, so the self-consistent seal keeps assertionVersion while an
+    // unrelated orphan control is still dropped.
+    const seal = buildSeal();
+    const orphan = 'urn:system:orphan-control';
+    const orphanVersion: Quad = {
+      subject: orphan,
+      predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+      object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      graph: META_GRAPH,
+    };
+    const meta = [...seal, orphanVersion];
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+    const kept = selection.metaIndexes.map((i) => meta[i]!);
+    // Seal's assertionVersion survives (descriptive); the orphan's is dropped.
+    expect(kept.filter((q) => q.subject === ASSERTION_URI).length).toBe(seal.length);
+    expect(kept.some((q) => q.subject === orphan)).toBe(false);
+  });
 });

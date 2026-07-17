@@ -2,7 +2,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
-  graphScopedSealAuthor,
+  isSelfConsistentGraphScopedAssertionSeal,
   knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
   validateSubGraphName,
@@ -1172,7 +1172,7 @@ function selectSystemOverrideMetadataIndexes(
  * not-yet-published KA it was being stripped — leaving 13/14 quads and making
  * `parseAssertionSealQuads` throw "Partial graph-scoped assertion seal".
  *
- * Classifying it here (via the core `graphScopedSealAuthor` self-consistency
+ * Classifying it here (via the core `isSelfConsistentGraphScopedAssertionSeal` self-consistency
  * check — v2 seal whose kaUal author == authorAddress == `.../assertion/<addr>/…`
  * coordinate) keeps the control-authentication abstraction honest: the seal
  * field follows the descriptive path instead of being smuggled through
@@ -1182,7 +1182,7 @@ function selectSystemOverrideMetadataIndexes(
  */
 function isGraphSealDescriptiveVersion(quad: Quad, metadata: IntegrityMetadataIndex): boolean {
   return quad.predicate === ASSERTION_VERSION
-    && graphScopedSealAuthor(metadata.metaBySubject.get(quad.subject) ?? [], quad.subject) !== undefined;
+    && isSelfConsistentGraphScopedAssertionSeal(metadata.metaBySubject.get(quad.subject) ?? [], quad.subject);
 }
 
 function isAuthenticatedSyncControl(

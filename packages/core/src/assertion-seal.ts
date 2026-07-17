@@ -402,7 +402,7 @@ export interface AssertionSeal {
  */
 /**
  * The single low-level seal-field collector, shared by
- * {@link parseAssertionSealQuads} and {@link graphScopedSealAuthor}. Filters to
+ * {@link parseAssertionSealQuads} and {@link isSelfConsistentGraphScopedAssertionSeal}. Filters to
  * `subject === assertionUri`, normalises/validates root-entity IRIs, and returns
  * every non-root-entity object grouped by predicate WITH MULTIPLICITY preserved
  * — so each caller applies its own cardinality policy (the full parser takes the
@@ -601,58 +601,59 @@ export function parseAssertionSealQuads(
 }
 
 /**
- * GH#1778 — durable-sync admission helper. Given a subject's `_meta` rows,
- * return the seal author address when they form a *self-consistent graph-scoped
- * author seal rooted at the subject's own author coordinate*, else `undefined`.
- *
- * Lives beside {@link ASSERTION_SEAL_PREDICATES} and {@link parseAssertionSealQuads}
- * so the durable-sync integrity layer does not re-declare seal predicate names
- * or re-implement seal-shape parsing. Deliberately lighter than
- * `parseAssertionSealQuads` (it never throws and only inspects the identity
- * fields) because it runs on peer-supplied rows during selection: it decides
- * whether the seal's `dkg:assertionVersion` control predicate may be admitted.
- * The seal's ultimate integrity is still enforced at publish time (the Merkle
+ * GH#1778 — durable-sync admission predicate. Returns `true` when a subject's
+ * `_meta` rows form a *self-consistent graph-scoped author seal rooted at the
+ * subject's own author coordinate*, so the durable-sync integrity layer may
+ * treat the seal's `dkg:assertionVersion` row as descriptive metadata rather
+ * than an authenticated control. This is a narrow admission policy, not a
+ * general author extractor — but it lives beside {@link ASSERTION_SEAL_PREDICATES}
+ * and {@link parseAssertionSealQuads} so the integrity layer does not re-declare
+ * seal predicate names or re-implement seal-shape parsing. Deliberately lighter
+ * than `parseAssertionSealQuads` (never throws, inspects only identity fields);
+ * the seal's ultimate integrity is still enforced at publish time (the Merkle
  * recompute against the author-signed root).
  *
  * Self-consistent means: the subject carries the author-signed
  * `assertionMerkleRoot`; content scope is graph-scoped v2; there is exactly one
- * `kaUal` and one `authorAddress`; and the `kaUal` author, the `authorAddress`,
- * and the `/assertion/<addr>/…` subject coordinate all agree (case-folded).
+ * distinct `kaUal`, `authorAddress`, AND `assertionVersion` (fail-closed on any
+ * conflicting/duplicate value, so a tampered version cannot be admitted); and
+ * the `kaUal` author, the `authorAddress`, and the `/assertion/<addr>/…` subject
+ * coordinate all agree (case-folded).
  */
-export function graphScopedSealAuthor(
+export function isSelfConsistentGraphScopedAssertionSeal(
   rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   subject: string,
-): string | undefined {
+): boolean {
   try {
     const { fields } = collectSealFieldObjects(rows, subject);
-    // Admission is fail-closed on ambiguity: an identity predicate present with
-    // anything other than exactly one DISTINCT value is treated as absent, so a
-    // peer that supplies two conflicting kaUal/authorAddress values can never be
-    // silently collapsed to one (unlike the full parser's last-writer-wins).
+    // Fail closed on ambiguity: an identity predicate present with anything
+    // other than exactly one DISTINCT value is treated as absent, so a peer that
+    // supplies two conflicting kaUal/authorAddress/assertionVersion values can
+    // never be silently collapsed to one (unlike the full parser's last-writer).
     const exactlyOne = (predicate: string): string | undefined => {
       const distinct = [...new Set(fields.get(predicate) ?? [])];
       return distinct.length === 1 ? distinct[0] : undefined;
     };
-    if (!fields.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return undefined;
+    if (!fields.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return false;
     const scopeVersion = exactlyOne(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION);
     if (scopeVersion === undefined
       || integerLiteralToValue(scopeVersion) !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      return undefined;
+      return false;
     }
+    // The admitted field itself must be single-valued — a subject with two
+    // conflicting assertionVersion rows is rejected outright (the 🔴 this guards).
+    if (exactlyOne(ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION) === undefined) return false;
     const kaUalObject = exactlyOne(ASSERTION_SEAL_PREDICATES.KA_UAL);
     const authorObject = exactlyOne(ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS);
-    if (kaUalObject === undefined || authorObject === undefined) return undefined;
+    if (kaUalObject === undefined || authorObject === undefined) return false;
     const author = stringLiteralToValue(authorObject);
     const ualAuthor = parseDeterministicKnowledgeAssetUal(iriObjectToValue(kaUalObject)).agentAddress;
     const coordinate = parseContextGraphAssertionUri(subject);
-    if (!coordinate) return undefined;
+    if (!coordinate) return false;
     const lc = author.toLowerCase();
-    if (ualAuthor.toLowerCase() !== lc || coordinate.agentAddress.toLowerCase() !== lc) {
-      return undefined;
-    }
-    return author;
+    return ualAuthor.toLowerCase() === lc && coordinate.agentAddress.toLowerCase() === lc;
   } catch {
-    return undefined;
+    return false;
   }
 }
 
