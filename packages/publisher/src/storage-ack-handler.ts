@@ -2014,6 +2014,11 @@ export class StorageACKHandler {
         // unrelated graph.
         inlineByteLength === undefined ? swmGraphUri : inlineVmGraphUri!,
         graphUpdate.publicTripleCount,
+        // ACK verification operates on a canonical graph-scoped payload. The
+        // exact c14n form is legitimate protocol output (for example Markdown
+        // section nodes); the validator still rejects arbitrary/private uses
+        // of the reserved namespace before signing an ACK.
+        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         return this.encodeDecline(

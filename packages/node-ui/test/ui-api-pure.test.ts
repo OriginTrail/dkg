@@ -584,7 +584,11 @@ describe('UI API tests', () => {
         entities: 'all', // compatibility-only neutral value
       } as any);
       const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
-      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: true,
+      });
 
       requestLog.length = 0;
       expect(() =>
@@ -601,13 +605,18 @@ describe('UI API tests', () => {
     it('promoteAssertion shares the complete owning KA and never silently widens a legacy subset', async () => {
       await promoteAssertion('cg-1', 'asset', { subGraphName: 'sg' });
       const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
-      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: true,
+      });
 
       requestLog.length = 0;
       await promoteAssertion('cg-1', 'legacy-caller', 'all', 'sg-legacy');
       expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
         contextGraphId: 'cg-1',
         subGraphName: 'sg-legacy',
+        awaitCuratorAck: true,
       });
 
       requestLog.length = 0;
@@ -615,6 +624,7 @@ describe('UI API tests', () => {
       expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
         contextGraphId: 'cg-1',
         subGraphName: 'sg-from-fourth-arg',
+        awaitCuratorAck: true,
       });
 
       requestLog.length = 0;

@@ -620,6 +620,10 @@ export class UpdateHandler {
       parsed,
       vmGraph,
       graphUpdate.publicTripleCount,
+      // The chain-verified graph update contains the sender's already
+      // canonicalized KA. This is required for blank-node-backed structures
+      // such as Markdown sections; non-canonical reserved terms remain denied.
+      { allowCanonicalSkolemTerms: true },
     );
     if (!validation.valid) {
       this.log.warn(

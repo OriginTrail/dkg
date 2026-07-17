@@ -886,6 +886,12 @@ export const knowledgeAssetPullFrom = (
 
 export interface AtomicShareOptions {
   subGraphName?: string;
+  /**
+   * Require a private context graph's curator to apply the complete KA before
+   * the UI reports that it reached Shared Working Memory. Defaults to true for
+   * interactive UI shares; public context graphs ignore the gate.
+   */
+  awaitCuratorAck?: boolean;
 }
 
 type LegacyAtomicShareOptions = AtomicShareOptions & {
@@ -920,7 +926,16 @@ function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOption
   if (opts.skipSeal !== undefined && opts.skipSeal !== false) {
     throw new TypeError('skipSeal must be false or omitted');
   }
-  return opts.subGraphName ? { subGraphName: opts.subGraphName } : {};
+  if (opts.awaitCuratorAck !== undefined && typeof opts.awaitCuratorAck !== 'boolean') {
+    throw new TypeError('awaitCuratorAck must be a boolean when supplied');
+  }
+  return {
+    ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    // The synchronous UI flow must not turn a local-only SWM commit into a
+    // success toast. For private CGs this waits for the curator's applied ACK;
+    // for public CGs the daemon treats the flag as a no-op.
+    awaitCuratorAck: opts.awaitCuratorAck ?? true,
+  };
 }
 
 /** Atomically seal and share the complete WM Knowledge Asset to SWM. */
@@ -935,6 +950,7 @@ export const knowledgeAssetShare = (
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      awaitCuratorAck: opts.awaitCuratorAck,
     },
   );
 };
