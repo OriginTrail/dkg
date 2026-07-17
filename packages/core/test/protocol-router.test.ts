@@ -1370,6 +1370,73 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(1);
     });
 
+    it('falls back to a live limited candidate after cached direct-address dialing fails', async () => {
+      let limitedNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x67])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({
+          addresses: [
+            { multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } },
+          ],
+        }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('All multiaddr dials failed');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x67]));
+      expect(dialCalls).toBe(1);
+      expect(limitedNewStream).toBe(1);
+    });
+
+    it('prefers an open direct candidate even when a limited candidate is listed first', async () => {
+      let limitedNewStream = 0;
+      let directNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x68])) as any;
+            },
+          },
+          {
+            status: 'open',
+            newStream: async () => {
+              directNewStream += 1;
+              return makeStubStream(new Uint8Array([0x69])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({ addresses: [] }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('dialProtocol must not be called when direct is open');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x69]));
+      expect(directNewStream).toBe(1);
+      expect(limitedNewStream).toBe(0);
+      expect(dialCalls).toBe(0);
+    });
+
     // The Window D shape this fast path is meant to heal: a single
     // inbound LIMITED circuit-relay connection AND an empty
     // peerStore for the peer. Verify the fast path still fires
