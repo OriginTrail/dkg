@@ -4,7 +4,7 @@ import {
   sendSyncRequest,
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
-import { markSyncPeerResponded } from '../error-tags.js';
+import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
@@ -49,8 +49,51 @@ function rememberUnfinishedSyncResponderSession(checkpointKey: string, session: 
   unfinishedSyncResponderSessions.set(checkpointKey, session);
 }
 
-function isSyncResponderSessionSupersededError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes('sync session was superseded');
+function getPersistedSyncResponderSession(
+  checkpoint: ReturnType<SyncCheckpointStore['get']>,
+  now = Date.now(),
+): UnfinishedSyncResponderSession | undefined {
+  if (
+    !checkpoint?.responderSessionId
+    || !Number.isSafeInteger(checkpoint.responderSessionExpiresAtMs)
+    || (checkpoint.responderSessionExpiresAtMs ?? 0) <= now
+  ) return undefined;
+  return {
+    syncSessionId: checkpoint.responderSessionId,
+    expiresAt: checkpoint.responderSessionExpiresAtMs!,
+  };
+}
+
+function persistUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+  session: UnfinishedSyncResponderSession,
+  now = Date.now(),
+): void {
+  rememberUnfinishedSyncResponderSession(checkpointKey, session, now);
+  checkpointStore.setResponderSession?.(
+    checkpointKey,
+    session.syncSessionId,
+    session.expiresAt,
+    now,
+  );
+}
+
+function forgetUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+): void {
+  unfinishedSyncResponderSessions.delete(checkpointKey);
+  checkpointStore.clearResponderSession?.(checkpointKey);
+}
+
+function isSyncResponderSessionInvalidError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message.toLowerCase();
+  return message.includes('sync session') && (
+    message.includes('superseded')
+    || message.includes('expired')
+  );
 }
 
 function usesResponderSession(includeSharedMemory: boolean, phase: SyncPhase): boolean {
@@ -221,11 +264,21 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
   }
-  let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
+  const checkpoint = checkpointStore.get(checkpointKey);
+  let offset = checkpoint?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
+  // A successful caller deletes the checkpoint after verification/storage.
+  // The process-local cache can outlive that synchronous delete, so never let
+  // a cache-only token resurrect a completed snapshot at offset zero.
+  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
   const savedResponderSession = usesPageSession
-    ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+    ? (
+        (checkpoint
+          ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+          : undefined)
+        ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
+      )
     : undefined;
   if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
@@ -233,6 +286,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
+  let responsePages = 0;
   let timedOut = false;
   // Start with the throughput-oriented page size, but reduce it within the
   // existing bounded retry budget if a response cannot traverse the wire.
@@ -318,6 +372,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       });
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
+      responsePages += 1;
       phaseTelemetry.recordPage();
 
       let parsed: { quads: Quad[]; totalQuads: number };
@@ -391,15 +446,16 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
-    if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
-      // Exact-message match — only fires IN-PROCESS (same-node tests). Over the
-      // wire the responder's "superseded" text is destroyed by the router's
-      // stream.abort (it becomes a generic reset), which is why the
-      // `resumedFromOffset > 0` branch below is the real network-path fix.
+    if (usesPageSession && isSyncResponderSessionInvalidError(err)) {
+      // A responder-declared superseded/expired token can never make progress.
+      // Rotate it immediately even at offset zero instead of re-saving the
+      // terminal token until its requester-side TTL elapses. Some transports
+      // still destroy a responder's text and expose a generic reset, which is
+      // why the zero-accepted-page fallback below remains necessary.
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
     } else if (usesPageSession && responderSession && !recovery && !denied) {
-      if (resumedFromOffset > 0) {
+      if (resumedFromOffset > 0 && responsePages === 0) {
         // R1 fix (2026-07-07 sync storm). This round RESUMED a saved session at
         // offset>0 and then aborted. The responder supersedes any resume whose
         // session token it no longer holds (a concurrent flow to the same
@@ -419,16 +475,70 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // likely valid, and a supersede there just costs one wasted resume
         // attempt before this branch catches it next round. Precise
         // per-supersede handling that never loses resume is the
-        // in-band-sentinel follow-up.
+        // in-band-sentinel follow-up. This inference is valid only when the
+        // responder accepted ZERO pages in this round. Once at least one page
+        // has succeeded, the responder demonstrably accepted this exact token;
+        // a later stream/dial failure is therefore safe to retry from the last
+        // previously certified checkpoint. At worst, a concurrent supersession
+        // after that accepted page costs one extra retry: its zero-page failure
+        // reaches this branch and then rotates the session safely.
         unfinishedSyncResponderSessions.delete(checkpointKey);
         checkpointStore.delete(checkpointKey);
       } else {
-        // Fresh round (no resume) — keep the session so a retry can resume from
-        // where it got to. Recovery never persists a responder session to
-        // resume (see the timeout branch below + Codex #1173).
-        rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+        // Fresh round, or a resumed round that demonstrably delivered at least
+        // one page with this token: keep the session so a retry can resume from
+        // the last certified checkpoint. Recovery never persists a responder
+        // session to resume (see the timeout branch below + Codex #1173).
+        const refreshedResponderSession = responsePages > 0
+          ? {
+              ...responderSession,
+              // The responder touches both its token and immutable row-list
+              // TTL on every successfully served page. Mirror that sliding
+              // expiry locally so a long, progressing snapshot is not forced
+              // back to offset zero merely because it crossed ten minutes.
+              expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+            }
+          : responderSession;
+        persistUnfinishedSyncResponderSession(
+          checkpointStore,
+          checkpointKey,
+          refreshedResponderSession,
+        );
       }
     }
+    // A durable data prefix that already crossed the wire is still useful when
+    // a later page loses its stream. Return it through the same bounded,
+    // incomplete-result contract as a deadline so the caller can verify whole
+    // graph boundaries, materialize only exact KAs, and advance to the last
+    // certified offset. Throwing here discarded every accepted page and made
+    // an unstable relay replay the entire round forever. Keep this narrowly on
+    // durable DATA transport failures: denials, parse/integrity failures,
+    // responder-session invalidation, metadata, and recovery retain their
+    // existing fail-closed error semantics.
+    if (
+      !includeSharedMemory
+      && phase === 'data'
+      && !recovery
+      && responsePages > 0
+      && allQuads.length > 0
+      && isSyncBackoffWorthyError(err)
+    ) {
+      logWarn(
+        ctx,
+        `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
+      );
+      phaseTelemetry.finish('timed_out', allQuads.length);
+      return {
+        quads: allQuads,
+        bytesReceived,
+        resumedFromOffset,
+        nextOffset: offset,
+        checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
+
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
   }
@@ -442,8 +552,28 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     // the session TTL old) instead of current state, because the responder's
     // `refreshRowList` only fires on a NEW syncSessionId (Codex #1173). Drop the
     // session so the retry mints a fresh id and the responder re-reads.
-    if (timedOut && !recovery) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
-    else unfinishedSyncResponderSessions.delete(checkpointKey);
+    if (!recovery) {
+      // Durable rootless verification may safely reclassify a transport-
+      // complete response as an incomplete manifest prefix. Retain the token
+      // until that higher layer deletes the checkpoint after a truly complete
+      // verified/store commit, otherwise its safe offset cannot be resumed
+      // even without a process restart. Persistent stores additionally write
+      // the token through setResponderSession(); the process-local path keeps
+      // older/custom checkpoint stores correct within one daemon lifetime.
+      const refreshedResponderSession = responsePages > 0
+        ? {
+            ...responderSession,
+            expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+          }
+        : responderSession;
+      persistUnfinishedSyncResponderSession(
+        checkpointStore,
+        checkpointKey,
+        refreshedResponderSession,
+      );
+    } else {
+      forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
+    }
   }
 
   if (timedOut) {

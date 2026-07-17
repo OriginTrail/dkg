@@ -461,6 +461,7 @@ describe('verifySyncedData — rootless graph scope', () => {
     expect(processed.rejectedKcs).toBe(1);
     expect(processed.verifiedDataIndexes).toEqual([]);
     expect(processed.verifiedMetaIndexes).toEqual([]);
+    expect(processed.verifiedGraphScopedDataGraphs).toEqual([]);
   });
 
   it('verifies only newer graph-scoped KAs in a sinceBatchId delta', () => {

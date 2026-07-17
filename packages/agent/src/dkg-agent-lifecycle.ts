@@ -471,6 +471,7 @@ type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeer
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
+const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 
 async function runAlreadyMemberDelegationRefresh<T>(
   agent: DKGAgent,
@@ -482,6 +483,40 @@ async function runAlreadyMemberDelegationRefresh<T>(
     chains = new Map<string, Promise<void>>();
     alreadyMemberDelegationRefreshChains.set(agent, chains);
   }
+  const previous = chains.get(key) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const settled = run.then(() => undefined, () => undefined);
+  chains.set(key, settled);
+  try {
+    return await run;
+  } finally {
+    if (chains.get(key) === settled) {
+      chains.delete(key);
+    }
+  }
+}
+
+/**
+ * Serialize physical durable streams for one peer + Context Graph while still
+ * allowing callers with different budgets/callback semantics to run as
+ * distinct operations. Responder sessions are keyed by this same identity;
+ * overlapping a 120s automatic pass with a 300s recovery pass can otherwise
+ * supersede the immutable snapshot, duplicate transport work, and race the
+ * safe checkpoint. The wait happens outside global admission so queued work
+ * does not consume one of the scarce active sync slots.
+ */
+async function runSerializedDurableContextGraphSync<T>(
+  agent: DKGAgent,
+  remotePeerId: string,
+  contextGraphId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let chains = durableContextGraphSyncChains.get(agent);
+  if (!chains) {
+    chains = new Map<string, Promise<void>>();
+    durableContextGraphSyncChains.set(agent, chains);
+  }
+  const key = JSON.stringify([remotePeerId, contextGraphId]);
   const previous = chains.get(key) ?? Promise.resolve();
   const run = previous.catch(() => undefined).then(operation);
   const settled = run.then(() => undefined, () => undefined);
@@ -579,6 +614,7 @@ function durableSyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
+  totalTimeoutMs: number;
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
   hasAccessDeniedCallback: boolean;
@@ -591,6 +627,7 @@ function durableSyncSingleFlightKey(params: {
     remotePeerId: params.remotePeerId,
     contextGraphIds: params.contextGraphIds,
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    totalTimeoutMs: params.totalTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
   });
 }
@@ -708,6 +745,25 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 }
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
+
+export type DurableSyncOptions = {
+  stopOnBackoffWorthyFailure?: boolean;
+  /**
+   * Total wall-clock budget for the legacy durable lane. The agent clamps this
+   * independently so an API caller cannot create an unbounded sync operation.
+   */
+  totalTimeoutMs?: number;
+};
+
+const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
+
+function normalizeDurableSyncTotalTimeoutMs(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
+  return Math.min(
+    MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+    Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
+  );
+}
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -3903,8 +3959,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[] = [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
     onAccessDenied?: (contextGraphId: string) => void,
+    options?: DurableSyncOptions,
   ): Promise<number> {
-    const result = await this.syncFromPeerDetailed(remotePeerId, contextGraphIds, onPhase, onAccessDenied);
+    const result = await this.syncFromPeerDetailed(
+      remotePeerId,
+      contextGraphIds,
+      onPhase,
+      onAccessDenied,
+      undefined,
+      options,
+    );
     return result.insertedTriples;
   }
 
@@ -3916,7 +3980,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Phase C — optional gap-safe per-CG delta high-water mark resolver. Backed
     // by a CONTIGUOUS watermark when supplied; omitted ⇒ full scan (default).
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    options?: { stopOnBackoffWorthyFailure?: boolean },
+    options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
@@ -3966,10 +4030,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onPhase?: PhaseCallback,
     onAccessDenied?: (contextGraphId: string) => void,
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    options?: { stopOnBackoffWorthyFailure?: boolean },
+    options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const totalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
@@ -3989,16 +4054,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           onAccessDenied,
           sinceBatchIdFor,
           stopOnBackoffWorthyFailure,
+          undefined,
+          totalTimeoutMs,
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: emptyDurableSyncResult,
-      runWithAdmission: (item, work) => this.runContextGraphSyncWithBackpressure(
-        ctx,
+      runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
+        this,
+        remotePeerId,
         item.contextGraphId,
-        item.lane,
-        item.operationId,
-        work,
+        () => this.runContextGraphSyncWithBackpressure(
+          ctx,
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          work,
+        ),
       ),
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({
@@ -4018,6 +4090,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphIds: orderedContextGraphIds,
       stopOnBackoffWorthyFailure,
+      totalTimeoutMs,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
@@ -4037,6 +4110,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     stopOnBackoffWorthyFailure?: boolean,
     onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
+    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     return runDurableSync({
@@ -4046,7 +4120,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
+        remainingContextGraphs,
+        totalTimeoutMs,
+      ),
       fetchSyncPages: (
         opCtx,
         peerId,
@@ -4869,9 +4946,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  createContextGraphSyncDeadline(this: DKGAgent, remainingContextGraphs: number): number {
+  createContextGraphSyncDeadline(this: DKGAgent,
+    remainingContextGraphs: number,
+    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+  ): number {
     const divisor = Math.max(1, remainingContextGraphs);
-    const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
+    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
+    const budgetMs = Math.max(
+      SYNC_MIN_GRAPH_BUDGET_MS,
+      Math.floor(normalizedTotalTimeoutMs / divisor),
+    );
     return Date.now() + budgetMs;
   }
 

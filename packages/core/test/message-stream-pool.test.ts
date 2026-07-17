@@ -679,6 +679,81 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
+  it('reuses a live relayed connection after pooled dial sees stale addresses', async () => {
+    const reusedStream = new FakeStream();
+    let reused = 0;
+    const node = makeFakeNode({
+      onDial: async () => null,
+    });
+    node.libp2p.getConnections = () => [
+      {
+        status: 'open',
+        limits: { bytes: 256 * 1024 * 1024 },
+        remotePeer: {
+          equals: (other: unknown) =>
+            (other as { toString?: () => string }).toString?.() === PEER_A,
+          toString: () => PEER_A,
+        },
+        newStream: async (_protocols, options) => {
+          reused += 1;
+          expect(options?.runOnLimitedConnection).toBe(true);
+          return reusedStream as unknown as import('@libp2p/interface').Stream;
+        },
+      },
+    ];
+
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const pending = pool.send(PEER_A, new TextEncoder().encode('through-relay'));
+    await flush();
+    await flush();
+
+    expect(node.state.dials.get(PEER_A)).toBe(1);
+    expect(reused).toBe(1);
+    reusedStream.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('delivered')));
+    expect(new TextDecoder().decode(await pending)).toBe('delivered');
+
+    await pool.close();
+  });
+
+  it('skips closed and wrong-peer connections during post-dial reuse', async () => {
+    const wrongPeerNewStream = vi.fn();
+    const closedNewStream = vi.fn();
+    const node = makeFakeNode({
+      onDial: async () => null,
+    });
+    node.libp2p.getConnections = () => [
+      {
+        status: 'open',
+        remotePeer: { toString: () => PEER_B },
+        newStream: wrongPeerNewStream,
+      },
+      {
+        status: 'closed',
+        remotePeer: { toString: () => PEER_A },
+        newStream: closedNewStream,
+      },
+    ];
+
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    await expect(
+      pool.send(PEER_A, new TextEncoder().encode('unreachable')),
+    ).rejects.toThrow(/dial rejected/);
+    expect(wrongPeerNewStream).not.toHaveBeenCalled();
+    expect(closedNewStream).not.toHaveBeenCalled();
+
+    await pool.close();
+  });
+
   it('rejects immediately if signal already aborted before send() (Codex #560 round 2)', async () => {
     const node = makeFakeNode();
     const pool = new MessageStreamPool(node, {

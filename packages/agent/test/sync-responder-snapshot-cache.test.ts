@@ -563,6 +563,51 @@ describe('sync responder snapshot cache and budget', () => {
     expect(loads).toBe(1);
   });
 
+  it('keeps an active store-bounded fallback alive past its original rejection TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 10,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    let loads = 0;
+    const loadRows = async () => {
+      loads += 1;
+      return [0, 1].map((index) => ({
+        s: `urn:sliding-rejection:${index}`,
+        p: `${DKG_NS}label`,
+        o: `"sliding-rejection-${index}"`,
+        g: 'urn:sliding-rejection:graph',
+      }));
+    };
+
+    await expect(memo.get('long-session', loadRows)).rejects.toMatchObject({
+      name: 'SyncRowSnapshotBudgetError',
+      reason: 'snapshot_rows',
+    });
+
+    // A later store-bounded page touches the rejection just before its
+    // original expiry. The same immutable session must still take the typed
+    // fallback after that original boundary instead of becoming `null`.
+    vi.setSystemTime(9);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+
+    vi.setSystemTime(18);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    expect(loads).toBe(1);
+  });
+
   it('does not resume a superseded snapshot after a refresh exceeds the budget', async () => {
     const budget = createSyncResponderSnapshotBudget({
       maxRows: 4,

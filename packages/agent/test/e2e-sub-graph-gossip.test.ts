@@ -92,11 +92,13 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
     try { await nodeB?.stop(); } catch {}
   });
 
-  it('SWM write to sub-graph replicates via gossip', async () => {
-    await nodeA.share(CG_ID, [
-      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/name', object: '"DKG V10 Paper"', graph: '' },
-      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/author', object: '"Research Team"', graph: '' },
+  it('rootless SWM assertion in a sub-graph replicates via gossip', async () => {
+    await nodeA.assertion.create(CG_ID, 'research-draft', { subGraphName: SG_RESEARCH });
+    await nodeA.assertion.write(CG_ID, 'research-draft', [
+      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/name', object: '"DKG V10 Paper"' },
+      { subject: 'urn:sg:paper:1', predicate: 'http://schema.org/author', object: '"Research Team"' },
     ], { subGraphName: SG_RESEARCH });
+    await nodeA.assertion.promote(CG_ID, 'research-draft', { subGraphName: SG_RESEARCH });
 
     const bBindings = await pollUntil(
       () => nodeB.query(
@@ -210,27 +212,77 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
     await sleep(500);
 
     const addrA = nodes[0].multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const addrB = nodes[1].multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await nodes[1].connectTo(addrA);
     await nodes[2].connectTo(addrA);
+    // A star only guarantees that A sees both publishers/subscribers. The
+    // active SWM fan-out deliberately targets the publisher's own live
+    // subscriber set, so B cannot be expected to deliver its concurrent beta
+    // write to C until B and C have exchanged subscriptions. Fully mesh this
+    // three-node test and prove the transport precondition before asserting
+    // all-recipient replication.
+    await nodes[2].connectTo(addrB);
+    const peersDeadline = Date.now() + 5_000;
+    while (
+      Date.now() < peersDeadline
+      && nodes.some((node) => node.node.libp2p.getPeers().length < 2)
+    ) {
+      await sleep(100);
+    }
+    for (const node of nodes) {
+      expect(node.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
+    }
     await sleep(2000);
 
     const CG = 'concurrent-sg-e2e';
     await nodes[0].createContextGraph({ id: CG, name: 'Concurrent Sub-graph E2E' });
+
+    // Discovery gossip is asynchronous. Subscribing B/C before they have the
+    // CG metadata is an authorization-denied no-op and made this test depend
+    // on timing/state left by earlier cases in the file.
+    const discoveryDeadline = Date.now() + 10_000;
+    let cgKnown = [true, false, false];
+    while (Date.now() < discoveryDeadline) {
+      cgKnown = await Promise.all(nodes.map((node) => node.contextGraphExists(CG)));
+      if (cgKnown.every(Boolean)) break;
+      await sleep(250);
+    }
+    expect(cgKnown).toEqual([true, true, true]);
+
     for (const n of nodes) n.subscribeToContextGraph(CG);
-    await sleep(1500);
+    const subscriberDeadline = Date.now() + 10_000;
+    let subscriberCounts = [0, 0, 0];
+    const swmWireId = ethers.keccak256(ethers.toUtf8Bytes(CG)).toLowerCase();
+    const swmTopic = `dkg/context-graph/${swmWireId}/shared-memory`;
+    while (Date.now() < subscriberDeadline) {
+      subscriberCounts = nodes.map((node) => node.gossip.getSubscribers(swmTopic).length);
+      if (subscriberCounts.every((count) => count >= 2)) break;
+      await sleep(250);
+    }
+    expect(subscriberCounts).toEqual([2, 2, 2]);
 
     await nodes[0].createSubGraph(CG, 'alpha');
     await nodes[0].createSubGraph(CG, 'beta');
     await nodes[1].createSubGraph(CG, 'beta');
 
-    // Node A writes to alpha, Node B writes to beta
+    // Node A writes a rootless assertion to alpha, Node B writes one to beta.
+    // Direct `share()` is the read-only legacy/root-scoped API and must not be
+    // used for new V10 KAs.
     await Promise.all([
-      nodes[0].share(CG, [
-        { subject: 'urn:conc:alpha:1', predicate: 'http://schema.org/name', object: '"Alpha Data"', graph: '' },
-      ], { subGraphName: 'alpha' }),
-      nodes[1].share(CG, [
-        { subject: 'urn:conc:beta:1', predicate: 'http://schema.org/name', object: '"Beta Data"', graph: '' },
-      ], { subGraphName: 'beta' }),
+      (async () => {
+        await nodes[0].assertion.create(CG, 'alpha-draft', { subGraphName: 'alpha' });
+        await nodes[0].assertion.write(CG, 'alpha-draft', [
+          { subject: 'urn:conc:alpha:1', predicate: 'http://schema.org/name', object: '"Alpha Data"' },
+        ], { subGraphName: 'alpha' });
+        await nodes[0].assertion.promote(CG, 'alpha-draft', { subGraphName: 'alpha' });
+      })(),
+      (async () => {
+        await nodes[1].assertion.create(CG, 'beta-draft', { subGraphName: 'beta' });
+        await nodes[1].assertion.write(CG, 'beta-draft', [
+          { subject: 'urn:conc:beta:1', predicate: 'http://schema.org/name', object: '"Beta Data"' },
+        ], { subGraphName: 'beta' });
+        await nodes[1].assertion.promote(CG, 'beta-draft', { subGraphName: 'beta' });
+      })(),
     ]);
 
     // Node C should eventually see both

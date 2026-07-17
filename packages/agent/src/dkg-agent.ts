@@ -89,6 +89,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -2672,7 +2673,7 @@ export class DKGAgent extends DKGAgentBase {
             opts?.subGraphName,
           );
           const entityResult = await agent.store.query(
-            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal WHERE {
+            `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal ?contentScopeVersion WHERE {
               GRAPH <${metaGraph}> {
                 <${candidateLifecycleUri}> <${DKG_NS}state> ?state .
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -2684,6 +2685,7 @@ export class DKGAgent extends DKGAgentBase {
                 OPTIONAL { <${candidateLifecycleUri}> <${KA_ID_PRED}> ?kaNum }
                 OPTIONAL { <${candidateLifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
+                OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}contentScopeVersion> ?contentScopeVersion }
               }
             } LIMIT 1`,
           );
@@ -2697,7 +2699,7 @@ export class DKGAgent extends DKGAgentBase {
 
         const stateStr = strip(row['state']) as AssertionState;
         const layerStr = strip(row['memoryLayer']);
-        const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
+        const persistedGraphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
         // RFC ka-metadata-trim Phase 2 — the wm/swm pointers are only
         // materialised when they DIVERGE from VM (the "all three equal"
         // steady state is implicit). COALESCE a missing wm/swm to the vm
@@ -2709,6 +2711,14 @@ export class DKGAgent extends DKGAgentBase {
         const kaNumberStr = strip(row['kaNum']);
         const reservedUal = strip(row['reservedUal']);
         const publishedUal = strip(row['publishedUal']);
+        const graphUri = canonicalRootlessLifecycleGraph({
+          contextGraphId,
+          contentScopeVersion: strip(row['contentScopeVersion']),
+          reservedUal,
+          memoryLayer: layerStr,
+          subGraphName: opts?.subGraphName,
+          persistedGraph: persistedGraphUri,
+        });
 
         // Query all prov:Activity events that acted on this assertion
         // (linked via prov:used or prov:generated)

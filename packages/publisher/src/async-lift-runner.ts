@@ -96,17 +96,24 @@ export class AsyncLiftRunner {
   }
 
   private async runCycle(): Promise<boolean> {
-    let processedAny = false;
-    for (const walletId of this.config.walletIds) {
-      if (this.stopped) {
-        break;
-      }
-      const result = await this.config.publisher.processNext(walletId);
-      if (result) {
-        processedAny = true;
-      }
+    if (this.stopped) return false;
+
+    // Each configured wallet owns an independent nonce stream and is already
+    // protected by the publisher's wallet-scoped claim. Run one job per
+    // wallet concurrently so adding publisher wallets actually increases
+    // throughput. Wait for every wallet attempt to settle before propagating
+    // an error; otherwise a fast rejection could start the next cycle while a
+    // slower wallet from this cycle is still publishing.
+    const outcomes = await Promise.allSettled(
+      this.config.walletIds.map((walletId) => this.config.publisher.processNext(walletId)),
+    );
+    const failure = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    if (failure) {
+      throw failure.reason;
     }
-    return processedAny;
+    return outcomes.some((outcome) => outcome.status === 'fulfilled' && Boolean(outcome.value));
   }
 }
 
