@@ -149,14 +149,16 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     expect(await agent.resolveAssertionAuthor(slashCg, NAME, undefined, CURATOR)).toBe(MEMBER);
   });
 
-  it('does not cross-match a name that is a suffix of another', async () => {
+  it('does not cross-match a name that is a suffix of another (different authors make it observable)', async () => {
+    // MEMBER authors 'asset'; OTHER authors 'myasset' (which ends with 'asset').
+    // Anchored `/asset` suffix + exact-name check must resolve MEMBER alone. An
+    // UNANCHORED suffix match would pull OTHER in and make 'asset' ambiguous —
+    // so an accidental regression changes the observable result (throws) instead
+    // of silently passing.
     const store = new OxigraphStore();
-    await store.insert([...sealFor(MEMBER, 'triplets'), ...sealFor(MEMBER, 'justTriplets')]);
+    await store.insert([...sealFor(MEMBER, 'asset'), ...sealFor(OTHER, 'myasset')]);
     const agent = stubAgent(store, CURATOR);
-    // 'triplets' must not match '.../justTriplets' (segment-anchored suffix).
-    expect(await agent.resolveAssertionAuthor(CG, 'triplets', undefined, CURATOR)).toBe(MEMBER);
-    const kaUri = contextGraphAssertionUri(CG, MEMBER, 'triplets');
-    expect(kaUri.endsWith('/triplets')).toBe(true);
+    expect(await agent.resolveAssertionAuthor(CG, 'asset', undefined, CURATOR)).toBe(MEMBER);
   });
 });
 

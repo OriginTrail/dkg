@@ -369,6 +369,28 @@ export function parseContextGraphAssertionUri(subject: string): {
   return { scope, agentAddress, name };
 }
 
+/**
+ * Query bounds for locating the assertion-coordinate subjects of one
+ * `(contextGraphId, name[, subGraphName])` in `_meta`, derived from the same
+ * grammar as {@link contextGraphAssertionUri} so callers do not re-encode the
+ * URI layout. `prefix`/`suffix` bound a `STRSTARTS`/`STRENDS` filter (the prefix
+ * carries the full context-graph id verbatim, so a slash-containing id matches
+ * correctly); `scope` is what a matched subject's {@link parseContextGraphAssertionUri}
+ * `scope` must equal (see that function for why cg and subGraph are not split).
+ */
+export function contextGraphAssertionQueryBounds(
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): { scope: string; prefix: string; suffix: string } {
+  const scope = subGraphName ? `${contextGraphId}/${subGraphName}` : contextGraphId;
+  return {
+    scope,
+    prefix: `did:dkg:context-graph:${scope}/assertion/`,
+    suffix: `/${name}`,
+  };
+}
+
 /** Canonical identity segment used by all new per-KA memory-layer writes. */
 export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): string {
   // Non-EVM legacy identities (notably peer IDs) remain byte-for-byte stable.

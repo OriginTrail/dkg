@@ -1,6 +1,7 @@
 import {
   ASSERTION_SEAL_PREDICATES,
   assertSafeIri,
+  contextGraphAssertionQueryBounds,
   contextGraphMetaUri,
   escapeSparqlLiteral,
   knowledgeAssetAgentAddressesEqual,
@@ -51,15 +52,12 @@ export async function resolveFinalizedAssertionAuthor(
 ): Promise<string | undefined> {
   if (!validateAssertionName(name).valid) return undefined;
   const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
-  // The seal subject is the author's own assertion coordinate. Bracket the
-  // author segment with an exact prefix + `/<name>` suffix; `name` cannot
-  // contain `/` (validateAssertionName), so STRENDS cannot cross a segment. The
-  // prefix carries the full contextGraphId verbatim, so a slash-containing cg id
-  // is matched correctly server-side.
-  const prefix = subGraphName
-    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`
-    : `did:dkg:context-graph:${contextGraphId}/assertion/`;
-  const suffix = `/${name}`;
+  // Bound the query by the canonical assertion-coordinate grammar (the core
+  // helper owns the URI layout; `name` cannot contain `/`, so the suffix cannot
+  // cross a segment, and the prefix carries a slash-containing cg id verbatim).
+  const { scope: expectedScope, prefix, suffix } = contextGraphAssertionQueryBounds(
+    contextGraphId, name, subGraphName,
+  );
   const result = await store.query(
     `SELECT DISTINCT ?s WHERE {
       GRAPH <${metaGraph}> {
@@ -73,10 +71,7 @@ export async function resolveFinalizedAssertionAuthor(
     ? (result.bindings ?? []).map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
     : [];
   // Map each seal subject back to its exact-case author segment via the shared
-  // core parser, re-validating scope/name. `scope` is compared as a whole so a
-  // slash-containing contextGraphId is preserved (the parser cannot split cg
-  // from subGraph, and must not try).
-  const expectedScope = subGraphName ? `${contextGraphId}/${subGraphName}` : contextGraphId;
+  // core parser, re-validating scope/name against the query bounds.
   const candidates: string[] = [];
   for (const subject of subjects) {
     const coord = parseContextGraphAssertionUri(subject);
