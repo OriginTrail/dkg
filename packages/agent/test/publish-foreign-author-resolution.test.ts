@@ -176,6 +176,47 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBeUndefined();
   });
 
+  // A complete seal at MEMBER's coordinate but whose authorAddress/kaUal name a
+  // DIFFERENT author must NOT be trusted from the URI — the resolver reads the
+  // author from the seal identity, not the subject alone.
+  function mismatchedSeal(coordAuthor: string, sealAuthor: string, name = NAME): Quad[] {
+    return buildAssertionSealQuads({
+      assertionUri: contextGraphAssertionUri(CG, coordAuthor, name),
+      metaGraph: contextGraphMetaUri(CG),
+      merkleRoot: MERKLE,
+      authorAddress: sealAuthor,
+      authorAttestationR: new Uint8Array(32).fill(1),
+      authorAttestationVS: new Uint8Array(32).fill(2),
+      authorSchemeVersion: 1,
+      chainId: 31337n,
+      kav10Address: '0x1234567890123456789012345678901234567890',
+      reservedKaId: (BigInt(sealAuthor) << 96n) | 7n,
+      finalizedAtIso: '2026-01-01T00:00:00.000Z',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: `did:dkg:hardhat:31337/${sealAuthor}/7`,
+      assertionVersion: 1,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    }) as Quad[];
+  }
+
+  it('ignores a complete seal whose authorAddress/kaUal disagree with the subject coordinate', async () => {
+    const store = new OxigraphStore();
+    // Subject coordinate = MEMBER, but the seal names OTHER.
+    await store.insert(mismatchedSeal(MEMBER, OTHER));
+    const agent = stubAgent(store, CURATOR);
+    // Neither MEMBER (URI) nor OTHER (seal) is resolved — the subject is not a
+    // self-consistent candidate, so it is treated as not finalized.
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBeUndefined();
+  });
+
+  it('resolves the aligned seal and ignores a coordinate-mismatched one at the same name', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...mismatchedSeal(OTHER, `0x${'33'.repeat(20)}`)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(MEMBER);
+  });
+
   it('does not cross-match a name that is a suffix of another (different authors make it observable)', async () => {
     // MEMBER authors 'asset'; OTHER authors 'myasset' (which ends with 'asset').
     // Anchored `/asset` suffix + exact-name check must resolve MEMBER alone. An

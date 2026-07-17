@@ -2,7 +2,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
-  isSelfConsistentGraphScopedAssertionSeal,
+  parseGraphScopedAssertionSealCandidate,
   knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
   validateSubGraphName,
@@ -1172,17 +1172,19 @@ function selectSystemOverrideMetadataIndexes(
  * not-yet-published KA it was being stripped — leaving 13/14 quads and making
  * `parseAssertionSealQuads` throw "Partial graph-scoped assertion seal".
  *
- * Classifying it here (via the core `isSelfConsistentGraphScopedAssertionSeal` self-consistency
- * check — v2 seal whose kaUal author == authorAddress == `.../assertion/<addr>/…`
- * coordinate) keeps the control-authentication abstraction honest: the seal
- * field follows the descriptive path instead of being smuggled through
- * `isAuthenticatedSyncControl` as an "authenticated control". A peer that forges
- * a version value gains nothing the sibling quads didn't already allow — a
- * tampered version derives the wrong graph scope and fails closed at publish.
+ * Classifying it here (via the core `parseGraphScopedAssertionSealCandidate`
+ * check — the SAME canonical "publishable graph-scoped seal" definition VM
+ * publish uses: complete v2 seal whose kaUal author == authorAddress ==
+ * `.../assertion/<addr>/…` coordinate, single-valued identity fields) keeps the
+ * control-authentication abstraction honest: the seal field follows the
+ * descriptive path instead of being smuggled through `isAuthenticatedSyncControl`
+ * as an "authenticated control". A peer that forges a version value gains nothing
+ * the sibling quads didn't already allow — a tampered version derives the wrong
+ * graph scope and fails closed at publish.
  */
 function isGraphSealDescriptiveVersion(quad: Quad, metadata: IntegrityMetadataIndex): boolean {
   return quad.predicate === ASSERTION_VERSION
-    && isSelfConsistentGraphScopedAssertionSeal(metadata.metaBySubject.get(quad.subject) ?? [], quad.subject);
+    && parseGraphScopedAssertionSealCandidate(metadata.metaBySubject.get(quad.subject) ?? [], quad.subject) !== undefined;
 }
 
 function isAuthenticatedSyncControl(

@@ -1,13 +1,11 @@
 import {
   ASSERTION_SEAL_PREDICATES,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   assertSafeIri,
   contextGraphAssertionQueryBounds,
   contextGraphMetaUri,
   escapeSparqlLiteral,
   knowledgeAssetAgentAddressesEqual,
-  parseAssertionSealQuads,
-  parseContextGraphAssertionUri,
+  parseGraphScopedAssertionSealCandidate,
   validateAssertionName,
 } from '@origintrail-official/dkg-core';
 
@@ -86,21 +84,18 @@ export async function resolveFinalizedAssertionAuthor(
       else rowsBySubject.set(quad.subject, [quad]);
     }
   }
-  // Admit only subjects whose rows parse as a COMPLETE graph-scoped v2 seal —
-  // the exact check publish performs — so a resolved author is always
-  // publishable and a partial/corrupt subject is treated as not-finalized.
+  // Admit only subjects that are a complete, self-consistent graph-scoped seal —
+  // the SAME canonical definition durable-sync uses (`parseGraphScopedAssertionSealCandidate`):
+  // a partial/corrupt subject, or a complete seal whose `authorAddress`/`kaUal`
+  // disagree with its `/assertion/<addr>/…` coordinate, is NOT a publish
+  // candidate (it is treated as not-finalized rather than silently trusted).
   const candidates: string[] = [];
   for (const [subject, rows] of rowsBySubject) {
-    const coord = parseContextGraphAssertionUri(subject);
-    if (!coord || coord.scope !== expectedScope || coord.name !== name) continue;
-    let seal;
-    try {
-      seal = parseAssertionSealQuads(rows, subject);
-    } catch {
-      continue; // partial/corrupt seal — not a publish candidate
-    }
-    if (!seal || seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) continue;
-    candidates.push(coord.agentAddress);
+    const candidate = parseGraphScopedAssertionSealCandidate(rows, subject);
+    if (!candidate
+      || candidate.coordinate.scope !== expectedScope
+      || candidate.coordinate.name !== name) continue;
+    candidates.push(candidate.coordinate.agentAddress);
   }
   if (candidates.length === 0) return undefined;
   // 1. Prefer the caller's own KA (preserves today's self-publish exactly).

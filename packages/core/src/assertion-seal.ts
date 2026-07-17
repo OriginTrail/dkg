@@ -402,7 +402,7 @@ export interface AssertionSeal {
  */
 /**
  * The single low-level seal-field collector, shared by
- * {@link parseAssertionSealQuads} and {@link isSelfConsistentGraphScopedAssertionSeal}. Filters to
+ * {@link parseAssertionSealQuads} and {@link parseGraphScopedAssertionSealCandidate}. Filters to
  * `subject === assertionUri`, normalises/validates root-entity IRIs, and returns
  * every non-root-entity object grouped by predicate WITH MULTIPLICITY preserved
  * — so each caller applies its own cardinality policy (the full parser takes the
@@ -600,60 +600,66 @@ export function parseAssertionSealQuads(
   };
 }
 
+/** A validated, publishable graph-scoped author seal candidate + its coordinate. */
+export interface GraphScopedAssertionSealCandidate {
+  seal: AssertionSeal;
+  coordinate: { scope: string; agentAddress: string; name: string };
+}
+
 /**
- * GH#1778 — durable-sync admission predicate. Returns `true` when a subject's
- * `_meta` rows form a *self-consistent graph-scoped author seal rooted at the
- * subject's own author coordinate*, so the durable-sync integrity layer may
- * treat the seal's `dkg:assertionVersion` row as descriptive metadata rather
- * than an authenticated control. This is a narrow admission policy, not a
- * general author extractor — but it lives beside {@link ASSERTION_SEAL_PREDICATES}
- * and {@link parseAssertionSealQuads} so the integrity layer does not re-declare
- * seal predicate names or re-implement seal-shape parsing. Deliberately lighter
- * than `parseAssertionSealQuads` (never throws, inspects only identity fields);
- * the seal's ultimate integrity is still enforced at publish time (the Merkle
- * recompute against the author-signed root).
+ * GH#1778 — the SINGLE canonical definition of a "publishable graph-scoped
+ * author seal", shared by VM-publish author resolution and durable-sync
+ * admission so the two never drift. Returns the parsed seal + its subject
+ * coordinate iff a subject's `_meta` rows form a complete, self-consistent
+ * graph-scoped v2 seal rooted at its own author coordinate; otherwise
+ * `undefined` (never throws — safe on peer-supplied rows during selection).
  *
- * Self-consistent means: the subject carries the author-signed
- * `assertionMerkleRoot`; content scope is graph-scoped v2; there is exactly one
- * distinct `kaUal`, `authorAddress`, AND `assertionVersion` (fail-closed on any
- * conflicting/duplicate value, so a tampered version cannot be admitted); and
- * the `kaUal` author, the `authorAddress`, and the `/assertion/<addr>/…` subject
- * coordinate all agree (case-folded).
+ * A row set qualifies only when ALL of the following hold:
+ *  - the identity/version predicates (`assertionMerkleRoot`, `contentScopeVersion`,
+ *    `kaUal`, `authorAddress`, `assertionVersion`) each have exactly ONE distinct
+ *    value — fail-closed on conflicting/duplicate rows, so a peer cannot rely on
+ *    the full parser's last-writer-wins to slip a tampered value through;
+ *  - `parseAssertionSealQuads` accepts it as a COMPLETE seal (all required fields
+ *    present — the exact check publish performs), and it is graph-scoped v2;
+ *  - the subject `/assertion/<addr>/…` coordinate, the seal's `authorAddress`, and
+ *    the `kaUal` author all agree (case-folded) — a seal that names a different
+ *    author than its subject URI is rejected, not silently trusted.
  */
-export function isSelfConsistentGraphScopedAssertionSeal(
+export function parseGraphScopedAssertionSealCandidate(
   rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   subject: string,
-): boolean {
+): GraphScopedAssertionSealCandidate | undefined {
   try {
     const { fields } = collectSealFieldObjects(rows, subject);
-    // Fail closed on ambiguity: an identity predicate present with anything
-    // other than exactly one DISTINCT value is treated as absent, so a peer that
-    // supplies two conflicting kaUal/authorAddress/assertionVersion values can
-    // never be silently collapsed to one (unlike the full parser's last-writer).
-    const exactlyOne = (predicate: string): string | undefined => {
-      const distinct = [...new Set(fields.get(predicate) ?? [])];
-      return distinct.length === 1 ? distinct[0] : undefined;
-    };
-    if (!fields.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return false;
-    const scopeVersion = exactlyOne(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION);
-    if (scopeVersion === undefined
-      || integerLiteralToValue(scopeVersion) !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      return false;
+    // Fail closed on ambiguity BEFORE the last-writer-wins full parse: any
+    // identity/version predicate present with more than one distinct value is
+    // rejected outright.
+    for (const predicate of [
+      ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT,
+      ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+      ASSERTION_SEAL_PREDICATES.KA_UAL,
+      ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+      ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+    ]) {
+      if (new Set(fields.get(predicate) ?? []).size > 1) return undefined;
     }
-    // The admitted field itself must be single-valued — a subject with two
-    // conflicting assertionVersion rows is rejected outright (the 🔴 this guards).
-    if (exactlyOne(ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION) === undefined) return false;
-    const kaUalObject = exactlyOne(ASSERTION_SEAL_PREDICATES.KA_UAL);
-    const authorObject = exactlyOne(ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS);
-    if (kaUalObject === undefined || authorObject === undefined) return false;
-    const author = stringLiteralToValue(authorObject);
-    const ualAuthor = parseDeterministicKnowledgeAssetUal(iriObjectToValue(kaUalObject)).agentAddress;
+    const seal = parseAssertionSealQuads(rows, subject);
+    if (!seal
+      || seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || !seal.kaUal) {
+      return undefined;
+    }
     const coordinate = parseContextGraphAssertionUri(subject);
-    if (!coordinate) return false;
-    const lc = author.toLowerCase();
-    return ualAuthor.toLowerCase() === lc && coordinate.agentAddress.toLowerCase() === lc;
+    if (!coordinate) return undefined;
+    // Identity alignment: subject-coordinate author == seal author == kaUal author.
+    const sealAuthor = seal.authorAddress.toLowerCase();
+    const ualAuthor = parseDeterministicKnowledgeAssetUal(seal.kaUal).agentAddress.toLowerCase();
+    if (coordinate.agentAddress.toLowerCase() !== sealAuthor || ualAuthor !== sealAuthor) {
+      return undefined;
+    }
+    return { seal, coordinate };
   } catch {
-    return false;
+    return undefined;
   }
 }
 
