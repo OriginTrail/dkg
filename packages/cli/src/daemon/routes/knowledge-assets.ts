@@ -166,6 +166,22 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
  * publish path, which never down-classified them).
  */
+/**
+ * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
+ * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
+ * response shape cannot drift between the two routes. Returns `true` (and writes
+ * the response) when it handled the error, `false` otherwise.
+ */
+function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== "AMBIGUOUS_ASSERTION_AUTHOR") return false;
+  jsonResponse(res, 409, {
+    code: "AMBIGUOUS_ASSERTION_AUTHOR",
+    error: e.message ?? String(e),
+    candidates: e.candidates ?? [],
+  });
+  return true;
+}
+
 function respondAssertionError(res: RequestContext["res"], e: any): void {
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
@@ -433,6 +449,16 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
   return agentAddress ? { agentAddress } : {};
+}
+
+/**
+ * GH#1778 — the VM-publish caller hint. The token holder is the CALLER, not
+ * necessarily the KA author, so it is passed as `callerAgentAddress` (a
+ * resolution hint), never as `agentAddress` (an authoritative author selector).
+ * Centralised so both publish routes construct the same option.
+ */
+function publishCallerHintLane(agentAddress?: string): { callerAgentAddress?: string } {
+  return agentAddress ? { callerAgentAddress: agentAddress } : {};
 }
 
 function resolveBatchRejectionReporterIdentity(
@@ -1395,10 +1421,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
-          // GH#1778 — the token holder is the CALLER, not necessarily the author.
-          // Pass it as a caller hint so a curator resolves the member author from
-          // stored _meta; an explicit author selector would suppress that.
-          ...(writePreflightCallerAgentAddress ? { callerAgentAddress: writePreflightCallerAgentAddress } : {}),
+          ...publishCallerHintLane(writePreflightCallerAgentAddress),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
@@ -1436,9 +1459,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         // GH#1778 — several authors share this KA name; the caller must
         // disambiguate. Surface the candidate authors so the UI/CLI can pick.
-        if (err?.code === "AMBIGUOUS_ASSERTION_AUTHOR") {
-          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err), candidates: err.candidates ?? [] });
-        }
+        if (respondAmbiguousAssertionAuthor(res, err)) return;
         if (
           err.message?.includes("required") ||
           err.message?.includes("Invalid") ||
@@ -1471,12 +1492,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
         let pub: FinalizedPublishResult;
-        // GH#1778 — the token holder is the CALLER, not necessarily the author.
-        // Pass it as a caller hint (not an author selector) so a curator resolves
-        // the member author from stored _meta rather than looking under its own.
-        const publishStorageLane = writePreflightCallerAgentAddress
-          ? { callerAgentAddress: writePreflightCallerAgentAddress }
-          : {};
+        const publishStorageLane = publishCallerHintLane(writePreflightCallerAgentAddress);
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {
@@ -1542,9 +1558,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         // GH#1778 — several authors share this KA name; the caller must
         // disambiguate. Surface the candidate authors so the UI/CLI can pick.
-        if (e?.code === "AMBIGUOUS_ASSERTION_AUTHOR") {
-          return jsonResponse(res, 409, { code: e.code, error: msg, candidates: e.candidates ?? [] });
-        }
+        if (respondAmbiguousAssertionAuthor(res, e)) return;
         // Funded-wallet selection found no operational wallet holding the
         // gas + TRAC a publish needs. This is a user-actionable funding
         // condition (4xx), not a server/on-chain bug. Classification + body are

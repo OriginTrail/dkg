@@ -24,31 +24,63 @@ import { createOperationContext } from '../src/logger.js';
 
 describe('parseContextGraphAssertionUri (inverse of contextGraphAssertionUri)', () => {
   const ADDR = '0xA32f1cc125401B55911678847426759094055B2d';
+  // Wallet-scoped context graph IDs may contain '/' (validateContextGraphId allows it).
+  const SLASH_CG = '0x1111111111111111111111111111111111111111/project';
 
-  it('round-trips the no-subgraph coordinate', () => {
+  it('round-trips the no-subgraph coordinate (scope = contextGraphId)', () => {
     const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets');
     expect(parseContextGraphAssertionUri(uri)).toEqual({
-      contextGraphId: 'construction',
+      scope: 'construction',
       agentAddress: ADDR,
       name: 'justTriplets',
     });
   });
 
-  it('round-trips the sub-graph coordinate', () => {
+  it('round-trips the sub-graph coordinate (scope = contextGraphId/subGraphName)', () => {
     const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets', 'wing-a');
     expect(parseContextGraphAssertionUri(uri)).toEqual({
-      contextGraphId: 'construction',
-      subGraphName: 'wing-a',
+      scope: 'construction/wing-a',
       agentAddress: ADDR,
       name: 'justTriplets',
     });
   });
 
-  it('returns undefined for non-assertion or malformed subjects', () => {
+  it('preserves a slash-containing contextGraphId (GH#1778 review) — no subgraph', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset');
+    // The whole cg id (incl. its slash) is the scope; it is NOT mis-split into a subgraph.
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: SLASH_CG,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('preserves a slash-containing contextGraphId with a subGraphName', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: `${SLASH_CG}/wing-a`,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('anchors on the rightmost assertion coordinate even when the scope contains one', () => {
+    const trickyCg = `weird/assertion/${ADDR}/inner`;
+    const uri = contextGraphAssertionUri(trickyCg, ADDR, 'asset');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: trickyCg,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('returns undefined for non-assertion, malformed, or non-0x-author subjects', () => {
     expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/_meta')).toBeUndefined();
     expect(parseContextGraphAssertionUri(`did:dkg:context-graph:construction/_shared_memory/${ADDR}/7`)).toBeUndefined();
     expect(parseContextGraphAssertionUri('did:dkg:gnosis:100/0xabc/7')).toBeUndefined();
     expect(parseContextGraphAssertionUri('urn:dkg:assertion:construction:0xabc:name')).toBeUndefined();
+    // author segment is not a 0x40 address
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/assertion/notanaddr/asset')).toBeUndefined();
   });
 });
 

@@ -296,6 +296,7 @@ export {
   buildAssertionSealQuads,
   buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads,
+  graphScopedSealAuthor,
   type AssertionSealBuildArgs,
   type AssertionSeal,
 } from './assertion-seal.js';

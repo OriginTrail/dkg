@@ -332,29 +332,41 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
 }
 
 /**
- * Inverse of {@link contextGraphAssertionUri}: parse an assertion-coordinate
- * subject `did:dkg:context-graph:<cg>[/<sub>]/assertion/<addr>/<name>` back into
- * its parts, or `undefined` when the shape does not match. Centralises the URI
- * layout so consumers (VM-publish author resolution, durable-sync seal identity)
- * do not each re-derive it with bespoke slicing/regex. `contextGraphId`,
- * `subGraphName`, and `name` cannot contain `/`, so segment counting is exact.
+ * Inverse of {@link contextGraphAssertionUri}: split an assertion-coordinate
+ * subject `did:dkg:context-graph:<scope>/assertion/<addr>/<name>` into its
+ * cryptographic coordinate, or `undefined` when the shape does not match.
+ * Centralises the URI layout so consumers (VM-publish author resolution,
+ * durable-sync seal identity) do not re-derive it with bespoke slicing/regex.
+ *
+ * Anchored on the `/assertion/<addr>/<name>` suffix from the RIGHT so it is
+ * robust to slash-containing context-graph IDs (which {@link validateContextGraphId}
+ * permits, e.g. wallet-scoped `0xabc…/project`). `scope` is the raw
+ * `contextGraphId` OR `contextGraphId/<subGraphName>` and is deliberately NOT
+ * split: a context-graph ID may itself contain `/`, so it cannot be separated
+ * from an optional sub-graph name by the URI alone. Callers that know the
+ * expected context graph compare `scope` to
+ * `subGraphName ? contextGraphId + "/" + subGraphName : contextGraphId`.
+ * `subGraphName` and `name` cannot contain `/`, so the suffix is unambiguous;
+ * `agentAddress` is validated as a 0x EVM address.
  */
 export function parseContextGraphAssertionUri(subject: string): {
-  contextGraphId: string;
-  subGraphName?: string;
+  scope: string;
   agentAddress: string;
   name: string;
 } | undefined {
   const PREFIX = 'did:dkg:context-graph:';
   if (!subject.startsWith(PREFIX)) return undefined;
   const parts = subject.slice(PREFIX.length).split('/');
-  if (parts.length === 4 && parts[1] === 'assertion' && parts[0] && parts[2] && parts[3]) {
-    return { contextGraphId: parts[0], agentAddress: parts[2], name: parts[3] };
-  }
-  if (parts.length === 5 && parts[2] === 'assertion' && parts[0] && parts[1] && parts[3] && parts[4]) {
-    return { contextGraphId: parts[0], subGraphName: parts[1], agentAddress: parts[3], name: parts[4] };
-  }
-  return undefined;
+  // Minimum shape: <scope(>=1)>/assertion/<addr>/<name> → at least 4 segments.
+  if (parts.length < 4) return undefined;
+  const name = parts[parts.length - 1]!;
+  const agentAddress = parts[parts.length - 2]!;
+  const sentinel = parts[parts.length - 3]!;
+  if (sentinel !== 'assertion' || name.length === 0) return undefined;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
+  const scope = parts.slice(0, parts.length - 3).join('/');
+  if (scope.length === 0) return undefined;
+  return { scope, agentAddress, name };
 }
 
 /** Canonical identity segment used by all new per-KA memory-layer writes. */

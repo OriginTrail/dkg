@@ -84,6 +84,14 @@ describe('GH#1778 durable-sync retains the seal assertionVersion', () => {
     });
   }
 
+  it('keeps assertionVersion for a self-consistent SUB-GRAPH seal', () => {
+    const subUri = contextGraphAssertionUri(CG, AUTHOR, NAME, 'wing-a');
+    const seal = buildSeal({ assertionUri: subUri });
+    const kept = keptMeta(seal, { kind: 'fullSnapshot' }).filter((q) => q.subject === subUri);
+    expect(kept).toHaveLength(seal.length);
+    expect(() => parseAssertionSealQuads(kept, subUri)).not.toThrow();
+  });
+
   it('drops assertionVersion on a non-seal subject (no assertionMerkleRoot) — unchanged fail-closed behaviour', () => {
     const foreign: Quad = {
       subject: `did:dkg:context-graph:${CG}/assertion/${AUTHOR}/other`,

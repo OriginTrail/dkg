@@ -2,8 +2,8 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
+  graphScopedSealAuthor,
   knowledgeAssetLayerGraphUri,
-  parseContextGraphAssertionUri,
   parseDeterministicKnowledgeAssetUal,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
@@ -16,8 +16,6 @@ import { appendInPlace } from './append-in-place.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
-const ASSERTION_MERKLE_ROOT = `${DKG_NS}assertionMerkleRoot`;
-const AUTHOR_ADDRESS = `${DKG_NS}authorAddress`;
 const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
@@ -1168,43 +1166,18 @@ function selectSystemOverrideMetadataIndexes(
  * quads and making `parseAssertionSealQuads` throw "Partial graph-scoped
  * assertion seal", i.e. the KA is unpublishable.
  *
- * Admit `dkg:assertionVersion` only for a self-consistent seal rooted at its own
- * author coordinate: the subject carries a v2 seal whose single `dkg:kaUal`
- * author equals its single `dkg:authorAddress` and the `.../assertion/<addr>/…`
- * path segment. A peer that forges a version value gains nothing the sibling
- * quads didn't already allow — a tampered version derives the wrong graph scope
- * and fails closed at publish on the Merkle recheck.
+ * The self-consistency check (v2 seal whose kaUal author == authorAddress ==
+ * `.../assertion/<addr>/…` coordinate) lives in core beside the seal vocabulary
+ * (`graphScopedSealAuthor`) so this integrity layer does not re-declare seal
+ * predicates. A peer that forges a version value gains nothing the sibling quads
+ * didn't already allow — a tampered version derives the wrong graph scope and
+ * fails closed at publish on the Merkle recheck.
  */
 function isSelfConsistentGraphSeal(
   subject: string,
   metadata: IntegrityMetadataIndex,
 ): boolean {
-  const rows = metadata.metaBySubject.get(subject) ?? [];
-  if (!rows.some((row) => row.predicate === ASSERTION_MERKLE_ROOT)) return false;
-  try {
-    const scopeVersions = distinctObjects(rows, CONTENT_SCOPE_VERSION)
-      .map((value) => parseInteger(value, 'contentScopeVersion'));
-    if (scopeVersions.length !== 1
-      || scopeVersions[0] !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
-      return false;
-    }
-    const kaUals = [...new Set(distinctObjects(rows, KA_UAL)
-      .map((value) => stripLiteral(value).replace(/^<(.*)>$/, '$1')))];
-    if (kaUals.length !== 1) return false;
-    const authors = [...new Set(distinctObjects(rows, AUTHOR_ADDRESS).map(stripLiteral))];
-    if (authors.length !== 1) return false;
-    const author = authors[0]!.toLowerCase();
-    if (parseDeterministicKnowledgeAssetUal(kaUals[0]!).agentAddress.toLowerCase() !== author) {
-      return false;
-    }
-    // The seal must sit at its own author's assertion coordinate.
-    const coordinate = parseContextGraphAssertionUri(subject);
-    return coordinate !== undefined
-      && /^0x[0-9a-fA-F]{40}$/.test(coordinate.agentAddress)
-      && coordinate.agentAddress.toLowerCase() === author;
-  } catch {
-    return false;
-  }
+  return graphScopedSealAuthor(metadata.metaBySubject.get(subject) ?? [], subject) !== undefined;
 }
 
 function isAuthenticatedSyncControl(

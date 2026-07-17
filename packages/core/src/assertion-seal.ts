@@ -25,7 +25,9 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LEGACY_ROOT_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
+  parseDeterministicKnowledgeAssetUal,
 } from './ka-content-scope.js';
+import { parseContextGraphAssertionUri } from './constants.js';
 
 const ONT = 'http://dkg.io/ontology/';
 
@@ -573,6 +575,59 @@ export function parseAssertionSealQuads(
     ...(privateTripleCount !== undefined ? { privateTripleCount } : {}),
     rootEntities,
   };
+}
+
+/**
+ * GH#1778 — durable-sync admission helper. Given a subject's `_meta` rows,
+ * return the seal author address when they form a *self-consistent graph-scoped
+ * author seal rooted at the subject's own author coordinate*, else `undefined`.
+ *
+ * Lives beside {@link ASSERTION_SEAL_PREDICATES} and {@link parseAssertionSealQuads}
+ * so the durable-sync integrity layer does not re-declare seal predicate names
+ * or re-implement seal-shape parsing. Deliberately lighter than
+ * `parseAssertionSealQuads` (it never throws and only inspects the identity
+ * fields) because it runs on peer-supplied rows during selection: it decides
+ * whether the seal's `dkg:assertionVersion` control predicate may be admitted.
+ * The seal's ultimate integrity is still enforced at publish time (the Merkle
+ * recompute against the author-signed root).
+ *
+ * Self-consistent means: the subject carries the author-signed
+ * `assertionMerkleRoot`; content scope is graph-scoped v2; there is exactly one
+ * `kaUal` and one `authorAddress`; and the `kaUal` author, the `authorAddress`,
+ * and the `/assertion/<addr>/…` subject coordinate all agree (case-folded).
+ */
+export function graphScopedSealAuthor(
+  rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
+  subject: string,
+): string | undefined {
+  const own = rows.filter((q) => q.subject === subject);
+  const objectsOf = (predicate: string): string[] =>
+    [...new Set(own.filter((q) => q.predicate === predicate).map((q) => q.object))];
+
+  if (!own.some((q) => q.predicate === ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) {
+    return undefined;
+  }
+  try {
+    const scopeVersions = objectsOf(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION);
+    if (scopeVersions.length !== 1
+      || integerLiteralToValue(scopeVersions[0]!) !== BigInt(GRAPH_KA_CONTENT_SCOPE_VERSION)) {
+      return undefined;
+    }
+    const kaUals = objectsOf(ASSERTION_SEAL_PREDICATES.KA_UAL);
+    const authors = objectsOf(ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS);
+    if (kaUals.length !== 1 || authors.length !== 1) return undefined;
+    const author = stringLiteralToValue(authors[0]!);
+    const ualAuthor = parseDeterministicKnowledgeAssetUal(iriObjectToValue(kaUals[0]!)).agentAddress;
+    const coordinate = parseContextGraphAssertionUri(subject);
+    if (!coordinate) return undefined;
+    const lc = author.toLowerCase();
+    if (ualAuthor.toLowerCase() !== lc || coordinate.agentAddress.toLowerCase() !== lc) {
+      return undefined;
+    }
+    return author;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── literal helpers ─────────────────────────────────────────────

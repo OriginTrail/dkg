@@ -34,10 +34,10 @@ const PUBLIC_QUAD: Quad = {
 };
 const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
 
-function sealFor(author: string, name = NAME): Quad[] {
+function sealAt(cg: string, author: string, name = NAME, subGraphName?: string): Quad[] {
   return buildAssertionSealQuads({
-    assertionUri: contextGraphAssertionUri(CG, author, name),
-    metaGraph: contextGraphMetaUri(CG),
+    assertionUri: contextGraphAssertionUri(cg, author, name, subGraphName),
+    metaGraph: contextGraphMetaUri(cg),
     merkleRoot: MERKLE,
     authorAddress: author,
     authorAttestationR: new Uint8Array(32).fill(1),
@@ -53,6 +53,10 @@ function sealFor(author: string, name = NAME): Quad[] {
     publicTripleCount: 1,
     privateTripleCount: 0,
   }) as Quad[];
+}
+
+function sealFor(author: string, name = NAME): Quad[] {
+  return sealAt(CG, author, name);
 }
 
 function makeLog() {
@@ -123,6 +127,28 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     expect(await agent.resolveAssertionAuthor(CG, 'no-such-name', undefined, CURATOR)).toBeUndefined();
   });
 
+  it('resolves the subgraph member and does NOT fall back to a same-named root seal', async () => {
+    // Member seal in sub-graph 'wing-a' AND a same-named root seal by a different
+    // author as a guard: the requested sub-graph scope must resolve the wing-a
+    // member, never the root author.
+    const store = new OxigraphStore();
+    await store.insert([...sealAt(CG, MEMBER, NAME, 'wing-a'), ...sealAt(CG, OTHER, NAME)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, 'wing-a', CURATOR)).toBe(MEMBER);
+    // ...and the root scope resolves the root author, not the wing-a member.
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(OTHER);
+  });
+
+  it('resolves a foreign author for a slash-containing (wallet-scoped) context graph id', async () => {
+    // GH#1778 review: validateContextGraphId permits '/'. The from-the-right
+    // parser must not mis-split the cg id into a subgraph.
+    const slashCg = `0x${'11'.repeat(20)}/project`;
+    const store = new OxigraphStore();
+    await store.insert(sealAt(slashCg, MEMBER, NAME));
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(slashCg, NAME, undefined, CURATOR)).toBe(MEMBER);
+  });
+
   it('does not cross-match a name that is a suffix of another', async () => {
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER, 'triplets'), ...sealFor(MEMBER, 'justTriplets')]);
@@ -160,6 +186,15 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER })).toBe(OTHER);
     // A caller hint (no explicit selector) resolves the sole member author.
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
+  });
+
+  it('rejects supplying both agentAddress (selector) and callerAgentAddress (hint)', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    await expect(
+      agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER, callerAgentAddress: CURATOR }),
+    ).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
   });
 });
 
