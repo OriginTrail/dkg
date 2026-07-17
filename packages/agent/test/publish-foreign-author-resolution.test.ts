@@ -4,6 +4,7 @@ import {
   contextGraphAssertionUri,
   contextGraphSharedMemoryUri,
   contextGraphMetaUri,
+  ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -147,6 +148,32 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     await store.insert(sealAt(slashCg, MEMBER, NAME));
     const agent = stubAgent(store, CURATOR);
     expect(await agent.resolveAssertionAuthor(slashCg, NAME, undefined, CURATOR)).toBe(MEMBER);
+  });
+
+  // A subject with ONLY dkg:assertionMerkleRoot (a stale/partial/peer-supplied
+  // fragment) must NOT count as a publishable author candidate.
+  function partialSealOnly(author: string, name = NAME): Quad {
+    return {
+      subject: contextGraphAssertionUri(CG, author, name),
+      predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT,
+      object: `"${'ab'.repeat(32)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`,
+      graph: contextGraphMetaUri(CG),
+    };
+  }
+
+  it('does NOT count a partial (merkleRoot-only) subject — resolves the sole complete seal', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), partialSealOnly(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    // The partial OTHER subject must not create false ambiguity.
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(MEMBER);
+  });
+
+  it('treats a partial-only name as not finalized (returns undefined, no unusable author)', async () => {
+    const store = new OxigraphStore();
+    await store.insert([partialSealOnly(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBeUndefined();
   });
 
   it('does not cross-match a name that is a suffix of another (different authors make it observable)', async () => {

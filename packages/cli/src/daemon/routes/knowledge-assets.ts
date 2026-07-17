@@ -158,15 +158,6 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
 ] as const;
 
 /**
- * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
- * HTTP status mapping the legacy `/api/assertion/*` routes use, so callers see
- * 400 for their own mistakes (missing assertion, unsafe/reserved IRI) and 409
- * for the "_meta says completed but the data graph is empty" case — instead of
- * a blanket 500. NOT applied to vm/publish: on-chain/storage failures there can
- * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
- * publish path, which never down-classified them).
- */
-/**
  * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
  * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
  * response shape cannot drift between the two routes. Returns `true` (and writes
@@ -182,6 +173,15 @@ function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): bo
   return true;
 }
 
+/**
+ * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
+ * HTTP status mapping the legacy `/api/assertion/*` routes use, so callers see
+ * 400 for their own mistakes (missing assertion, unsafe/reserved IRI) and 409
+ * for the "_meta says completed but the data graph is empty" case — instead of
+ * a blanket 500. NOT applied to vm/publish: on-chain/storage failures there can
+ * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
+ * publish path, which never down-classified them).
+ */
 function respondAssertionError(res: RequestContext["res"], e: any): void {
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
