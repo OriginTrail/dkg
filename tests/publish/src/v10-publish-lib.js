@@ -68,7 +68,36 @@ const CG_SUBSCRIBE_TIMEOUT_MS = Number(process.env.V10_CG_SUBSCRIBE_TIMEOUT_MS |
 // query / VM GET / Query Remote paths are still exercised (V8 parity).
 const READ_RETRIES = Number(process.env.V10_READ_RETRIES || 4);
 const READ_RETRY_MS = Number(process.env.V10_READ_RETRY_MS || 3000);
+const BATCH_DELAY_MS = Number(process.env.TEST_BATCH_DELAY_MS || 0);
+const STORE_BUSY_COOLDOWN_MS = Number(process.env.V10_STORE_BUSY_COOLDOWN_MS || 15000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export function isStoreSchedulerBusy(error) {
+  const code = error?.code || error?.body?.code;
+  const message = [error?.message, error?.serverError, error?.body?.error]
+    .filter((value) => typeof value === 'string')
+    .join(' | ');
+  return code === 'STORE_SCHEDULER_BUSY'
+    || /Store scheduler (?:queue wait timeout|queue full)/i.test(message);
+}
+
+// Give a busy node's store scheduler breathing room between independent KAs.
+// This deliberately does not retry a failed publish: the one-shot lifecycle may
+// already have created local state or reached the chain before returning an
+// error, so replaying it could create duplicate assets.
+export async function waitBetweenPublishBatches(
+  completedIndex,
+  totalCount,
+  delayMs = BATCH_DELAY_MS,
+  sleepFn = sleep,
+) {
+  if (!Number.isFinite(delayMs) || delayMs <= 0 || completedIndex >= totalCount - 1) {
+    return false;
+  }
+  console.log(`Waiting ${delayMs}ms before the next KA publish…`);
+  await sleepFn(delayMs);
+  return true;
+}
 
 function withTimeout(promise, label, nodeName, timeoutMs = OP_TIMEOUT_MS) {
   let timer;
@@ -480,6 +509,7 @@ export function defineChainPublishSuite(config) {
 
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
           const pubStart = Date.now();
+          let publishHitStoreBusy = false;
           try {
             const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name, PUBLISH_TIMEOUT_MS);
             assert.ok(result, 'Publish returned no result');
@@ -520,6 +550,7 @@ export function defineChainPublishSuite(config) {
             publishSuccess++;
             publishDurations.push(Date.now() - pubStart);
           } catch (error) {
+            publishHitStoreBusy = isStoreSchedulerBusy(error);
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             console.log(`❌ Publish failed | No UAL`);
             failedAssets.push(`KA #${i + 1} (Publish failed)`);
@@ -622,6 +653,12 @@ export function defineChainPublishSuite(config) {
             failedAssets.push(`KA #${i + 1} (Query Remote (sync) failed)`);
             queryRemoteFail++;
           }
+
+          await waitBetweenPublishBatches(
+            i,
+            KA_COUNT,
+            Math.max(BATCH_DELAY_MS, publishHitStoreBusy ? STORE_BUSY_COOLDOWN_MS : 0),
+          );
         }
 
         // null (not 0) when nothing succeeded — "0s avg" would read as instant
