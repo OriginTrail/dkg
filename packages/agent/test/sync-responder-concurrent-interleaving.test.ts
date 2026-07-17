@@ -402,6 +402,46 @@ describe('sync responder pagination interleaving', () => {
     boundedQuery.assertObserved();
   });
 
+  it('preserves durable cursors beyond one million rows instead of replaying the clamp boundary', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'rootless-cursor-over-one-million';
+    const manifest = graphScopedVmMeta({
+      cgId,
+      ual: 'did:dkg:base:8453/0x00000000000000000000000000000000000000ae/11',
+      publicTripleCount: 1_000_010,
+      status: 'confirmed',
+    });
+    await store.insert([...manifest.quads, q(manifest.graph, 0)]);
+
+    const requestedDeepOffset = 1_000_005;
+    const boundedQuery = watchBoundedPageQuery(
+      store,
+      manifest.graph,
+      [0, requestedDeepOffset],
+      1,
+    );
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: 'rootless-cursor-over-one-million-session',
+    };
+
+    expect(linesFromNquads(await cap.invoke({ ...base, offset: 0 }))).toHaveLength(1);
+    expect(linesFromNquads(await cap.invoke({ ...base, offset: requestedDeepOffset }))).toHaveLength(0);
+    boundedQuery.assertObserved();
+  });
+
   it('falls back to store-bounded paging for an oversized durable-meta snapshot', async () => {
     const store = new OxigraphStore();
     const cgId = 'oversized-durable-meta';
