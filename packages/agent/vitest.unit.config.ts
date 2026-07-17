@@ -60,6 +60,8 @@ export default defineConfig({
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",
+      "test/rootless-durable-skips-legacy-partition.test.ts",
+      "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
