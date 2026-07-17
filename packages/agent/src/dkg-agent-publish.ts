@@ -20,6 +20,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  parseContextGraphAssertionUri,
   contextGraphCatalogUri,
   contextGraphLayerUri,
   deriveCuratorDidFromCgId,
@@ -4151,15 +4152,18 @@ export class PublishMethods extends DKGAgentBase {
     const subjects = result.type === 'bindings'
       ? result.bindings.map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
       : [];
-    // Map each seal subject back to its exact-case author segment, and reject
-    // any subject whose author segment is not a well-formed 0x address (the
-    // FILTER prefix/suffix already fence the shape, but keep it defensive so a
-    // malformed `_meta` row cannot become a publish author).
+    // Map each seal subject back to its exact-case author segment via the shared
+    // core parser, re-validating cg/subGraph/name (the FILTER already fences the
+    // shape; this keeps a malformed `_meta` row from becoming a publish author).
     const candidates: string[] = [];
     for (const subject of subjects) {
-      if (!subject.startsWith(prefix) || !subject.endsWith(suffix)) continue;
-      const author = subject.slice(prefix.length, subject.length - suffix.length);
-      if (/^0x[0-9a-fA-F]{40}$/.test(author)) candidates.push(author);
+      const coord = parseContextGraphAssertionUri(subject);
+      if (!coord
+        || coord.contextGraphId !== contextGraphId
+        || coord.subGraphName !== subGraphName
+        || coord.name !== name
+        || !/^0x[0-9a-fA-F]{40}$/.test(coord.agentAddress)) continue;
+      candidates.push(coord.agentAddress);
     }
     if (candidates.length === 0) return undefined;
     // 1. Prefer the caller's own KA (preserves today's self-publish exactly).
@@ -4181,6 +4185,32 @@ export class PublishMethods extends DKGAgentBase {
       ),
       { code: 'AMBIGUOUS_ASSERTION_AUTHOR', candidates: distinct },
     );
+  }
+
+  /**
+   * GH#1778 — pick the author identity for a VM publish, shared by both the
+   * sync and async publish entry points so their policy cannot drift.
+   *
+   * `opts.agentAddress` is an AUTHORITATIVE author selector for direct
+   * programmatic callers: when set, exactly that author is published and it is
+   * NEVER silently substituted by a different same-named author (a mismatch
+   * simply falls through to the existing "is not finalized"). The daemon
+   * publish routes instead pass `opts.callerAgentAddress` (the token/caller
+   * identity) and leave the author to be resolved from stored `_meta` — that is
+   * the curator-publishes-a-member-KA flow. With neither, the effective node
+   * identity (default agent → peer) is the caller hint, and resolution prefers
+   * the node's OWN same-named KA before any resident foreign seal.
+   */
+  async resolveFinalizedAssertionPublishAuthor(this: DKGAgent,
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string; agentAddress?: string; callerAgentAddress?: string },
+  ): Promise<string> {
+    if (opts?.agentAddress) return opts.agentAddress;
+    const callerHint = opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    return (await this.resolveAssertionAuthor(
+      contextGraphId, name, opts?.subGraphName, callerHint,
+    )) ?? callerHint;
   }
 
   /**
@@ -4206,6 +4236,8 @@ export class PublishMethods extends DKGAgentBase {
     opts?: {
       subGraphName?: string;
       agentAddress?: string;
+      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
+      callerAgentAddress?: string;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
@@ -4215,16 +4247,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    // GH#1778 — resolve the KA author from stored `_meta` (a curator publishes
-    // a member-authored share; the caller's token address is not the author).
-    // The caller hint is the EFFECTIVE publish identity (token → default agent →
-    // peer), so a node that also self-authored this name still prefers its OWN
-    // KA on the tokenless path; falls back to that same identity when nothing is
-    // finalized, preserving the existing "is not finalized"/self-publish behaviour.
-    const callerAgentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    const agentAddress = (await this.resolveAssertionAuthor(
-      contextGraphId, name, opts?.subGraphName, callerAgentAddress,
-    )) ?? callerAgentAddress;
+    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -5429,6 +5452,8 @@ export class PublishMethods extends DKGAgentBase {
     opts?: {
       subGraphName?: string;
       agentAddress?: string;
+      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
+      callerAgentAddress?: string;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherNodeIdentityIdOverride?: bigint;
@@ -5437,16 +5462,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    // GH#1778 — resolve the KA author from stored `_meta` (a curator publishes
-    // a member-authored share; the caller's token address is not the author).
-    // The caller hint is the EFFECTIVE publish identity (token → default agent →
-    // peer), so a node that also self-authored this name still prefers its OWN
-    // KA on the tokenless path; falls back to that same identity when nothing is
-    // finalized, preserving the existing "is not finalized"/self-publish behaviour.
-    const callerAgentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    const agentAddress = (await this.resolveAssertionAuthor(
-      contextGraphId, name, opts?.subGraphName, callerAgentAddress,
-    )) ?? callerAgentAddress;
+    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,

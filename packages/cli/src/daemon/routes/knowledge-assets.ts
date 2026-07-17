@@ -1395,7 +1395,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
-          ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+          // GH#1778 — the token holder is the CALLER, not necessarily the author.
+          // Pass it as a caller hint so a curator resolves the member author from
+          // stored _meta; an explicit author selector would suppress that.
+          ...(writePreflightCallerAgentAddress ? { callerAgentAddress: writePreflightCallerAgentAddress } : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
@@ -1468,7 +1471,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
         let pub: FinalizedPublishResult;
-        const publishStorageLane = scopedTokenStorageLane(writePreflightCallerAgentAddress);
+        // GH#1778 — the token holder is the CALLER, not necessarily the author.
+        // Pass it as a caller hint (not an author selector) so a curator resolves
+        // the member author from stored _meta rather than looking under its own.
+        const publishStorageLane = writePreflightCallerAgentAddress
+          ? { callerAgentAddress: writePreflightCallerAgentAddress }
+          : {};
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {

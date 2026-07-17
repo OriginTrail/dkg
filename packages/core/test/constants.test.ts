@@ -7,6 +7,8 @@ import {
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
+  contextGraphAssertionUri,
+  parseContextGraphAssertionUri,
   DHT_PROTOCOL,
   validateContextGraphId,
   validateNewContextGraphId,
@@ -19,6 +21,36 @@ import {
   wireTopicForNetwork,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
+
+describe('parseContextGraphAssertionUri (inverse of contextGraphAssertionUri)', () => {
+  const ADDR = '0xA32f1cc125401B55911678847426759094055B2d';
+
+  it('round-trips the no-subgraph coordinate', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      contextGraphId: 'construction',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('round-trips the sub-graph coordinate', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      contextGraphId: 'construction',
+      subGraphName: 'wing-a',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('returns undefined for non-assertion or malformed subjects', () => {
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/_meta')).toBeUndefined();
+    expect(parseContextGraphAssertionUri(`did:dkg:context-graph:construction/_shared_memory/${ADDR}/7`)).toBeUndefined();
+    expect(parseContextGraphAssertionUri('did:dkg:gnosis:100/0xabc/7')).toBeUndefined();
+    expect(parseContextGraphAssertionUri('urn:dkg:assertion:construction:0xabc:name')).toBeUndefined();
+  });
+});
 
 describe('context graph topic helpers (V10)', () => {
   it('contextGraphFinalizationTopic matches deprecated contextGraphPublishTopic', () => {

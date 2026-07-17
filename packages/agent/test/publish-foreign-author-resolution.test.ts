@@ -134,6 +134,57 @@ describe('GH#1778 resolveAssertionAuthor', () => {
   });
 });
 
+describe('GH#1778 an explicit agentAddress is an authoritative author selector', () => {
+  it('does NOT substitute a different sole resident author when an explicit agentAddress is requested', async () => {
+    // Only MEMBER has a seal for NAME. A direct caller explicitly requesting
+    // OTHER (an author selector, e.g. a programmatic caller) must FAIL as
+    // not-finalized — never silently publish MEMBER's same-named KA.
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    agent.chain = {};
+    agent.publisher = {
+      hasSwmShareComplete: async () => true,
+      clearSwmShareComplete: async () => {},
+      clearRemainingSharedMemory: async () => {},
+    };
+    await expect(agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: OTHER }))
+      .rejects.toThrow(/is not finalized/);
+  });
+
+  it('resolveFinalizedAssertionPublishAuthor returns an explicit agentAddress verbatim', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    // Explicit selector wins over resolution, even when MEMBER is the sole seal.
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER })).toBe(OTHER);
+    // A caller hint (no explicit selector) resolves the sole member author.
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
+  });
+});
+
+describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
+  it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR); // curator is NOT the author
+    let historyAgent: string | undefined;
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async (_cg: string, _n: string, o: { agentAddress: string }) => {
+          historyAgent = o.agentAddress;
+          return null; // force the early exit after author resolution
+        },
+      },
+      configurable: true,
+    });
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
+      .rejects.toThrow(/is not finalized or does not exist/);
+    // The async intent path resolved the MEMBER author before touching history.
+    expect(historyAgent).toBe(MEMBER);
+  });
+});
+
 describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author', () => {
   it('a curator publishing a member-authored KA (no agentAddress) reaches the member seal', async () => {
     const store = new OxigraphStore();

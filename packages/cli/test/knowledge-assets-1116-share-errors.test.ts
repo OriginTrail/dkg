@@ -445,6 +445,39 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls).toBe(0);
   });
 
+  // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
+  // author list so UI/CLI consumers can pick an author.
+  const AMBIGUOUS_AUTHORS = [
+    '0xA32f1cc125401B55911678847426759094055B2d',
+    '0x2222222222222222222222222222222222222222',
+  ];
+  function throwAmbiguousAuthor(): never {
+    throw Object.assign(
+      new Error('2 authors have a knowledge asset with this name'),
+      { code: 'AMBIGUOUS_ASSERTION_AUTHOR', candidates: AMBIGUOUS_AUTHORS },
+    );
+  }
+
+  it('vm/publish-async: AMBIGUOUS_ASSERTION_AUTHOR → 409 { code, candidates }', async () => {
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => throwAmbiguousAuthor(),
+    });
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('AMBIGUOUS_ASSERTION_AUTHOR');
+    expect(res.body.candidates).toEqual(AMBIGUOUS_AUTHORS);
+  });
+
+  it('vm/publish: AMBIGUOUS_ASSERTION_AUTHOR → 409 { code, candidates }', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => throwAmbiguousAuthor(),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('AMBIGUOUS_ASSERTION_AUTHOR');
+    expect(res.body.candidates).toEqual(AMBIGUOUS_AUTHORS);
+  });
+
   it('vm/publish-async rejects before persisting when no runtime can claim jobs', async () => {
     let resolved = 0;
     let enqueued = 0;
@@ -796,7 +829,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         return {
           contextGraphId: CG_ID,
           name: ASSERTION_NAME,
-          agentAddress: opts.agentAddress,
+          // GH#1778 — the route forwards the token as a CALLER hint; the author
+          // is resolved from that (here the caller IS the author).
+          agentAddress: opts.callerAgentAddress,
           shareOperationId: 'share-token-agent',
           roots: ['urn:test:token-agent-root'],
           seal: {
@@ -830,7 +865,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(202);
     expect(res.body.jobId).toBe('job-token-agent');
     expect(seenResolveOptions).toHaveLength(1);
-    expect(seenResolveOptions[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+    expect(seenResolveOptions[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
   });
 
@@ -1478,7 +1513,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(createCalls).toHaveLength(0);
     });
 
-    it('passes the token-scoped storage lane into finalized publish calls', async () => {
+    it('passes the token caller hint into finalized publish calls', async () => {
       const token = 'agent-token-a';
       const tokenAgentAddress = `0x${'ab'.repeat(20)}`;
       const seenOpts: unknown[] = [];
@@ -1506,7 +1541,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(200);
       expect(res.body.storageAckPeerIds).toEqual(['12D3KooWStorageCore3']);
       expect(seenOpts).toHaveLength(1);
-      expect(seenOpts[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+      expect(seenOpts[0]).toMatchObject({ callerAgentAddress: tokenAgentAddress });
     });
 
     it('standalone vm/publish accepts uint72 publisher identity overrides into publish options', async () => {

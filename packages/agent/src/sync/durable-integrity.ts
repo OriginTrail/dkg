@@ -3,6 +3,7 @@ import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  parseContextGraphAssertionUri,
   parseDeterministicKnowledgeAssetUal,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
@@ -1196,8 +1197,11 @@ function isSelfConsistentGraphSeal(
     if (parseDeterministicKnowledgeAssetUal(kaUals[0]!).agentAddress.toLowerCase() !== author) {
       return false;
     }
-    const coordinate = /\/assertion\/(0x[0-9a-fA-F]{40})\/[^/]+$/.exec(subject);
-    return coordinate !== null && coordinate[1]!.toLowerCase() === author;
+    // The seal must sit at its own author's assertion coordinate.
+    const coordinate = parseContextGraphAssertionUri(subject);
+    return coordinate !== undefined
+      && /^0x[0-9a-fA-F]{40}$/.test(coordinate.agentAddress)
+      && coordinate.agentAddress.toLowerCase() === author;
   } catch {
     return false;
   }

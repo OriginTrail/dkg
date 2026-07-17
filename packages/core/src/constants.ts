@@ -331,6 +331,32 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
+/**
+ * Inverse of {@link contextGraphAssertionUri}: parse an assertion-coordinate
+ * subject `did:dkg:context-graph:<cg>[/<sub>]/assertion/<addr>/<name>` back into
+ * its parts, or `undefined` when the shape does not match. Centralises the URI
+ * layout so consumers (VM-publish author resolution, durable-sync seal identity)
+ * do not each re-derive it with bespoke slicing/regex. `contextGraphId`,
+ * `subGraphName`, and `name` cannot contain `/`, so segment counting is exact.
+ */
+export function parseContextGraphAssertionUri(subject: string): {
+  contextGraphId: string;
+  subGraphName?: string;
+  agentAddress: string;
+  name: string;
+} | undefined {
+  const PREFIX = 'did:dkg:context-graph:';
+  if (!subject.startsWith(PREFIX)) return undefined;
+  const parts = subject.slice(PREFIX.length).split('/');
+  if (parts.length === 4 && parts[1] === 'assertion' && parts[0] && parts[2] && parts[3]) {
+    return { contextGraphId: parts[0], agentAddress: parts[2], name: parts[3] };
+  }
+  if (parts.length === 5 && parts[2] === 'assertion' && parts[0] && parts[1] && parts[3] && parts[4]) {
+    return { contextGraphId: parts[0], subGraphName: parts[1], agentAddress: parts[3], name: parts[4] };
+  }
+  return undefined;
+}
+
 /** Canonical identity segment used by all new per-KA memory-layer writes. */
 export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): string {
   // Non-EVM legacy identities (notably peer IDs) remain byte-for-byte stable.
