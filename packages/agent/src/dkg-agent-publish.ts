@@ -46,6 +46,8 @@ import {
   parseAssertionSealQuads, type AssertionSeal,
   ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  validateAssertionName,
+  knowledgeAssetAgentAddressesEqual,
   LegacyKnowledgeAssetReadOnlyError,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -4098,6 +4100,90 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * GH#1778 — resolve the AUTHOR of a named assertion for VM publish.
+   *
+   * A curator publishes a member-shared rootless KA it did NOT author: the
+   * seal lives in the curator's `_meta` under the member's author coordinate
+   * (`.../assertion/<member>/<name>`), delivered by durable `_meta` sync. The
+   * publish routes, however, only carry the CALLER's token address (a
+   * body-supplied author is deliberately 400-rejected — "the seal already
+   * encodes the author"). So the author must be recovered from stored state,
+   * never from the caller's claim.
+   *
+   * Enumerates the sealed assertion subjects for this (cg, name, subGraph) in
+   * the local `_meta` graph and applies the resolution rule agreed for #1778:
+   *   1. if the CALLER authored a KA of this name → return the caller's own
+   *      (stored-case) address — byte-identical to today's self-publish;
+   *   2. else if exactly one other author has it → return that author;
+   *   3. else if several other authors have it → throw
+   *      `AMBIGUOUS_ASSERTION_AUTHOR` with the candidate list;
+   *   4. else (none finalized) → return `undefined`, so the caller falls back
+   *      to its own address and the existing "is not finalized" error stands.
+   *
+   * The returned address is the EXACT case stored on the seal subject, so the
+   * downstream `contextGraphAssertionUri(...)` re-read hits the same subject
+   * (`contextGraphAssertionUri` does not canonicalise address case).
+   */
+  async resolveAssertionAuthor(this: DKGAgent,
+    contextGraphId: string,
+    name: string,
+    subGraphName?: string,
+    callerAgentAddress?: string,
+  ): Promise<string | undefined> {
+    if (!validateAssertionName(name).valid) return undefined;
+    const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+    // The seal subject is the author's own assertion coordinate. Bracket the
+    // author segment with an exact prefix + `/<name>` suffix; `name` cannot
+    // contain `/` (validateAssertionName), so STRENDS cannot cross a segment.
+    const prefix = subGraphName
+      ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`
+      : `did:dkg:context-graph:${contextGraphId}/assertion/`;
+    const suffix = `/${name}`;
+    const result = await this.store.query(
+      `SELECT DISTINCT ?s WHERE {
+        GRAPH <${metaGraph}> {
+          ?s <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root .
+          FILTER(STRSTARTS(STR(?s), "${escapeSparqlLiteral(prefix)}"))
+          FILTER(STRENDS(STR(?s), "${escapeSparqlLiteral(suffix)}"))
+        }
+      }`,
+    );
+    const subjects = result.type === 'bindings'
+      ? result.bindings.map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+    // Map each seal subject back to its exact-case author segment, and reject
+    // any subject whose author segment is not a well-formed 0x address (the
+    // FILTER prefix/suffix already fence the shape, but keep it defensive so a
+    // malformed `_meta` row cannot become a publish author).
+    const candidates: string[] = [];
+    for (const subject of subjects) {
+      if (!subject.startsWith(prefix) || !subject.endsWith(suffix)) continue;
+      const author = subject.slice(prefix.length, subject.length - suffix.length);
+      if (/^0x[0-9a-fA-F]{40}$/.test(author)) candidates.push(author);
+    }
+    if (candidates.length === 0) return undefined;
+    // 1. Prefer the caller's own KA (preserves today's self-publish exactly).
+    if (callerAgentAddress) {
+      const own = candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, callerAgentAddress));
+      if (own) return own;
+    }
+    // Distinct authors, case-insensitive (guards the known mixed-case _meta hazard).
+    const distinct: string[] = [];
+    for (const author of candidates) {
+      if (!distinct.some((a) => knowledgeAssetAgentAddressesEqual(a, author))) distinct.push(author);
+    }
+    if (distinct.length === 1) return distinct[0];
+    throw Object.assign(
+      new Error(
+        `Cannot publish "${name}" in context graph "${contextGraphId}": ` +
+          `${distinct.length} authors have a knowledge asset with this name. ` +
+          `Publish is unambiguous only for a single author.`,
+      ),
+      { code: 'AMBIGUOUS_ASSERTION_AUTHOR', candidates: distinct },
+    );
+  }
+
+  /**
    * RFC-001 §9.x — publish a previously-finalized assertion to the
    * verifiable-memory chain.
    *
@@ -4129,7 +4215,16 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const agentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    // GH#1778 — resolve the KA author from stored `_meta` (a curator publishes
+    // a member-authored share; the caller's token address is not the author).
+    // The caller hint is the EFFECTIVE publish identity (token → default agent →
+    // peer), so a node that also self-authored this name still prefers its OWN
+    // KA on the tokenless path; falls back to that same identity when nothing is
+    // finalized, preserving the existing "is not finalized"/self-publish behaviour.
+    const callerAgentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const agentAddress = (await this.resolveAssertionAuthor(
+      contextGraphId, name, opts?.subGraphName, callerAgentAddress,
+    )) ?? callerAgentAddress;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -5342,7 +5437,16 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    const agentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    // GH#1778 — resolve the KA author from stored `_meta` (a curator publishes
+    // a member-authored share; the caller's token address is not the author).
+    // The caller hint is the EFFECTIVE publish identity (token → default agent →
+    // peer), so a node that also self-authored this name still prefers its OWN
+    // KA on the tokenless path; falls back to that same identity when nothing is
+    // finalized, preserving the existing "is not finalized"/self-publish behaviour.
+    const callerAgentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const agentAddress = (await this.resolveAssertionAuthor(
+      contextGraphId, name, opts?.subGraphName, callerAgentAddress,
+    )) ?? callerAgentAddress;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,

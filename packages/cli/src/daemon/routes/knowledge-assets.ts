@@ -1431,6 +1431,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
         }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (err?.code === "AMBIGUOUS_ASSERTION_AUTHOR") {
+          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err), candidates: err.candidates ?? [] });
+        }
         if (
           err.message?.includes("required") ||
           err.message?.includes("Invalid") ||
@@ -1526,6 +1531,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // caller precondition; map it to the same 409 (code-first).
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
+        }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (e?.code === "AMBIGUOUS_ASSERTION_AUTHOR") {
+          return jsonResponse(res, 409, { code: e.code, error: msg, candidates: e.candidates ?? [] });
         }
         // Funded-wallet selection found no operational wallet holding the
         // gas + TRAC a publish needs. This is a user-actionable funding
