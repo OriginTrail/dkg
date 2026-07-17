@@ -81,6 +81,14 @@ export function isStoreSchedulerBusy(error) {
     || /Store scheduler (?:queue wait timeout|queue full)/i.test(message);
 }
 
+export function isStorageAckTimeout(error) {
+  const message = [error?.message, error?.serverError, error?.body?.error]
+    .filter((value) => typeof value === 'string')
+    .join(' | ');
+  return /storage_ack_(?:timeout|insufficient)\b/i.test(message)
+    || /only \d+\/\d+ ACKs received within \d+ms/i.test(message);
+}
+
 // Give a busy node's store scheduler breathing room between independent KAs.
 // This deliberately does not retry a failed publish: the one-shot lifecycle may
 // already have created local state or reached the chain before returning an
@@ -510,6 +518,7 @@ export function defineChainPublishSuite(config) {
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
           const pubStart = Date.now();
           let publishHitStoreBusy = false;
+          let publishHitStorageAckTimeout = false;
           try {
             const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name, PUBLISH_TIMEOUT_MS);
             assert.ok(result, 'Publish returned no result');
@@ -551,6 +560,7 @@ export function defineChainPublishSuite(config) {
             publishDurations.push(Date.now() - pubStart);
           } catch (error) {
             publishHitStoreBusy = isStoreSchedulerBusy(error);
+            publishHitStorageAckTimeout = isStorageAckTimeout(error);
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             console.log(`❌ Publish failed | No UAL`);
             failedAssets.push(`KA #${i + 1} (Publish failed)`);
@@ -652,6 +662,19 @@ export function defineChainPublishSuite(config) {
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (Query Remote (sync) failed)`);
             queryRemoteFail++;
+          }
+
+          // A storage ACK timeout has already consumed the node's full 120s ACK
+          // budget and proved the storage quorum unavailable. Repeating it can
+          // only exhaust Jenkins' 15-minute outer timeout before summaries reach
+          // Grafana. Keep the failed attempt + fallback read evidence, then let
+          // the next scheduled build retest recovery.
+          if (publishHitStorageAckTimeout && i < KA_COUNT - 1) {
+            console.log(
+              `Stopping ${name} after storage ACK timeout; `
+              + `${KA_COUNT - i - 1} repeated publish attempt(s) skipped so this build can aggregate metrics.`,
+            );
+            break;
           }
 
           await waitBetweenPublishBatches(
