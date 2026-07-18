@@ -57,9 +57,10 @@ not replacements for the RFC.
 
 | Freeze item | Normative owner | Implementation owner | Acceptance proof |
 |---|---|---|---|
-| 1. Signed payload descriptor | `WAL-001` | `WAL-003`, `WAL-008` | Signed/AEAD metadata vectors and unsigned-side-information negatives. |
+| 0. `WalObjectV1` atom and large-object range contract | `WAL-001` | `WAL-003`, `WAL-004`, `WAL-005`, `WAL-009`, `WAL-010` | One reconciled `WalObjectId`, inline opaque payload, ephemeral range resume, bounded-memory temporary staging, complete verification, and atomic promotion; no separately addressed payload/blob/chunk. |
+| 1. Signed adapter payload envelope | `WAL-001` | `WAL-003`, `WAL-008` | Envelope remains inline in `WalObjectV1.payloadBytes`; signed/AEAD metadata vectors and unsigned-side-information negatives; no independent payload identity. |
 | 2. Snapshot wire schema and closure | `WAL-001` | `WAL-017`, `WAL-018` | Below-floor bootstrap, custody, GC, and closure tests. |
-| 3. Set-tree/blob conformance | `WAL-001` | `WAL-004`, `WAL-005` | Independent implementations and exact roots/proofs. |
+| 3. Set-tree/object-range conformance | `WAL-001` | `WAL-004`, `WAL-005` | Independent implementations, exact set roots/proofs, and whole-object range/reassembly vectors without chunk identities. |
 | 4. Reducer conformance | `WAL-001` | `WAL-012`, `WAL-014` | Normative fixtures under all permutations. |
 | 5. Cross-view `MOVE_TIER` privacy | `WAL-001` | `WAL-008`, `WAL-016` | Public target contains no private source metadata. |
 | 6. Authority lifecycle/availability | `WAL-001` | `WAL-007`, `WAL-023` | Rotation, HA, revocation, rollback guard, and recovery cases. |

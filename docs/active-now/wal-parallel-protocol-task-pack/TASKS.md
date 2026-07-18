@@ -19,7 +19,7 @@ separately accepted.
 | ID | Task | Depends on | Primary result |
 |---|---|---|---|
 | `WAL-000` | Freeze the legacy semantic and performance baseline | — | Reproducible old-path truth and parity corpus. |
-| `WAL-001` | Close RFC implementation-freeze decisions and vectors | `WAL-000` | Byte-interoperable schemas and conformance fixtures. |
+| `WAL-001` | Close RFC implementation-freeze decisions and vectors | `WAL-000` | One atomic `WalObjectV1`, byte-interoperable range framing, schemas, and fixtures. |
 | `WAL-002` | Scaffold WAL package, runtime modes, and isolation | `WAL-000`, `WAL-001` | Safe `legacy`/`parallel`/`wal` skeleton with legacy default. |
 | `WAL-003` | Implement canonical encoding, signatures, and object IDs | `WAL-001`, `WAL-002` | Canonical protocol objects and golden vectors. |
 | `WAL-004` | Implement content-addressed BlobStore and resumable proofs | `WAL-003` | Durable exact-byte blobs and verified range resume. |
@@ -106,10 +106,68 @@ wire/convergence contract, not additional prose ambiguity.
 
 ### Scope and deliverables
 
-- Define canonical integer-key schemas for every record, nested object, request,
-  response, snapshot, legacy-genesis object, policy, receipt, and cutover object.
-- Define `PayloadDescriptorV1`, including all signed length, codec, media type,
-  encryption algorithm, key epoch, nonce, and associated-data fields.
+- Freeze `WalObjectV1` as the sole durable content-addressed synchronization
+  atom. Its canonical version-1 representation is an exact-arity deterministic
+  CBOR tuple with the following logical fields:
+
+  ```text
+  WalObjectV1 = [
+      version,
+      namespaceId,
+      writerId,
+      writerEpoch,
+      sequence,
+      previousObjectIdOrNull,
+      payloadBytes,
+      signature
+  ]
+  ```
+
+  `payloadBytes` is inline and opaque to the generic WAL protocol. It MUST NOT
+  have a separate `PayloadId` or `BlobId`; payload fragments and transfer chunks
+  MUST NOT have independent content identities, signatures, set membership, or
+  durable protocol representations. Set reconciliation operates exclusively on
+  `WalObjectId` values.
+- Freeze exact-arity tuple schemas for every remaining control-plane request,
+  response, checkpoint, snapshot declaration, legacy-genesis declaration,
+  policy, receipt, and cutover message. DKG/SWM/VM fields belong inside the
+  adapter-owned opaque payload and MUST NOT leak into `WalObjectV1`.
+- Define domain-separated signing and identity rules over the canonical complete
+  object. The object becomes locally visible only after all canonical bytes have
+  arrived and the complete `WalObjectId`, signature, tuple arity, and canonical
+  encoding have been validated.
+- Define resumable range transport as ephemeral framing rather than WAL object
+  structure. At minimum, freeze byte-exact schemas equivalent to:
+
+  ```text
+  GetWalObjectRangeV1 = [walObjectId, offset, maximumLength]
+  WalObjectRangeV1    = [walObjectId, totalObjectLength, offset, bytes]
+  ```
+
+  The offset addresses the canonical encoding of the complete `WalObjectV1`,
+  not `payloadBytes` independently. Range frames may be retried, reordered, and
+  sourced from different authorized providers, but are never reconciliation
+  atoms and are not accepted as independently complete content.
+- Define the large-object contract: stream ranges into quota-controlled
+  temporary storage; keep memory bounded independently of object size; persist
+  only local resumable progress; defend against dishonest lengths and sparse-file
+  exhaustion; recompute the complete object hash; verify the signature; fsync;
+  and atomically promote the object. Size is governed by explicit local/network
+  admission policy rather than by creating smaller content-addressed chunks.
+- Record the intentional trade-off: protocol v1 provides no sub-object
+  deduplication or independent cryptographic verification of ranges. Adding a
+  Merkle/chunk identity layer would change the synchronization-atom invariant
+  and therefore requires a later protocol version and RFC decision.
+- Remove or rewrite every RFC and backlog requirement that treats payloads,
+  blobs, or chunks as separately content-addressed synchronized objects before
+  dependent implementation tasks begin. In particular, reconcile the current
+  `WAL-003`, `WAL-004`, `WAL-005`, `WAL-008`, `WAL-009`, `WAL-010`, and related
+  acceptance language with this frozen atom boundary.
+- Define the adapter-owned payload-envelope form, including any length, codec,
+  media type, encryption algorithm, key epoch, nonce, and associated-data
+  fields required by DKG semantics. The envelope is encoded entirely inside
+  `payloadBytes`, is covered by the enclosing WAL-object signature/identity, and
+  has no independent generic-WAL identity or fetch protocol.
 - Fix snapshot parents/base heads, post-compaction causal closure, custodian
   receipts, retention, and removed-custodian behavior.
 - Fix empty roots, nibble packing, proof framing, pagination, malformed-proof
@@ -121,6 +179,33 @@ wire/convergence contract, not additional prose ambiguity.
 
 ### Acceptance area
 
+- [ ] The normative RFC states that `WalObjectV1` is the smallest and only
+      durable content-addressed set-reconciliation atom; a repository-wide
+      specification/backlog audit finds no separately synchronized `PayloadId`,
+      `BlobId`, content-addressed chunk, or payload-fragment identity.
+- [ ] Golden vectors freeze the exact tuple arity, field positions, null rules,
+      domain separators, signature input, complete canonical bytes, and
+      `WalObjectId`; missing, extra, reordered, or non-canonical fields fail.
+- [ ] The generic tuple contains no graph, RDF, SPARQL, SWM/VM, policy, tier,
+      chain, or conflict field; such information occurs only in opaque
+      adapter-owned `payloadBytes`.
+- [ ] Set-reconciliation tests exchange only `WalObjectId` values and fetching
+      one missing ID reconstructs exactly one complete `WalObjectV1`.
+- [ ] Range-frame vectors cover zero-length, first, middle, final, duplicate,
+      overlapping, out-of-order, cross-provider, interrupted, resumed,
+      dishonest-total-length, overflow, and out-of-bounds cases without giving
+      any range an independent durable or content-addressed identity.
+- [ ] A large-object integration test streams an object substantially larger
+      than the process memory budget into temporary storage, keeps measured
+      memory within the frozen bound, resumes after restart, and publishes no
+      partial object before complete hash/signature/canonicality verification
+      and atomic promotion.
+- [ ] Quota, concurrency, advertised-length, sparse-file, timeout, cancellation,
+      and cleanup tests prove that malicious or abandoned large transfers cannot
+      exhaust memory or durable staging space.
+- [ ] Documentation explicitly states that changing one payload byte produces a
+      new whole-object identity and that v1 does not promise cross-object range
+      deduplication or pre-completion content verification.
 - [ ] All ten RFC implementation-freeze items have an explicit normative answer
       merged or approved in `dkgv10-spec`; none remains implicit in code.
 - [ ] At least two independent test implementations consume the same fixtures
