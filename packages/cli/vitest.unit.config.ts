@@ -14,6 +14,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/api-client.test.ts',
+          'test/async-vm-publish-registration.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
