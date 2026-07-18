@@ -672,10 +672,26 @@ reconciliationSeed = BLAKE3(
 The requester chooses `requesterNonce` only after receiving the provider's
 signed immutable head. The normative symbol-membership schedule, degree
 distribution, peeling order, integer encoding, overflow behavior, and checksum
-test are fixed by `RatelessIbltProfileV1` conformance vectors before independent
-implementations are accepted. A provider can generate and cache the same
-deterministic symbol stream once per `(headId, reconciliationSeed)` and serve
-any requested contiguous window.
+test are fixed by the `ProtocolV1IbltReconciliationAlgorithm` conformance
+vectors before independent implementations are accepted. This name identifies
+a normative algorithm, not a protocol object or synchronization atom. A
+provider can generate and cache the same deterministic symbol stream once per
+`(headId, reconciliationSeed)` and serve any requested contiguous window.
+
+The following rule is normative:
+
+> The IBLT reconciliation algorithm, its parameters, symbols, local
+> set-commitment nodes, byte-range frames, and local progress records are
+> control-plane or implementation data, not synchronization atoms. They MUST
+> NOT receive content IDs, become members of the reconciled content set, be
+> admitted to `WalObjectStore`, or acquire an independent synchronization
+> lifecycle. Only `WalObjectId` values are elements of the reconciled content
+> set, and only a complete canonical `WalObjectV1` is fetched and admitted as
+> synchronized content.
+
+An implementation may cache symbols, commitment nodes, or transfer progress
+locally, including across restart, but that cache is disposable and has no
+protocol-visible identity or authority.
 
 The receiver initially requests a bounded symbol window, subtracts its local
 contribution, and peels pure symbols. If decoding does not complete, it requests

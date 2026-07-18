@@ -15,9 +15,9 @@ checkout.
 | Planning branch | `codex/wal-parallel-protocol-task-pack` |
 | Worktree | `/private/tmp/dkg-v9-wal-parallel-protocol-task-pack` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `014770f4b21b03fe796dac16f11d424d87b121e0` |
+| RFC source commit | `d139a2a64eb729d007eb6b429e141204e9cf1ce0` |
 | RFC version | `0.5` |
-| RFC SHA-256 | `2892b21e94cb9d9dc30bc7cba85a5671851b420c80fd4715cbef019457602b2d` |
+| RFC SHA-256 | `47d219bdbdda1678dc2f2bcfd4711abe5771a52c7d080986cf4282340337d1af` |
 
 ## Mandatory system-context contract
 
