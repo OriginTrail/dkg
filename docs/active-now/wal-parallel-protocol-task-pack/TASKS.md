@@ -374,10 +374,11 @@ transfer, authorization, admission, RDF, or SPARQL.
   frozen empty root, insertion-order independence, incremental updates, and a
   simple reference root implementation. The tree is an authenticated
   commitment, not the normal wire reconciliation algorithm.
-- Implement `RatelessIbltProfileV1` exactly: seed derivation, symbol-membership
-  schedule, degree distribution, signed-i64 count arithmetic, 32-byte ID XOR,
-  domain-separated checksum XOR, deterministic symbol order, and canonical
-  symbol tuples.
+- Implement the `ProtocolV1IbltReconciliationAlgorithm` exactly: seed
+  derivation, symbol-membership schedule, degree distribution, signed-i64 count
+  arithmetic, 32-byte ID XOR, domain-separated checksum XOR, deterministic
+  symbol order, and canonical symbol tuples. This name denotes an algorithm,
+  not a protocol object.
 - Implement pure encode, subtract, incremental-window append, pure-symbol
   detection, deterministic peeling, and provider-only/receiver-only output.
 - Require successful decoding to leave a zero residual, pass every checksum,
@@ -395,6 +396,12 @@ transfer, authorization, admission, RDF, or SPARQL.
   failure cases, and fallback pages.
 - Keep the module dependency-free from DKG semantics and expose pure interfaces
   that `WAL-009` and `WAL-019` can drive.
+- Enforce the atom boundary in code and schemas: the algorithm, parameters,
+  symbols, local set-commitment nodes, range frames, and local progress records
+  may be disposable caches or control data but MUST NOT receive content IDs,
+  enter the reconciled content set, be admitted to `WalObjectStore`, or acquire
+  an independent synchronization lifecycle. Only `WalObjectId` is a reconciled
+  set element and only complete canonical `WalObjectV1` is synchronized content.
 
 ### Acceptance area
 
@@ -430,6 +437,10 @@ transfer, authorization, admission, RDF, or SPARQL.
       enumerate RDF.
 - [ ] The module imports no RDF, SPARQL, SWM/VM, graph-storage, discovery,
       libp2p, or object-transfer implementation.
+- [ ] Static schema/code tests find no `IbltProfileId`, `SymbolId`,
+      content-addressed symbol/cache/range type, `WalObjectStore` admission path
+      for reconciliation control data, or set element type other than
+      `WalObjectId`.
 
 ---
 

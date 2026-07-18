@@ -289,6 +289,11 @@ the receiver uses bounded sorted-ID enumeration and recomputes the same signed
 root. It is independent of sequential gaps, message arrival, or application
 keys.
 
+The protocol-v1 IBLT reconciliation algorithm and its symbols are ephemeral
+control-plane data, not synchronized content objects. They have no content IDs
+or set membership. `WalObjectV1` remains the sole durable content-addressed
+synchronization atom.
+
 The set is append-only between compaction floors. Tombstones make deletion
 monotonic. A peer below the floor receives a signed snapshot and then reconciles
 the post-snapshot WAL-object set. Empty-node backfill may select deterministic
