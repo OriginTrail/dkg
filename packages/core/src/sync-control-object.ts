@@ -8,6 +8,16 @@ import {
   type CanonicalJsonValue,
   type StrictJsonParseOptions,
 } from './canonical-json.js';
+import {
+  assertCanonicalChainId,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalHexBytes,
+  assertExactKeys,
+  isPlainRecord,
+} from './sync-wire-scalars.js';
+
+export { assertCanonicalEvmAddress } from './sync-wire-scalars.js';
 
 export const CONTROL_OBJECT_DIGEST_DOMAIN = 'dkg-control-object-v1\n' as const;
 export const CONTROL_SIGNATURE_VARIANT_DIGEST_DOMAIN =
@@ -57,9 +67,6 @@ export interface ControlObjectSignatureVariantV1 {
 const UTF8 = new TextEncoder();
 const DOMAIN_BYTES = UTF8.encode(CONTROL_OBJECT_DIGEST_DOMAIN);
 const SIGNATURE_VARIANT_DOMAIN_BYTES = UTF8.encode(CONTROL_SIGNATURE_VARIANT_DIGEST_DOMAIN);
-const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
-const LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})+$/;
-const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 
 /**
  * Return the exact RFC-64 unsigned-envelope bytes used by every digest/signature
@@ -220,15 +227,6 @@ export function parseCanonicalControlSignatureVariant(
   return variant;
 }
 
-export function assertCanonicalEvmAddress(value: string, label = 'address'): void {
-  if (typeof value !== 'string' || !EVM_ADDRESS.test(value)) {
-    throw new Error(`${label} must be a lowercase 20-byte 0x EVM address`);
-  }
-  if (value === '0x0000000000000000000000000000000000000000') {
-    throw new Error(`${label} must not be the zero address`);
-  }
-}
-
 export function bytesToLowerHex(bytes: Uint8Array): string {
   let result = '0x';
   for (const byte of bytes) result += byte.toString(16).padStart(2, '0');
@@ -319,10 +317,9 @@ function assertUnsignedControlEnvelopeFields(
     if (envelope.signatureEvidence.kind !== 'eip1271-current-finalized') {
       throw new Error('EIP-1271 control objects require current-finalized evidence');
     }
-    if (
-      typeof envelope.signatureEvidence.chainId !== 'string'
-      || !CANONICAL_UNSIGNED_DECIMAL.test(envelope.signatureEvidence.chainId)
-    ) {
+    try {
+      assertCanonicalChainId(envelope.signatureEvidence.chainId, 'EIP-1271 chainId');
+    } catch {
       throw new Error('EIP-1271 chainId must be a canonical unsigned decimal string');
     }
     assertCanonicalEvmAddress(
@@ -354,38 +351,6 @@ function assertSignatureForSuite(
     1,
     MAX_EIP1271_SIGNATURE_BYTES,
   );
-}
-
-function assertCanonicalDigest(value: string, label: string): void {
-  if (
-    typeof value !== 'string'
-    || value.length !== 66
-    || !/^0x[0-9a-f]{64}$/.test(value)
-  ) {
-    throw new Error(`${label} must be a lowercase 32-byte 0x digest`);
-  }
-}
-
-function assertCanonicalHexBytes(
-  value: string,
-  label: string,
-  minBytes: number,
-  maxBytes: number,
-): void {
-  if (typeof value !== 'string' || !value.startsWith('0x')) {
-    throw new Error(`${label} must be lowercase 0x-prefixed bytes`);
-  }
-  const hexLength = value.length - 2;
-  if (
-    hexLength % 2 !== 0
-    || hexLength < minBytes * 2
-    || hexLength > maxBytes * 2
-    || !LOWER_HEX_BYTES.test(value)
-  ) {
-    throw new Error(
-      `${label} must be ${minBytes === maxBytes ? `${minBytes}` : `${minBytes}-${maxBytes}`} lowercase bytes`,
-    );
-  }
 }
 
 function extractUnsignedEnvelope(
@@ -436,34 +401,4 @@ function digestWithDomain(domain: Uint8Array, payload: Uint8Array): Uint8Array {
   preimage.set(domain);
   preimage.set(payload, domain.length);
   return sha256(preimage);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function assertExactKeys(
-  record: Record<string, unknown>,
-  expected: readonly string[],
-  label: string,
-): void {
-  const actual = Reflect.ownKeys(record);
-  if (actual.some((key) => typeof key !== 'string')) {
-    throw new Error(`${label} must not contain symbol properties`);
-  }
-  const strings = actual as string[];
-  if (
-    strings.length !== expected.length
-    || [...strings].sort().some((key, index) => key !== expected[index])
-  ) {
-    throw new Error(`${label} has unknown or missing fields`);
-  }
-  for (const key of strings) {
-    const descriptor = Object.getOwnPropertyDescriptor(record, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} fields must be enumerable data properties`);
-    }
-  }
 }

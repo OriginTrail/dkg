@@ -182,6 +182,23 @@ describe('Track-2 control-object envelopes', () => {
     })).toThrow(/canonical unsigned decimal/);
   });
 
+  it('uses the complete canonical u256 range for EIP-1271 chain IDs', () => {
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureEvidence: {
+        ...SAFE_VECTOR.signatureEvidence,
+        chainId: '115792089237316195423570985008687907853269984665640564039457584007913129639935',
+      },
+    })).not.toThrow();
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureEvidence: {
+        ...SAFE_VECTOR.signatureEvidence,
+        chainId: '115792089237316195423570985008687907853269984665640564039457584007913129639936',
+      },
+    })).toThrow(/canonical unsigned decimal/);
+  });
+
   it('rejects a non-string chain ID and evidence for a different contract', () => {
     expect(() => assertUnsignedControlEnvelope({
       ...SAFE_VECTOR,

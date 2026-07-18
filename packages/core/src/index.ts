@@ -15,6 +15,37 @@ export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './canonical-json.js';
 export * from './sync-control-object.js';
+export {
+  MAX_DECIMAL_U64,
+  MAX_DECIMAL_U256,
+  assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
+  assertCanonicalDigest,
+  assertCanonicalHexBytes,
+  assertCanonicalKaId,
+  assertCanonicalTimestampMs,
+  parseCanonicalDecimalU64,
+  parseCanonicalDecimalU256,
+} from './sync-wire-scalars.js';
+export type {
+  BatchIdV1,
+  BlockNumberV1,
+  ByteLengthV1,
+  ChainIdV1,
+  CountV1,
+  DecimalU64V1,
+  DecimalU256V1,
+  Digest32V1,
+  EndKaIdV1,
+  EvmAddressV1,
+  IndexV1,
+  KaIdV1,
+  ReservedKaIdV1,
+  StartKaIdV1,
+  TimestampMsV1,
+} from './sync-wire-scalars.js';
+export * from './ka-transfer-descriptor.js';
 export * from './event-bus.js';
 export {
   Logger,
