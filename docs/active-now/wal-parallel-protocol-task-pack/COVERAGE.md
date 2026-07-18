@@ -19,8 +19,8 @@ not replacements for the RFC.
 | 4. Canonical encoding, hashes, signatures | `WAL-001`, `WAL-003` | Cross-implementation fixtures in `WAL-003`. |
 | 5. Namespace and disclosure views | `WAL-007`, `WAL-008`, `WAL-016` | Privacy suite in `WAL-008` and `WAL-021`. |
 | 6. Protocol objects | `WAL-001`, `WAL-003`, `WAL-007`, `WAL-008`, `WAL-012`, `WAL-016`, `WAL-017`, `WAL-023` | Wire vectors in `WAL-001`/`WAL-003`. |
-| 7. Blob format and resumable transfer | `WAL-004`, `WAL-009`, `WAL-010` | Resume/adversarial evidence in `WAL-004`, `WAL-021`, `WAL-022`. |
-| 8. Deterministic set tree | `WAL-005`, `WAL-009`, `WAL-019` | Completeness/scaling proof in `WAL-005` and `WAL-022`. |
+| 7. Whole-object format and resumable range transfer | `WAL-004`, `WAL-009`, `WAL-010` | Resume/adversarial evidence in `WAL-004`, `WAL-021`, `WAL-022`. |
+| 8. Rateless IBLT set reconciliation | `WAL-005`, `WAL-009`, `WAL-019` | 100% reconciliation-unit coverage and conformance in `WAL-005`; completeness/scaling proof in `WAL-022`. |
 | 9. Transport protocol | `WAL-009`, `WAL-010`, `WAL-019` | Framing/auth/abuse suite in `WAL-009` and `WAL-021`. |
 | 10. Durable storage | `WAL-006`, `WAL-011`, `WAL-013` | Crash suite in `WAL-006`, `WAL-013`, `WAL-021`. |
 | 11. RDF canonicalization/compiler | `WAL-012` | Semantic parity in `WAL-000`, `WAL-012`, `WAL-022`. |
@@ -42,25 +42,25 @@ not replacements for the RFC.
 
 | Invariant | Primary tasks | Required proof |
 |---|---|---|
-| Immutable identity | `WAL-003`, `WAL-004`, `WAL-005` | Canonical object/blob/set vectors and substitution negatives. |
+| Immutable identity | `WAL-003`, `WAL-004`, `WAL-005` | Canonical complete-object/set vectors, absence of sub-object identities, and substitution negatives. |
 | Authorization before disclosure | `WAL-007`–`WAL-010` | Private request probes return no metadata before authorization. |
 | Explicit completeness | `WAL-005`, `WAL-007`, `WAL-019` | Exact vector/checkpoint/root/count convergence. |
 | Pull is correctness | `WAL-010`, `WAL-019` | Lost-nudge/offline tests still converge. |
 | WAL before RDF | `WAL-006`, `WAL-011`, `WAL-013`, `WAL-015` | Crash tests show no RDF before durable closed WAL state. |
 | Deterministic projection | `WAL-012`–`WAL-016` | All arrival/provider permutations yield identical digests. |
-| Deletion is a record | `WAL-014`, `WAL-017` | Absence never deletes; tombstone/no-resurrection tests pass. |
+| Deletion is an object | `WAL-014`, `WAL-017` | Absence never deletes; tombstone/no-resurrection tests pass. |
 | No silent conflict loss | `WAL-014`, `WAL-015` | Every incompatible branch and resolution head is explicit. |
-| Bounded resources | `WAL-004`–`WAL-011`, `WAL-014`, `WAL-019`, `WAL-021` | Frame/proof/blob/closure/conflict/queue resource attack tests. |
+| Bounded resources | `WAL-004`–`WAL-011`, `WAL-014`, `WAL-019`, `WAL-021` | Frame/symbol/decode/fallback/range/staging/closure/conflict/queue resource attack tests. |
 | One authoritative switch | `WAL-002`, `WAL-023`, `WAL-024` | Legacy before cutover; WAL after one signed persistent ID; never both. |
 
 ## Implementation-freeze item coverage
 
 | Freeze item | Normative owner | Implementation owner | Acceptance proof |
 |---|---|---|---|
-| 0. `WalObjectV1` atom and large-object range contract | `WAL-001` | `WAL-003`, `WAL-004`, `WAL-005`, `WAL-009`, `WAL-010` | One reconciled `WalObjectId`, inline opaque payload, ephemeral range resume, bounded-memory temporary staging, complete verification, and atomic promotion; no separately addressed payload/blob/chunk. |
+| 0. `WalObjectV1` atom and large-object range contract | `WAL-001` | `WAL-003`, `WAL-004`, `WAL-009`, `WAL-010` | One reconciled `WalObjectId`, inline opaque payload, ephemeral range resume, bounded-memory temporary staging, complete verification, and atomic promotion; no separately addressed payload/blob/chunk. |
 | 1. Signed adapter payload envelope | `WAL-001` | `WAL-003`, `WAL-008` | Envelope remains inline in `WalObjectV1.payloadBytes`; signed/AEAD metadata vectors and unsigned-side-information negatives; no independent payload identity. |
 | 2. Snapshot wire schema and closure | `WAL-001` | `WAL-017`, `WAL-018` | Below-floor bootstrap, custody, GC, and closure tests. |
-| 3. Set-tree/object-range conformance | `WAL-001` | `WAL-004`, `WAL-005` | Independent implementations, exact set roots/proofs, and whole-object range/reassembly vectors without chunk identities. |
+| 3. WalObject/set-commitment/rateless-IBLT conformance | `WAL-001` | `WAL-003`–`WAL-005` | Exact object bytes, set roots, seeds, symbols, peel traces, decoded differences, reconstructed-root checks, fallback pages, and range/reassembly vectors; 100% dedicated reconciliation-module unit coverage and two independent vector consumers. |
 | 4. Reducer conformance | `WAL-001` | `WAL-012`, `WAL-014` | Normative fixtures under all permutations. |
 | 5. Cross-view `MOVE_TIER` privacy | `WAL-001` | `WAL-008`, `WAL-016` | Public target contains no private source metadata. |
 | 6. Authority lifecycle/availability | `WAL-001` | `WAL-007`, `WAL-023` | Rotation, HA, revocation, rollback guard, and recovery cases. |

@@ -15,9 +15,9 @@ checkout.
 | Planning branch | `codex/wal-parallel-protocol-task-pack` |
 | Worktree | `/private/tmp/dkg-v9-wal-parallel-protocol-task-pack` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `270a94f2bb4d3b132d511b31be314d77e79b915d` |
-| RFC version | `0.4` |
-| RFC SHA-256 | `cd3c6d91225cc2d42bb26ccb2a062f7ec0dcff53de8c9a92b44021d715cb9b92` |
+| RFC source commit | `014770f4b21b03fe796dac16f11d424d87b121e0` |
+| RFC version | `0.5` |
+| RFC SHA-256 | `2892b21e94cb9d9dc30bc7cba85a5671851b420c80fd4715cbef019457602b2d` |
 
 ## Mandatory system-context contract
 
@@ -77,7 +77,7 @@ flowchart TD
 | Wave | Tasks | Exit condition |
 |---|---|---|
 | 0 | `WAL-000`–`WAL-002` | Baseline receipts, frozen wire decisions, safe feature/config skeleton. |
-| 1 | `WAL-003`–`WAL-006` | Canonical objects, blob/set proofs, and crash-safe WAL storage pass conformance tests. |
+| 1 | `WAL-003`–`WAL-006` | Canonical objects, whole-object range storage, rateless IBLT reconciliation, signed set commitments, and crash-safe WAL storage pass conformance tests. |
 | 2 | `WAL-007`–`WAL-011` | Authority, private crypto adapter, wire protocols, provider discovery, and closed admission work fail-closed. |
 | 3 | `WAL-012`–`WAL-016` | Local commits and identical admitted sets produce deterministic SWM/VM projections without semantic drift. |
 | 4 | `WAL-017`–`WAL-020` | Snapshot/delta backfill and the complete network shadow protocol run beside legacy authority. |

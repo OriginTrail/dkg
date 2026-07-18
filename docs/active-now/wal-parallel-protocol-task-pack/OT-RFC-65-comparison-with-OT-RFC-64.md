@@ -36,9 +36,10 @@ RDF graph identity, KA lifecycle, and triplestore activation inside the sync
 architecture.
 
 The WAL proposal moves the boundary down one layer. The protocol reconciles an
-unordered authenticated set of immutable `RecordId` values, transfers exact
-content-addressed bytes with verified resume, and knows nothing about RDF or
-SPARQL. A deterministic adapter then interprets those admitted bytes, applies
+unordered authenticated set of immutable `WalObjectId` values using rateless
+IBLT difference discovery, transfers each complete canonical `WalObjectV1` by
+resumable byte ranges, and knows nothing about RDF or SPARQL. A deterministic
+adapter then interprets the inline opaque payload bytes, applies
 SPARQL-aware causal conflict rules, and materializes SWM/VM as a rebuildable
 projection. The WAL, not a graph catalog or triplestore, is the replicated
 source of truth.
@@ -46,7 +47,7 @@ source of truth.
 The recommendation is therefore not to discard PR #144. Preserve its authority,
 freshness, fail-closed routing, pull, VM, fault-injection, and A/B acceptance
 contracts, but replace its semantic inventory/event wire with the generic WAL
-record-set and blob protocol. Keep the proposed Revision-4 single-store
+object-set and range protocol. Keep the proposed Revision-4 single-store
 activation insight only inside the RDF adapter, where a guarded SPARQL update
 atomically advances projection content and its materialization marker.
 
@@ -92,11 +93,13 @@ Source:
 
 ### C. WAL byte-set proposal
 
-- Signed immutable byte records and content-addressed payload blobs.
-- Signed author checkpoint commits the exact `RecordId` set root.
+- One uniform signed immutable `WalObjectV1` with inline opaque payload bytes.
+- Signed author checkpoint commits the exact `WalObjectId` set root.
 - Signed membership and curator head vector retain the PR's authority model.
-- Deterministic set-tree reconciliation discovers missing record IDs.
-- Verified resumable byte-range transfer fetches missing payload content.
+- Rateless IBLT reconciliation discovers the exact symmetric difference and is
+  verified against the signed deterministic set commitment.
+- Resumable whole-object byte ranges fetch missing canonical WAL objects; ranges
+  have no independent content identity.
 - WAL is authoritative; triplestore is a replayable projection.
 - RDF/SPARQL is one adapter with causal merge, explicit conflict branches, and
   guarded activation.
@@ -110,15 +113,15 @@ Source:
 
 | Dimension                     | PR #144 Rev 3.2                                               | PR #144 proposed Rev 4                                                          | WAL byte-set proposal                                                                    |
 | ----------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Replicated truth              | Signed semantic inventory events plus named RDF content       | Signed live semantic catalog plus RDF content                                   | Signed immutable WAL records plus exact payload bytes                                    |
+| Replicated truth              | Signed semantic inventory events plus named RDF content       | Signed live semantic catalog plus RDF content                                   | Signed immutable `WalObjectV1` values with inline opaque payload bytes                   |
 | Protocol abstraction          | KA/RDF aware                                                  | KA/RDF aware                                                                    | Application-agnostic bytes                                                               |
-| Difference discovery          | Compare `(era, seq)` heads; fetch `(N, M]`                    | Fetch whole catalog; local row-set diff                                         | Reconcile `RecordId` sets by deterministic 16-way radix tree                             |
+| Difference discovery          | Compare `(era, seq)` heads; fetch `(N, M]`                    | Fetch whole catalog; local row-set diff                                         | Rateless IBLT over `WalObjectId`, verified against a signed deterministic set commitment |
 | Order dependency              | Per-author ordered hash chain                                 | Per-author catalog version only                                                 | None for sync; causal DAG only in adapter                                                |
-| Payload identity              | Canonical RDF-set digest                                      | Canonical RDF-set digest                                                        | BLAKE3 of exact bytes; semantic digest may exist inside payload                          |
-| Transfer unit                 | Inventory event plus named RDF graph                          | Whole catalog plus named RDF graphs                                             | WAL envelope plus missing content-addressed blob ranges                                  |
-| Resume/chunking               | Not specified                                                 | Not specified                                                                   | Normative verified range resume                                                          |
-| Deletion                      | Explicit `delete` event                                       | Absence from newer signed catalog                                               | Immutable tombstone record                                                               |
-| SWM-to-VM                     | Delete SWM row plus upsert VM row                             | Catalog tier change                                                             | Causal `MOVE_TIER` record interpreted by VM adapter                                      |
+| Payload identity              | Canonical RDF-set digest                                      | Canonical RDF-set digest                                                        | No separate payload identity; payload is inline in the complete WAL-object identity      |
+| Transfer unit                 | Inventory event plus named RDF graph                          | Whole catalog plus named RDF graphs                                             | One complete canonical `WalObjectV1`, streamed as transient byte ranges                  |
+| Resume/chunking               | Not specified                                                 | Not specified                                                                   | Normative range resume; ranges are not independently content-addressed                   |
+| Deletion                      | Explicit `delete` event                                       | Absence from newer signed catalog                                               | Immutable tombstone WAL object                                                           |
+| SWM-to-VM                     | Delete SWM row plus upsert VM row                             | Catalog tier change                                                             | Causal `MOVE_TIER` payload interpreted by VM adapter                                     |
 | Concurrent same-author writes | Local sequence CAS serializes                                 | Lane lock plus guarded seal CAS                                                 | Immutable concurrent records retained; adapter merges or conflicts                       |
 | Cross-author conflict         | Mostly avoided by author lanes; no RDF merge policy           | Same                                                                            | Author-scoped coexistence plus signed policy for shared-key conflicts                    |
 | SPARQL role                   | Guarded canonical activation                                  | Catalog/content/seal truth and activation                                       | Projection-only guarded materialization                                                  |
@@ -130,7 +133,7 @@ Source:
 | Private authorization         | Signed membership; fail closed before lane/content serve      | Same                                                                            | Same, before even set summaries or IDs                                                   |
 | VM authority                  | Author seal plus on-chain identity/finality                   | Same                                                                            | Same checks in VM adapter                                                                |
 | Store portability             | Depends on SQLite plus guarded triplestore semantics          | Depends on guarded SPARQL semantics                                             | Protocol portable; each adapter declares guarded-materialization capability              |
-| Rebuild source                | Inventory plus graph providers and snapshots                  | Latest catalogs plus graph providers                                            | WAL records/blobs and signed snapshots                                                   |
+| Rebuild source                | Inventory plus graph providers and snapshots                  | Latest catalogs plus graph providers                                            | Complete WAL objects and signed snapshot WAL objects                                     |
 | Steady-state equal cost       | One curator head vector; then no lane fetch                   | One curator head vector; then no catalog fetch                                  | One curator head vector plus equal set roots; cacheable                                  |
 | Authority cutover             | Parallel convergence rollout                                  | Track-2 replacement after tactical baseline                                     | Full-fleet shadow run followed by one signed network-wide hard cutover                    |
 | A/B baseline                  | Unmodified v10.0.8                                            | Track 2 compared with tactical Track 1                                          | The authoritative arm at shadow-run time; retain comparable v10.0.8 and Track-1 receipts |
@@ -192,7 +195,7 @@ committed to; it cannot reveal a newer set that nobody reachable advertises.
 
 Both require signed membership and policy evidence for private collections.
 The WAL proposal moves the check slightly earlier: even set roots, counts,
-record IDs, and blob lengths may leak activity, so an unauthorized peer receives
+WAL-object IDs, and object lengths may leak activity, so an unauthorized peer receives
 no reconciliation summary.
 
 ### 3.5 VM remains semantically validated
@@ -230,8 +233,8 @@ seal, named graph, RDF-set canonicalization, and SPARQL activation.
 The WAL protocol asks:
 
 ```text
-Which committed RecordId values am I missing?
-Which exact BlobId byte ranges are incomplete?
+Which committed WalObjectId values differ between our sets?
+Which exact byte ranges of each complete WalObjectV1 are incomplete?
 Are the bytes, signatures, authorization, and checkpoint proofs valid?
 ```
 
@@ -277,14 +280,19 @@ protocol, and every catalog update retransmits the full author catalog.
 
 ### 5.3 WAL set reconciliation
 
-The WAL design compares signed author checkpoint roots, descends only
-mismatching prefixes of a deterministic `RecordId` set tree, and requests
-missing immutable records. It is independent of sequential gaps, message
-arrival, or application keys.
+The WAL design compares signed author checkpoint roots. Equal roots finish with
+zero reconciliation symbols. When roots differ, nodes subtract deterministic
+rateless IBLT symbol streams over `WalObjectId`, peel provider-only and
+receiver-only IDs, and verify the decoded remote set against its signed count
+and deterministic set commitment. If decoding exceeds its resource budget,
+the receiver uses bounded sorted-ID enumeration and recomputes the same signed
+root. It is independent of sequential gaps, message arrival, or application
+keys.
 
 The set is append-only between compaction floors. Tombstones make deletion
 monotonic. A peer below the floor receives a signed snapshot and then reconciles
-the post-snapshot record set.
+the post-snapshot WAL-object set. Empty-node backfill may select deterministic
+enumeration immediately because its difference is the entire retained set.
 
 This approach follows Iroh's useful separation—reconcile small metadata, then
 fetch content by hash from any usable path or provider—while adding DKG-specific
@@ -318,12 +326,12 @@ required:
 
 ```mermaid
 sequenceDiagram
-  participant W as WAL and blob store
+  participant W as WAL-object store
   participant A as RDF adapter
   participant T as Triplestore
 
-  W->>W: fsync immutable record, payload, signed checkpoint
-  W->>A: replay admitted RecordId
+  W->>W: fsync complete immutable WAL object and signed checkpoint
+  W->>A: replay admitted WalObjectId
   A->>T: guarded RDF mutation plus projection marker
   alt response received
     T-->>A: committed marker and state digest
@@ -376,15 +384,15 @@ pretend their union automatically defines the active RDF view.
 ## 8. Transfer and resume
 
 PR #144 reuses existing transport and does not specify exact wire framing,
-chunking, range verification, or resume. It identifies content by canonical
+range transfer, whole-object verification, or resume. It identifies content by canonical
 RDF-set digest.
 
 The WAL proposal makes transfer an explicit protocol:
 
-- deterministic envelope bytes and domain-separated record hash;
-- exact payload byte hash;
-- metadata/set reconciliation separate from content transfer;
-- BLAKE3-tree verified ranges;
+- deterministic tuple bytes and a domain-separated complete `WalObjectId`;
+- inline opaque payload bytes with no second content identity;
+- rateless IBLT/set reconciliation separate from whole-object transfer;
+- transient resumable byte ranges followed by complete-object verification;
 - durable missing-range maps;
 - multi-provider resume;
 - strict frame, byte, decompression, and concurrency bounds.
@@ -395,7 +403,8 @@ longer defines the transport object or wire identity.
 ## 9. Complexity trade-off
 
 The WAL proposal is not automatically smaller in its first release. It adds a
-generic WAL store, set tree, blob range protocol, adapter contract, and explicit
+generic WAL-object store, authenticated set commitment, rateless IBLT and
+fallback reconciliation, range protocol, adapter contract, and explicit
 conflict model. Its justification is architectural deletion after migration:
 
 - no RDF page sync protocol;
@@ -441,11 +450,11 @@ The WAL RFC should normatively import these PR #144 decisions:
 
 | PR #144 concept                                    | WAL replacement                                                          |
 | -------------------------------------------------- | ------------------------------------------------------------------------ |
-| `inventory_event` semantic row                     | Canonical signed `WalRecordV1` bytes                                     |
-| Lane event hash chain as delta proof               | Author checkpoint over deterministic `RecordId` set root                 |
+| `inventory_event` semantic row                     | Canonical signed `WalObjectV1` bytes                                     |
+| Lane event hash chain as delta proof               | Author checkpoint over deterministic `WalObjectId` set root              |
 | `(era, seq)` sync cursor                           | Signed checkpoint ID, set root, and compaction floor                     |
-| Named RDF graph fetch                              | `BlobId` verified byte-range fetch                                       |
-| Canonical RDF-set digest as transport identity     | Exact-byte BLAKE3 `BlobId`; semantic digest remains adapter metadata     |
+| Named RDF graph fetch                              | Complete `WalObjectV1` whole-object range fetch                          |
+| Canonical RDF-set digest as transport identity     | Exact-byte BLAKE3 `WalObjectId`; semantic digest remains adapter metadata |
 | `applied_row` as sync absence index                | WAL set index; adapter separately owns projection index                  |
 | SQLite inventory as protocol control truth         | `WalStore` signed checkpoints; local index implementation is replaceable |
 | Oxigraph active descriptor as network progress     | In-store RDF projection marker only                                      |
@@ -503,8 +512,9 @@ but adopt the WAL proposal as the target protocol boundary. Specifically:
 
 1. Keep the signed roster, per-author checkpoints, curator freshness vector,
    fail-closed authorization, pull loop, VM chain validation, and A/B gates.
-2. Define `WalRecordV1`, exact byte identity, set-tree proofs, and blob-range
-   transfer instead of semantic inventory events or catalogs.
+2. Define `WalObjectV1`, exact byte identity, rateless IBLT reconciliation,
+   signed set-commitment verification, deterministic fallback, and whole-object
+   range transfer instead of semantic inventory events or catalogs.
 3. Implement the RDF/SPARQL reducer and guarded materializer as the first
    adapter.
 4. Run byte reconciliation and shadow projection beside the current path.

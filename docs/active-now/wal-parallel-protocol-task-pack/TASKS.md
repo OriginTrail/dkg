@@ -22,19 +22,19 @@ separately accepted.
 | `WAL-001` | Close RFC implementation-freeze decisions and vectors | `WAL-000` | One atomic `WalObjectV1`, byte-interoperable range framing, schemas, and fixtures. |
 | `WAL-002` | Scaffold WAL package, runtime modes, and isolation | `WAL-000`, `WAL-001` | Safe `legacy`/`parallel`/`wal` skeleton with legacy default. |
 | `WAL-003` | Implement canonical encoding, signatures, and object IDs | `WAL-001`, `WAL-002` | Canonical protocol objects and golden vectors. |
-| `WAL-004` | Implement content-addressed BlobStore and resumable proofs | `WAL-003` | Durable exact-byte blobs and verified range resume. |
-| `WAL-005` | Implement deterministic RecordId set tree and proofs | `WAL-003` | Authenticated 16-way radix reconciliation index. |
-| `WAL-006` | Implement crash-safe WalStore and SQLite control state | `WAL-003`–`WAL-005` | Durable records, lanes, checkpoints, staging, and replay queues. |
+| `WAL-004` | Implement durable WalObjectStore and resumable whole-object ranges | `WAL-003` | Bounded-memory staging and atomic promotion of complete WAL objects. |
+| `WAL-005` | Implement rateless IBLT reconciliation with full unit coverage | `WAL-003` | Exact symmetric-difference discovery, signed-root verification, and bounded fallback. |
+| `WAL-006` | Implement crash-safe WalStore and SQLite control state | `WAL-003`–`WAL-005` | Durable objects, lanes, checkpoints, staging, and replay queues. |
 | `WAL-007` | Implement membership, author checkpoints, vectors, and authority lifecycle | `WAL-003`, `WAL-005`, `WAL-006` | Exact completeness and freshness authority. |
-| `WAL-008` | Integrate private payload descriptors and Sender Key epochs | `WAL-003`, `WAL-004`, `WAL-007` | Fail-closed private bytes without changing DKG membership semantics. |
-| `WAL-009` | Implement bounded authenticated WAL wire protocols | `WAL-002`–`WAL-008` | Four versioned raw libp2p protocols. |
+| `WAL-008` | Integrate private inline payload envelopes and Sender Key epochs | `WAL-003`, `WAL-004`, `WAL-007` | Fail-closed private bytes without changing DKG membership semantics. |
+| `WAL-009` | Implement bounded authenticated WAL wire protocols | `WAL-002`–`WAL-008` | Three versioned protocol families with the complete frozen method catalog. |
 | `WAL-010` | Implement provider discovery, selection, failover, and cold start | `WAL-004`, `WAL-005`, `WAL-007`, `WAL-009` | Correct multi-provider retrieval and authorized bootstrap. |
-| `WAL-011` | Implement remote admission, causal closure, and quarantine | `WAL-006`–`WAL-010` | One fail-closed admission path for fetched records. |
+| `WAL-011` | Implement remote admission, causal closure, and quarantine | `WAL-006`–`WAL-010` | One fail-closed admission path for fetched WAL objects. |
 | `WAL-012` | Implement RDF canonicalization, mutation compiler, and signed policy | `WAL-001`, `WAL-003` | Deterministic adapter inputs without remote SPARQL execution. |
-| `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local records beside legacy writes. |
+| `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside legacy writes. |
 | `WAL-014` | Implement deterministic reducer and conflict resolution | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent active/conflict state. |
 | `WAL-015` | Implement atomic RDF materializer and projection rebuild | `WAL-006`, `WAL-014` | Guarded Oxigraph shadow projection with exact markers. |
-| `WAL-016` | Implement VM activation, private-safe tier movement, and reorg handling | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by admitted WAL records. |
+| `WAL-016` | Implement VM activation, private-safe tier movement, and reorg handling | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by admitted WAL objects. |
 | `WAL-017` | Implement deletion, expiry, snapshots, custody, and compaction | `WAL-004`–`WAL-007`, `WAL-011`, `WAL-014`, `WAL-015` | Bounded history with no resurrection. |
 | `WAL-018` | Implement genesis migration, backfill, and rebuild tooling | `WAL-016`, `WAL-017` | Authenticated bootstrap from existing SWM/VM state. |
 | `WAL-019` | Implement reconciliation driver and complete network shadow protocol | `WAL-009`–`WAL-018` | Pull-correct shadow convergence with persistent retries. |
@@ -158,11 +158,9 @@ wire/convergence contract, not additional prose ambiguity.
   deduplication or independent cryptographic verification of ranges. Adding a
   Merkle/chunk identity layer would change the synchronization-atom invariant
   and therefore requires a later protocol version and RFC decision.
-- Remove or rewrite every RFC and backlog requirement that treats payloads,
-  blobs, or chunks as separately content-addressed synchronized objects before
-  dependent implementation tasks begin. In particular, reconcile the current
-  `WAL-003`, `WAL-004`, `WAL-005`, `WAL-008`, `WAL-009`, `WAL-010`, and related
-  acceptance language with this frozen atom boundary.
+- Audit every RFC and backlog requirement to ensure no payload, blob, range, or
+  chunk is treated as a separately content-addressed synchronized object before
+  dependent implementation tasks begin.
 - Define the adapter-owned payload-envelope form, including any length, codec,
   media type, encryption algorithm, key epoch, nonce, and associated-data
   fields required by DKG semantics. The envelope is encoded entirely inside
@@ -174,8 +172,9 @@ wire/convergence contract, not additional prose ambiguity.
   rejection, reducer relations, common-base rules, resource limits, provider
   cold start, authority rotation/HA, rollback-guard recovery, cutover cohort,
   late-node behavior, private-safe `MOVE_TIER`, and VM finality policy.
-- Publish byte fixtures for CBOR, signatures, IDs, blobs, sets, encryption,
-  snapshots, reducer cases, and cutover objects in the spec and code repos.
+- Publish byte fixtures for CBOR tuples, signatures, IDs, set commitments,
+  rateless IBLT symbols/peeling, object ranges, encryption, snapshots, reducer
+  cases, and cutover objects in the spec and code repos.
 
 ### Acceptance area
 
@@ -239,7 +238,7 @@ beside legacy sync without changing production authority.
   resolved agent config, startup, status, and documentation.
 - Default existing and new installations to `legacy` until a later approved
   release changes policy; `parallel` must require explicit enablement.
-- Allocate separate durable WAL, blob, staging, quarantine, and shadow-RDF
+- Allocate separate durable WAL-object, range-staging, quarantine, and shadow-RDF
   locations under `DKG_HOME`; never reuse legacy progress files or graphs.
 - Define lifecycle interfaces for start, stop, drain, replay, readiness, and
   fatal configuration mismatch without implementing protocol semantics yet.
@@ -275,11 +274,14 @@ which every later proof and replication decision depends.
 
 ### Scope and deliverables
 
-- Implement the RFC 8949 deterministic-CBOR profile with integer keys,
-  canonical rejection, NFC strings, fixed widths, sorted/deduplicated sets, and
-  no floats/tags/indefinite forms.
-- Implement domain-separated BLAKE3 digests and IDs for signed records,
-  membership, author checkpoints, vectors, cutover manifests, and typed blobs.
+- Implement the RFC 8949 deterministic-CBOR exact-arity tuple profile,
+  canonical rejection, NFC strings, fixed widths, sorted/deduplicated sets,
+  explicit null positions, and no maps/floats/tags/indefinite forms.
+- Implement the exact eight-position `WalObjectV1` codec with inline opaque
+  `payloadBytes`; no alternate JSON/map encoding and no separately typed
+  payload/blob/chunk identity.
+- Implement domain-separated BLAKE3 digests and IDs for complete signed WAL
+  objects, membership, author checkpoints, vectors, and cutover manifests.
 - Implement current secp256k1/EIP-191 signing and recovery with canonical low-S
   signatures and normalized recovery bits.
 - Implement typed codecs for all protocol objects frozen by `WAL-001`; do not
@@ -292,8 +294,9 @@ which every later proof and replication decision depends.
       signer, and object ID.
 - [ ] Every alternate/non-canonical encoding is rejected rather than normalized
       after receipt.
-- [ ] Map ordering, Unicode normalization, integer boundaries, set ordering,
-      duplicate fields, low-S, recovery-bit, and domain-confusion negatives pass.
+- [ ] Tuple arity/position, missing/extra value, explicit-null, map rejection,
+      Unicode normalization, integer boundaries, set ordering, low-S,
+      recovery-bit, and domain-confusion negatives pass.
 - [ ] Round-trip/property tests do not create two byte representations for one
       accepted logical object.
 - [ ] Existing author/curator key adapters sign and verify without redefining
@@ -302,77 +305,131 @@ which every later proof and replication decision depends.
 
 ---
 
-## WAL-004 — Implement the content-addressed BlobStore and resumable proofs
+## WAL-004 — Implement the durable WalObjectStore and resumable whole-object ranges
 
 **Focused RFC context:** Sections 7, 9, 10, 15, 17, and measurable transfer goals.
 
 ### Objective
 
-Store and transfer immutable payload bytes independently of RDF and providers,
-with exact identity, bounded memory, verified chunk resume, and crash durability.
+Store and reconstruct complete canonical `WalObjectV1` atoms independently of
+RDF and providers, with bounded memory, resumable ephemeral byte ranges, final
+whole-object verification, and crash durability.
 
 ### Scope and deliverables
 
-- Implement 64 KiB chunking, empty-blob representation, BLAKE3 leaf/pad/node
-  hashing, power-of-two padding, typed `BlobId`, range proofs, and blob info.
-- Implement sparse `.part` files, durable verified-chunk bitmaps, final root
-  recomputation, fsync/atomic rename, parent-directory fsync, and orphan GC.
-- Enforce per-blob, per-response, concurrency, decompression, staging lifetime,
-  disk quota, and path-safety limits; protocol v1 sends no compression.
-- Support chunks from multiple authorized providers without trusting provider
-  session state.
+- Implement final content paths keyed only by `WalObjectId`, quota-controlled
+  temporary files, local range-progress metadata, overlap/reorder handling,
+  restart resume, final ID/signature/canonicality verification, fsync/atomic
+  rename, parent-directory fsync, and orphan cleanup.
+- Stream ranges directly to temporary storage; memory usage must remain bounded
+  independently of total WAL-object size.
+- Enforce negotiated total length, offset arithmetic, maximum range, staged
+  bytes, sparse-file growth, concurrency, staging lifetime, disk quota, and
+  path-safety limits before allocation or expensive parsing.
+- Support ranges from multiple authorized providers without treating provider
+  session state, a range, inline payload, or progress bitmap as proof of object
+  correctness.
+- Keep range hashes/IDs out of persistent protocol schemas. Protocol v1 accepts
+  only the complete `WalObjectId` after all canonical bytes are reconstructed.
 
 ### Acceptance area
 
-- [ ] Zero-, one-, split-, maximum-, padded-, and multi-provider conformance
-      vectors produce exact roots and bytes.
-- [ ] Malformed range, sibling, length, index, root, duplicate, truncation, path,
-      and oversized cases fail before a blob becomes complete.
-- [ ] Crashes after chunk write, bitmap update, fsync, rename, and metadata commit
-      recover to a safe resumable state with no false completion.
-- [ ] Already verified chunks are never retransmitted; an interrupted stream
-      retransmits at most one incomplete 64 KiB chunk.
-- [ ] Streaming tests keep memory bounded independently of blob size and enforce
-      the 1 GiB configurable / 8 GiB hard-cap contract.
-- [ ] Concurrent providers cannot substitute bytes or cause two objects to occupy
-      the same final path.
+- [ ] Zero-payload, one-range, multi-range, maximum-policy-size, out-of-order,
+      overlapping, duplicate, interrupted, restarted, and multi-provider cases
+      reconstruct the exact canonical WAL-object bytes and ID.
+- [ ] Dishonest total length, overflow, gap, truncation, out-of-bounds offset,
+      conflicting overlap, invalid tuple, non-canonical CBOR, wrong signature,
+      wrong ID, path traversal, sparse-file exhaustion, and oversized cases fail
+      before an object becomes complete or visible.
+- [ ] Crashes after range write, progress update, fsync, rename, parent fsync, and
+      metadata commit recover to a safe resumable state with no false completion.
+- [ ] Durably recorded complete ranges are not retransmitted and an interrupted
+      stream retransmits at most one in-flight range.
+- [ ] A WAL object substantially larger than the configured process-memory
+      budget transfers and verifies while measured memory remains within the
+      frozen bound and small-object streams continue making progress.
+- [ ] Repository and wire-schema assertions prove there is no `PayloadId`,
+      `BlobId`, content-addressed range/chunk, or independent payload fetch path.
+- [ ] Concurrent providers cannot substitute bytes or cause two objects to
+      occupy the same final path.
 
 ---
 
-## WAL-005 — Implement the deterministic RecordId set tree and proofs
+## WAL-005 — Implement rateless IBLT reconciliation with full unit-test coverage
 
-**Focused RFC context:** Sections 6.6, 8, 9, 17, and measurable scaling goals.
+**Focused RFC context:** Sections 6.8, 8, 9, 17, 21–23, and measurable
+reconciliation goals.
 
 ### Objective
 
-Implement the authenticated per-author set commitment used to find exact
-missing record IDs without graph enumeration or sequence-gap assumptions.
+Implement the complete, application-agnostic reconciliation algorithm over
+32-byte `WalObjectId` sets. This task owns only deterministic set commitment,
+rateless IBLT symbol generation/subtraction/peeling, decode verification, and
+bounded sorted-ID fallback. It does not own discovery, network framing, object
+transfer, authorization, admission, RDF, or SPARQL.
 
 ### Scope and deliverables
 
-- Implement the persistent 16-way radix tree over 64 ID nibbles, 256-ID leaves,
-  deterministic splitting, subtree counts, canonical roots, and empty root.
-- Implement complete-leaf and branch proof codecs and verification against the
-  signed author checkpoint root/count.
-- Implement reconciliation descent that visits only mismatching prefixes and
-  never accepts a selected partial leaf as complete.
-- Bound depth, nodes, proofs, IDs, response bytes, outstanding work, and
-  adversarial sparse-prefix behavior.
+- Implement the deterministic 16-way radix Merkle set commitment, including the
+  frozen empty root, insertion-order independence, incremental updates, and a
+  simple reference root implementation. The tree is an authenticated
+  commitment, not the normal wire reconciliation algorithm.
+- Implement `RatelessIbltProfileV1` exactly: seed derivation, symbol-membership
+  schedule, degree distribution, signed-i64 count arithmetic, 32-byte ID XOR,
+  domain-separated checksum XOR, deterministic symbol order, and canonical
+  symbol tuples.
+- Implement pure encode, subtract, incremental-window append, pure-symbol
+  detection, deterministic peeling, and provider-only/receiver-only output.
+- Require successful decoding to leave a zero residual, pass every checksum,
+  produce unique bounded IDs, and reconstruct the provider's signed object
+  count and set root from the receiver set plus the decoded difference.
+- Implement detectable decode failure for residual cores, insufficient symbols,
+  overflow, malformed cells, duplicate output, checksum mismatch, count/root
+  mismatch, and configured CPU/memory/symbol/elapsed limits. Failure returns no
+  accepted partial difference.
+- Implement deterministic sorted/paginated full-ID fallback bound to a signed
+  head. Acceptance requires exact count and recomputed root; empty-node backfill
+  may select this path immediately.
+- Publish cross-language golden vectors for the set root, seed, every symbol
+  window, subtraction state, peel trace, decoded directions, reconstructed root,
+  failure cases, and fallback pages.
+- Keep the module dependency-free from DKG semantics and expose pure interfaces
+  that `WAL-009` and `WAL-019` can drive.
 
 ### Acceptance area
 
-- [ ] Insertion order and process restart never change the root for an identical
-      set.
-- [ ] All conformance roots/proofs pass and every malformed, omitted, duplicated,
-      reordered, wrong-count, wrong-prefix, and wrong-path proof fails.
-- [ ] A malicious provider cannot omit one ID from a mismatching leaf and still
-      produce an accepted completeness proof.
-- [ ] Equal roots cause zero tree descent; fixed `k` and `b` across `N=10^4` to
-      `10^6` satisfy the RFC control-byte growth bound.
-- [ ] Persistent-node crash tests recover without a signed checkpoint pointing
-      at a missing or different root.
-- [ ] Property tests compare the persistent implementation with a simple
-      reference set/root implementation.
+- [ ] The dedicated reconciliation package reports 100% line, statement,
+      function, and branch coverage. Generated fixture data is the only allowed
+      coverage exclusion; reconciliation source files may not use ignore
+      directives.
+- [ ] Unit tests cover empty/equal sets; one-sided and two-sided differences;
+      one ID; duplicate input rejection; disjoint sets; high-overlap sets;
+      randomized sets; and `N = 10^4`, `10^5`, and `10^6` with fixed `k`.
+- [ ] Unit tests cover every symbol degree and membership boundary, deterministic
+      seeds/windows, signed positive/negative counts, XOR cancellation,
+      checksum validation, incremental windows, deterministic peel order, and
+      exact direction classification.
+- [ ] Unit tests prove insufficient-symbol and non-peelable cores request more
+      symbols, preserve prior decode work, and never emit an accepted partial
+      result.
+- [ ] Malformed arity/type/length, count overflow/underflow, all-zero false-pure,
+      checksum collision fixtures, duplicate decoded IDs, resource-limit
+      exhaustion, stale/wrong seed, count mismatch, and root mismatch fail with
+      stable reason codes and bounded work.
+- [ ] Property and fuzz tests compare encode/subtract/decode with a simple set
+      symmetric-difference oracle across at least 100,000 deterministic seeds;
+      every accepted result equals the oracle exactly.
+- [ ] Set-commitment tests prove identical roots across insertion permutations,
+      deletion/rebuild, restart serialization, and reference implementation;
+      any omitted, extra, duplicated, or reordered fallback ID fails final root
+      verification.
+- [ ] Golden vectors are consumed by at least two independent implementations
+      that produce byte-identical roots, symbols, peel traces, and decoded sets.
+- [ ] Equal signed roots return before symbol generation; fixed `k` and `b`
+      across increasing `N` satisfy the RFC reconciliation-byte bound and do not
+      enumerate RDF.
+- [ ] The module imports no RDF, SPARQL, SWM/VM, graph-storage, discovery,
+      libp2p, or object-transfer implementation.
 
 ---
 
@@ -382,15 +439,16 @@ missing record IDs without graph enumeration or sequence-gap assumptions.
 
 ### Objective
 
-Create the single durable replicated-truth store for records, checkpoints,
+Create the single durable replicated-truth store for WAL objects, checkpoints,
 admission, replay, and progress, while keeping RDF a separate rebuildable
 projection.
 
 ### Scope and deliverables
 
-- Implement the RFC SQLite schema for records, blobs, chunks, author lanes, set
-  nodes, checkpoints, vectors, idempotency, admission, materialization,
-  providers, and persistent retry queues.
+- Implement the RFC SQLite schema for complete WAL objects, local-only object
+  ranges, author lanes, set-commitment nodes, bounded IBLT cache, checkpoints,
+  vectors, idempotency, admission, materialization, providers, and persistent
+  retry queues.
 - Use SQLite WAL mode, `synchronous=FULL`, foreign keys, explicit schema version,
   migrations, and one-writer transaction discipline.
 - Implement atomic author-sequence/checkpoint/set-root finalization and staged
@@ -406,8 +464,8 @@ projection.
       backwards/forwards gated by explicit versions.
 - [ ] Fault injection at every insert, set update, checkpoint, commit, rollback,
       and process boundary yields either the old state or the complete new state.
-- [ ] No acknowledged record is lost and no checkpoint references absent record,
-      set, blob, policy, or snapshot state.
+- [ ] No acknowledged WAL object is lost and no checkpoint references absent
+      object, set-commitment, policy, or snapshot state.
 - [ ] Idempotency returns the original result for the same request digest and
       rejects key reuse with a different digest across restart.
 - [ ] Corruption/integrity failures produce `blocked` and never false `complete`
@@ -427,7 +485,7 @@ membership, and chain authority rather than provider inventory.
 
 ### Scope and deliverables
 
-- Implement author lanes/epochs/sequences, one checkpoint per authored record,
+- Implement author lanes/epochs/sequences, one checkpoint per authored WAL object,
   set-extension validation, previous-checkpoint linkage, snapshots, and
   compaction floors.
 - Implement signed membership checkpoints and exact disclosure views separated
@@ -456,7 +514,7 @@ membership, and chain authority rather than provider inventory.
 
 ---
 
-## WAL-008 — Integrate private payload descriptors and Sender Key epochs
+## WAL-008 — Integrate private inline payload envelopes and Sender Key epochs
 
 **Focused RFC context:** Sections 3, 5, 6.1, 9, 15, 17, and freeze items 1 and 5.
 
@@ -467,10 +525,11 @@ membership/key-package distribution and preserving its authority semantics.
 
 ### Scope and deliverables
 
-- Implement the signed `PayloadDescriptorV1` frozen by `WAL-001` and bind all
-  decryption-critical metadata into the record signature and AEAD data.
-- Derive per-record keys from the existing epoch key with the RFC HKDF domains;
-  encrypt content-addressed payloads using AES-256-GCM and unique nonces.
+- Implement `DkgPayloadEnvelopeV1` entirely inside `WalObjectV1.payloadBytes`
+  and bind all decryption-critical metadata into the complete WAL-object
+  signature/identity and AEAD associated data.
+- Derive per-object keys from the existing epoch key with the RFC HKDF domains;
+  encrypt inline adapter content using AES-256-GCM and unique nonces.
 - Enforce exact private view/key epoch authorization before returning head,
   root, count, ID, size, proof, provider hint, ciphertext, or plaintext.
 - Integrate key rotation/removal with future serving and retention without
@@ -501,21 +560,35 @@ membership/key-package distribution and preserving its authority semantics.
 
 ### Objective
 
-Expose the four versioned WAL protocol families over the existing raw
+Expose the three versioned WAL protocol families over the existing raw
 `ProtocolRouter`, with authorization-before-disclosure, canonical framing, and
 hard resource bounds.
 
 ### Scope and deliverables
 
-- Register `/dkg/10.1.0/wal-head`, `/wal-reconcile`, `/wal-record`, and
-  `/wal-blob` without using the reliable-message outbox as correctness storage.
+- Register `/dkg/10.1.0/wal-control`, `/wal-reconcile`, and `/wal-object`
+  without using the reliable-message outbox as correctness storage.
 - Implement unsigned-varint length framing, deterministic CBOR, request IDs,
   replay cache, timestamps, requester/target binding, identity/delegation proof,
   cancellation, deadlines, and uniform denial.
-- Implement all `GET_VECTOR`, `GET_CHECKPOINT`, `GET_NODE`, `GET_LEAF`,
-  `GET_RECORDS`, `GET_BLOB_INFO`, and `GET_CHUNKS` messages.
-- Enforce per-frame, record, ID, chunk, proof, concurrency, queue, fan-out, and
-  request-freshness limits before allocation or expensive validation.
+- Implement the complete frozen method catalog: `GET_CAPABILITIES`, `GET_HEAD`,
+  `GET_VECTOR`, `GET_CHECKPOINT`, `ANNOUNCE_HEAD`, `CANCEL`,
+  `GET_RECONCILIATION_SYMBOLS`, `GET_OBJECT_IDS`, `GET_OBJECT_RANGE`, and the
+  common bounded `ERROR` response.
+- Publish exact request/response tuple tables, numeric message/error codes,
+  protocol negotiation rules, requester/provider state machines, and sequence
+  diagrams for equal sets, IBLT delta sync, incremental symbol continuation,
+  fallback enumeration, empty-node backfill, range resume, provider switch,
+  cancellation, authorization denial, stale head, and malformed peer behavior.
+- Keep provider discovery explicitly outside the three WAL wire families and
+  document the handoff from an untrusted provider candidate to negotiated,
+  identity-bound, authorized protocol requests.
+- Bind every reconciliation response to the immutable signed head, seed, symbol
+  offset/page cursor, and request. Bind every object range to `WalObjectId`,
+  total canonical length, and byte offset.
+- Enforce per-frame, symbol window, decoded-ID, fallback page, object, range,
+  concurrency, queue, fan-out, temporary staging, and request-freshness limits
+  before allocation or expensive validation.
 - Preserve Iroh-inspired provider/path independence without adding an Iroh
   runtime dependency in protocol v1.
 
@@ -527,11 +600,15 @@ hard resource bounds.
 - [ ] All protocol conformance frames round-trip byte-exactly and reject
       non-canonical, truncated, trailing, oversized, replayed, stale, or
       misbound requests.
+- [ ] Every catalogued method and stable error code has valid, boundary, and
+      invalid golden frames plus requester/provider transition tests; no
+      undocumented message can affect reconciliation or object admission.
 - [ ] Authorization runs before private metadata lookup/serialization and before
       any private response byte is written.
 - [ ] Existing `/dkg/10.0.x/*` handlers and legacy sync behavior are unchanged in
       `legacy` and remain authoritative in `parallel`.
-- [ ] Slowloris, count/length mismatch, proof bomb, cancellation, timeout, queue
+- [ ] Slowloris, count/length mismatch, symbol bomb, fallback-page abuse,
+      dishonest object length, range overflow, cancellation, timeout, queue
       saturation, and concurrent-stream tests stay within configured bounds.
 - [ ] Protocol negotiation cannot downgrade a private WAL request to legacy or
       another disclosure view.
@@ -558,7 +635,8 @@ correctness dependency.
 - Separate signed target discovery from availability hints; gossip and
   checkpoint nudges may wake reconciliation but never define completeness.
 - Implement provider scoring, bounded fan-out, retry/backoff, request-boundary
-  switching, multi-provider blob chunks, and persisted availability hints.
+  switching, cross-provider symbol windows and WAL-object ranges, and persisted
+  availability hints.
 - Implement authorized cold start for public and private collections without
   exposing private collection metadata to discovery infrastructure.
 
@@ -568,8 +646,9 @@ correctness dependency.
       least one valid provider through the frozen bootstrap path.
 - [ ] Lost gossip, unavailable curator cache, stale hint, one malicious provider,
       and direct-to-relay path changes do not change the expected signed set.
-- [ ] Provider switching during set descent, record fetch, and blob range fetch
-      converges to exact bytes without duplicate verified chunks.
+- [ ] Provider switching during symbol acquisition, fallback enumeration, and
+      WAL-object range fetch converges to exact sets and bytes without duplicate
+      durably recorded ranges.
 - [ ] Private discovery returns no collection/view/root/provider metadata to an
       unauthorized requester.
 - [ ] Retry state survives restart, respects concurrency/fan-out bounds, and
@@ -586,14 +665,15 @@ correctness dependency.
 ### Objective
 
 Create one fail-closed path that turns fetched canonical bytes into admitted WAL
-records only after every identity, authority, content, causal, privacy, policy,
+objects only after every identity, authority, content, causal, privacy, policy,
 and VM prerequisite is satisfied.
 
 ### Scope and deliverables
 
-- Stage fetched records until checkpoint inclusion, signature, ID, policy, view,
-  blob completion, parents, base heads, cross-author permission, decryption,
-  adapter version, limits, and relevant chain evidence validate.
+- Stage fetched WAL objects until checkpoint inclusion, complete-object
+  signature/ID/canonicality, policy, namespace, inline payload envelope, parents,
+  base heads, cross-author permission, decryption, adapter version, limits, and
+  relevant chain evidence validate.
 - Fetch causal/content closure without unbounded recursion or accepting provider
   omission as deletion.
 - Atomically admit a closed batch and persist affected logical-key work.
@@ -603,13 +683,14 @@ and VM prerequisite is satisfied.
 
 ### Acceptance area
 
-- [ ] No incomplete record/blob/policy/causal set changes canonical or shadow RDF.
+- [ ] No incomplete WAL object, policy, or causal set changes canonical or
+      shadow RDF.
 - [ ] Every validation step has focused valid/invalid tests and the documented
       fail-closed order, including private authorization before disclosure.
 - [ ] Parent cycles, excessive closure depth, cross-view references, policy
       substitution, author equivocation, and VM evidence substitution are
       rejected or blocked exactly as specified.
-- [ ] Atomic batch crash tests leave all records staged or the entire closed batch
+- [ ] Atomic batch crash tests leave all WAL objects staged or the entire closed batch
       admitted and queued; no half-admitted causal state is visible.
 - [ ] Quarantine byte/time/count limits work across restart and cannot evict or
       overwrite valid canonical objects.
@@ -666,20 +747,20 @@ SPARQL execution.
 ### Objective
 
 Compile every eligible local authoritative mutation into a durable shadow WAL
-record with idempotent API results, without changing legacy write authority.
+object with idempotent API results, without changing legacy write authority.
 
 ### Scope and deliverables
 
 - Wire publisher/share/update/delete/expiry paths to the shared compiler behind
   explicit `parallel` mode.
-- Persist/fsync referenced blobs before acquiring the author-lane mutex and
-  beginning the immediate SQLite transaction.
-- Resolve idempotency, allocate sequence, sign the record, update set tree,
-  create checkpoint, and commit atomically; do no network or graph work inside
-  the transaction.
+- Encode the complete inline adapter payload before acquiring the author-lane
+  mutex and beginning the immediate SQLite transaction.
+- Resolve idempotency, allocate sequence, bind the previous object, sign the
+  complete `WalObjectV1`, update the set commitment, create the checkpoint, and
+  commit atomically; do no network or graph work inside the transaction.
 - Queue shadow materialization and send best-effort checkpoint nudges only after
   durable commit.
-- Expose `recordId`, WAL status, materialization status, and checkpoint ID
+- Expose `walObjectId`, WAL status, materialization status, and checkpoint ID
   without falsely claiming global propagation.
 
 **Likely surfaces:** `packages/publisher/src/dkg-publisher.ts`, share/update/
@@ -690,11 +771,11 @@ workspace handlers, `packages/agent/src/`, and `packages/wal/`.
 - [ ] In `legacy`, public API responses and storage/network behavior remain the
       current baseline with zero WAL side effects.
 - [ ] In `parallel`, each eligible successful legacy mutation produces exactly
-      one matching durable WAL record/checkpoint and isolated shadow result.
-- [ ] Same idempotency key/digest returns the same `RecordId` across restart;
+      one matching durable WAL object/checkpoint and isolated shadow result.
+- [ ] Same idempotency key/digest returns the same `WalObjectId` across restart;
       same key/different digest fails deterministically.
-- [ ] Crashes after every blob/WAL/checkpoint/nudge/materialization boundary lose
-      no acknowledged record and recover without manual repair.
+- [ ] Crashes after every object-file/WAL/checkpoint/nudge/materialization
+      boundary lose no acknowledged object and recover without manual repair.
 - [ ] Shadow failure is visible and bounded but cannot mutate production graphs
       or silently convert WAL into the authoritative write path.
 - [ ] p95/p99 latency and CPU/RSS overhead are recorded against `WAL-000` and
@@ -708,7 +789,7 @@ workspace handlers, `packages/agent/src/`, and `packages/wal/`.
 
 ### Objective
 
-Reduce identical admitted record sets to identical active state and explicit
+Reduce identical admitted WAL-object sets to identical active state and explicit
 conflict branches regardless of arrival, provider, retry, or replay order.
 
 ### Scope and deliverables
@@ -719,7 +800,7 @@ conflict branches regardless of arrival, provider, retry, or replay order.
 - Implement conservative replace/patch/delete/tier conflict policy and signed
   single-/multi-valued/shared-write rules.
 - Preserve every incompatible maximal branch in reserved conflict projections;
-  `RecordId` may order processing but never select a winner.
+  `WalObjectId` may order processing but never select a winner.
 - Admit `RESOLVE` only from an authorized signer referencing every current
   conflict head and supplying a complete deterministic result.
 - Detect same-sequence author equivocation, retain evidence, block the lane, and
@@ -728,13 +809,13 @@ conflict branches regardless of arrival, provider, retry, or replay order.
 ### Acceptance area
 
 - [ ] Every reducer fixture produces identical active-head, state, and conflict
-      digests under all record-arrival and provider permutations.
+      digests under all WAL-object-arrival and provider permutations.
 - [ ] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
       delete/update, tier movement, multi-base, resolution, and equivocation
       vectors match the normative fixtures.
 - [ ] No incompatible branch is dropped or made active by wall clock, arrival
-      order, provider identity, or lexical `RecordId` winner selection.
-- [ ] Unauthorized, incomplete, stale-head, or partial `RESOLVE` records fail
+      order, provider identity, or lexical `WalObjectId` winner selection.
+- [ ] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
       without changing active/conflict state.
 - [ ] Resource limits bound causal depth, conflict heads, touched keys, and
       recomputation work with stable blocked/quarantine outcomes.
@@ -796,7 +877,7 @@ SWM-to-VM movement causally and without leaking private SWM metadata.
 
 - Implement the frozen two-sided/opaque `MOVE_TIER` representation and source/
   target view authorization.
-- Bind VM records to existing UAL/KA identity, author, context graph, root,
+- Bind VM WAL objects to existing UAL/KA identity, author, context graph, root,
   assertion version/count, receipt, transaction/log location, block hash, and
   current network finality policy.
 - Allow durable admission before activation; activate only after the current
@@ -813,7 +894,7 @@ SWM-to-VM movement causally and without leaking private SWM metadata.
       CG, insufficient finality, and reorg cases never produce active VM state.
 - [ ] Valid finalized transition atomically activates VM and supersedes the
       corresponding SWM view; reorg deterministically restores prior valid SWM.
-- [ ] Public target records/responses disclose none of the private source IDs,
+- [ ] Public target objects/responses disclose none of the private source IDs,
       graph names, epochs, counts, or causal shape.
 - [ ] Chain policy reconfiguration and stored-frontier revalidation follow the
       frozen rule across restart.
@@ -835,8 +916,8 @@ conflicts, forging authorship, or resurrecting stale state.
 
 - Implement signed causal deletes and policy-authorized expiry bound to a signed
   vector/block frontier; local wall time may schedule but not hide state alone.
-- Implement author-scoped snapshot records/manifests containing live logical
-  keys, author heads, state/blob digests, conflict references, covered root,
+- Implement author-scoped snapshot WAL objects/manifests containing live logical
+  keys, author heads, inline state digests/bytes, conflict references, covered root,
   policy, adapter, and VM frontier.
 - Implement new-epoch compaction, baseline snapshot ID, compaction floor, signed
   expiring custodian receipts, quorum/retention grace, removed-custodian policy,
@@ -881,7 +962,7 @@ nodes to current authenticated state without inventing pre-WAL causal history.
   projection-only rebuild through the same verifier/admission/reducer path.
 - Produce dry-run reports, resumable execution, deterministic manifests, abort
   safety, and post-barrier proof that every new mutation creates a shadow WAL
-  record.
+  object.
 
 ### Acceptance area
 
@@ -892,7 +973,7 @@ nodes to current authenticated state without inventing pre-WAL causal history.
       rows remain quarantined unless explicit migration policy authorizes a
       clearly labeled legacy view.
 - [ ] Empty, stale, below-floor, and projection-only nodes reach exact target
-      roots, blobs, RDF, conflict, tombstone, and VM state.
+      roots, complete WAL objects, RDF, conflict, tombstone, and VM state.
 - [ ] Backfill performs no remote graph enumeration; local complete-WAL rebuild
       performs zero network payload transfer.
 - [ ] Barrier abort/resume and crashes at every snapshot/checkpoint/vector step
@@ -908,28 +989,31 @@ nodes to current authenticated state without inventing pre-WAL causal history.
 
 ### Objective
 
-Join signed target discovery, set reconciliation, record/blob retrieval,
+Join signed target discovery, rateless IBLT reconciliation, WAL-object range retrieval,
 admission, replay, and shadow materialization into one durable pull-correct
 protocol operating across upgraded nodes.
 
 ### Scope and deliverables
 
 - On connect, nudge, and periodic heartbeat, obtain membership/vector/
-  checkpoints, compare local roots, choose baseline, descend mismatches, fetch
-  records/blobs, admit closed work, and materialize affected keys.
+  checkpoints, compare signed roots, choose baseline, stream rateless IBLT
+  symbols, verify the decoded remote set or bounded fallback, fetch remote-only
+  complete WAL objects by ranges, admit closed work, and materialize affected
+  keys.
 - Persist reconciliation sessions, provider/retry state, missing IDs/ranges,
   queue priorities, cancellation, backpressure, and restart recovery.
 - Add best-effort checkpoint gossip/nudges only as wakeups; dropped/reordered
   nudges must not affect eventual correctness.
-- Enforce four streams per peer, two blob streams per collection/peer, global
+- Enforce four reconciliation streams per peer, two WAL-object range streams per namespace/peer, global
   bounded materialization, policy priority, and every frozen resource limit.
 - Run exclusively in isolated WAL/shadow namespaces while legacy remains
   authoritative.
 
 ### Acceptance area
 
-- [ ] Equal sets exchange no tree/record/blob data and perform zero triplestore
-      enumeration after current heads are known.
+- [ ] Equal signed roots exchange no IBLT symbols, fallback IDs, or WAL-object
+      bytes and perform zero triplestore enumeration after current heads are
+      known.
 - [ ] Missed nudge, opposite arrival, reconnect, offline stale peer, late join,
       partial transfer, provider switch, restart, and unavailable-provider cases
       converge to the exact signed target.
@@ -959,7 +1043,7 @@ hand.
 - Expose per collection/view/author membership, vector, checkpoint, expiry,
   freshness source, rollback high-water, root/count, compaction floor, and
   snapshot ID.
-- Expose missing record IDs/counts, blob ranges, durable WAL head, admission/
+- Expose missing WAL-object IDs/counts, IBLT symbol/fallback state, object ranges, durable WAL head, admission/
   quarantine reasons, materialization frontier/lag, active/conflict/VM-pending
   keys, provider/retry/queue state, and cutover state.
 - Implement exact readiness values: `complete`, `known-incomplete`,
@@ -982,7 +1066,7 @@ hand.
       applicable, audit logged, and cannot bypass admission/cutover invariants.
 - [ ] Dashboard/API load does not enumerate all graphs or materially block WAL
       writer/reconciliation transactions.
-- [ ] Publish/share returns durable `recordId`, WAL/materialization status, and
+- [ ] Publish/share returns durable `walObjectId`, WAL/materialization status, and
       checkpoint ID with no false global-propagation claim.
 
 ---
@@ -998,10 +1082,11 @@ repeatable release-blocking tests.
 
 ### Scope and deliverables
 
-- Inject crashes at every blob, SQLite, checkpoint, vector, admission,
+- Inject crashes at every object-range/file, SQLite, checkpoint, vector, admission,
   materialization, snapshot, compaction, genesis, reconciliation, and cutover
   durable boundary.
-- Build malicious-provider fixtures for omission, substitution, malformed proofs,
+- Build malicious-provider fixtures for IBLT omission/substitution, malformed
+  symbols, residual cores, fallback-page omission, dishonest object lengths,
   forks, stale vectors, equivocation, closure bombs, frame/length bombs, slow
   streams, replay, downgrade, and provider switching.
 - Build private authorization probes for unauthenticated/removed/stale/wrong-view/
@@ -1012,12 +1097,13 @@ repeatable release-blocking tests.
 ### Acceptance area
 
 - [ ] At least 100 randomized runs per durable crash boundary yield zero lost
-      acknowledged records, partial canonical projections, false completion, or
+      acknowledged WAL objects, partial canonical projections, false completion, or
       manual repair.
 - [ ] Every security negative is rejected before unauthorized disclosure or
       projection activation and reports a stable bounded reason.
-- [ ] Malicious provider omission/substitution cannot satisfy checkpoint/set/blob
-      proofs or change expected signed state.
+- [ ] Malicious provider omission/substitution cannot satisfy checkpoint/set-root,
+      decoded-root, fallback-root, or complete-WAL-object verification or change
+      expected signed state.
 - [ ] Resource attacks stay within configured memory, disk, CPU-work, queue,
       concurrency, and time limits.
 - [ ] Same-sequence equivocation is retained and blocks the lane; it is never
@@ -1139,7 +1225,7 @@ paths only after all evidence gates pass.
 
 - [ ] Every prior task acceptance area is complete and linked to exact commits and
       reproducible evidence; no implementation-freeze item remains open.
-- [ ] All expected author roots/counts, blobs, projection/conflict digests,
+- [ ] All expected author roots/counts, complete WAL objects, projection/conflict digests,
       lifecycle states, private decisions, and VM states match across the fleet.
 - [ ] Seven-day/million-mutation soak and every measurable numeric threshold pass
       on comparable production-scale infrastructure.
