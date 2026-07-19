@@ -1,9 +1,11 @@
 import {
+  AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeControlObjectDigestHex,
   decodeOpaqueKaBundleV1,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
@@ -12,6 +14,8 @@ import {
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
@@ -20,6 +24,7 @@ import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
+import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const ATTACKER_WALLET = new ethers.Wallet(`0x${'77'.repeat(32)}`);
@@ -29,7 +34,6 @@ const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/successor-producer' as ContextGraphIdV1;
 const GOVERNANCE = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
-const DELEGATION_DIGEST = `0x${'76'.repeat(32)}` as Digest32V1;
 const KA_NUMBER = 7n;
 const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
 const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
@@ -47,13 +51,14 @@ const DEPLOYMENT = Object.freeze({
 
 describe('RFC-64 public/open one-row successor producer', () => {
   it('verifies the exact successor before staging its bundle and signed objects', async () => {
-    const genesis = await emptyGenesis();
+    const { genesis, authorization } = await producerHistory();
     const events: string[] = [];
     let stagedBundle: { blobDigest: Digest32V1; bundleBytes: Uint8Array } | undefined;
     let stagedObjects: readonly { envelope: { objectType: string } }[] | undefined;
     const stageKaBundle = vi.fn(async (input) => {
       events.push('bundle');
       stagedBundle = input;
+      return durableBundleReceipt(input);
     });
     const stageVerifiedObjects = vi.fn(async (input) => {
       events.push('objects');
@@ -79,6 +84,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
       deployment: DEPLOYMENT,
       issuedAt: '1773900001000' as never,
       catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
     });
 
     expect(events).toEqual(['bundle', 'objects']);
@@ -115,11 +121,19 @@ describe('RFC-64 public/open one-row successor producer', () => {
       kaId: KA_ID,
       assertionCoordinate: 'gate-1-object',
     });
+    expect(result.authorship).toMatchObject({
+      authorAddress: AUTHOR,
+      catalogIssuerKey: AUTHOR,
+      catalogIssuerDelegationObjectDigest: authorization.catalogIssuerDelegation.objectDigest,
+      catalogHeadObjectDigest: result.publication.head.objectDigest,
+      catalogRowDigest: result.sealBinding.catalogRowDigest,
+      row: result.row,
+    });
   });
 
   it('rejects a non-author attestation before either durable staging callback', async () => {
-    const genesis = await emptyGenesis();
-    const stageKaBundle = vi.fn(async () => {});
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
     const stageVerifiedObjects = vi.fn(async () => undefined as never);
     const catalogSignDigest = vi.fn(async (digest: Uint8Array) =>
       AUTHOR_WALLET.signMessage(digest));
@@ -138,6 +152,7 @@ describe('RFC-64 public/open one-row successor producer', () => {
       deployment: DEPLOYMENT,
       issuedAt: '1773900001000' as never,
       catalogSigner: { issuer: AUTHOR, signDigest: catalogSignDigest },
+      catalogIssuerAuthorization: authorization,
     })).rejects.toMatchObject({ code: 'catalog-successor-producer-binding' });
 
     expect(catalogSignDigest).not.toHaveBeenCalled();
@@ -146,8 +161,8 @@ describe('RFC-64 public/open one-row successor producer', () => {
   });
 
   it('rejects a deployment/seal binding mismatch before durable staging', async () => {
-    const genesis = await emptyGenesis();
-    const stageKaBundle = vi.fn(async () => {});
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
     const stageVerifiedObjects = vi.fn(async () => undefined as never);
     const producer = new Rfc64PublicCatalogSuccessorProducerV1({
       controlObjects: { stageVerifiedObjects } as never,
@@ -167,15 +182,155 @@ describe('RFC-64 public/open one-row successor producer', () => {
       } as CatalogSealDeploymentProfileV1,
       issuedAt: '1773900001000' as never,
       catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
     })).rejects.toMatchObject({ code: 'catalog-successor-producer-binding' });
 
     expect(stageKaBundle).not.toHaveBeenCalled();
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
+
+  it('rejects a valid delegation from another author lane with zero staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const crossAuthorAuthorization = await directCatalogAuthorization(
+      ATTACKER_WALLET,
+      `${CONTEXT_GRAPH_ID}-attacker` as ContextGraphIdV1,
+    );
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: crossAuthorAuthorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-verification' });
+
+    expect(authorization.catalogIssuerDelegation.objectDigest)
+      .not.toBe(crossAuthorAuthorization.catalogIssuerDelegation.objectDigest);
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('rejects an arbitrary catalog signer with zero staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const signDigest = vi.fn(async (digest: Uint8Array) => ATTACKER_WALLET.signMessage(digest));
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: {
+        issuer: ATTACKER_WALLET.address.toLowerCase() as EvmAddressV1,
+        signDigest,
+      },
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-history' });
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['non-durable', (input: BundleStageInput) => ({
+      durable: false,
+      blobDigest: input.blobDigest,
+      byteLength: input.bundleBytes.byteLength,
+    })],
+    ['wrong digest', (input: BundleStageInput) => ({
+      durable: true,
+      blobDigest: `0x${'00'.repeat(32)}`,
+      byteLength: input.bundleBytes.byteLength,
+    })],
+    ['wrong byte length', (input: BundleStageInput) => ({
+      durable: true,
+      blobDigest: input.blobDigest,
+      byteLength: input.bundleBytes.byteLength + 1,
+    })],
+  ])('rejects a %s bundle provider receipt before staging control objects', async (_label, buildReceipt) => {
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(async (input) => buildReceipt(input) as never);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-bundle-stage' });
+
+    expect(stageKaBundle).toHaveBeenCalledOnce();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized Gate-1 projection before catalog signing or durable staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: new Uint8Array(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1),
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: { issuer: AUTHOR, signDigest },
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
 });
 
-async function emptyGenesis() {
-  return produceEmptyAuthorCatalogGenesisV1({
+type BundleStageInput = {
+  readonly blobDigest: Digest32V1;
+  readonly bundleBytes: Uint8Array;
+};
+
+async function producerHistory() {
+  const authorization = await directCatalogAuthorization(AUTHOR_WALLET, CONTEXT_GRAPH_ID);
+  const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope: {
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -187,10 +342,59 @@ async function emptyGenesis() {
       era: '0',
       bucketCount: '1',
     } as AuthorCatalogScopeV1,
-    catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+    catalogIssuerDelegationDigest: authorization.catalogIssuerDelegation.objectDigest,
     issuedAt: '1773900000000' as never,
     signer: catalogSigner(),
   });
+  return { genesis, authorization };
+}
+
+async function directCatalogAuthorization(
+  wallet: ethers.Wallet,
+  contextGraphId: ContextGraphIdV1,
+) {
+  const authorAddress = wallet.address.toLowerCase() as EvmAddressV1;
+  const unsigned: UnsignedControlEnvelopeV1 = {
+    issuer: authorAddress,
+    objectType: AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+    payload: {
+      authorAddress,
+      authorAuthorityEvidenceDigest: null,
+      catalogEra: '0',
+      catalogIssuerKey: authorAddress,
+      contextGraphId,
+      effectiveAt: '1773899999000',
+      expiresAt: '1774000000000',
+      governanceChainId: '20430',
+      governanceContractAddress: GOVERNANCE,
+      networkId: NETWORK_ID,
+      ownershipTransitionDigest: null,
+      previousDelegationDigest: null,
+      subGraphName: null,
+    },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  };
+  const objectDigest = computeControlObjectDigestHex(unsigned);
+  const catalogIssuerDelegation = {
+    ...unsigned,
+    objectDigest,
+    signature: await wallet.signMessage(ethers.getBytes(objectDigest)),
+  } as SignedAuthorCatalogIssuerDelegationEnvelopeV1;
+  return Object.freeze({
+    catalogIssuerDelegation,
+    parentAuthorAgentEvidence: null,
+  });
+}
+
+function durableBundleReceipt(
+  input: BundleStageInput,
+) {
+  return Promise.resolve(Object.freeze({
+    durable: true as const,
+    blobDigest: input.blobDigest,
+    byteLength: input.bundleBytes.byteLength,
+  }));
 }
 
 function catalogSigner() {

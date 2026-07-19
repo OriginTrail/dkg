@@ -33,6 +33,7 @@
     "./dist/rfc64/public-catalog-native-transport-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
+    "./dist/rfc64/public-catalog-successor-producer-v1.js": null,
     "./dist/rfc64/public-catalog-transport-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
     "./dist/rfc64/*": null,

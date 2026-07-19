@@ -8,8 +8,12 @@ const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 
-if (typeof root.DKGAgent !== 'function' || typeof legacyAgent.DKGAgent !== 'function') {
-  throw new Error('published agent entry points did not expose DKGAgent');
+if (
+  typeof root.DKGAgent !== 'function'
+  || typeof legacyAgent.DKGAgent !== 'function'
+  || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
+) {
+  throw new Error('published agent entry points did not expose required root APIs');
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
@@ -39,6 +43,7 @@ const blockedRfc64Modules = [
   'public-catalog-native-transport-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-successor-producer-v1.js',
   'public-catalog-transport-v1.js',
   'secure-filesystem-policy-v1.js',
 ];

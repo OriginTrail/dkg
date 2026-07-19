@@ -14,7 +14,9 @@ import {
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
   KA_TRANSFER_PROJECTION_V1,
+  MIN_KA_BUNDLE_BYTES_V1,
   ZERO_DIGEST32_V1,
+  calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -25,6 +27,7 @@ import {
   readVerifiedCatalogSealBindingV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedTransferredCatalogBundleMetadataV1,
+  verifyAuthorCatalogDirectoryPathV1,
   verifyCatalogSealBindingV1,
   verifyCgSharedProjectionV1,
   verifyTransferredCatalogBundleV1,
@@ -36,6 +39,7 @@ import {
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
+  type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
@@ -47,6 +51,12 @@ import {
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 import {
+  readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogRowAuthorshipV1,
+  type AuthorAgentDelegationEvidenceV1,
+  type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
+} from './catalog-row-authorship.js';
+import {
   produceSparseAuthorCatalogSuccessorV1,
   type ProducedAuthorCatalogPublicationV1,
   type Rfc64AuthorCatalogEip191SignerV1,
@@ -56,6 +66,7 @@ import type {
   StageVerifiedControlObjectsResultV1,
 } from './control-object-store-v1.js';
 import { assertRecoverableAuthorAttestationV1 } from './public-catalog-native-receiver-v1.js';
+import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from './public-catalog-native-transport-v1.js';
 
 export type Rfc64PublicCatalogSuccessorProducerErrorCodeV1 =
   | 'catalog-successor-producer-input'
@@ -82,10 +93,24 @@ export interface StageRfc64PublicCatalogBundleV1 {
   readonly bundleBytes: Uint8Array;
 }
 
+/** Exact durable provider receipt for the immutable bundle write. */
+export interface StagedRfc64PublicCatalogBundleReceiptV1 {
+  readonly durable: true;
+  readonly blobDigest: Digest32V1;
+  readonly byteLength: number;
+}
+
+export interface Rfc64PublicCatalogIssuerAuthorizationV1 {
+  readonly catalogIssuerDelegation: SignedAuthorCatalogIssuerDelegationEnvelopeV1;
+  readonly parentAuthorAgentEvidence: AuthorAgentDelegationEvidenceV1 | null;
+}
+
 export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
   readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'stageVerifiedObjects'>;
-  /** Must resolve only after the immutable bundle is durably available by digest. */
-  readonly stageKaBundle: (input: StageRfc64PublicCatalogBundleV1) => Promise<void>;
+  /** Must return an exact receipt only after the immutable bytes are durably available. */
+  readonly stageKaBundle: (
+    input: StageRfc64PublicCatalogBundleV1,
+  ) => Promise<StagedRfc64PublicCatalogBundleReceiptV1>;
 }
 
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
@@ -98,6 +123,8 @@ export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt: TimestampMsV1;
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
+  /** Exact author/delegation closure authorizing the catalog signer for this lane. */
+  readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
 }
 
 export interface ProducedAndStagedPublicOpenOneRowSuccessorV1 {
@@ -109,6 +136,7 @@ export interface ProducedAndStagedPublicOpenOneRowSuccessorV1 {
   readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
   readonly transfer: VerifiedTransferredCatalogBundleMetadataV1;
   readonly projection: VerifiedCgSharedProjectionMetadataV1;
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
   readonly stagedControlObjects: StageVerifiedControlObjectsResultV1;
 }
 
@@ -245,24 +273,74 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     }
 
     let verifiedObjects;
+    let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
     try {
-      verifiedObjects = await Promise.all(publication.stagedObjects.map(async (envelope) => ({
-        envelope,
-        issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
-      })));
+      const authorization = input.catalogIssuerAuthorization;
+      const catalogIssuerDelegationSignature = await verifyControlEnvelopeIssuerSignatureV1(
+        authorization.catalogIssuerDelegation,
+      );
+      verifiedObjects = await Promise.all(
+        publication.stagedObjects.map(async (envelope) => ({
+          envelope,
+          issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+        })),
+      );
+      const signaturesByDigest = new Map(
+        verifiedObjects.map(({ envelope, issuerSignature }) => [
+          envelope.objectDigest,
+          issuerSignature,
+        ] as const),
+      );
+      const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(
+        publication.head,
+        publication.directoryPath,
+        '0' as DecimalU64V1,
+      );
+      const authorshipToken = verifyAuthorCatalogRowAuthorshipV1({
+        catalogIssuerDelegation: authorization.catalogIssuerDelegation,
+        catalogIssuerDelegationSignature,
+        parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
+        catalogHead: publication.head,
+        catalogHeadSignature: requiredSignature(
+          signaturesByDigest,
+          publication.head.objectDigest,
+          'catalog head',
+        ),
+        directoryPathEnvelopes: publication.directoryPath,
+        directoryPathSignatures: publication.directoryPath.map((envelope, index) =>
+          requiredSignature(
+            signaturesByDigest,
+            envelope.objectDigest,
+            `directory path node ${index}`,
+          )),
+        directoryPathProof,
+        catalogBucket: producedBucket,
+        catalogBucketSignature: requiredSignature(
+          signaturesByDigest,
+          producedBucket.objectDigest,
+          'catalog bucket',
+        ),
+        targetKaId: producedRow.kaId,
+      });
+      authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipToken);
     } catch (cause) {
       fail(
         'catalog-successor-producer-verification',
-        'produced control-object signature verification failed',
+        'produced control objects failed signature or author-catalog authorship verification',
         cause,
       );
     }
 
     try {
-      await this.#stageKaBundle(Object.freeze({
+      const bundleReceipt = await this.#stageKaBundle(Object.freeze({
         blobDigest: prepared.encoded.blobDigest,
         bundleBytes: new Uint8Array(prepared.bundleBytes),
       }));
+      assertExactDurableBundleReceipt(
+        bundleReceipt,
+        prepared.encoded.blobDigest,
+        prepared.bundleBytes.byteLength,
+      );
     } catch (cause) {
       fail(
         'catalog-successor-producer-bundle-stage',
@@ -290,6 +368,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       sealBinding,
       transfer,
       projection,
+      authorship,
       stagedControlObjects,
     });
   }
@@ -301,10 +380,29 @@ function prepareRowAndBundle(input: ProduceAndStagePublicOpenOneRowSuccessorInpu
   let encoded: ReturnType<typeof encodeOpaqueKaBundleV1>;
   let row: AuthorCatalogRowV1;
   try {
+    if (!(input?.projectionBytes instanceof Uint8Array)) {
+      throw new TypeError('projectionBytes must be a Uint8Array');
+    }
+    // Reject a projection that cannot possibly fit the Gate-1 transport before
+    // canonicalizing the seal or allocating/copying a complete bundle.
+    if (
+      BigInt(input.projectionBytes.byteLength)
+      > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)
+        - MIN_KA_BUNDLE_BYTES_V1
+    ) {
+      throw new RangeError('projection exceeds the Gate-1 complete-bundle ceiling');
+    }
     const assertionCoordinate = input?.assertionCoordinate;
     const previousHead = input?.previousHead;
     sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(input.seal);
     seal = parseCanonicalGraphScopedAuthorSealV1(sealBytes);
+    const bundleByteLength = calculateOpaqueKaBundleByteLengthV1(
+      BigInt(input.projectionBytes.byteLength),
+      BigInt(sealBytes.byteLength),
+    );
+    if (bundleByteLength > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
+      throw new RangeError('bundle exceeds the Gate-1 complete-bundle ceiling');
+    }
     encoded = encodeOpaqueKaBundleV1(input.projectionBytes, sealBytes);
     const byteLength = BigInt(encoded.bundleBytes.byteLength);
     const chunkCount = ((byteLength - 1n) / KA_TRANSFER_CHUNK_SIZE_BYTES_V1) + 1n;
@@ -356,6 +454,36 @@ function prepareRowAndBundle(input: ProduceAndStagePublicOpenOneRowSuccessorInpu
       'projection, seal, or catalog-row input is not canonical',
       cause,
     );
+  }
+}
+
+function requiredSignature(
+  signaturesByDigest: ReadonlyMap<
+    string,
+    Awaited<ReturnType<typeof verifyControlEnvelopeIssuerSignatureV1>>
+  >,
+  objectDigest: string,
+  label: string,
+): Awaited<ReturnType<typeof verifyControlEnvelopeIssuerSignatureV1>> {
+  const signature = signaturesByDigest.get(objectDigest);
+  if (signature === undefined) {
+    throw new Error(`verified signature for ${label} is unavailable`);
+  }
+  return signature;
+}
+
+function assertExactDurableBundleReceipt(
+  receipt: StagedRfc64PublicCatalogBundleReceiptV1,
+  expectedBlobDigest: Digest32V1,
+  expectedByteLength: number,
+): void {
+  if (
+    (typeof receipt !== 'object' || receipt === null)
+    || receipt.durable !== true
+    || receipt.blobDigest !== expectedBlobDigest
+    || receipt.byteLength !== expectedByteLength
+  ) {
+    throw new Error('bundle provider did not return the exact durable digest/length receipt');
   }
 }
 
