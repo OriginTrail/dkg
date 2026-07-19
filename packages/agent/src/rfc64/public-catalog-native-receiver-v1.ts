@@ -27,12 +27,14 @@ import {
   assertNetworkIdV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   buildAuthorAttestationTypedData,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
   contextGraphWorkspaceGraphUri,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
   readVerifiedCatalogSealBindingV1,
   readVerifiedAuthorCatalogBucketDescriptorV1,
@@ -46,13 +48,16 @@ import {
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CountV1,
+  type ContextGraphIdV1,
   type Digest32V1,
+  type KaIdV1,
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
   quadsToNQuads,
@@ -103,7 +108,10 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
     Rfc64PublicCatalogNativeTransportV1,
     'fetchCatalogObject' | 'fetchKaBundle'
   >;
-  readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'stageVerifiedObjects'>;
+  readonly controlObjects: Pick<
+    Rfc64ControlObjectOperationsV1,
+    'stageVerifiedObjects' | 'getVerifiedObjectByDigest'
+  >;
   readonly inventory: Pick<
     Rfc64InventoryV1OperationsV1,
     'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
@@ -125,7 +133,17 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly swmGraph: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+  /** Exact predecessor rows absent from this head and physically deactivated before its CAS. */
+  readonly removedRows: readonly Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>[];
+  readonly removedRowCount: number;
   readonly appliedHeadStatus: 'applied' | 'existing';
+}
+
+export interface Rfc64PublicCatalogNativeRemovedRowEvidenceV1 {
+  readonly kaId: KaIdV1;
+  readonly swmGraph: string;
+  readonly sealMetaGraph: string;
+  readonly sealSubject: string;
 }
 
 export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
@@ -143,6 +161,9 @@ export interface Rfc64PublicCatalogNativeMultiAssetActivationEvidenceV1 {
   readonly activatedTripleCount: number;
   /** Strictly increasing by mathematical KA ID. */
   readonly rows: readonly Readonly<Rfc64PublicCatalogNativeActivatedRowEvidenceV1>[];
+  /** Exact predecessor rows absent from this head and physically deactivated before its CAS. */
+  readonly removedRows: readonly Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>[];
+  readonly removedRowCount: number;
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
@@ -196,6 +217,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       || typeof options?.contentTransport?.fetchCatalogObject !== 'function'
       || typeof options?.contentTransport?.fetchKaBundle !== 'function'
       || typeof options.controlObjects?.stageVerifiedObjects !== 'function'
+      || typeof options.controlObjects?.getVerifiedObjectByDigest !== 'function'
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
       || typeof options.store?.query !== 'function'
@@ -702,6 +724,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       );
     }
 
+    // The durable applied-head points at the only catalog closure allowed to
+    // own materialization removals. Reconstruct and re-authorize that exact
+    // predecessor after every target row/bundle has verified, but before the
+    // first semantic mutation. This also makes exact-head replay a repair path
+    // for a prior indeterminate removal failure.
+    const predecessorRows = await loadExactAppliedPredecessorRows(
+      this.options.controlObjects,
+      head,
+      trustedCatalogScope,
+    );
+    const targetKaIds = new Set(preparedRows.map(({ row }) => row.kaId));
+    const plannedRemovals = predecessorRows
+      .filter((row) => !targetKaIds.has(row.kaId))
+      .map((row) => planOwnedRowRemoval(trustedCatalogScope, row));
+
     try {
       await this.options.controlObjects.stageVerifiedObjects([
         fetchedDelegation,
@@ -711,6 +748,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       ]);
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'verified catalog objects could not be staged', cause);
+    }
+
+    const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
+    for (const removal of plannedRemovals) {
+      throwIfAborted(signal);
+      await deactivateExactOwnedPublicProjection(this.options.store, removal);
+      removedRows.push(removal);
     }
 
     const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
@@ -837,6 +881,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         activatedTripleCount: only.activatedTripleCount,
         swmGraph: only.swmGraph,
         authorship: only.authorship,
+        removedRows: Object.freeze(removedRows),
+        removedRowCount: removedRows.length,
         appliedHeadStatus,
       });
     }
@@ -846,6 +892,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       inventoryRowCount: activatedRows.length,
       activatedTripleCount,
       rows: Object.freeze(activatedRows),
+      removedRows: Object.freeze(removedRows),
+      removedRowCount: removedRows.length,
       appliedHeadStatus,
     });
   }
@@ -1206,6 +1254,220 @@ function assertDirectAuthorCatalogIssuerDelegationBindingV1(
   }
 }
 
+async function loadExactAppliedPredecessorRows(
+  controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'getVerifiedObjectByDigest'>,
+  targetHead: SignedAuthorCatalogHeadEnvelopeV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+): Promise<readonly Readonly<AuthorCatalogRowV1>[]> {
+  const predecessorDigest = targetHead.payload.previousHeadDigest;
+  if (predecessorDigest === null) {
+    fail('catalog-native-receiver-history', 'successor has no predecessor digest');
+  }
+  try {
+    const storedHead = await controlObjects.getVerifiedObjectByDigest({
+      objectDigest: predecessorDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (storedHead === null) throw new Error('applied predecessor head is not staged');
+    assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+    const predecessorHead = storedHead.envelope;
+    if (
+      predecessorHead.objectDigest !== predecessorDigest
+      || predecessorHead.payload.version === targetHead.payload.version
+      || BigInt(predecessorHead.payload.version) + 1n !== BigInt(targetHead.payload.version)
+      || BigInt(predecessorHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
+    ) {
+      throw new Error('predecessor identity, version, or row bound differs from target history');
+    }
+    assertAuthorCatalogHeadScopeBindingV1(predecessorHead.payload, trustedCatalogScope);
+
+    const storedDelegation = await controlObjects.getVerifiedObjectByDigest({
+      objectDigest: predecessorHead.payload.catalogIssuerDelegationDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (storedDelegation === null) throw new Error('predecessor delegation is not staged');
+    assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
+    assertDirectAuthorCatalogIssuerDelegationBindingV1(
+      storedDelegation.envelope,
+      predecessorHead,
+      trustedCatalogScope,
+    );
+
+    const storedDirectory = await controlObjects.getVerifiedObjectByDigest({
+      objectDigest: predecessorHead.payload.directoryRootDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (storedDirectory === null) throw new Error('predecessor directory root is not staged');
+    assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
+      storedDirectory.envelope,
+      predecessorHead.payload.bucketCount,
+    );
+    const directory = storedDirectory.envelope;
+    assertAuthorCatalogDirectoryNodeScopeBindingV1(
+      directory.payload,
+      deriveAuthorCatalogScopeFromHeadV1(predecessorHead.payload),
+    );
+    if (
+      directory.objectDigest !== predecessorHead.payload.directoryRootDigest
+      || directory.issuer !== predecessorHead.issuer
+    ) {
+      throw new Error('predecessor directory identity or issuer differs from its head');
+    }
+    const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(
+      predecessorHead,
+      [directory],
+      '0' as never,
+    );
+    const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(
+      directoryPathProof,
+      predecessorHead,
+    );
+    if (descriptor.rowCount !== predecessorHead.payload.totalRows) {
+      throw new Error('predecessor directory row count differs from its head');
+    }
+    if (predecessorHead.payload.totalRows === '0') {
+      if (
+        descriptor.bucketDigest !== ZERO_DIGEST32_V1
+        || descriptor.byteLength !== '0'
+        || descriptor.rowCount !== '0'
+      ) {
+        throw new Error('empty predecessor descriptor is not canonical');
+      }
+      return Object.freeze([]);
+    }
+    if (descriptor.bucketDigest === ZERO_DIGEST32_V1) {
+      throw new Error('non-empty predecessor has an empty bucket digest');
+    }
+
+    const storedBucket = await controlObjects.getVerifiedObjectByDigest({
+      objectDigest: descriptor.bucketDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (storedBucket === null) throw new Error('predecessor bucket is not staged');
+    assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
+    const bucket = storedBucket.envelope;
+    assertAuthorCatalogBucketScopeBindingV1(
+      bucket.payload,
+      deriveAuthorCatalogScopeFromHeadV1(predecessorHead.payload),
+    );
+    if (
+      bucket.objectDigest !== descriptor.bucketDigest
+      || bucket.issuer !== predecessorHead.issuer
+      || bucket.payload.bucketId !== descriptor.bucketId
+      || bucket.payload.rows.length.toString() !== descriptor.rowCount
+      || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
+        !== descriptor.byteLength
+    ) {
+      throw new Error('predecessor bucket differs from its verified descriptor');
+    }
+
+    for (const row of bucket.payload.rows) {
+      verifyAuthorCatalogRowAuthorshipV1({
+        catalogIssuerDelegation: storedDelegation.envelope,
+        catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
+        parentAuthorAgentEvidence: null,
+        catalogHead: predecessorHead,
+        catalogHeadSignature: storedHead.issuerSignature,
+        directoryPathEnvelopes: [directory],
+        directoryPathSignatures: [storedDirectory.issuerSignature],
+        directoryPathProof,
+        catalogBucket: bucket,
+        catalogBucketSignature: storedBucket.issuerSignature,
+        targetKaId: row.kaId,
+      });
+    }
+    return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'exact applied predecessor catalog closure could not authorize removals',
+      cause,
+    );
+  }
+}
+
+function planOwnedRowRemoval(
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+  row: Readonly<AuthorCatalogRowV1>,
+): Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1> {
+  const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+    contextGraphId: trustedCatalogScope.contextGraphId,
+    subGraphName: trustedCatalogScope.subGraphName,
+    authorAddress: trustedCatalogScope.authorAddress,
+    assertionCoordinate: row.assertionCoordinate,
+  });
+  return Object.freeze({
+    kaId: row.kaId,
+    swmGraph: derivePublicSwmGraph(trustedCatalogScope.contextGraphId, row.kaId),
+    sealMetaGraph: placement.metaGraph,
+    sealSubject: placement.subject,
+  });
+}
+
+async function deactivateExactOwnedPublicProjection(
+  store: TripleStore,
+  removal: Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>,
+): Promise<void> {
+  let replaced: boolean;
+  try {
+    replaced = await tryReplaceGraphAndSubjectAtomically(
+      store,
+      removal.swmGraph,
+      [],
+      removal.sealMetaGraph,
+      removal.sealSubject,
+      [],
+      { source: 'rfc64-public-catalog-native-deactivation' },
+    );
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-activation',
+      `atomic SWM projection and author-seal removal failed for KA ${removal.kaId}`,
+      cause,
+    );
+  }
+  if (!replaced) {
+    fail(
+      'catalog-native-receiver-activation',
+      'store lacks atomic named-graph and author-seal replacement for catalog removal',
+    );
+  }
+
+  let graphExists: boolean;
+  let sealRows;
+  try {
+    graphExists = await store.hasGraph(removal.swmGraph, {
+      source: 'rfc64-public-catalog-native-removal-post-read',
+    });
+    sealRows = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${removal.sealMetaGraph}> { `
+        + `<${removal.sealSubject}> ?p ?o } } LIMIT 1`,
+      {
+        source: 'rfc64-public-catalog-native-removal-post-read',
+        maxResponseBytes: 4 * 1024,
+      },
+    );
+  } catch (cause) {
+    fail('catalog-native-receiver-activation', 'removed-row exact post-read failed', cause);
+  }
+  if (
+    graphExists
+    || sealRows.type !== 'bindings'
+    || sealRows.bindings.length !== 0
+  ) {
+    fail(
+      'catalog-native-receiver-activation',
+      `removed KA ${removal.kaId} projection or author seal remains present`,
+    );
+  }
+}
+
+function derivePublicSwmGraph(contextGraphId: ContextGraphIdV1, kaId: KaIdV1): string {
+  const identity = unpackKnowledgeAssetId(BigInt(kaId));
+  return `${contextGraphWorkspaceGraphUri(contextGraphId)}`
+    + `/${identity.agentAddress}/${identity.kaNumber.toString()}`;
+}
+
 async function activateExactPublicProjection(
   store: TripleStore,
   head: SignedAuthorCatalogHeadEnvelopeV1,
@@ -1234,9 +1496,7 @@ async function activateExactPublicProjection(
   ) {
     fail('catalog-native-receiver-activation', 'projection/parser triple count or graph scope changed');
   }
-  const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
-  const swmGraph = `${contextGraphWorkspaceGraphUri(head.payload.contextGraphId)}`
-    + `/${identity.agentAddress}/${identity.kaNumber.toString()}`;
+  const swmGraph = derivePublicSwmGraph(head.payload.contextGraphId, row.kaId);
   const graphQuads = quads.map((quad) => ({ ...quad, graph: swmGraph }));
   let replaced: boolean;
   try {
