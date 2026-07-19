@@ -342,6 +342,21 @@ whole-object verification, and crash durability.
 
 ### Scope and deliverables
 
+- Freeze the public storage boundary to this complete-object-only shape:
+
+  ```ts
+  abstract class WalObjectStore {
+    abstract has(id: WalObjectId): Promise<boolean>;
+    abstract read(id: WalObjectId, offset?: bigint, length?: number): AsyncIterable<Uint8Array>;
+    abstract put(expectedId: WalObjectId, bytes: AsyncIterable<Uint8Array>): Promise<void>;
+    abstract ids(): AsyncIterable<WalObjectId>;
+  }
+  ```
+
+  `put` verifies and atomically admits one complete object; `read` offsets
+  address its full canonical bytes; and `ids` is strict unsigned lexical order.
+  Range progress, provider identity, temporary paths, deletion, quarantine,
+  RDF, and SPARQL do not appear in this abstract contract.
 - Implement final content paths keyed only by `WalObjectId`, quota-controlled
   temporary files, local range-progress metadata, overlap/reorder handling,
   restart resume, final ID/signature/canonicality verification, fsync/atomic
@@ -356,26 +371,29 @@ whole-object verification, and crash durability.
   correctness.
 - Keep range hashes/IDs out of persistent protocol schemas. Protocol v1 accepts
   only the complete `WalObjectId` after all canonical bytes are reconstructed.
+- Implement range reconstruction as a package-internal concrete service rather
+  than a public storage abstraction. Its JSON metadata is local restart state,
+  never a signed, hashed, reconciled, or wire representation.
 
 ### Acceptance area
 
-- [ ] Zero-payload, one-range, multi-range, maximum-policy-size, out-of-order,
+- [x] Zero-payload, one-range, multi-range, maximum-policy-size, out-of-order,
       overlapping, duplicate, interrupted, restarted, and multi-provider cases
       reconstruct the exact canonical WAL-object bytes and ID.
-- [ ] Dishonest total length, overflow, gap, truncation, out-of-bounds offset,
+- [x] Dishonest total length, overflow, gap, truncation, out-of-bounds offset,
       conflicting overlap, invalid tuple, non-canonical CBOR, wrong signature,
       wrong ID, path traversal, sparse-file exhaustion, and oversized cases fail
       before an object becomes complete or visible.
-- [ ] Crashes after range write, progress update, fsync, rename, parent fsync, and
+- [x] Crashes after range write, progress update, fsync, rename, parent fsync, and
       metadata commit recover to a safe resumable state with no false completion.
-- [ ] Durably recorded complete ranges are not retransmitted and an interrupted
+- [x] Durably recorded complete ranges are not retransmitted and an interrupted
       stream retransmits at most one in-flight range.
-- [ ] A WAL object substantially larger than the configured process-memory
+- [x] A WAL object substantially larger than the configured process-memory
       budget transfers and verifies while measured memory remains within the
       frozen bound and small-object streams continue making progress.
-- [ ] Repository and wire-schema assertions prove there is no `PayloadId`,
+- [x] Repository and wire-schema assertions prove there is no `PayloadId`,
       `BlobId`, content-addressed range/chunk, or independent payload fetch path.
-- [ ] Concurrent providers cannot substitute bytes or cause two objects to
+- [x] Concurrent providers cannot substitute bytes or cause two objects to
       occupy the same final path.
 
 ---

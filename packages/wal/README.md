@@ -123,6 +123,70 @@ receives the current authorized signer set and threshold from its caller. This
 module recovers and checks signatures; it does not select, rotate, weaken, or
 redefine DKG authority.
 
+## Durable complete-object store and resumable ranges
+
+WAL-004 exports one deliberately small storage abstraction:
+
+```ts
+abstract class WalObjectStore {
+  abstract has(id: WalObjectId): Promise<boolean>;
+  abstract read(id: WalObjectId, offset?: bigint, length?: number): AsyncIterable<Uint8Array>;
+  abstract put(expectedId: WalObjectId, bytes: AsyncIterable<Uint8Array>): Promise<void>;
+  abstract ids(): AsyncIterable<WalObjectId>;
+}
+```
+
+`FileWalObjectStore` streams candidate bytes to an object-local temporary file,
+fsyncs it, verifies the exact canonical tuple and EIP-191 signature, recomputes
+the domain-separated complete `WalObjectId`, atomically renames it to
+`objects/<first-byte>/<remaining-id>.wal`, and fsyncs the parent directory.
+Only then does `has()` return true. Reads address the full canonical object—not
+the inline payload—and `ids()` yields strict unsigned lexical ID order.
+
+The range receiver is package-internal. It stores bounded range files and local
+JSON restart metadata under `range-staging/`; those files are not protocol
+objects, are not reconciled, and have no content IDs. Agreeing overlaps and
+duplicates are accepted, conflicting overlaps fail, missing ranges survive a
+restart, and only complete reconstructed bytes may enter the public store.
+
+```mermaid
+sequenceDiagram
+    participant P as Authorized provider(s)
+    participant R as Internal range receiver
+    participant T as Local temporary staging
+    participant S as WalObjectStore
+    P->>R: WalObjectId, total length, offset, bytes
+    R->>R: Check object/range/quota/part/concurrency bounds
+    R->>T: Write separate range file, fsync, rename, fsync directory
+    R->>T: Commit local restart metadata
+    R-->>P: Stored, duplicate, or missing ranges
+    Note over P,R: Restart or provider failover may resume uncovered offsets
+    R->>T: Stream-assemble complete canonical WalObjectV1 bytes
+    R->>S: put(expected WalObjectId, byte stream)
+    S->>S: Verify canonicality, signature, and whole-object ID
+    S->>S: fsync temporary, atomic rename, fsync parent
+    S-->>R: Complete object visible
+    R->>T: Remove staging and fsync staging root
+```
+
+```mermaid
+sequenceDiagram
+    participant A as Receiver before interruption
+    participant D as Durable range files
+    participant B as Receiver after restart
+    A->>D: Commit ranges [100,180) and [80,130)
+    A--xA: Process interruption
+    B->>D: Read metadata and validate every part name/length
+    B->>B: Merge agreeing coverage to [80,180)
+    B-->>B: Request only [0,80) and [180,total)
+    Note over B,D: At most the unacknowledged in-flight range is retried
+```
+
+The default object policy is 1 GiB with an 8 GiB protocol hard ceiling; ranges
+are at most 1 MiB. Staging additionally caps physical bytes, parts per object,
+simultaneous incomplete objects, lifetime, and assembly/verification buffers.
+No sparse final or staging file is used.
+
 ## IBLT sequence
 
 ```mermaid

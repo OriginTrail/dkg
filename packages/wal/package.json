@@ -20,6 +20,11 @@
       "import": "./dist/protocol/index.js",
       "default": "./dist/protocol/index.js"
     },
+    "./store": {
+      "types": "./dist/store/index.d.ts",
+      "import": "./dist/store/index.js",
+      "default": "./dist/store/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
