@@ -1298,6 +1298,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // gates by node role + per-CG authorization.
     this.messenger.register(PROTOCOL_GET_CIPHERTEXT_CHUNK, (data, fromPeerId) => this.handleGetCiphertextChunk(data, fromPeerId));
 
+    // OT-RFC-64 Gate 1: wire the public author-catalog transport onto the
+    // production router. Announce/fetch protocols are admission-gated like
+    // every other node protocol. Dormant when no dataDir opened persistence.
+    this.startRfc64PublicCatalogServiceV1(ctx);
+
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
     let onChainIdentityId = 0n;

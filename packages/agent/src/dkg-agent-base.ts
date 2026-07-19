@@ -15,6 +15,7 @@ import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
 } from './rfc64/persistence-v1.js';
+import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -992,6 +993,12 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /**
+   * RFC-64 Gate 1 public author-catalog service, wired onto the production
+   * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
+   * while dormant (no dataDir) or after `stop()`.
+   */
+  protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
