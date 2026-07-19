@@ -29,6 +29,7 @@ import {
   type SendOptions,
   type SignedControlEnvelopeV1,
   type AuthorCatalogScopeV1,
+  type CountV1,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -60,6 +61,14 @@ import {
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+  Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1,
+  type Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  type Rfc64PublicCatalogCurrentHeadAuthorizationV1,
+  type Rfc64PublicCatalogCurrentHeadQueryV1,
+  type Rfc64PublicCatalogCurrentHeadScopeV1,
+} from './public-catalog-current-head-discovery-v1.js';
+import {
   Rfc64PublicCatalogNativeTransportV1,
   type Rfc64PublicCatalogNativeAuthorizationInputV1,
   type Rfc64PublicCatalogNativeAuthorizationV1,
@@ -80,6 +89,7 @@ import {
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
+  type FetchedRfc64PublicCatalogHeadV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
 
@@ -96,6 +106,8 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
   /** Full production native content/reconciliation path. Omission is diagnostic-only. */
   readonly native?: Rfc64PublicCatalogServiceNativeOptionsV1;
+  /** Optional Gate-3 pull-discovery capability; no automatic lifecycle trigger. */
+  readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
   /**
@@ -136,6 +148,16 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
   readonly createReconciler: (
     clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>,
   ) => Rfc64PublicCatalogReceiverReconcilerV1;
+}
+
+export interface Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1 {
+  /**
+   * Resolve the durable semantically applied head for one locally trusted
+   * public/open root scope. Staged-only and candidate heads must not be returned.
+   */
+  readonly readCurrentAppliedCatalogHeadDigest: (
+    trustedScope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<Digest32V1 | null>;
 }
 
 export interface PublishOpenAuthorCatalogGenesisInputV1 {
@@ -179,6 +201,18 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
+export interface DiscoverRfc64PublicCatalogCurrentHeadInputV1 {
+  readonly remotePeerId: string;
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
+/** Verified discovery result. Returning it never stages or activates the head. */
+export interface DiscoveredRfc64PublicCatalogCurrentHeadV1 {
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly head: FetchedRfc64PublicCatalogHeadV1;
+}
+
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
   readonly acceptedPolicies: number;
@@ -193,6 +227,8 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #policies = new Rfc64AcceptedOpenCatalogPolicyRegistryV1();
   readonly #receiver: Rfc64PublicCatalogReceiverV1;
   readonly #transport: Rfc64PublicCatalogTransportV1;
+  readonly #currentHeadDiscoveryTransport:
+    Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
   #started = false;
@@ -214,6 +250,19 @@ export class Rfc64PublicCatalogServiceV1 {
         this.#receiver.schedule(announcement, remotePeerId);
       },
     });
+
+    this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined
+      ? undefined
+      : new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(options.router, {
+        controlObjects: this.#controlObjects,
+        readCurrentAppliedCatalogHeadDigest: (query) =>
+          options.currentHeadDiscovery!.readCurrentAppliedCatalogHeadDigest(
+            this.#resolveTrustedCurrentHeadScope(query),
+          ),
+        authorizeOpenCatalogOperation: (input) =>
+          this.#authorizeCurrentHeadDiscovery(input),
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
 
     this.#nativeTransport = options.native === undefined
       ? undefined
@@ -276,11 +325,13 @@ export class Rfc64PublicCatalogServiceV1 {
     if (this.#started) return;
     this.#nativeTransport?.start();
     try {
+      this.#currentHeadDiscoveryTransport?.start();
       // Register the announcement protocol last so no callback can schedule
-      // reconciliation before the content-fetch protocols are live.
+      // reconciliation before content-fetch and pull-discovery are live.
       this.#transport.start();
       this.#started = true;
     } catch (cause) {
+      this.#currentHeadDiscoveryTransport?.stop();
       this.#nativeTransport?.stop();
       throw cause;
     }
@@ -297,6 +348,7 @@ export class Rfc64PublicCatalogServiceV1 {
       await this.#receiver.close();
     } finally {
       this.#transport.stop();
+      this.#currentHeadDiscoveryTransport?.stop();
       this.#nativeTransport?.stop();
     }
   }
@@ -410,6 +462,58 @@ export class Rfc64PublicCatalogServiceV1 {
     return this.#announceCatalogHeadSnapshot(announcement, peers);
   }
 
+  /**
+   * Pull and authenticate one provider's semantically current public/open head.
+   * The discovery response is treated as a hint: this method exact-fetches the
+   * named signed head, re-verifies it, and binds it to local accepted policy
+   * before returning. It intentionally does not stage, schedule, or activate.
+   */
+  async discoverCurrentCatalogHead(
+    input: DiscoverRfc64PublicCatalogCurrentHeadInputV1,
+  ): Promise<DiscoveredRfc64PublicCatalogCurrentHeadV1 | null> {
+    this.#requireStarted();
+    const discovery = this.#currentHeadDiscoveryTransport;
+    if (discovery === undefined) {
+      throw new Error('RFC-64 current-head discovery is not configured');
+    }
+    const trustedScope = this.#resolveTrustedCurrentHeadScope(input.scope);
+    const held = this.#policies.lookup(trustedScope.networkId, trustedScope.contextGraphId)!;
+    const query: Rfc64PublicCatalogCurrentHeadQueryV1 = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      networkId: trustedScope.networkId,
+      contextGraphId: trustedScope.contextGraphId,
+      subGraphName: trustedScope.subGraphName,
+      authorAddress: trustedScope.authorAddress,
+      catalogEra: trustedScope.era,
+      policyDigest: held.policyDigest,
+    });
+    const announcement = await discovery.discoverCurrentCatalogHead(
+      input.remotePeerId,
+      query,
+      this.#sendOptions(input.signal),
+    );
+    if (announcement === null) return null;
+    this.#assertAcceptedOpenAnnouncement(announcement);
+    const currentTrustedScope = this.#resolveTrustedCatalogScope(announcement);
+    const head = await this.#transport.fetchCatalogHead(
+      input.remotePeerId,
+      announcement,
+      this.#sendOptions(input.signal),
+    );
+    if (head === null) {
+      throw new Error('RFC-64 discovered current head is no longer available by exact digest');
+    }
+    try {
+      assertAuthorCatalogHeadScopeBindingV1(head.envelope.payload, currentTrustedScope);
+    } catch (cause) {
+      throw new Error(
+        'RFC-64 discovered head differs from the accepted public/open policy scope',
+        { cause },
+      );
+    }
+    return Object.freeze({ announcement, head });
+  }
+
   /** Idle-await the receiver (tests / graceful shutdown coordination). */
   whenReceiverIdle(): Promise<void> {
     return this.#receiver.whenIdle();
@@ -469,6 +573,23 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
   }
+
+  async #authorizeCurrentHeadDiscovery(
+    input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
+    try {
+      this.#resolveTrustedCurrentHeadScope(input);
+    } catch {
+      return null;
+    }
+    const record = this.#policies.lookup(input.networkId, input.contextGraphId);
+    if (record === null || record.policy.accessPolicy !== 0) return null;
+    return Object.freeze({
+      accessPolicy: 0,
+      policyDigest: record.policyDigest,
+    });
+  }
+
   async #authorizeNativeOperation(
     input: Rfc64PublicCatalogNativeAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogNativeAuthorizationV1 | null> {
@@ -492,6 +613,44 @@ export class Rfc64PublicCatalogServiceV1 {
       throw new Error('RFC-64 announcement has no matching accepted open policy generation');
     }
     return deriveRfc64PublicOpenCatalogScopeV1(announcement, record.policy);
+  }
+
+  #resolveTrustedCurrentHeadScope(
+    input: Rfc64PublicCatalogCurrentHeadScopeV1,
+  ): Readonly<AuthorCatalogScopeV1> {
+    const record = this.#policies.lookup(input.networkId, input.contextGraphId);
+    const policy = record?.policy;
+    if (
+      record === null
+      || policy === undefined
+      || policy.accessPolicy !== 0
+      || policy.source.kind !== 'owner-signed-unregistered'
+      || policy.networkId !== input.networkId
+      || policy.contextGraphId !== input.contextGraphId
+      || policy.governanceChainId !== null
+      || policy.governanceContractAddress !== null
+      || policy.ownershipTransitionDigest !== null
+      || policy.era !== input.catalogEra
+      || input.subGraphName !== null
+      || policy.source.ownerAddress !== input.authorAddress
+    ) {
+      throw new Error(
+        'RFC-64 current-head query is not bound to the accepted public/open root policy',
+      );
+    }
+    const scope = Object.freeze({
+      networkId: policy.networkId,
+      contextGraphId: policy.contextGraphId,
+      governanceChainId: policy.governanceChainId,
+      governanceContractAddress: policy.governanceContractAddress,
+      ownershipTransitionDigest: policy.ownershipTransitionDigest,
+      subGraphName: null,
+      authorAddress: policy.source.ownerAddress,
+      era: policy.era,
+      bucketCount: '1' as CountV1,
+    });
+    assertAuthorCatalogScopeV1(scope);
+    return scope;
   }
 
   async #stageHeadOnly(

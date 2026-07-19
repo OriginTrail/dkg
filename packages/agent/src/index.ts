@@ -37,6 +37,7 @@ export {
 export * from './rfc64/catalog-row-authorship.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/public-catalog-transport-v1.js';
+export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';

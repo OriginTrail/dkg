@@ -29,6 +29,7 @@
     "./dist/rfc64/persistence-layout-v1.js": null,
     "./dist/rfc64/persistence-root-ownership-v1-internal.js": null,
     "./dist/rfc64/persistence-v1.js": null,
+    "./dist/rfc64/public-catalog-current-head-discovery-v1.js": null,
     "./dist/rfc64/public-catalog-native-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-native-reconciler-v1.js": null,
     "./dist/rfc64/public-catalog-native-transport-v1.js": null,
