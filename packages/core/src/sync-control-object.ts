@@ -224,6 +224,33 @@ export function assertControlSignatureVariantDigest(
   }
 }
 
+/** Return the exact bounded canonical bytes of a detached signature variant. */
+export function canonicalizeControlSignatureVariantBytes(
+  variant: ControlObjectSignatureVariantV1,
+): Uint8Array {
+  if (!isPlainRecord(variant)) {
+    throw new Error('Control signature variant must be a plain JSON object');
+  }
+  assertExactKeys(
+    variant,
+    ['objectDigest', 'signature', 'signatureVariantDigest'],
+    'control signature variant',
+  );
+  assertControlSignatureVariantDigest(
+    variant.objectDigest,
+    variant.signature,
+    variant.signatureVariantDigest,
+  );
+  return canonicalizeJsonBytes({
+    objectDigest: variant.objectDigest,
+    signature: variant.signature,
+    signatureVariantDigest: variant.signatureVariantDigest,
+  }, {
+    maxBytes: MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
+    maxDepth: 1,
+  });
+}
+
 /** Strictly decode the normalized detached-signature record defined by RFC-64. */
 export function parseCanonicalControlSignatureVariant(
   input: string | Uint8Array,
@@ -237,20 +264,8 @@ export function parseCanonicalControlSignatureVariant(
     ),
     maxDepth: Math.min(options.maxDepth ?? 1, 1),
   });
-  if (!isPlainRecord(parsed)) {
-    throw new Error('Control signature variant must be a plain JSON object');
-  }
-  assertExactKeys(
-    parsed,
-    ['objectDigest', 'signature', 'signatureVariantDigest'],
-    'control signature variant',
-  );
   const variant = parsed as unknown as ControlObjectSignatureVariantV1;
-  assertControlSignatureVariantDigest(
-    variant.objectDigest,
-    variant.signature,
-    variant.signatureVariantDigest,
-  );
+  canonicalizeControlSignatureVariantBytes(variant);
   return variant;
 }
 

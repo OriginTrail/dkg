@@ -15,6 +15,10 @@ import {
   openInventoryV1,
   type Rfc64InventoryV1Foundation,
 } from './rfc64/inventory-v1/index.js';
+import {
+  openRfc64ControlObjectStoreV1,
+  type Rfc64ControlObjectStoreV1,
+} from './rfc64/control-object-store-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -993,6 +997,8 @@ export class DKGAgentBase {
    * are deliberately dormant and never substitute an in-memory inventory.
    */
   protected rfc64InventoryV1?: Rfc64InventoryV1Foundation;
+  /** Durable immutable object cache opened only after inventory path ownership. */
+  protected rfc64ControlObjectStoreV1?: Rfc64ControlObjectStoreV1;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
@@ -1565,19 +1571,23 @@ export class DKGAgentBase {
   }
 
   /**
-   * Acquire the RFC-64 inventory and finish bounded stale-candidate cleanup
-   * before any network consumer can observe or mutate inventory state.
+   * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
+   * open the inherited-owner control-object tree before network consumers.
    */
   protected async prepareRfc64InventoryV1(): Promise<void> {
     if (!this.config.dataDir || this.rfc64InventoryV1 !== undefined) return;
 
     const inventory = await openInventoryV1(this.config.dataDir);
+    let controlObjectStore: Rfc64ControlObjectStoreV1 | undefined;
     try {
       for (;;) {
         const batch = inventory.purgeNextStartupStaleCandidateBatch();
         if (batch.done) break;
         await this.yieldRfc64InventoryV1StartupBatch();
       }
+      // openInventoryV1 has already established single-process ownership and
+      // secured rfc64-sync; Windows children inherit that owner-only ACL.
+      controlObjectStore = await openRfc64ControlObjectStoreV1(this.config.dataDir);
     } catch (cause) {
       try {
         inventory.close();
@@ -1589,6 +1599,7 @@ export class DKGAgentBase {
       }
       throw cause;
     }
+    this.rfc64ControlObjectStoreV1 = controlObjectStore;
     this.rfc64InventoryV1 = inventory;
   }
 
@@ -1598,12 +1609,15 @@ export class DKGAgentBase {
   }
 
   /**
-   * Relinquish the single inventory foundation. Clear the local reference
-   * before closing so a fail-stop close error cannot be retried accidentally.
+   * Relinquish the control store and single inventory foundation. Clear local
+   * references before closing so fail-stop cleanup cannot be retried.
    */
   protected closeRfc64InventoryV1(): void {
+    const controlObjectStore = this.rfc64ControlObjectStoreV1;
     const inventory = this.rfc64InventoryV1;
+    this.rfc64ControlObjectStoreV1 = undefined;
     this.rfc64InventoryV1 = undefined;
+    controlObjectStore?.close();
     inventory?.close();
   }
 

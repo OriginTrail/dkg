@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,10 @@ import {
   INVENTORY_V1_RELATIVE_PATH,
   openInventoryV1,
 } from '../src/rfc64/inventory-v1/index.js';
+import {
+  RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+  openRfc64ControlObjectStoreV1,
+} from '../src/rfc64/control-object-store-v1.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -30,6 +34,7 @@ function syntheticAgent(dataDirectory?: string): any {
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     rfc64InventoryV1: undefined,
+    rfc64ControlObjectStoreV1: undefined,
   });
   return agent;
 }
@@ -107,6 +112,7 @@ function minimalStartedAgent(
     node: { stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
     rfc64InventoryV1: { close: inventoryClose },
+    rfc64ControlObjectStoreV1: { close: () => { order.push('control-store'); } },
     store: { close: vi.fn(async () => { order.push('store'); }) },
     log: { warn: vi.fn() },
   });
@@ -195,6 +201,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await agent.prepareRfc64InventoryV1();
 
     expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
   });
@@ -208,17 +215,24 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     await agent.prepareRfc64InventoryV1();
     const ownedFoundation = agent.rfc64InventoryV1;
+    const ownedControlObjectStore = agent.rfc64ControlObjectStoreV1;
     await agent.prepareRfc64InventoryV1();
 
     expect(agent.rfc64InventoryV1).toBe(ownedFoundation);
+    expect(agent.rfc64ControlObjectStoreV1).toBe(ownedControlObjectStore);
     expect(ownedFoundation.databasePath).toBe(
       join(dataDirectory, INVENTORY_V1_RELATIVE_PATH),
     );
     expect(yieldBatch).toHaveBeenCalledTimes(3);
     expect(() => ownedFoundation.createCandidateSession()).not.toThrow();
+    expect(ownedControlObjectStore.rootPath).toBe(
+      join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH),
+    );
 
     agent.closeRfc64InventoryV1();
     expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
+    expect(ownedControlObjectStore.closed).toBe(true);
     expect(candidateLoadCount(dataDirectory)).toBe(0);
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
   });
@@ -239,6 +253,34 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(nodeStart).not.toHaveBeenCalled();
     expect(agent.started).toBe(false);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'releases inventory ownership when control-store topology is unsafe',
+    async () => {
+      const dataDirectory = temporaryDataDirectory();
+      const outside = temporaryDataDirectory();
+      const inventory = await openInventoryV1(dataDirectory);
+      const initialStore = await openRfc64ControlObjectStoreV1(dataDirectory);
+      initialStore.close();
+      inventory.close();
+      const objectsPath = join(
+        dataDirectory,
+        RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+        'objects',
+      );
+      rmSync(objectsPath, { recursive: true, force: true });
+      symlinkSync(outside, objectsPath, 'dir');
+      const agent = syntheticAgent(dataDirectory);
+
+      await expect(agent.prepareRfc64InventoryV1())
+        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+      expect(agent.rfc64InventoryV1).toBeUndefined();
+      expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
+
+      const replacement = await openInventoryV1(dataDirectory);
+      replacement.close();
+    },
+  );
 
   it('releases an acquired inventory when node startup fails', async () => {
     const failure = new Error('node start failed');
@@ -268,7 +310,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await agent.stop();
     await agent.stop();
 
-    expect(order).toEqual(['node', 'sync-worker', 'inventory', 'store']);
+    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
     expect(inventoryClose).toHaveBeenCalledOnce();
     expect(agent.rfc64InventoryV1).toBeUndefined();
     expect(agent.started).toBe(false);
@@ -284,7 +326,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     await expect(agent.stop()).rejects.toBe(failure);
 
-    expect(order).toEqual(['node', 'sync-worker', 'inventory', 'store']);
+    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
     expect(agent.rfc64InventoryV1).toBeUndefined();
     expect(agent.started).toBe(false);
     await expect(agent.stop()).resolves.toBeUndefined();

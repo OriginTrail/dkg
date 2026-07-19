@@ -115,6 +115,7 @@ export default defineConfig({
       "test/rfc64-catalog-row-authorship.test.ts",
       "test/rfc64-agent-inventory-lifecycle.test.ts",
       "test/rfc64-author-catalog-producer.test.ts",
+      "test/rfc64-control-object-store-v1.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

@@ -7,6 +7,7 @@ import {
   assertControlObjectDigest,
   assertSignedControlEnvelope,
   assertUnsignedControlEnvelope,
+  canonicalizeControlSignatureVariantBytes,
   canonicalizeSignedControlEnvelopeBytes,
   canonicalizeUnsignedControlEnvelopeBytes,
   computeControlObjectDigestHex,
@@ -138,6 +139,11 @@ describe('Track-2 control-object envelopes', () => {
         signature: EOA_SIGNATURE,
         signatureVariantDigest: EOA_SIGNATURE_VARIANT_DIGEST,
       });
+    expect(new TextDecoder().decode(canonicalizeControlSignatureVariantBytes({
+      signatureVariantDigest: EOA_SIGNATURE_VARIANT_DIGEST,
+      signature: EOA_SIGNATURE,
+      objectDigest: EOA_DIGEST,
+    }))).toBe(EOA_CANONICAL_SIGNATURE_VARIANT);
   });
 
   it('is independent of JavaScript insertion order and verifies exact claims', () => {
