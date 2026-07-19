@@ -21,8 +21,15 @@ function mutableEvidence(): Record<string, any> {
 /**
  * The core mutation assertion: apply `mutate`, then require that the artifact
  * STILL PARSES (so the failure is the targeted invariant, not a schema
- * rejection), that the fixture is rejected, that `check` specifically flipped
- * to false, and that no other check was collaterally disturbed.
+ * rejection), that the fixture is rejected, and that `check` specifically
+ * flipped to false.
+ *
+ * It deliberately does NOT assert that every other check stayed true: some
+ * mutations legitimately trip more than one invariant (splicing a duplicate
+ * quad also changes the array length, so `quadsUnique` and `quadCountExact`
+ * both fail). The teeth come from pinning the TARGETED check — verified by
+ * mutating the verifier itself, where neutering any single check fails the
+ * tests that pin it.
  */
 function expectCheckFails(check: keyof Gate1ChecksV1, mutate: (doc: any) => void): void {
   const doc = mutableEvidence();
