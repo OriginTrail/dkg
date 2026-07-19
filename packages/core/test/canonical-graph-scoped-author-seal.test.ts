@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import * as coreBarrel from '../src/index.js';
 import { ASSERTION_SEAL_PREDICATES } from '../src/assertion-seal.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
@@ -462,3 +463,27 @@ function toStoreObject(object: string): CanonicalAuthorSealStoreRowV1['object'] 
     datatypeIri: `${XSD}string`,
   };
 }
+
+describe('CanonicalGraphScopedAuthorSealV1 public package barrel', () => {
+  it('re-exports the codec API from ../src/index.js and behaves identically', () => {
+    // Verifies the consumer-facing import contract: a regression that dropped
+    // the seal export block from src/index.ts would make these barrel symbols
+    // undefined and fail here, even though the direct-module tests stay green.
+    expect(typeof coreBarrel.canonicalizeCanonicalGraphScopedAuthorSealV1).toBe('function');
+    expect(typeof coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1).toBe('function');
+    expect(typeof coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1).toBe('function');
+    expect(typeof coreBarrel.CanonicalGraphScopedAuthorSealError).toBe('function');
+    expect(coreBarrel.MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1)
+      .toBe(MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1);
+
+    expect(coreBarrel.canonicalizeCanonicalGraphScopedAuthorSealV1(PAYLOAD)).toBe(CANONICAL);
+    expect(coreBarrel.computeCanonicalGraphScopedAuthorSealDigestV1(PAYLOAD)).toBe(SEAL_DIGEST);
+
+    const rows = toStoreRows(
+      coreBarrel.projectCanonicalGraphScopedAuthorSealRowsV1(PAYLOAD, COORDINATE),
+    );
+    expect(coreBarrel.decodeCanonicalGraphScopedAuthorSealRowsV1(rows, COORDINATE).payload)
+      .toEqual(PAYLOAD);
+  });
+});
