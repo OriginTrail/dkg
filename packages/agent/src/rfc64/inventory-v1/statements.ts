@@ -231,6 +231,40 @@ WHERE session_id = :session
   AND author_address = :author
   AND target_catalog_head_digest = :head
   AND bucket_id_u64be = :bucket;`,
+
+  getAppliedHead: `
+SELECT current_catalog_head_digest, applied_inventory_digest,
+       catalog_version_u64be, inventory_row_count_u64be
+FROM rfc64_applied_catalog_heads_v1
+WHERE catalog_scope_digest = :scope
+  AND author_address = :author;`,
+
+  insertAppliedHead: `
+INSERT INTO rfc64_applied_catalog_heads_v1 (
+  catalog_scope_digest,
+  author_address,
+  current_catalog_head_digest,
+  applied_inventory_digest,
+  catalog_version_u64be,
+  inventory_row_count_u64be
+) VALUES (
+  :scope,
+  :author,
+  :nextHead,
+  :inventoryDigest,
+  :catalogVersion,
+  :inventoryRowCount
+);`,
+
+  updateAppliedHeadCas: `
+UPDATE rfc64_applied_catalog_heads_v1
+SET current_catalog_head_digest = :nextHead,
+    applied_inventory_digest = :inventoryDigest,
+    catalog_version_u64be = :catalogVersion,
+    inventory_row_count_u64be = :inventoryRowCount
+WHERE catalog_scope_digest = :scope
+  AND author_address = :author
+  AND current_catalog_head_digest = :expectedHead;`,
 });
 
 export type InventoryV1StatementKey = keyof typeof INVENTORY_V1_STATEMENT_SQL;
@@ -251,6 +285,9 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   diffRemovedNext: 'rfc64.candidate-bucket.diff-removed.next.v1',
   countBucketRows: 'rfc64.candidate-bucket.rows.count.v1',
   deleteHeader: 'rfc64.candidate-bucket.delete.v1',
+  getAppliedHead: 'rfc64.applied-head.get.v1',
+  insertAppliedHead: 'rfc64.applied-head.insert.v1',
+  updateAppliedHeadCas: 'rfc64.applied-head.cas-update.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
 
 export type InventoryV1StatementId =
@@ -268,9 +305,12 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'diffRemovedFirst',
   'diffRemovedNext',
   'countBucketRows',
+  'getAppliedHead',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   ...INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS,
   'deleteHeader',
+  'insertAppliedHead',
+  'updateAppliedHeadCas',
 ] as const satisfies readonly InventoryV1StatementKey[]);

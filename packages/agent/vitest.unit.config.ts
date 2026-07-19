@@ -108,6 +108,7 @@ export default defineConfig({
       "test/rfc64-inventory-v1-scalars.test.ts",
       "test/rfc64-inventory-v1-lifecycle.test.ts",
       "test/rfc64-inventory-v1-candidates.test.ts",
+      "test/rfc64-inventory-v1-applied-head.test.ts",
       "test/rfc64-inventory-v1-candidate-plans.test.ts",
       "test/rfc64-inventory-v1-candidate-latency.test.ts",
       "test/rfc64-inventory-v1-candidate-faults.test.ts",

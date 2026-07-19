@@ -28,8 +28,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   INVENTORY_V1_APPLICATION_ID,
   INVENTORY_V1_DDL,
+  INVENTORY_V1_LEGACY_DDL,
   INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_OBJECTS,
+  INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   InventoryV1OpenError,
   normalizeInventoryV1SchemaSql,
@@ -427,7 +429,7 @@ function assertInitializedInventory(path: string): void {
   const database = new DatabaseSync(path, { readOnly: true });
   try {
     expect(pragmaInteger(database, 'application_id')).toBe(INVENTORY_V1_APPLICATION_ID);
-    expect(pragmaInteger(database, 'user_version')).toBe(1);
+    expect(pragmaInteger(database, 'user_version')).toBe(INVENTORY_V1_USER_VERSION);
     const rows = database.prepare(
       `SELECT name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name`,
     ).all();
@@ -1131,7 +1133,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     newer.exec(`
       CREATE TABLE future_schema (value TEXT);
       PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
-      PRAGMA user_version = 2;
+      PRAGMA user_version = ${INVENTORY_V1_USER_VERSION + 1};
     `);
     newer.close();
 
@@ -1140,7 +1142,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     expectNoQuarantine(path);
   });
 
-  it('quarantines an incompatible owned v1 schema and rebuilds exact v1', async () => {
+  it('quarantines an incompatible owned v1 schema and rebuilds exact current schema', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
     mkdirSync(dirname(path), { recursive: true });
@@ -1446,7 +1448,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     newer.exec(`
       CREATE TABLE future_schema (value TEXT);
       PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
-      PRAGMA user_version = 2;
+      PRAGMA user_version = ${INVENTORY_V1_USER_VERSION + 1};
     `);
     newer.close();
     truncateSync(path, 100);

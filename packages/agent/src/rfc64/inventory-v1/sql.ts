@@ -8,7 +8,8 @@ import {
 } from '../persistence-layout-v1.js';
 
 export const INVENTORY_V1_APPLICATION_ID = 0x444b3634;
-export const INVENTORY_V1_USER_VERSION = 1;
+export const INVENTORY_V1_LEGACY_USER_VERSION = 1;
+export const INVENTORY_V1_USER_VERSION = 2;
 export const INVENTORY_V1_RELATIVE_PATH =
   `${RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1}/${RFC64_INVENTORY_DATABASE_FILENAME_V1}`;
 export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -287,15 +288,63 @@ CREATE TABLE rfc64_candidate_bucket_rows_v1 (
   ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT`;
 
-export const INVENTORY_V1_DDL = [
+/**
+ * One durable current/applied ref per exact author-catalog scope. The row is
+ * advanced only through a head-digest compare-and-swap after semantic commit.
+ */
+export const INVENTORY_V1_APPLIED_HEADS_TABLE_SQL = `
+CREATE TABLE rfc64_applied_catalog_heads_v1 (
+  catalog_scope_digest BLOB NOT NULL CHECK (
+    typeof(catalog_scope_digest) = 'blob' AND length(catalog_scope_digest) = 32
+  ),
+  author_address BLOB NOT NULL CHECK (
+    typeof(author_address) = 'blob' AND length(author_address) = 20
+    AND author_address <> zeroblob(20)
+  ),
+  current_catalog_head_digest BLOB NOT NULL CHECK (
+    typeof(current_catalog_head_digest) = 'blob'
+    AND length(current_catalog_head_digest) = 32
+  ),
+  applied_inventory_digest BLOB NOT NULL CHECK (
+    typeof(applied_inventory_digest) = 'blob'
+    AND length(applied_inventory_digest) = 32
+  ),
+  catalog_version_u64be BLOB NOT NULL CHECK (
+    typeof(catalog_version_u64be) = 'blob'
+    AND length(catalog_version_u64be) = 8
+  ),
+  inventory_row_count_u64be BLOB NOT NULL CHECK (
+    typeof(inventory_row_count_u64be) = 'blob'
+    AND length(inventory_row_count_u64be) = 8
+  ),
+  PRIMARY KEY (catalog_scope_digest, author_address)
+) WITHOUT ROWID, STRICT`;
+
+export const INVENTORY_V1_LEGACY_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
-export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+export const INVENTORY_V1_DDL = [
+  INVENTORY_V1_LEGACY_DDL,
+  INVENTORY_V1_APPLIED_HEADS_TABLE_SQL,
+].join(';\n\n').concat(';');
+
+export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   rfc64_candidate_bucket_loads_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_LOADS_TABLE_SQL),
   rfc64_candidate_bucket_rows_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_ROWS_TABLE_SQL),
 });
+
+export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+  ...INVENTORY_V1_LEGACY_USER_OBJECTS,
+  rfc64_applied_catalog_heads_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_APPLIED_HEADS_TABLE_SQL,
+  ),
+});
+
+export const INVENTORY_V1_MIGRATE_V1_TO_V2_SQL = `
+${INVENTORY_V1_APPLIED_HEADS_TABLE_SQL};
+PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim().replace(/;$/, '');

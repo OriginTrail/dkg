@@ -219,6 +219,11 @@ function parametersFor(sql: string): Record<string, Uint8Array | number> {
     head: hexBytes(NEW_HEAD_HEX),
     oldHead: hexBytes(OLD_HEAD_HEX),
     newHead: hexBytes(NEW_HEAD_HEX),
+    nextHead: hexBytes(NEW_HEAD_HEX),
+    expectedHead: hexBytes(OLD_HEAD_HEX),
+    inventoryDigest: hexBytes('77'.repeat(32)),
+    catalogVersion: hexBytes('0000000000000001'),
+    inventoryRowCount: hexBytes('0000000000000001'),
     bucket: hexBytes(SELECTED_BUCKET_HEX),
     afterKaIdU256be: hexBytes(`${AUTHOR_HEX}${'00'.repeat(11)}01`),
     limit: 256,
@@ -287,6 +292,15 @@ function expectPlanGate(plans: PlanClass): void {
       && detail.includes('USING PRIMARY KEY')
       && detail.includes('bucket_id_u64be=?')),
     'candidate cascade must use the bucket-first child primary key',
+  ).toBe(true);
+
+  expect(
+    plans.getAppliedHead.some((detail) => detail.includes('USING PRIMARY KEY')),
+    `${INVENTORY_V1_STATEMENT_IDS.getAppliedHead} must use its exact scope primary key`,
+  ).toBe(true);
+  expect(
+    plans.updateAppliedHeadCas.some((detail) => detail.includes('USING PRIMARY KEY')),
+    `${INVENTORY_V1_STATEMENT_IDS.updateAppliedHeadCas} must use its exact scope primary key`,
   ).toBe(true);
 }
 
