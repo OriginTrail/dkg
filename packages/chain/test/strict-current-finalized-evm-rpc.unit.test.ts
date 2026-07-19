@@ -378,6 +378,28 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(0);
   });
 
+  it('fails over past a large HTTP error body instead of a terminal resource limit', async () => {
+    const first = await startRpcServer((_call, response) => {
+      // A transient 5xx whose error page far exceeds the JSON-RPC body cap must
+      // stay failover-eligible, not be reclassified as a terminal resource-limit.
+      response.writeHead(503, {
+        'content-type': 'text/html',
+        'transfer-encoding': 'chunked',
+      });
+      response.write(' '.repeat(40_000));
+      response.end(' '.repeat(30_000));
+    });
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+
+    await expect(adapter(fixedRequest())).resolves.toMatchObject({ blockHash: BLOCK_HASH });
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls.length).toBeGreaterThan(0);
+  });
+
   it('cancels the actual loopback HTTP operation and does not fail over', async () => {
     const received = deferred<void>();
     const connectionClosed = deferred<void>();

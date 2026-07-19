@@ -301,14 +301,18 @@ async function postJsonRpc(
     throw unavailable(`JSON-RPC ${method} transport failed`, cause);
   }
 
-  const body = await readResponseBodyBounded(response, maxResponseBytes);
   if (!response.ok) {
     // An HTTP intermediary/provider failure is transport availability, even if
     // its untrusted body happens to mimic a deterministic JSON-RPC revert. Only
     // a successful JSON-RPC transport response may select an invalidity code.
+    // Discard the untrusted error body without reading it through the bounded
+    // cap: a large 5xx HTML page must stay `rpc-unavailable` (failover-eligible)
+    // rather than becoming a terminal `resource-limit` that halts the loop.
+    await response.body?.cancel().catch(() => undefined);
     throw unavailable(`JSON-RPC ${method} returned HTTP ${response.status}`);
   }
 
+  const body = await readResponseBodyBounded(response, maxResponseBytes);
   let parsed: unknown;
   try {
     parsed = JSON.parse(body) as unknown;
