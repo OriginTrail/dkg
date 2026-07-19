@@ -83,6 +83,16 @@ export interface IbltCacheRecord {
   expiresAtMs: number;
 }
 
+export interface ClaimPrivatePayloadNonceInput {
+  namespaceId: Uint8Array;
+  writerId: Uint8Array;
+  writerEpoch: bigint;
+  sequence: bigint;
+  keyEpoch: bigint;
+  nonce: Uint8Array;
+  claimedAtMs?: number;
+}
+
 export interface VectorRecord {
   vectorId: Uint8Array;
   collectionId: Uint8Array;

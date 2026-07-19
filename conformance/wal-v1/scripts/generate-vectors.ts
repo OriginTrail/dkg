@@ -17,6 +17,7 @@ import {
   authorFinalityRequirement,
   collectionId,
   createWalObject,
+  derivePrivateObjectKey,
   encryptAes256Gcm,
   moveTierCommitment,
   namespaceId,
@@ -228,7 +229,7 @@ async function buildVectors() {
     throw new Error('independent IBLT symbols mismatch');
   }
 
-  const encryptionKey = byteRange(0, 32);
+  const encryptionEpochKey = byteRange(0, 32);
   const encryptionNonce = byteRange(32, 12);
   const encryptionFields = {
     namespaceId: namespace,
@@ -243,8 +244,9 @@ async function buildVectors() {
     nonce: encryptionNonce
   };
   const associatedDataDigest = payloadAssociatedDataDigest(encryptionFields);
+  const encryptionObjectKey = derivePrivateObjectKey(encryptionEpochKey, encryptionFields);
   const plaintext = encodeCanonical([1n, 'private mutation', fixtureId('private-state')]);
-  const ciphertext = encryptAes256Gcm(encryptionKey, encryptionNonce, plaintext, associatedDataDigest);
+  const ciphertext = encryptAes256Gcm(encryptionObjectKey, encryptionNonce, plaintext, associatedDataDigest);
   const encryptedEnvelope = encodeCanonical([
     1n,
     BigInt(encryptionFields.payloadKind),
@@ -260,6 +262,10 @@ async function buildVectors() {
   const targetMutationDigest = fixtureId('target-mutation');
   const sourceState = fixtureId('source-state');
   const sourceResult = fixtureId('source-result');
+  const sourceCausalOpening = fixtureId('private-source-causal-opening');
+  const sourceGraphName = 'urn:dkg:private-source-graph';
+  const sourceKeyEpoch = 987_654_321n;
+  const sourceActivityCount = 123_456_789n;
   const transitionCommitment = moveTierCommitment({
     nonce: transitionNonce,
     sourceNamespaceId,
@@ -623,7 +629,16 @@ async function buildVectors() {
     },
     encryption: {
       algorithm: 'AES-256-GCM',
-      key: hex(encryptionKey),
+      namespaceId: hex(encryptionFields.namespaceId),
+      writerId: hex(encryptionFields.writerId),
+      writerEpoch: encryptionFields.writerEpoch.toString(),
+      sequence: encryptionFields.sequence.toString(),
+      keyEpoch: encryptionFields.keyEpoch.toString(),
+      payloadKind: encryptionFields.payloadKind,
+      codec: encryptionFields.codec,
+      mediaType: encryptionFields.mediaType,
+      epochKey: hex(encryptionEpochKey),
+      objectKey: hex(encryptionObjectKey),
       nonce: hex(encryptionNonce),
       associatedDataDigest: hex(associatedDataDigest),
       plaintext: hex(plaintext),
@@ -643,7 +658,11 @@ async function buildVectors() {
       transitionCommitment: hex(transitionCommitment),
       publicTargetPayload: hex(publicMoveTier),
       privateSourcePayload: hex(privateMoveTier),
-      forbiddenPublicValues: [sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult].map(hex)
+      forbiddenPublicValues: [
+        sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult, sourceCausalOpening
+      ].map(hex),
+      forbiddenPublicText: [sourceGraphName],
+      forbiddenPublicScalarCbor: [sourceKeyEpoch, sourceActivityCount].map((value) => hex(encodeCanonical(value)))
     },
     reducer: reducerVectors,
     finality: [

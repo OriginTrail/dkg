@@ -179,6 +179,7 @@ describe('WalControlStore schema and rollback guard', () => {
       'membership_checkpoints',
       'object_ranges',
       'peer_state',
+      'private_payload_nonces',
       'quarantine',
       'retry_queue',
       'rollback_guard',
@@ -213,7 +214,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let value = control(root);
     closeControl(value);
     database = new Database(join(root, 'objects.sqlite'));
-    database.prepare('UPDATE wal_control_schema SET version = 3').run();
+    database.prepare('UPDATE wal_control_schema SET version = 4').run();
     database.close();
     await expectCode(() => control(root), 'WAL_CONTROL_UNSUPPORTED_SCHEMA');
 
@@ -236,7 +237,7 @@ describe('WalControlStore schema and rollback guard', () => {
     await expectCode(() => control(missingObjects), 'WAL_CONTROL_INVALID_CONFIGURATION');
   });
 
-  it('migrates schema version 1 to authority-aware version 2 transactionally', async () => {
+  it('migrates schema version 1 through authority-aware version 2 to private-payload version 3 transactionally', async () => {
     const root = await temporary('migration-v1-v2');
     await prepare(root);
     let value = control(root);
@@ -244,6 +245,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let database = new Database(join(root, 'objects.sqlite'));
     database.pragma('foreign_keys = OFF');
     for (const table of [
+      'private_payload_nonces',
       'collection_vector_heads',
       'collection_vector_conflicts',
       'collection_vectors',
@@ -267,11 +269,79 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
+    expect(hookCalls).toBe(2);
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(3);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
+    database.close();
+  });
+
+  it('migrates schema version 2 to private-payload version 3 transactionally', async () => {
+    const root = await temporary('migration-v2-v3');
+    await prepare(root);
+    let value = control(root);
+    closeControl(value);
+    let database = new Database(join(root, 'objects.sqlite'));
+    database.exec('DROP TABLE private_payload_nonces');
+    database.prepare('UPDATE wal_control_schema SET version = 2').run();
+    database.close();
+
+    await expectCode(
+      () => control(root, { migrationHook: () => { throw new Error('v2 to v3 migration crash'); } }),
+      'WAL_CONTROL_IO',
+    );
+    database = new Database(join(root, 'objects.sqlite'));
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(2);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeUndefined();
+    database.close();
+
+    let hookCalls = 0;
+    value = control(root, { migrationHook: () => { hookCalls += 1; } });
     expect(hookCalls).toBe(1);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(2);
-    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(3);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
     database.close();
+  });
+
+  it('claims private-payload nonces durably and scopes uniqueness to the derived object key', async () => {
+    const root = await temporary('private-nonces');
+    await prepare(root);
+    let value = control(root, { now: () => 55 });
+    const base = {
+      namespaceId: fixedBytes(bytes('nonce-namespace'), 32, 'namespaceId'),
+      writerId: object('first').tuple[2],
+      writerEpoch: 3n,
+      sequence: 9n,
+      keyEpoch: 11n,
+      nonce: bytes('nonce').slice(0, 12),
+    };
+    value.claimPrivatePayloadNonce(base);
+    await expectCode(() => value.claimPrivatePayloadNonce(base), 'WAL_CONTROL_NONCE_REUSE');
+    closeControl(value);
+
+    value = control(root);
+    await expectCode(() => value.claimPrivatePayloadNonce(base), 'WAL_CONTROL_NONCE_REUSE');
+    for (const changed of [
+      { sequence: 10n },
+      { writerEpoch: 4n },
+      { namespaceId: bytes('other-namespace') },
+      { writerId: bytes('other-writer').slice(0, 20) },
+      { nonce: bytes('other-nonce').slice(0, 12) },
+    ]) value.claimPrivatePayloadNonce({ ...base, ...changed, claimedAtMs: 56 });
+    await expectCode(
+      () => value.claimPrivatePayloadNonce({ ...base, keyEpoch: 12n }),
+      'WAL_CONTROL_NONCE_REUSE',
+    );
+    await expectCode(
+      () => value.claimPrivatePayloadNonce({ ...base, nonce: new Uint8Array(11) }),
+      'WAL_CONTROL_INVALID_CONFIGURATION',
+    );
+    await expectCode(
+      () => value.claimPrivatePayloadNonce({ ...base, claimedAtMs: -1 }),
+      'WAL_CONTROL_INVALID_CONFIGURATION',
+    );
   });
 
   it('rejects invalid configuration, unsafe index paths, and use after close', async () => {

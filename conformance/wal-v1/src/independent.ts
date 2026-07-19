@@ -1,6 +1,6 @@
 import { webcrypto } from 'node:crypto';
 import { getBytes, verifyMessage } from 'ethers';
-import { compareBytes, concat, equalBytes, hash, hex, sortedUniqueBytes, u64le, utf8, xorInto } from './bytes.js';
+import { compareBytes, concat, equalBytes, hash, hex, sortedUniqueBytes, u64be, u64le, utf8, xorInto } from './bytes.js';
 import type { SymbolV1 } from './iblt.js';
 import { independentSetCommitmentRoot } from './set-commitment.js';
 import { DOMAINS } from './schema.js';
@@ -198,6 +198,23 @@ export async function independentDecryptAesGcm(
     ciphertext
   );
   return new Uint8Array(plaintext);
+}
+
+export async function independentDerivePrivateObjectKey(
+  epochKey: Uint8Array,
+  namespaceId: Uint8Array,
+  writerId: Uint8Array,
+  writerEpoch: bigint,
+  sequence: bigint
+): Promise<Uint8Array> {
+  const key = await webcrypto.subtle.importKey('raw', epochKey, 'HKDF', false, ['deriveBits']);
+  const bits = await webcrypto.subtle.deriveBits({
+    name: 'HKDF',
+    hash: 'SHA-256',
+    salt: concat(writerId, u64be(writerEpoch)),
+    info: concat(utf8('dkg-wal-private-object-v1\0'), namespaceId, u64be(sequence))
+  }, key, 256);
+  return new Uint8Array(bits);
 }
 
 function sameSet(left: readonly Uint8Array[], right: readonly Uint8Array[]): boolean {

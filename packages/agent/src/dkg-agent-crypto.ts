@@ -1252,7 +1252,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     ctx: OperationContext;
   }): Promise<LocalSwmSenderKeySendState> {
     const senderAgentAddress = ethers.getAddress(input.sender.agentAddress);
-    const createdAtMs = Date.now();
+    const priorState = this.swmSenderKeySendStates.get(
+      swmSenderStateKey(input.contextGraphId, input.subGraphName, senderAgentAddress),
+    );
+    const wallClockMs = Date.now();
+    if (!Number.isSafeInteger(wallClockMs) || wallClockMs < 0) {
+      throw new Error('Cannot create Sender Key epoch with an invalid wall-clock timestamp');
+    }
+    if (priorState !== undefined && priorState.createdAtMs >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Cannot advance Sender Key WAL key epoch beyond the safe-integer limit');
+    }
+    const createdAtMs = Math.max(wallClockMs, (priorState?.createdAtMs ?? -1) + 1);
     const epochId = generateSwmSenderEpochId();
     const chainKey = generateSwmSenderChainKey();
     const senderSigningKeypair = await generateEd25519Keypair();
@@ -1263,6 +1273,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       epochId,
       membershipHash: input.membershipHash,
       chainKey,
+      walEpochKey: new Uint8Array(chainKey),
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,
       senderSigningPublicKey: senderSigningKeypair.publicKey,
@@ -2158,6 +2169,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       epochId: secret.epochId,
       membershipHash: secret.membershipHash,
       chainKey: secret.chainKey,
+      walEpochKey: new Uint8Array(secret.chainKey),
       nextMessageIndex: uint64ForProto(secret.initialMessageIndex),
       senderSigningPublicKey: secret.senderSigningPublicKey,
       createdAtMs: uint64ForProto(secret.createdAtMs),

@@ -20,7 +20,7 @@
 // "parallel" and "serial" is 6x for N=6, well outside any reasonable
 // noise floor.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -39,6 +39,8 @@ import {
   type AgentKeyRecord,
 } from '../src/index.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
+import type { LocalSwmSenderKeySendState } from '../src/dkg-agent-types.js';
+import { swmSenderStateKey } from '../src/dkg-agent-swm-state.js';
 
 // The fanout function lives on the agent class but is `private`. The
 // existing swm-sender-key-stale-target test reaches it via the same
@@ -56,6 +58,7 @@ type StubMessenger = {
 interface FanoutInternals {
   messenger: StubMessenger;
   node: { peerId: { toString(): string } };
+  swmSenderKeySendStates: Map<string, LocalSwmSenderKeySendState>;
   createAndDistributeSwmSenderKeyEpoch(input: {
     contextGraphId: string;
     subGraphName?: string;
@@ -63,7 +66,7 @@ interface FanoutInternals {
     recipients: readonly FakeRecipient[];
     membershipHash: string;
     ctx: OperationContext;
-  }): Promise<unknown>;
+  }): Promise<LocalSwmSenderKeySendState>;
 }
 
 interface FakeRecipient {
@@ -120,10 +123,50 @@ async function bootAgent(): Promise<{ agent: DKGAgent; internals: FanoutInternal
 describe('createAndDistributeSwmSenderKeyEpoch: parallel fanout latency', () => {
   let agent: DKGAgent | null = null;
   afterEach(async () => {
+    vi.restoreAllMocks();
     if (agent) {
       await agent.stop().catch(() => undefined);
       agent = null;
     }
+  });
+
+  it('assigns a strictly increasing WAL key epoch when Sender Key rotation lands in one millisecond', async () => {
+    const boot = await bootAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    installStubMessenger(internals, async () => ({
+      delivered: true,
+      response: encodeSwmSenderKeyPackageAck({
+        version: SWM_SENDER_KEY_PACKAGE_VERSION,
+        type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
+        accepted: true,
+      }),
+      attempts: 1,
+      messageId: 'm-monotonic',
+    }));
+    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    const sender = agentFromPrivateKey(
+      ethers.Wallet.createRandom().privateKey,
+      'sender',
+    ) as AgentKeyRecord & { privateKey: string };
+    const input = {
+      contextGraphId: 'test-cg/wal-key-epoch',
+      sender,
+      recipients: [makeFakeRecipient()],
+      membershipHash: 'sha256:first',
+      ctx: { operationId: 'test-op', operationName: 'share' } as OperationContext,
+    };
+    const first = await internals.createAndDistributeSwmSenderKeyEpoch(input);
+    internals.swmSenderKeySendStates.set(
+      swmSenderStateKey(input.contextGraphId, undefined, first.senderAgentAddress),
+      first,
+    );
+    const second = await internals.createAndDistributeSwmSenderKeyEpoch({
+      ...input,
+      membershipHash: 'sha256:second',
+    });
+    expect(second.createdAtMs).toBe(first.createdAtMs + 1);
+    expect(second.walEpochKey).not.toEqual(first.walEpochKey);
   });
 
   it('fans out concurrently (N recipients ≈ one slot, not N slots)', async () => {
@@ -246,6 +289,8 @@ describe('createAndDistributeSwmSenderKeyEpoch: parallel fanout latency', () => 
       ctx: { operationId: 'test-op', operationName: 'share' },
     });
     expect(state).toBeDefined();
+    expect(state.walEpochKey).toEqual(state.chainKey);
+    expect(state.walEpochKey).toHaveLength(32);
   });
 
   it('1-of-N partial fail: throw cites only the agent whose keys all failed; non-failed peers do not appear in the error', async () => {

@@ -1,5 +1,23 @@
-export const WAL_CONTROL_SCHEMA_VERSION = 2;
+export const WAL_CONTROL_SCHEMA_VERSION = 3;
 export const WAL_ROLLBACK_SCHEMA_VERSION = 1;
+
+/**
+ * Durable nonce claims for private inline payloads. A nonce is unique per
+ * derived object key; the full derivation coordinates are retained so a
+ * restart cannot silently permit reuse.
+ */
+export const WAL_PRIVATE_PAYLOAD_SCHEMA_SQL = `
+  CREATE TABLE private_payload_nonces (
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    writer_id BLOB NOT NULL CHECK (length(writer_id) = 20),
+    writer_epoch BLOB NOT NULL CHECK (length(writer_epoch) = 8),
+    sequence BLOB NOT NULL CHECK (length(sequence) = 8),
+    key_epoch BLOB NOT NULL CHECK (length(key_epoch) = 8),
+    nonce BLOB NOT NULL CHECK (length(nonce) = 12),
+    claimed_at_ms INTEGER NOT NULL CHECK (claimed_at_ms >= 0),
+    PRIMARY KEY (namespace_id, writer_id, writer_epoch, sequence, nonce)
+  ) WITHOUT ROWID;
+`;
 
 export const WAL_AUTHORITY_SCHEMA_SQL = `
   CREATE TABLE authority_sets (
@@ -337,11 +355,17 @@ export const WAL_CONTROL_SCHEMA_SQL = `
   CREATE INDEX gc_queue_eligible ON gc_queue(state, eligible_at_ms);
 
   ${WAL_AUTHORITY_SCHEMA_SQL}
+  ${WAL_PRIVATE_PAYLOAD_SCHEMA_SQL}
 `;
 
 export const WAL_CONTROL_MIGRATION_1_TO_2_SQL = `
   ${WAL_AUTHORITY_SCHEMA_SQL}
   UPDATE wal_control_schema SET version = 2 WHERE singleton = 1 AND version = 1;
+`;
+
+export const WAL_CONTROL_MIGRATION_2_TO_3_SQL = `
+  ${WAL_PRIVATE_PAYLOAD_SCHEMA_SQL}
+  UPDATE wal_control_schema SET version = 3 WHERE singleton = 1 AND version = 2;
 `;
 
 export const WAL_ROLLBACK_SCHEMA_SQL = `

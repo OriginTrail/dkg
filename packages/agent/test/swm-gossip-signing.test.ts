@@ -17,10 +17,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
+import type { LocalSwmSenderKeyReceiveState, LocalSwmSenderKeySendState } from '../src/dkg-agent-types.js';
 
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
+  swmSenderKeySendStates: Map<string, LocalSwmSenderKeySendState>;
+  swmSenderKeyReceiveStates: Map<string, LocalSwmSenderKeyReceiveState>;
   encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array>;
   decryptWorkspacePayloadWithSenderKey(
     message: SwmSenderKeyMessageMsg,
@@ -215,6 +218,13 @@ describe('DKGAgent SWM gossip signing', () => {
     );
     const request = decodeWorkspacePublishRequest(decrypted);
     expect(new TextDecoder().decode(request.nquads)).toContain('wire secret');
+    const sendState = [...internals.swmSenderKeySendStates.values()][0]!;
+    const receiveState = [...internals.swmSenderKeyReceiveStates.values()][0]!;
+    expect(sendState.walEpochKey).toHaveLength(32);
+    expect(receiveState.walEpochKey).toEqual(sendState.walEpochKey);
+    expect(receiveState.createdAtMs).toBe(sendState.createdAtMs);
+    expect(sendState.chainKey).not.toEqual(sendState.walEpochKey);
+    expect(receiveState.chainKey).not.toEqual(receiveState.walEpochKey);
   });
 
   it('keeps legacy raw SWM gossip for open graphs when no local signing key exists', async () => {

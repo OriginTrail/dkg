@@ -35,6 +35,11 @@
       "import": "./dist/authority/index.js",
       "default": "./dist/authority/index.js"
     },
+    "./privacy": {
+      "types": "./dist/privacy/index.d.ts",
+      "import": "./dist/privacy/index.js",
+      "default": "./dist/privacy/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

@@ -1510,14 +1510,28 @@ objectKey = HKDF-SHA256(
 )
 ```
 
+For protocol v1, `epochKey` is a stable copy of the initial 32-byte Sender Key
+`chainKey` carried by the existing signed key package; it is copied before the
+message chain ratchets and is never replaced by a later ratchet value.
+`keyEpoch` is the package `createdAtMs` u64. A sender makes that value strictly
+increase when rotating an epoch for the same private view and sender. Existing
+persisted Sender Key state that lacks the stable initial-key copy remains valid
+for legacy Sender Key traffic but MUST rotate before it can write or decrypt
+private WAL payloads. These rules add domain-separated key use to the existing
+package; they do not add a membership list or key-distribution protocol.
+
 The DKG payload envelope uses AES-256-GCM with a random 12-byte nonce. The WAL
 store enforces nonce uniqueness per derived key. Associated data commits to the
 namespace, writer, epoch, sequence, envelope version, payload kind, codec, media
 type, key epoch, and nonce. Ciphertext, including its authentication tag, is
 inline `contentBytes` inside the signed WAL object. Neither plaintext nor
-ciphertext has a separately advertised content ID. Member removal rotates the
-key epoch and stops future serving. It cannot revoke ciphertext or keys
-previously obtained.
+ciphertext has a separately advertised content ID, and no plaintext hash is
+advertised outside the ciphertext. Authorization of the exact current private
+view and key epoch occurs before lookup or disclosure of any head, root, count,
+ID, size, proof, provider hint, ciphertext, or plaintext. Member removal rotates
+the key epoch and stops future writes and serving to the removed member. It
+cannot revoke ciphertext or keys previously obtained, so this is explicitly
+future secrecy rather than retroactive revocation.
 
 ## 16. VM activation and reorgs
 

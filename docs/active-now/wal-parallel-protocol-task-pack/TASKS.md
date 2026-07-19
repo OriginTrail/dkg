@@ -628,17 +628,17 @@ membership/key-package distribution and preserving its authority semantics.
 
 ### Acceptance area
 
-- [ ] Existing Sender Key membership and key-package vectors still decide who
+- [x] Existing Sender Key membership and key-package vectors still decide who
       receives epoch keys; WAL code does not invent another membership source.
-- [ ] Valid encryption vectors decrypt exactly; wrong collection/view/author/
+- [x] Valid encryption vectors decrypt exactly; wrong collection/view/author/
       sequence/key/nonce/policy/length/codec/media-type data fails authentication.
-- [ ] Nonce reuse, unsigned metadata, plaintext-hash advertisement, and
+- [x] Nonce reuse, unsigned metadata, plaintext-hash advertisement, and
       deterministic-equality leakage are rejected by tests.
-- [ ] Unauthenticated, removed, stale-policy, wrong-view, downgrade, and probing
+- [x] Unauthenticated, removed, stale-policy, wrong-view, downgrade, and probing
       callers receive a uniform denial with zero private metadata disclosure.
-- [ ] Key-epoch rotation stops future serving/writes to removed members while
+- [x] Key-epoch rotation stops future serving/writes to removed members while
       documentation states the non-retroactive limit accurately.
-- [ ] Public VM reconciliation fixtures contain no private SWM IDs, graph names,
+- [x] Public VM reconciliation fixtures contain no private SWM IDs, graph names,
       epochs, counts, or causal openings.
 
 ---

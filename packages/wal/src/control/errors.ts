@@ -10,6 +10,7 @@ export type WalControlStoreErrorCode =
   | 'WAL_CONTROL_LANE_CONFLICT'
   | 'WAL_CONTROL_LIMIT_EXCEEDED'
   | 'WAL_CONTROL_LEASE_CONFLICT'
+  | 'WAL_CONTROL_NONCE_REUSE'
   | 'WAL_CONTROL_ROLLBACK_REJECTED';
 
 export class WalControlStoreError extends Error {

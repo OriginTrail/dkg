@@ -9,6 +9,7 @@ import {
   independentCborDecode,
   independentCborEncode,
   independentDecryptAesGcm,
+  independentDerivePrivateObjectKey,
   independentMappingIndexForState,
   independentReduceCase,
   independentRoot,
@@ -18,6 +19,7 @@ import {
 import {
   assembleRanges,
   authorFinalityRequirement,
+  derivePrivateObjectKey,
   decryptAes256Gcm,
   parseWalObject,
   reduceCase,
@@ -258,7 +260,22 @@ describe('ProtocolV1IbltReconciliationAlgorithm', () => {
 
 describe('adapter, reducer, privacy, and finality vectors', () => {
   it('decrypts the fixed AES-GCM vector in independent implementations', async () => {
-    const key = fromHex(vectors.encryption.key, 32);
+    const epochKey = fromHex(vectors.encryption.epochKey, 32);
+    const coordinates = {
+      namespaceId: fromHex(vectors.encryption.namespaceId, 32),
+      writerId: fromHex(vectors.encryption.writerId, 20),
+      writerEpoch: BigInt(vectors.encryption.writerEpoch),
+      sequence: BigInt(vectors.encryption.sequence),
+    };
+    const key = derivePrivateObjectKey(epochKey, coordinates);
+    expect(hex(key)).toBe(vectors.encryption.objectKey);
+    expect(hex(await independentDerivePrivateObjectKey(
+      epochKey,
+      coordinates.namespaceId,
+      coordinates.writerId,
+      coordinates.writerEpoch,
+      coordinates.sequence,
+    ))).toBe(vectors.encryption.objectKey);
     const nonce = fromHex(vectors.encryption.nonce, 12);
     const ciphertext = fromHex(vectors.encryption.ciphertextAndTag);
     const associatedData = fromHex(vectors.encryption.associatedDataDigest, 32);
@@ -285,6 +302,12 @@ describe('adapter, reducer, privacy, and finality vectors', () => {
   it('keeps private MOVE_TIER data out of the public target bytes', () => {
     const publicBytes = Buffer.from(vectors.moveTier.publicTargetPayload, 'hex');
     for (const forbidden of vectors.moveTier.forbiddenPublicValues) {
+      expect(publicBytes.includes(Buffer.from(forbidden, 'hex'))).toBe(false);
+    }
+    for (const forbidden of vectors.moveTier.forbiddenPublicText) {
+      expect(publicBytes.includes(Buffer.from(forbidden, 'utf8'))).toBe(false);
+    }
+    for (const forbidden of vectors.moveTier.forbiddenPublicScalarCbor) {
       expect(publicBytes.includes(Buffer.from(forbidden, 'hex'))).toBe(false);
     }
   });

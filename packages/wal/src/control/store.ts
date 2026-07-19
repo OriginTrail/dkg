@@ -22,10 +22,12 @@ import {
   WAL_CONTROL_SCHEMA_SQL,
   WAL_CONTROL_SCHEMA_VERSION,
   WAL_CONTROL_MIGRATION_1_TO_2_SQL,
+  WAL_CONTROL_MIGRATION_2_TO_3_SQL,
   WAL_ROLLBACK_SCHEMA_SQL,
   WAL_ROLLBACK_SCHEMA_VERSION,
 } from './schema.js';
 import type {
+  ClaimPrivatePayloadNonceInput,
   FinalizeLocalWalInput,
   FinalizeLocalWalResult,
   GcQueueRecord,
@@ -759,6 +761,30 @@ export class WalControlStore {
     };
   }
 
+  /**
+   * Atomically records a nonce before encryption. Repeating the exact nonce
+   * under the same derived object-key coordinates fails across restarts.
+   */
+  claimPrivatePayloadNonce(input: ClaimPrivatePayloadNonceInput): void {
+    this.assertUsable();
+    const result = this.database.prepare(`
+      INSERT OR IGNORE INTO private_payload_nonces(
+        namespace_id, writer_id, writer_epoch, sequence, key_epoch, nonce, claimed_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      fixedBytes(input.namespaceId, 32, 'namespaceId'),
+      fixedBytes(input.writerId, 20, 'writerId'),
+      u64Blob(input.writerEpoch, 'writerEpoch'),
+      u64Blob(input.sequence, 'sequence'),
+      u64Blob(input.keyEpoch, 'keyEpoch'),
+      fixedBytes(input.nonce, 12, 'nonce'),
+      safeInteger(input.claimedAtMs ?? nowValue(this.now), 'claimedAtMs'),
+    );
+    if (result.changes !== 1) {
+      controlError('WAL_CONTROL_NONCE_REUSE', 'private payload nonce was already claimed for this object key');
+    }
+  }
+
   recordObjectRange(input: ObjectRangeRecord): void {
     this.assertUsable();
     const id = fixedBytes(input.objectId, 32, 'objectId');
@@ -1166,20 +1192,25 @@ export class WalControlStore {
     if (table !== undefined) {
       const row = this.database.prepare('SELECT version FROM wal_control_schema WHERE singleton = 1').get() as
         VersionRow | undefined;
-      if (row?.version === 1) {
+      let version = row?.version;
+      if (version === undefined || version < 1 || version > WAL_CONTROL_SCHEMA_VERSION) {
+        controlError('WAL_CONTROL_UNSUPPORTED_SCHEMA', `unsupported WAL control schema version ${version ?? 'missing'}`);
+      }
+      for (const migration of [
+        { from: 1, sql: WAL_CONTROL_MIGRATION_1_TO_2_SQL },
+        { from: 2, sql: WAL_CONTROL_MIGRATION_2_TO_3_SQL },
+      ]) {
+        if (version !== migration.from) continue;
         this.database.exec('BEGIN IMMEDIATE');
         try {
-          this.database.exec(WAL_CONTROL_MIGRATION_1_TO_2_SQL);
+          this.database.exec(migration.sql);
           hook?.();
           this.database.exec('COMMIT');
+          version += 1;
         } catch (error) {
           this.database.exec('ROLLBACK');
           throw error;
         }
-        return;
-      }
-      if (row?.version !== WAL_CONTROL_SCHEMA_VERSION) {
-        controlError('WAL_CONTROL_UNSUPPORTED_SCHEMA', `unsupported WAL control schema version ${row?.version ?? 'missing'}`);
       }
       return;
     }

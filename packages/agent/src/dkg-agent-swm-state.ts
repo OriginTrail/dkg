@@ -46,6 +46,7 @@ export function serializeSwmSenderSendState(state: LocalSwmSenderKeySendState): 
     epochId: state.epochId,
     membershipHash: state.membershipHash,
     chainKey: encodeWorkspaceEncryptionKey(state.chainKey),
+    walEpochKey: state.walEpochKey === undefined ? undefined : encodeWorkspaceEncryptionKey(state.walEpochKey),
     nextMessageIndex: state.nextMessageIndex,
     senderSigningSecretKey: encodeWorkspaceEncryptionKey(state.senderSigningSecretKey),
     senderSigningPublicKey: encodeWorkspaceEncryptionKey(state.senderSigningPublicKey),
@@ -61,6 +62,7 @@ export function serializeSwmSenderReceiveState(state: LocalSwmSenderKeyReceiveSt
     epochId: state.epochId,
     membershipHash: state.membershipHash,
     chainKey: encodeWorkspaceEncryptionKey(state.chainKey),
+    walEpochKey: state.walEpochKey === undefined ? undefined : encodeWorkspaceEncryptionKey(state.walEpochKey),
     nextMessageIndex: state.nextMessageIndex,
     senderSigningPublicKey: encodeWorkspaceEncryptionKey(state.senderSigningPublicKey),
     createdAtMs: state.createdAtMs,
@@ -86,6 +88,7 @@ export function serializePendingSenderKeyEntry(entry: PendingSenderKeyEntry): Re
 }
 
 export function deserializeSwmSenderSendState(entry: Record<string, unknown>): LocalSwmSenderKeySendState {
+  const walEpochKey = optionalString(entry.walEpochKey);
   return {
     contextGraphId: requiredString(entry.contextGraphId, 'contextGraphId'),
     subGraphName: optionalString(entry.subGraphName),
@@ -93,6 +96,7 @@ export function deserializeSwmSenderSendState(entry: Record<string, unknown>): L
     epochId: requiredString(entry.epochId, 'epochId'),
     membershipHash: requiredString(entry.membershipHash, 'membershipHash'),
     chainKey: decodeWorkspaceEncryptionKey(requiredString(entry.chainKey, 'chainKey')),
+    walEpochKey: walEpochKey === undefined ? undefined : decodeWorkspaceEncryptionKey(walEpochKey),
     nextMessageIndex: requiredNumber(entry.nextMessageIndex, 'nextMessageIndex'),
     senderSigningSecretKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningSecretKey, 'senderSigningSecretKey')),
     senderSigningPublicKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningPublicKey, 'senderSigningPublicKey')),
@@ -110,6 +114,7 @@ export function deserializeSwmSenderReceiveState(entry: Record<string, unknown>)
       decodeWorkspaceEncryptionKey(requiredString(item.chainKey, 'skippedChainKeys.chainKey')),
     );
   }
+  const walEpochKey = optionalString(entry.walEpochKey);
   return {
     contextGraphId: requiredString(entry.contextGraphId, 'contextGraphId'),
     subGraphName: optionalString(entry.subGraphName),
@@ -117,6 +122,7 @@ export function deserializeSwmSenderReceiveState(entry: Record<string, unknown>)
     epochId: requiredString(entry.epochId, 'epochId'),
     membershipHash: requiredString(entry.membershipHash, 'membershipHash'),
     chainKey: decodeWorkspaceEncryptionKey(requiredString(entry.chainKey, 'chainKey')),
+    walEpochKey: walEpochKey === undefined ? undefined : decodeWorkspaceEncryptionKey(walEpochKey),
     nextMessageIndex: requiredNumber(entry.nextMessageIndex, 'nextMessageIndex'),
     senderSigningPublicKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningPublicKey, 'senderSigningPublicKey')),
     createdAtMs: requiredNumber(entry.createdAtMs, 'createdAtMs'),
