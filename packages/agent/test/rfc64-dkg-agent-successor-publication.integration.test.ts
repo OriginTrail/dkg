@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
+  computeAuthorCatalogScopeDigestV1,
   decodeOpaqueKaBundleV1,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
@@ -197,11 +198,29 @@ describe('RFC-64 DKGAgent public/open successor publication', () => {
     expect(second.inventoryRowCount).toBe('2');
     expect(third.announcement.catalogVersion).toBe('3');
     expect(third.inventoryRowCount).toBe('3');
+    expect(third.signedBucketRowCount).toBe('3');
+    expect(third.catalogScope).toEqual({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    });
+    expect(Object.isFrozen(third.catalogScope)).toBe(true);
+    expect(third.catalogScopeDigest).toBe(computeAuthorCatalogScopeDigestV1(third.catalogScope));
     expect(third.assets.map(({ kaId }) => kaId)).toEqual(expectedKaIds);
     expect(third.assets.map(({ kaUal }) => kaUal)).toEqual(
       [KA_NUMBER, SECOND_KA_NUMBER, THIRD_KA_NUMBER]
         .map((number) => `did:dkg:${NETWORK_ID}/${AUTHOR}/${number}`),
     );
+    expect(third.assets.map(({ activatedTripleCount }) => activatedTripleCount)).toEqual([2, 2, 2]);
+    expect(third.assets.every(({ sealDigest }) => /^0x[0-9a-f]{64}$/u.test(sealDigest))).toBe(true);
+    expect(Object.isFrozen(third.assets)).toBe(true);
+    expect(third.assets.every(Object.isFrozen)).toBe(true);
     expect(await agent.readRfc64StagedAuthorCatalogHeadV1({
       objectDigest: third.headObjectDigest,
       signatureVariantDigest: third.signatureVariantDigest,
