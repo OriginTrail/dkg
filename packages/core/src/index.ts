@@ -355,6 +355,7 @@ export {
   assertCanonicalGraphScopedAuthorSealCoordinateV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
   decodeCanonicalGraphScopedAuthorSealRowsV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
@@ -373,3 +374,4 @@ export {
   type ClassifiedCanonicalGraphScopedAuthorSealRowsV1,
   type CanonicalGraphScopedAuthorSealErrorCode,
 } from './canonical-graph-scoped-author-seal.js';
+export * from './catalog-seal-binding.js';

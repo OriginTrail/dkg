@@ -67,9 +67,13 @@ export const CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1 =
 export const MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1 = 16 * 1024;
 export const MAX_SEAL_TRIPLE_COUNT_V1 = 9_007_199_254_740_991n;
 
-const XSD_HEX_BINARY = '<http://www.w3.org/2001/XMLSchema#hexBinary>';
-const XSD_INTEGER = '<http://www.w3.org/2001/XMLSchema#integer>';
-const XSD_DATE_TIME = '<http://www.w3.org/2001/XMLSchema#dateTime>';
+const XSD_STRING_IRI = 'http://www.w3.org/2001/XMLSchema#string';
+const XSD_HEX_BINARY_IRI = 'http://www.w3.org/2001/XMLSchema#hexBinary';
+const XSD_INTEGER_IRI = 'http://www.w3.org/2001/XMLSchema#integer';
+const XSD_DATE_TIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const XSD_HEX_BINARY = `<${XSD_HEX_BINARY_IRI}>`;
+const XSD_INTEGER = `<${XSD_INTEGER_IRI}>`;
+const XSD_DATE_TIME = `<${XSD_DATE_TIME_IRI}>`;
 const UTF8 = new TextEncoder();
 const SEAL_DIGEST_DOMAIN_BYTES = UTF8.encode(
   CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1,
@@ -443,6 +447,57 @@ export function projectCanonicalGraphScopedAuthorSealRowsV1(
     );
   }
   return exactRows;
+}
+
+/**
+ * Project transferred canonical seal bytes into the backend-neutral typed RDF
+ * rows consumed by the strict inverse decoder and the PR #1780 classifier.
+ *
+ * This is an in-memory projection only. It performs no triple-store read or
+ * write and gives callers no authority to treat the seal as semantically
+ * admitted.
+ */
+export function projectCanonicalGraphScopedAuthorSealStoreRowsV1(
+  payload: CanonicalGraphScopedAuthorSealV1,
+  coordinate: CanonicalGraphScopedAuthorSealCoordinateV1,
+): readonly CanonicalAuthorSealStoreRowV1[] {
+  const rows = projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate);
+  const literal = (
+    value: string,
+    datatypeIri: string,
+  ): CanonicalAuthorSealStoreObjectV1 => Object.freeze({
+    kind: 'literal' as const,
+    value,
+    datatypeIri,
+  });
+  const objects: readonly CanonicalAuthorSealStoreObjectV1[] = [
+    literal(payload.assertionMerkleRoot.slice(2), XSD_HEX_BINARY_IRI),
+    literal(payload.authorAddress, XSD_STRING_IRI),
+    literal(payload.authorAttestationR.slice(2), XSD_HEX_BINARY_IRI),
+    literal(payload.authorAttestationVS.slice(2), XSD_HEX_BINARY_IRI),
+    literal('1', XSD_INTEGER_IRI),
+    literal(payload.assertedAtChainId, XSD_INTEGER_IRI),
+    literal(payload.assertedAtKav10Address, XSD_STRING_IRI),
+    literal(payload.reservedKaId, XSD_INTEGER_IRI),
+    literal(payload.assertionFinalizedAt, XSD_DATE_TIME_IRI),
+    literal('2', XSD_INTEGER_IRI),
+    Object.freeze({ kind: 'named-node' as const, value: payload.kaUal }),
+    literal(payload.assertionVersion, XSD_INTEGER_IRI),
+    literal(payload.publicTripleCount, XSD_INTEGER_IRI),
+    literal(payload.privateTripleCount, XSD_INTEGER_IRI),
+    ...(payload.privateMerkleRoot === null
+      ? []
+      : [literal(payload.privateMerkleRoot.slice(2), XSD_HEX_BINARY_IRI)]),
+  ];
+  if (objects.length !== rows.length) {
+    fail('canonical-seal-row-cardinality', 'typed projection cardinality is inconsistent');
+  }
+  return Object.freeze(rows.map((row, index) => Object.freeze({
+    subjectIri: row.subject,
+    predicateIri: row.predicate,
+    graphIri: row.graph,
+    object: objects[index],
+  })));
 }
 
 /** Render one typed store row to the exact canonical parser-row representation. */

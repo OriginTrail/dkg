@@ -13,6 +13,7 @@ import {
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectCanonicalGraphScopedAuthorSealStoreRowsV1,
   renderCanonicalAuthorSealStoreRowV1,
   type CanonicalAuthorSealStoreRowV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
@@ -90,6 +91,13 @@ describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
     expect(rows.map((row) => row.predicate)).toEqual(EXPECTED_PREDICATES);
     expect(rows.map((row) => row.object)).toEqual(EXPECTED_OBJECTS);
     expect(rows.every((row) => row.subject === SUBJECT && row.graph === META_GRAPH)).toBe(true);
+
+    const typedRows = projectCanonicalGraphScopedAuthorSealStoreRowsV1(PAYLOAD, COORDINATE);
+    expect(Object.isFrozen(typedRows)).toBe(true);
+    expect(typedRows).toHaveLength(rows.length);
+    expect(typedRows.map(renderCanonicalAuthorSealStoreRowV1)).toEqual(rows);
+    expect(typedRows.every((row) => Object.isFrozen(row) && Object.isFrozen(row.object)))
+      .toBe(true);
   });
 
   it('emits the optional private-root row only for positive private content', () => {
