@@ -390,6 +390,8 @@ interface WireRow extends AssetRowV1 {
   readonly swmGraph: string;
 }
 
+const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
+
 function verifySemanticState(value: unknown, path: string, rows: readonly WireRow[]): void {
   const semantic = closedArray(value, path, 3);
   semantic.forEach((entry, index) => {
@@ -412,7 +414,7 @@ function verifySemanticState(value: unknown, path: string, rows: readonly WireRo
       256 * 1024,
     );
     exact(
-      sha256Digest(projection),
+      sha256Digest(KA_PROJECTION_DIGEST_DOMAIN_V1, projection),
       rows[index]!.contentDigest,
       `${path}[${index}].projection digest`,
     );
