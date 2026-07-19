@@ -39,6 +39,20 @@ import {
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
+  CandidateInventoryV1,
+  type CandidateBucketDiffTraversalV1,
+  type CandidateBucketHeaderV1,
+  type CandidateBucketLoadKeyV1,
+  type CandidateBucketPageV1,
+  type CandidateBucketPutResultV1,
+  type CandidateBucketRowsTraversalV1,
+  type CandidateSessionV1,
+  type CandidateSessionGcBatchResultV1,
+  type Rfc64InventoryV1CandidateApi,
+  type VerifiedCandidateBucketLoadV1,
+} from './candidate.js';
+import type { KaIdV1 } from '@origintrail-official/dkg-core';
+import {
   createProductionInventoryV1LifecycleAdapter,
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   type InventoryV1LifecycleAdapter,
@@ -99,7 +113,7 @@ class InventoryV1TargetCloseError extends InventoryV1OpenError {
   }
 }
 
-export interface Rfc64InventoryV1Foundation {
+export interface Rfc64InventoryV1Foundation extends Rfc64InventoryV1CandidateApi {
   readonly databasePath: string;
   readonly closed: boolean;
   quarantineAndRebuild(): void;
@@ -241,6 +255,7 @@ async function openInventoryV1WithLifecycleAdapter(
 
 class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
+  #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
 
   constructor(
@@ -251,6 +266,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     private readonly lifecycle: InventoryV1LifecycleAdapter,
   ) {
     this.#database = database;
+    this.#candidate = this.createCandidateInventory(database);
     this.#lease = lease;
   }
 
@@ -262,6 +278,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     const database = this.requireOpen();
     assertQuarantineDurabilityAvailable(this.lifecycle);
     assertDatabaseQuiescent(database, this.lifecycle);
+    this.#candidate.close();
     try {
       closeInventoryTarget(database, 'explicit-quarantine', this.lifecycle);
     } catch (error) {
@@ -276,6 +293,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
         this.databasePath,
         this.lifecycle,
       );
+      this.#candidate = this.createCandidateInventory(this.#database);
     } catch (error) {
       if (error instanceof InventoryV1TargetCloseError) this.retainFailStop(error);
       this.releaseLease();
@@ -289,6 +307,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   }
 
   close(): void {
+    this.#candidate.close();
     const database = this.#database;
     if (database !== null) {
       try {
@@ -301,11 +320,142 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.releaseLease();
   }
 
+  createCandidateSession(): CandidateSessionV1 {
+    this.requireOpen();
+    return this.#candidate.createCandidateSession();
+  }
+
+  purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1 {
+    this.requireOpen();
+    return this.#candidate.purgeNextStartupStaleCandidateBatch();
+  }
+
+  putVerifiedCandidateBucket(load: VerifiedCandidateBucketLoadV1): CandidateBucketPutResultV1 {
+    this.requireOpen();
+    return this.#candidate.putVerifiedCandidateBucket(load);
+  }
+
+  getCandidateBucket(loadKey: CandidateBucketLoadKeyV1): CandidateBucketHeaderV1 {
+    this.requireOpen();
+    return this.#candidate.getCandidateBucket(loadKey);
+  }
+
+  beginCandidateBucketRows(loadKey: CandidateBucketLoadKeyV1): CandidateBucketRowsTraversalV1 {
+    this.requireOpen();
+    return this.#candidate.beginCandidateBucketRows(loadKey);
+  }
+
+  beginCandidateBucketDiff(
+    oldLoadKey: CandidateBucketLoadKeyV1,
+    newLoadKey: CandidateBucketLoadKeyV1,
+  ): CandidateBucketDiffTraversalV1 {
+    this.requireOpen();
+    return this.#candidate.beginCandidateBucketDiff(oldLoadKey, newLoadKey);
+  }
+
+  pageCandidateBucketRows(
+    traversal: CandidateBucketRowsTraversalV1,
+    cursor: KaIdV1 | null | undefined,
+    limit: number,
+  ): CandidateBucketPageV1 {
+    this.requireOpen();
+    return this.#candidate.pageCandidateBucketRows(traversal, cursor, limit);
+  }
+
+  pageCandidateBucketAddedOrChanged(
+    traversal: CandidateBucketDiffTraversalV1,
+    cursor: KaIdV1 | null | undefined,
+    limit: number,
+  ): CandidateBucketPageV1 {
+    this.requireOpen();
+    return this.#candidate.pageCandidateBucketAddedOrChanged(traversal, cursor, limit);
+  }
+
+  pageCandidateBucketRemoved(
+    traversal: CandidateBucketDiffTraversalV1,
+    cursor: KaIdV1 | null | undefined,
+    limit: number,
+  ): CandidateBucketPageV1 {
+    this.requireOpen();
+    return this.#candidate.pageCandidateBucketRemoved(traversal, cursor, limit);
+  }
+
+  closeCandidateTraversal(
+    traversal: CandidateBucketRowsTraversalV1 | CandidateBucketDiffTraversalV1,
+  ): void {
+    this.requireOpen();
+    this.#candidate.closeCandidateTraversal(traversal);
+  }
+
+  discardCandidateSessionBatch(
+    session: CandidateSessionV1,
+  ): CandidateSessionGcBatchResultV1 {
+    this.requireOpen();
+    return this.#candidate.discardCandidateSessionBatch(session);
+  }
+
+  deleteCandidateBucket(loadKey: CandidateBucketLoadKeyV1): void {
+    this.requireOpen();
+    this.#candidate.deleteCandidateBucket(loadKey);
+  }
+
   private requireOpen(): DatabaseSyncV1 {
     if (this.#database === null) {
       throw new InventoryV1OpenError('database-closed', 'inventory database is closed');
     }
     return this.#database;
+  }
+
+  private createCandidateInventory(database: DatabaseSyncV1): CandidateInventoryV1 {
+    return new CandidateInventoryV1(
+      database,
+      (currentDatabase) => {
+        if (this.#database !== currentDatabase) {
+          throw new InventoryV1OpenError(
+            'database-closed',
+            'candidate inventory low-level handle no longer owns the live foundation connection',
+          );
+        }
+        // Detach before close so no rejection path can expose a stale closed
+        // target through the foundation. DK6L remains held across the reopen.
+        this.#database = null;
+        try {
+          closeInventoryTarget(currentDatabase, 'failed-open-cleanup', this.lifecycle);
+        } catch (error) {
+          this.retainFailStop(error);
+        }
+        try {
+          const reopened = reopenVerifiedOwnedDatabase(
+            this.sqlite,
+            this.databasePath,
+            this.lifecycle,
+          );
+          this.#database = reopened;
+          return reopened;
+        } catch (cause) {
+          if (cause instanceof InventoryV1TargetCloseError) this.retainFailStop(cause);
+          // Never quarantine, rebuild, or manufacture a candidate outcome on the
+          // latency/indeterminate-COMMIT path. The live foundation stays closed.
+          throw new InventoryV1OpenError(
+            'database-io',
+            'failed to verify and reopen the existing RFC-64 inventory database',
+            { cause },
+          );
+        }
+      },
+      undefined,
+      (rejectedDatabase) => {
+        // Candidate validation happens after the provider returns. Detach the
+        // adopted replacement before closing it so `closed` and requireOpen()
+        // cannot observe a stale closed DatabaseSync handle.
+        if (this.#database === rejectedDatabase) this.#database = null;
+        try {
+          closeInventoryTarget(rejectedDatabase, 'failed-open-cleanup', this.lifecycle);
+        } catch (error) {
+          this.retainFailStop(error);
+        }
+      },
+    );
   }
 
   private releaseLease(): void {
@@ -320,6 +470,52 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
       this.#lease = null;
     }
     throw error;
+  }
+}
+
+function reopenVerifiedOwnedDatabase(
+  sqlite: SqliteModuleV1,
+  databasePath: string,
+  lifecycle: InventoryV1LifecycleAdapter,
+): DatabaseSyncV1 {
+  rejectOwnedFileSymlinks(databasePath);
+  rejectOrphanedSqliteSidecars(databasePath, 'inventory database');
+  if (!existsSync(databasePath)) {
+    throw new InventoryV1OpenError(
+      'database-io',
+      'inventory database disappeared before verified low-level reopen',
+    );
+  }
+  assertOwnedUnitOwners(databasePath);
+  assertExistingTargetHeader(databasePath);
+
+  let database: DatabaseSyncV1 | null = null;
+  try {
+    database = new sqlite.DatabaseSync(databasePath);
+    assertCommittedTargetIdentity(readIdentity(database));
+    verifyOwnedSchema(database);
+    applyAndVerifyPragmas(database);
+    verifyOwnedSchema(database);
+    tightenOwnedFileMode(databasePath);
+    return database;
+  } catch (cause) {
+    if (database !== null) {
+      closeInventoryTarget(database, 'failed-open-cleanup', lifecycle);
+      database = null;
+    }
+    if (cause instanceof InventoryV1OpenError) throw cause;
+    if (isBusySqliteError(cause)) {
+      throw new InventoryV1OpenError(
+        'database-busy',
+        'inventory database is busy during verified low-level reopen',
+        { cause },
+      );
+    }
+    throw new InventoryV1OpenError(
+      'database-io',
+      'failed to verify the existing inventory database during low-level reopen',
+      { cause },
+    );
   }
 }
 
