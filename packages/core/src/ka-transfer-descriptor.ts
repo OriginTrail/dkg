@@ -1,3 +1,5 @@
+import { sha256 } from '@noble/hashes/sha2.js';
+
 import {
   canonicalizeJson,
   parseCanonicalJson,
@@ -22,7 +24,10 @@ export const MAX_KA_TRANSFER_BYTES_V1 = 1_073_741_824n;
 export const MAX_KA_TRANSFER_CHUNKS_V1 = 4096n;
 export const MAX_KA_TRANSFER_DESCRIPTOR_BYTES_V1 = 512;
 export const MAX_KA_TRANSFER_DESCRIPTOR_DEPTH_V1 = 1;
+export const KA_TRANSFER_IDENTITY_DIGEST_DOMAIN_V1 =
+  'dkg-ka-transfer-descriptor-v1\n' as const;
 const UTF8 = new TextEncoder();
+const IDENTITY_DOMAIN_BYTES = UTF8.encode(KA_TRANSFER_IDENTITY_DIGEST_DOMAIN_V1);
 
 /**
  * Exact nested author-catalog transfer value. It is not a signed control object
@@ -139,6 +144,22 @@ export function canonicalizeKaTransferDescriptorBytesV1(
   descriptor: KaTransferDescriptorV1,
 ): Uint8Array {
   return UTF8.encode(canonicalizeKaTransferDescriptorV1(descriptor));
+}
+
+/**
+ * Bind verified partial chunks to every canonical descriptor field rather than
+ * merely to the final blob digest. This is the exact durable-resume/cache key.
+ */
+export function computeKaTransferIdentityDigestV1(
+  descriptor: KaTransferDescriptorV1,
+): Digest32V1 {
+  const hasher = sha256.create();
+  hasher.update(IDENTITY_DOMAIN_BYTES);
+  hasher.update(canonicalizeKaTransferDescriptorBytesV1(descriptor));
+  let result = '0x';
+  for (const byte of hasher.digest()) result += byte.toString(16).padStart(2, '0');
+  assertCanonicalDigest(result, 'transferIdentityDigest');
+  return result;
 }
 
 /**

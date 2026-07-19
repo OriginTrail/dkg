@@ -45,6 +45,9 @@ export type {
   TimestampMsV1,
 } from './sync-wire-scalars.js';
 export * from './ka-transfer-descriptor.js';
+export * from './ka-bundle-v1.js';
+export * from './ka-chunk-tree.js';
+export * from './ka-chunk-proof.js';
 export * from './event-bus.js';
 export {
   Logger,
