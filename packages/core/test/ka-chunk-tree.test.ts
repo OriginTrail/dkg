@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertKaChunkTreeByteLengthV1,
   computeEmptyKaChunkTreeRootV1,
   computeKaChunkLeafDigestV1,
   computeKaChunkTreeRootV1,
@@ -62,6 +63,10 @@ describe('RFC-64 dormant KA chunk tree', () => {
   });
 
   it('rejects transfer lengths outside 16..1 GiB and empty leaves', () => {
+    expectFailureCode(
+      () => assertKaChunkTreeByteLengthV1(1_073_741_825n),
+      'chunk-tree-byte-length',
+    );
     expectFailureCode(
       () => computeKaChunkTreeRootV1(new Uint8Array(15)),
       'chunk-tree-byte-length',
