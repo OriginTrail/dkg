@@ -65,6 +65,20 @@ export interface Rfc64DurableFileLifecycleV1<TKind extends string = string> {
   ) => void | Promise<void>;
 }
 
+/** @internal Source-test lifecycle with deterministic directory single-flight observation. */
+export interface Rfc64DurableFileTestLifecycleV1<TKind extends string = string>
+  extends Rfc64DurableFileLifecycleV1<TKind> {
+  readonly directoryPreparation?: (
+    observation: Rfc64DirectoryPreparationObservationV1,
+  ) => void | Promise<void>;
+}
+
+/** @internal Source-test observation emitted by the guarded test factory. */
+export interface Rfc64DirectoryPreparationObservationV1 {
+  readonly path: string;
+  readonly disposition: 'started' | 'joined';
+}
+
 export interface Rfc64DurableFileStoreV1<TKind extends string> {
   putExactBytes(input: PutRfc64ExactBytesInputV1<TKind>): Promise<void>;
   readOptionalBoundedBytes(
@@ -84,13 +98,20 @@ export function createRfc64DurableFileStoreV1<TKind extends string>(
 /** @internal Package-local fault injection; unavailable outside source tests. */
 export function createRfc64DurableFileStoreForTestV1<TKind extends string>(
   containmentRoot: string,
-  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  lifecycle: Rfc64DurableFileTestLifecycleV1<TKind>,
 ): Rfc64DurableFileStoreV1<TKind> {
   assertRfc64DurableFileTestEnvironmentV1();
+  const observeDirectoryPreparation = lifecycle.directoryPreparation;
   const guardedLifecycle = Object.freeze({
     boundary: async (boundary: Rfc64DurableFileBoundaryV1<TKind>): Promise<void> => {
       assertRfc64DurableFileTestEnvironmentV1();
       await lifecycle.boundary(boundary);
+    },
+    directoryPreparation: async (
+      observation: Rfc64DirectoryPreparationObservationV1,
+    ): Promise<void> => {
+      assertRfc64DurableFileTestEnvironmentV1();
+      await observeDirectoryPreparation?.(observation);
     },
   });
   return createRfc64DurableFileStoreWithLifecycleV1(
@@ -101,39 +122,25 @@ export function createRfc64DurableFileStoreForTestV1<TKind extends string>(
 
 const PRODUCTION_DURABLE_FILE_LIFECYCLE_V1 = Object.freeze({
   boundary: (): void => {},
-}) satisfies Rfc64DurableFileLifecycleV1;
+}) satisfies Rfc64DurableFileTestLifecycleV1;
 
 function createRfc64DurableFileStoreWithLifecycleV1<TKind extends string>(
   containmentRoot: string,
-  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  lifecycle: Rfc64DurableFileTestLifecycleV1<TKind>,
 ): Rfc64DurableFileStoreV1<TKind> {
   const directoryPreparations = new Map<string, Promise<void>>();
-  const prepareDirectoryTree = async (
-    target: string,
-    containmentRootAccess: Rfc64ExistingAccessV1,
-  ): Promise<void> => {
-    // Every caller independently revalidates the protected root before it may
-    // join an in-process preparation. The keyed promise only closes the brief
-    // Windows mkdir-before-DACL race; it does not weaken fail-closed admission.
-    if (containmentRootAccess === 'owner-only') {
-      await assertRfc64ExistingDirectoryV1(
-        containmentRoot,
-        'durable store containment root',
-        { access: 'owner-only' },
-      );
-    }
-    const key = resolve(target);
+  const prepareDirectoryComponent = async (path: string): Promise<void> => {
+    const key = resolve(path);
     const current = directoryPreparations.get(key);
     if (current !== undefined) {
+      await lifecycle.directoryPreparation?.({ path: key, disposition: 'joined' });
       await current;
       return;
     }
-    const operation = ensureRfc64SecureDirectoryTreeWithLifecycleV1(
-      target,
-      containmentRoot,
-      lifecycle,
-      containmentRootAccess,
-    );
+    const operation = Promise.resolve().then(async () => {
+      await lifecycle.directoryPreparation?.({ path: key, disposition: 'started' });
+      await prepareRfc64SecureDirectoryComponentV1(path, lifecycle);
+    });
     directoryPreparations.set(key, operation);
     try {
       await operation;
@@ -142,6 +149,28 @@ function createRfc64DurableFileStoreWithLifecycleV1<TKind extends string>(
         directoryPreparations.delete(key);
       }
     }
+  };
+  const prepareDirectoryTree = async (
+    target: string,
+    containmentRootAccess: Rfc64ExistingAccessV1,
+  ): Promise<void> => {
+    // Every caller independently revalidates the protected root before it may
+    // join an in-process preparation. Per-component promises close the brief
+    // Windows mkdir-before-DACL race even when distinct targets share a newly
+    // created ancestor; they do not weaken fail-closed admission.
+    if (containmentRootAccess === 'owner-only') {
+      await assertRfc64ExistingDirectoryV1(
+        containmentRoot,
+        'durable store containment root',
+        { access: 'owner-only' },
+      );
+    }
+    await walkRfc64ContainedDirectoryTreeV1(
+      target,
+      containmentRoot,
+      containmentRootAccess,
+      prepareDirectoryComponent,
+    );
   };
   return Object.freeze({
     putExactBytes: (input: PutRfc64ExactBytesInputV1<TKind>) =>
@@ -223,27 +252,32 @@ async function ensureRfc64SecureDirectoryTreeWithLifecycleV1<TKind extends strin
     target,
     containmentRoot,
     containmentRootAccess,
-    async (current) => {
-      let created = false;
-      try {
-        await mkdir(current, { mode: RFC64_SECURE_DIRECTORY_MODE_V1 });
-        created = true;
-        await lifecycle.boundary('directory.created');
-      } catch (cause) {
-        if (!isNodeError(cause, 'EEXIST')) {
-          fail('io', `failed to create durable store directory ${current}`, cause);
-        }
-      }
-      if (created) {
-        await chmodSecure(current, RFC64_SECURE_DIRECTORY_MODE_V1, 'directory');
-        await lifecycle.boundary('directory.mode-secured');
-        await fsyncDirectory(current);
-        await lifecycle.boundary('directory.self-fsynced');
-        await fsyncDirectory(dirname(current));
-        await lifecycle.boundary('directory.parent-fsynced');
-      }
-    },
+    (current) => prepareRfc64SecureDirectoryComponentV1(current, lifecycle),
   );
+}
+
+async function prepareRfc64SecureDirectoryComponentV1<TKind extends string>(
+  path: string,
+  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+): Promise<void> {
+  let created = false;
+  try {
+    await mkdir(path, { mode: RFC64_SECURE_DIRECTORY_MODE_V1 });
+    created = true;
+    await lifecycle.boundary('directory.created');
+  } catch (cause) {
+    if (!isNodeError(cause, 'EEXIST')) {
+      fail('io', `failed to create durable store directory ${path}`, cause);
+    }
+  }
+  if (created) {
+    await chmodSecure(path, RFC64_SECURE_DIRECTORY_MODE_V1, 'directory');
+    await lifecycle.boundary('directory.mode-secured');
+    await fsyncDirectory(path);
+    await lifecycle.boundary('directory.self-fsynced');
+    await fsyncDirectory(dirname(path));
+    await lifecycle.boundary('directory.parent-fsynced');
+  }
 }
 
 export interface PutRfc64ExactBytesInputV1<TKind extends string> {
