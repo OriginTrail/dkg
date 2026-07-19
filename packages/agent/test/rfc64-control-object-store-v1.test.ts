@@ -47,6 +47,13 @@ import {
 
 const SAFE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const BLOCK_HASH = `0x${'44'.repeat(32)}` as Digest32V1;
+// Exercising the exact 64-variant production ceiling intentionally publishes
+// 64 durable files. Windows validates every owner-only ACL through a separate
+// PowerShell child, so retain the suite-wide 60s budget and widen only this
+// platform-specific durability case.
+const SIGNATURE_VARIANT_CEILING_TEST_TIMEOUT_MS = process.platform === 'win32'
+  ? 180_000
+  : 60_000;
 const openRfc64ControlObjectStoreV1 = createRfc64ControlObjectStoreTestOpenerV1();
 const temporaryDirectories = createTemporaryDataDirectoryFixture();
 const { temporaryDataDirectory } = temporaryDirectories;
@@ -382,7 +389,7 @@ describe('RFC-64 durable control-object store v1', () => {
     })).resolves.toMatchObject({
       envelope: expect.objectContaining({ objectDigest: variants[0].envelope.objectDigest }),
     });
-  });
+  }, SIGNATURE_VARIANT_CEILING_TEST_TIMEOUT_MS);
 
   it.runIf(process.platform !== 'win32')(
     'fails closed when a signature shard is replaced by an owner-only symlink',
