@@ -44,15 +44,22 @@
     "benchmark:reconciliation:full": "node --import tsx scripts/benchmark.ts --matrix",
     "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --matrix --check",
     "benchmark:reconciliation:check:quick": "node --import tsx scripts/benchmark.ts --check",
+    "benchmark:store": "node --import tsx scripts/store-benchmark.ts",
+    "benchmark:store:matrix": "node --import tsx scripts/store-benchmark.ts --matrix",
+    "benchmark:store:rotated": "node --import tsx scripts/store-benchmark.ts --matrix --repetitions=3",
+    "benchmark:store:check": "node --import tsx scripts/store-benchmark.ts --matrix --check",
+    "benchmark:store:check:quick": "node --import tsx scripts/store-benchmark.ts --check",
     "vectors": "node --import tsx scripts/generate-vectors.ts",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0"
+    "@noble/hashes": "^2.2.0",
+    "better-sqlite3": "12.11.1"
   },
   "devDependencies": {
     "@types/node": "^22",
+    "@types/better-sqlite3": "^7",
     "@vitest/coverage-v8": "^4.0.18",
     "tsx": "^4.21.0",
     "vitest": "^4.0.18"

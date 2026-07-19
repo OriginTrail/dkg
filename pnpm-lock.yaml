@@ -1192,7 +1192,13 @@ importers:
       '@noble/hashes':
         specifier: ^2.2.0
         version: 2.2.0
+      better-sqlite3:
+        specifier: 12.11.1
+        version: 12.11.1
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7
+        version: 7.6.13
       '@types/node':
         specifier: ^22
         version: 22.19.11
