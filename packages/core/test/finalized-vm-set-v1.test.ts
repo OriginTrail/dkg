@@ -15,6 +15,7 @@ import {
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const CONTRACT = '0x2222222222222222222222222222222222222222';
 const OTHER_CONTRACT = '0x3333333333333333333333333333333333333333';
+const OTHER_CHAIN = '20431';
 const SCOPE = Object.freeze({
   networkId: 'otp:20430',
   chainId: '20430',
@@ -22,6 +23,26 @@ const SCOPE = Object.freeze({
 }) as FinalizedVmSetScopeV1;
 
 describe('RFC-64 finalized VM-set accumulator', () => {
+  it('returns the complete frozen empty-set evidence contract', () => {
+    const mutableScope = {
+      networkId: SCOPE.networkId,
+      chainId: SCOPE.chainId,
+      contractAddress: SCOPE.contractAddress,
+    } as FinalizedVmSetScopeV1;
+    const evidence = new FinalizedVmSetAccumulatorV1(mutableScope).finalize();
+    mutableScope.contractAddress = OTHER_CONTRACT as never;
+
+    expect(evidence).toEqual({
+      scope: SCOPE,
+      rootDigest: '0x900f13ea9b9bfc985dfd4beedf0ae0a6f01ff3a5a211943e18a751187dd9a09d',
+      rowCount: '0',
+      highestFinalizedOrdinal: null,
+    });
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(Object.isFrozen(evidence.scope)).toBe(true);
+    expect(evidence.scope).not.toBe(mutableScope);
+  });
+
   it('matches independent empty, one, even, and odd tree vectors', () => {
     expect(computeEmptyFinalizedVmSetRootV1()).toBe(
       '0x900f13ea9b9bfc985dfd4beedf0ae0a6f01ff3a5a211943e18a751187dd9a09d',
@@ -86,6 +107,13 @@ describe('RFC-64 finalized VM-set accumulator', () => {
       'finalized-vm-set-lane',
     );
     expectFailureCode(
+      () => snapshotFinalizedVmSetRowV1(
+        SCOPE,
+        { ...row(0), chainId: OTHER_CHAIN } as FinalizedVmSetRowV1,
+      ),
+      'finalized-vm-set-lane',
+    );
+    expectFailureCode(
       () => computeFinalizedVmSetLeafDigestV1(
         SCOPE,
         { ...row(0), contractAddress: OTHER_CONTRACT } as FinalizedVmSetRowV1,
@@ -96,31 +124,31 @@ describe('RFC-64 finalized VM-set accumulator', () => {
 
   it('rejects UAL aliases and author mismatches before hashing', () => {
     expectFailureCode(
-      () => snapshotFinalizedVmSetRowV1({
+      () => snapshotFinalizedVmSetRowV1(SCOPE, {
         ...row(0),
         ual: `did:dkg:otp:20430/${AUTHOR.toUpperCase()}/1`,
-      } as FinalizedVmSetRowV1, SCOPE.networkId),
+      } as FinalizedVmSetRowV1),
       'finalized-vm-set-ual',
     );
     expectFailureCode(
-      () => snapshotFinalizedVmSetRowV1({
+      () => snapshotFinalizedVmSetRowV1(SCOPE, {
         ...row(0),
         ual: `did:dkg:otp:20430/${OTHER_CONTRACT}/1`,
-      } as FinalizedVmSetRowV1, SCOPE.networkId),
+      } as FinalizedVmSetRowV1),
       'finalized-vm-set-ual',
     );
     expectFailureCode(
-      () => snapshotFinalizedVmSetRowV1({
+      () => snapshotFinalizedVmSetRowV1(SCOPE, {
         ...row(0),
         assertionVersion: '0',
-      } as FinalizedVmSetRowV1, SCOPE.networkId),
+      } as FinalizedVmSetRowV1),
       'finalized-vm-set-scalar',
     );
     expectFailureCode(
-      () => snapshotFinalizedVmSetRowV1({
+      () => snapshotFinalizedVmSetRowV1(SCOPE, {
         ...row(0),
         ual: `did:dkg:wrong-lane/${AUTHOR}/1`,
-      } as FinalizedVmSetRowV1, SCOPE.networkId),
+      } as FinalizedVmSetRowV1),
       'finalized-vm-set-ual',
     );
   });
@@ -145,8 +173,8 @@ describe('RFC-64 finalized VM-set accumulator', () => {
     });
 
     const snapshot = snapshotFinalizedVmSetRowV1(
+      SCOPE,
       proxy as FinalizedVmSetRowV1,
-      SCOPE.networkId,
     );
     expect(snapshot).toEqual(row(0));
     expect([...descriptorReads.values()].every((count) => count === 1)).toBe(true);

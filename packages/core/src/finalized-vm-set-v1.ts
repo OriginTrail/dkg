@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { assertNetworkIdV1, type NetworkIdV1 } from './author-catalog-codec.js';
 import { canonicalizeJsonBytes, type CanonicalJsonValue } from './canonical-json.js';
 import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
+import { snapshotExactDataRecord } from './sync-wire-objects.js';
 import {
   MAX_DECIMAL_U64,
   assertCanonicalChainId,
@@ -105,7 +106,7 @@ export const MAX_FINALIZED_VM_SET_UAL_BYTES_V1 = 209;
 
 /** Snapshot and validate the exact chain/contract lane before any row callbacks run. */
 export function snapshotFinalizedVmLaneV1(input: FinalizedVmLaneV1): Readonly<FinalizedVmLaneV1> {
-  const record = snapshotExactDataRecord(input, FINALIZED_VM_LANE_KEYS, 'finalized VM lane');
+  const record = snapshotRecord(input, FINALIZED_VM_LANE_KEYS, 'finalized VM lane');
   try {
     assertCanonicalChainId(record.chainId, 'lane.chainId');
     assertCanonicalEvmAddress(record.contractAddress, 'lane.contractAddress');
@@ -122,7 +123,7 @@ export function snapshotFinalizedVmLaneV1(input: FinalizedVmLaneV1): Readonly<Fi
 export function snapshotFinalizedVmSetScopeV1(
   input: FinalizedVmSetScopeV1,
 ): Readonly<FinalizedVmSetScopeV1> {
-  const record = snapshotExactDataRecord(
+  const record = snapshotRecord(
     input,
     FINALIZED_VM_SET_SCOPE_KEYS,
     'finalized VM-set scope',
@@ -142,19 +143,22 @@ export function snapshotFinalizedVmSetScopeV1(
 }
 
 /**
- * Snapshot one row exactly once, rejecting accessors and non-canonical aliases.
- * The returned object is safe to retain across hashing or I/O callbacks.
+ * Snapshot one row against the complete trusted scope, rejecting accessors,
+ * non-canonical aliases, UAL namespace drift, and cross-lane rows in one boundary.
  */
 export function snapshotFinalizedVmSetRowV1(
+  scopeInput: FinalizedVmSetScopeV1,
   input: FinalizedVmSetRowV1,
-  expectedNetworkId: NetworkIdV1,
 ): Readonly<FinalizedVmSetRowV1> {
-  try {
-    assertNetworkIdV1(expectedNetworkId, 'expectedNetworkId');
-  } catch (cause) {
-    fail('finalized-vm-set-scalar', 'trusted network profile is not canonical', cause);
-  }
-  const record = snapshotExactDataRecord(input, FINALIZED_VM_SET_ROW_KEYS, 'finalized VM row');
+  const scope = snapshotFinalizedVmSetScopeV1(scopeInput);
+  return snapshotFinalizedVmSetRowForScopeV1(scope, input);
+}
+
+function snapshotFinalizedVmSetRowForScopeV1(
+  scope: Readonly<FinalizedVmSetScopeV1>,
+  input: FinalizedVmSetRowV1,
+): Readonly<FinalizedVmSetRowV1> {
+  const record = snapshotRecord(input, FINALIZED_VM_SET_ROW_KEYS, 'finalized VM row');
   try {
     assertCanonicalChainId(record.chainId, 'row.chainId');
     assertCanonicalEvmAddress(record.contractAddress, 'row.contractAddress');
@@ -190,12 +194,16 @@ export function snapshotFinalizedVmSetRowV1(
     if (parsed.agentAddress !== record.authorAddress) {
       fail('finalized-vm-set-ual', 'row.ual author differs from row.authorAddress');
     }
-    if (parsed.chainId !== expectedNetworkId) {
+    if (parsed.chainId !== scope.networkId) {
       fail('finalized-vm-set-ual', 'row.ual namespace differs from the trusted network profile');
     }
   } catch (cause) {
     if (cause instanceof FinalizedVmSetV1Error) throw cause;
     fail('finalized-vm-set-ual', 'row.ual is not a canonical deterministic KA UAL', cause);
+  }
+
+  if (record.chainId !== scope.chainId || record.contractAddress !== scope.contractAddress) {
+    fail('finalized-vm-set-lane', 'finalized VM row differs from the trusted scope lane');
   }
 
   return Object.freeze({
@@ -218,13 +226,7 @@ export function computeFinalizedVmSetLeafDigestV1(
   row: FinalizedVmSetRowV1,
 ): Digest32V1 {
   const trustedScope = snapshotFinalizedVmSetScopeV1(scope);
-  const snapshot = snapshotFinalizedVmSetRowV1(row, trustedScope.networkId);
-  if (
-    snapshot.chainId !== trustedScope.chainId
-    || snapshot.contractAddress !== trustedScope.contractAddress
-  ) {
-    fail('finalized-vm-set-lane', 'finalized VM row differs from the trusted scope lane');
-  }
+  const snapshot = snapshotFinalizedVmSetRowForScopeV1(trustedScope, row);
   return digestBytesToLowerHex(computeFinalizedVmSetLeafDigestBytesV1(snapshot));
 }
 
@@ -266,13 +268,7 @@ export class FinalizedVmSetAccumulatorV1 {
         fail('finalized-vm-set-state', 'finalized VM row count exceeds the u64 range');
       }
 
-      const row = snapshotFinalizedVmSetRowV1(rowInput, this.#scope.networkId);
-      if (
-        row.chainId !== this.#scope.chainId
-        || row.contractAddress !== this.#scope.contractAddress
-      ) {
-        fail('finalized-vm-set-lane', 'finalized VM row differs from the accumulator lane');
-      }
+      const row = snapshotFinalizedVmSetRowForScopeV1(this.#scope, rowInput);
       const ordinal = parseCanonicalDecimalU64(row.ordinal, 'row.ordinal');
       if (this.#highestOrdinalValue !== null && ordinal <= this.#highestOrdinalValue) {
         fail('finalized-vm-set-order', 'finalized VM rows must have unique increasing ordinals');
@@ -353,38 +349,20 @@ function computeFinalizedVmSetLeafDigestBytesV1(
   );
 }
 
-function snapshotExactDataRecord<const Keys extends readonly string[]>(
+function snapshotRecord<const Keys extends readonly string[]>(
   input: unknown,
   expectedKeys: Keys,
   label: string,
 ): Readonly<Record<Keys[number], unknown>> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    fail('finalized-vm-set-schema', `${label} must be a plain data object`);
+  try {
+    return snapshotExactDataRecord(input, expectedKeys, label);
+  } catch (cause) {
+    fail(
+      'finalized-vm-set-schema',
+      cause instanceof Error ? cause.message : `${label} is not an exact data record`,
+      cause,
+    );
   }
-  const prototype = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) {
-    fail('finalized-vm-set-schema', `${label} must be a plain data object`);
-  }
-  const keys = Reflect.ownKeys(input);
-  if (keys.some((key) => typeof key !== 'string')) {
-    fail('finalized-vm-set-schema', `${label} must not contain symbol fields`);
-  }
-  const strings = keys as string[];
-  if (
-    strings.length !== expectedKeys.length
-    || expectedKeys.some((key) => !strings.includes(key))
-  ) {
-    fail('finalized-vm-set-schema', `${label} has unknown or missing fields`);
-  }
-  const snapshot: Record<string, unknown> = Object.create(null);
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail('finalized-vm-set-schema', `${label}.${key} must be an enumerable data field`);
-    }
-    snapshot[key] = descriptor.value;
-  }
-  return Object.freeze(snapshot) as Readonly<Record<Keys[number], unknown>>;
 }
 
 function digestBytes(domain: Uint8Array, ...chunks: readonly Uint8Array[]): Uint8Array {
