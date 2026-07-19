@@ -14,10 +14,12 @@ import {
   type CurrentFinalizedEvmCallRequestV1,
   type CurrentFinalizedEvmCallResultV1,
 } from './control-object-signature-verifier.js';
+import type { CurrentFinalizedEvmChainAdapterV1 } from './current-finalized-evm-call.js';
 import {
+  isPlainRecord,
   snapshotCurrentFinalizedEvmCallRequestV1,
-  type CurrentFinalizedEvmChainAdapterV1,
-} from './current-finalized-evm-call.js';
+  snapshotDenseDataArray,
+} from './current-finalized-strict-snapshot.js';
 
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
@@ -637,41 +639,19 @@ function assertConfigDataProperties(input: Record<string, unknown>): void {
 }
 
 function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
+  // Structural validation (dense data-only array) is shared with the router via
+  // snapshotDenseDataArray; endpoint normalization and the distinct-count policy
+  // stay local to this transport. A structurally invalid array fails closed with
+  // the endpoints message; a malformed endpoint string throws normalizeEndpoint's
+  // own TypeError, exactly as before.
+  const values = snapshotDenseDataArray(
+    input,
+    'Strict current-finalized endpoints must be a dense data-only array',
+  );
   const normalized: string[] = [];
-  try {
-    if (!Array.isArray(input)) throw new Error('not an array');
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-    if (
-      lengthDescriptor === undefined
-      || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-      || typeof lengthDescriptor.value !== 'number'
-      || !Number.isSafeInteger(lengthDescriptor.value)
-      || lengthDescriptor.value < 0
-    ) {
-      throw new Error('invalid length');
-    }
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(input);
-    if (
-      ownKeys.length !== length + 1
-      || ownKeys.some((key) => (
-        typeof key !== 'string'
-        || (key !== 'length' && !isCanonicalArrayIndex(key, length))
-      ))
-    ) {
-      throw new Error('not a dense ordinary array');
-    }
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-      if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-        throw new Error('entry is not a data property');
-      }
-      const endpoint = normalizeEndpoint(descriptor.value);
-      if (!normalized.includes(endpoint)) normalized.push(endpoint);
-    }
-  } catch (cause) {
-    if (cause instanceof TypeError) throw cause;
-    throw new TypeError('Strict current-finalized endpoints must be a dense data-only array');
+  for (const value of values) {
+    const endpoint = normalizeEndpoint(value);
+    if (!normalized.includes(endpoint)) normalized.push(endpoint);
   }
   if (normalized.length === 0 || normalized.length > CONTROL_EIP1271_MAX_ATTEMPTS_V1) {
     throw new TypeError(
@@ -679,12 +659,6 @@ function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
     );
   }
   return Object.freeze(normalized);
-}
-
-function isCanonicalArrayIndex(key: string, length: number): boolean {
-  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return false;
-  const index = Number(key);
-  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
 }
 
 function normalizeEndpoint(input: unknown): string {
@@ -701,12 +675,6 @@ function normalizeEndpoint(input: unknown): string {
     throw new TypeError('Strict current-finalized RPC endpoint must use HTTP(S) without a fragment');
   }
   return url.href;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
 }
 
 function unavailable(message: string, cause?: unknown): CurrentFinalizedEvmCallErrorV1 {

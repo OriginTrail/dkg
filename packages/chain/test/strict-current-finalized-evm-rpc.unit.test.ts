@@ -26,8 +26,6 @@ import {
 import {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 as ENTRY_BLOCK_REFERENCE_PROFILES,
   createStrictCurrentFinalizedEvmChainAdapterV1 as entryCreateStrictAdapter,
-  type CurrentFinalizedEvmBlockReferenceProfileV1 as EntryBlockReferenceProfile,
-  type StrictCurrentFinalizedEvmRpcConfigV1 as EntryRpcConfig,
 } from '../src/index.js';
 
 const CHAIN_ID = '20430' as ChainIdV1;
@@ -515,24 +513,23 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     }
   });
 
-  it('exposes the strict finalized RPC public API through the chain package entry point', () => {
-    // Consumers import from the package barrel, not the implementation module,
-    // so a dropped or miswired export in src/index.ts would break them while
-    // the impl-module tests above stay green.
+  it('exposes the strict finalized RPC public API values through the chain package entry point', () => {
+    // Runtime proof that consumers reach the strict RPC VALUES through the
+    // barrel, not the implementation module. The TYPE re-exports are proven
+    // separately at compile time in rfc64-strict-rpc-public-api.typecheck.ts
+    // (run via `test:types`, wired into `build`): type-only imports erase
+    // before runtime, so vitest alone cannot protect them.
     expect(entryCreateStrictAdapter).toBe(createStrictCurrentFinalizedEvmChainAdapterV1);
     expect(ENTRY_BLOCK_REFERENCE_PROFILES).toEqual([
       'eip1898',
       'trusted-block-number-hash-sandwich',
     ]);
-    // The two type exports must also be reachable through the barrel; using them
-    // here fails the typecheck if src/index.ts drops either type re-export.
-    const profile: EntryBlockReferenceProfile = 'trusted-block-number-hash-sandwich';
-    const config: EntryRpcConfig = {
+    const adapter = entryCreateStrictAdapter({
       chainId: CHAIN_ID,
       endpoints: ['http://127.0.0.1:1'],
-      blockReferenceProfile: profile,
-    };
-    expect(Object.isFrozen(entryCreateStrictAdapter(config))).toBe(true);
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+    expect(Object.isFrozen(adapter)).toBe(true);
   });
 });
 
