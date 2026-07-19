@@ -14,6 +14,7 @@ import {
   assertNetworkIdV1,
   assertPackedKaIdAuthorBindingV1,
   assertSubGraphNameV1,
+  isCatalogForbiddenCodePointV1,
   buildCatalogAssertionScopeV1,
   buildCatalogAssertionSubjectV1,
   canonicalizeAuthorCatalogRowV1,
@@ -107,6 +108,44 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
       expect(() => assertSubGraphNameV1(value)).toThrow(/catalog-identifier/);
     }
     expect(() => assertAssertionCoordinateV1('_private')).not.toThrow();
+  });
+
+  it('pins isCatalogForbiddenCodePointV1 at every forbidden endpoint and adjacent allowed value', () => {
+    // Every range endpoint and singleton the predicate forbids. A regression
+    // dropping any branch (e.g. the C1 range or a singleton) is caught here.
+    for (const cp of [
+      0x0000, 0x001f, // C0 range endpoints
+      0x007f, 0x009f, // C1 range endpoints
+      0x00a0,
+      0x1680,
+      0x2000, 0x200b, // 0x2000..0x200b range endpoints
+      0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(cp)).toBe(true);
+    }
+    // Values immediately adjacent to each forbidden range/singleton stay allowed,
+    // including U+200C (ZWNJ) right after the 0x2000..0x200b block.
+    for (const cp of [
+      0x0020, 0x007e, 0x00a1, 0x167f, 0x1681, 0x1fff, 0x200c, 0x2027,
+      0x202a, 0x202e, 0x2030, 0x205e, 0x2060, 0x2fff, 0x3001, 0xfefe, 0xff00,
+    ]) {
+      expect(isCatalogForbiddenCodePointV1(cp)).toBe(false);
+    }
+  });
+
+  it('rejects every forbidden endpoint through the lane identifier validators', () => {
+    // NFC-stable forbidden code points only: U+2000/U+2001 have canonical
+    // decompositions and would trip the earlier NFC guard, so the 0x2000..0x200b
+    // range is represented here by its NFC-stable endpoint U+200B (the predicate
+    // boundary test above proves 0x2000 itself is forbidden).
+    for (const cp of [
+      0x0000, 0x001f, 0x007f, 0x009f, 0x00a0, 0x1680,
+      0x200b, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ]) {
+      const identifier = `a${String.fromCodePoint(cp)}b`;
+      expect(() => assertSubGraphNameV1(identifier)).toThrow(/forbidden character or code point/);
+      expect(() => assertAssertionCoordinateV1(identifier)).toThrow(/forbidden character or code point/);
+    }
   });
 });
 
