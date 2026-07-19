@@ -1,5 +1,131 @@
-export const WAL_CONTROL_SCHEMA_VERSION = 1;
+export const WAL_CONTROL_SCHEMA_VERSION = 2;
 export const WAL_ROLLBACK_SCHEMA_VERSION = 1;
+
+export const WAL_AUTHORITY_SCHEMA_SQL = `
+  CREATE TABLE authority_sets (
+    authority_set_id BLOB PRIMARY KEY CHECK (length(authority_set_id) = 32),
+    canonical_bytes BLOB NOT NULL,
+    scope INTEGER NOT NULL CHECK (scope IN (0, 1)),
+    network_id TEXT NOT NULL,
+    authority_epoch BLOB NOT NULL CHECK (length(authority_epoch) = 8),
+    threshold INTEGER NOT NULL CHECK (threshold > 0),
+    not_before_ms INTEGER NOT NULL CHECK (not_before_ms >= 0),
+    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > not_before_ms),
+    previous_authority_set_id BLOB CHECK (
+      previous_authority_set_id IS NULL OR length(previous_authority_set_id) = 32
+    ),
+    status TEXT NOT NULL CHECK (status IN ('CURRENT', 'SUPERSEDED')),
+    accepted_at_ms INTEGER NOT NULL CHECK (accepted_at_ms >= 0),
+    FOREIGN KEY (previous_authority_set_id) REFERENCES authority_sets(authority_set_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE UNIQUE INDEX one_current_authority_set
+    ON authority_sets(network_id, scope) WHERE status = 'CURRENT';
+
+  CREATE TABLE authority_revocations (
+    revoked_authority_set_id BLOB PRIMARY KEY CHECK (length(revoked_authority_set_id) = 32),
+    source_authority_set_id BLOB NOT NULL CHECK (length(source_authority_set_id) = 32),
+    revoked_at_ms INTEGER NOT NULL CHECK (revoked_at_ms >= 0),
+    FOREIGN KEY (source_authority_set_id) REFERENCES authority_sets(authority_set_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+
+  CREATE TABLE authority_conflicts (
+    network_id TEXT NOT NULL,
+    scope INTEGER NOT NULL CHECK (scope IN (0, 1)),
+    authority_epoch BLOB NOT NULL CHECK (length(authority_epoch) = 8),
+    first_authority_set_id BLOB NOT NULL CHECK (length(first_authority_set_id) = 32),
+    second_authority_set_id BLOB NOT NULL CHECK (length(second_authority_set_id) = 32),
+    detected_at_ms INTEGER NOT NULL CHECK (detected_at_ms >= 0),
+    PRIMARY KEY (network_id, scope, authority_epoch)
+  ) WITHOUT ROWID;
+
+  CREATE TABLE membership_checkpoints (
+    membership_checkpoint_id BLOB PRIMARY KEY CHECK (length(membership_checkpoint_id) = 32),
+    canonical_bytes BLOB NOT NULL,
+    collection_id BLOB NOT NULL CHECK (length(collection_id) = 32),
+    checkpoint_number BLOB NOT NULL CHECK (length(checkpoint_number) = 8),
+    policy_epoch BLOB NOT NULL CHECK (length(policy_epoch) = 8),
+    publish_mode INTEGER NOT NULL CHECK (publish_mode IN (0, 1)),
+    rdf_policy_object_id BLOB NOT NULL CHECK (length(rdf_policy_object_id) = 32),
+    previous_membership_checkpoint_id BLOB CHECK (
+      previous_membership_checkpoint_id IS NULL OR length(previous_membership_checkpoint_id) = 32
+    ),
+    issued_at_ms INTEGER NOT NULL CHECK (issued_at_ms >= 0),
+    authority_set_id BLOB NOT NULL CHECK (length(authority_set_id) = 32),
+    status TEXT NOT NULL CHECK (status IN ('CURRENT', 'SUPERSEDED')),
+    accepted_at_ms INTEGER NOT NULL CHECK (accepted_at_ms >= 0),
+    FOREIGN KEY (previous_membership_checkpoint_id)
+      REFERENCES membership_checkpoints(membership_checkpoint_id) ON DELETE RESTRICT,
+    FOREIGN KEY (authority_set_id) REFERENCES authority_sets(authority_set_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE UNIQUE INDEX one_current_membership_checkpoint
+    ON membership_checkpoints(collection_id) WHERE status = 'CURRENT';
+
+  CREATE TABLE author_checkpoint_evidence (
+    checkpoint_id BLOB PRIMARY KEY CHECK (length(checkpoint_id) = 32),
+    canonical_bytes BLOB NOT NULL,
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    writer_id BLOB NOT NULL CHECK (length(writer_id) = 20),
+    writer_epoch BLOB NOT NULL CHECK (length(writer_epoch) = 8),
+    checkpoint_number BLOB NOT NULL CHECK (length(checkpoint_number) = 8),
+    object_set_root BLOB NOT NULL CHECK (length(object_set_root) = 32),
+    object_count BLOB NOT NULL CHECK (length(object_count) = 8),
+    max_sequence BLOB NOT NULL CHECK (length(max_sequence) = 8),
+    previous_checkpoint_id BLOB CHECK (
+      previous_checkpoint_id IS NULL OR length(previous_checkpoint_id) = 32
+    ),
+    baseline_snapshot_object_id BLOB CHECK (
+      baseline_snapshot_object_id IS NULL OR length(baseline_snapshot_object_id) = 32
+    ),
+    compaction_floor BLOB NOT NULL CHECK (length(compaction_floor) = 8),
+    set_snapshot BLOB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ACCEPTED', 'EQUIVOCATED')),
+    accepted_at_ms INTEGER NOT NULL CHECK (accepted_at_ms >= 0)
+  ) WITHOUT ROWID;
+  CREATE INDEX author_checkpoint_position
+    ON author_checkpoint_evidence(namespace_id, writer_id, writer_epoch, checkpoint_number);
+  CREATE INDEX author_checkpoint_lane_tip
+    ON author_checkpoint_evidence(namespace_id, writer_id, writer_epoch, status, checkpoint_number);
+
+  CREATE TABLE collection_vectors (
+    vector_id BLOB PRIMARY KEY CHECK (length(vector_id) = 32),
+    canonical_bytes BLOB NOT NULL,
+    collection_id BLOB NOT NULL CHECK (length(collection_id) = 32),
+    membership_checkpoint_id BLOB NOT NULL CHECK (length(membership_checkpoint_id) = 32),
+    vector_epoch BLOB NOT NULL CHECK (length(vector_epoch) = 8),
+    vector_number BLOB NOT NULL CHECK (length(vector_number) = 8),
+    previous_vector_id BLOB CHECK (previous_vector_id IS NULL OR length(previous_vector_id) = 32),
+    issued_at_ms INTEGER NOT NULL CHECK (issued_at_ms >= 0),
+    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > issued_at_ms),
+    authority_set_id BLOB NOT NULL CHECK (length(authority_set_id) = 32),
+    status TEXT NOT NULL CHECK (status IN ('CURRENT', 'VERIFIED', 'REVOKED')),
+    accepted_at_ms INTEGER NOT NULL CHECK (accepted_at_ms >= 0),
+    FOREIGN KEY (membership_checkpoint_id)
+      REFERENCES membership_checkpoints(membership_checkpoint_id) ON DELETE RESTRICT,
+    FOREIGN KEY (authority_set_id) REFERENCES authority_sets(authority_set_id) ON DELETE RESTRICT,
+    FOREIGN KEY (previous_vector_id) REFERENCES collection_vectors(vector_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE UNIQUE INDEX one_current_collection_vector
+    ON collection_vectors(collection_id) WHERE status = 'CURRENT';
+
+  CREATE TABLE collection_vector_conflicts (
+    collection_id BLOB NOT NULL CHECK (length(collection_id) = 32),
+    vector_epoch BLOB NOT NULL CHECK (length(vector_epoch) = 8),
+    vector_number BLOB NOT NULL CHECK (length(vector_number) = 8),
+    first_vector_id BLOB NOT NULL CHECK (length(first_vector_id) = 32),
+    second_vector_id BLOB NOT NULL CHECK (length(second_vector_id) = 32),
+    detected_at_ms INTEGER NOT NULL CHECK (detected_at_ms >= 0),
+    PRIMARY KEY (collection_id, vector_epoch, vector_number)
+  ) WITHOUT ROWID;
+
+  CREATE TABLE collection_vector_heads (
+    vector_id BLOB NOT NULL CHECK (length(vector_id) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    writer_id BLOB NOT NULL CHECK (length(writer_id) = 20),
+    checkpoint_id BLOB NOT NULL CHECK (length(checkpoint_id) = 32),
+    PRIMARY KEY (vector_id, namespace_id, writer_id),
+    FOREIGN KEY (vector_id) REFERENCES collection_vectors(vector_id) ON DELETE CASCADE
+  ) WITHOUT ROWID;
+`;
 
 export const WAL_CONTROL_SCHEMA_SQL = `
   CREATE TABLE wal_control_schema (
@@ -209,6 +335,13 @@ export const WAL_CONTROL_SCHEMA_SQL = `
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
   ) WITHOUT ROWID;
   CREATE INDEX gc_queue_eligible ON gc_queue(state, eligible_at_ms);
+
+  ${WAL_AUTHORITY_SCHEMA_SQL}
+`;
+
+export const WAL_CONTROL_MIGRATION_1_TO_2_SQL = `
+  ${WAL_AUTHORITY_SCHEMA_SQL}
+  UPDATE wal_control_schema SET version = 2 WHERE singleton = 1 AND version = 1;
 `;
 
 export const WAL_ROLLBACK_SCHEMA_SQL = `

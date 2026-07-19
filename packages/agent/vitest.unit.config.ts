@@ -13,6 +13,9 @@ const SQLITE_EXEC_ARGV = [
 export default defineConfig({
   test: {
     include: [
+      "test/agent-delegation.test.ts",
+      "test/request-authorize.test.ts",
+      "test/wal-authority-adapter.test.ts",
       "test/endorse.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",

@@ -9,8 +9,9 @@
 | `WAL-004` | Implemented and verified | The same branch contains the four-method complete-object store, scalable SQLite-indexed append-only segments, the reference file backend, streaming canonical/signature/ID verification, resumable bounded range staging, crash recovery at every durability point, a 10K/100K/1M/10M packed-store matrix, large-object evidence, adversarial filesystem/quota tests, and 100% package coverage. See `WAL-004-EVIDENCE.md`. |
 | `WAL-005` | Implemented and benchmarked | The same branch contains the reconciliation implementation, 100% unit coverage, 100,000-seed proof, 10K/100K/1M/10M baseline, and rotated binary64-versus-integer A/B evidence. |
 | `WAL-006` | Implemented and verified | The same branch contains versioned SQLite/FULL control state, atomic local finalization and remote admission, guarded independent rollback high-water, durable bounded queues/cache/quarantine/GC metadata, restart and integrity blocking, 25 focused tests, and 100% package coverage. See `WAL-006-EVIDENCE.md`. |
+| `WAL-007` | Implemented and verified | The same branch contains threshold authority rotation/revocation, signed membership/checkpoint/vector lifecycles, exact completeness/freshness, persistent fork evidence, guarded cohort recovery, a current-DKG adapter, 47 focused WAL tests, 37 unchanged/adapter DKG authorization tests, and 100% WAL package coverage. See `WAL-007-EVIDENCE.md`. |
 
-WAL-001 through WAL-006 now share one linear implementation history, one worktree,
+WAL-001 through WAL-007 now share one linear implementation history, one worktree,
 and one authoritative branch. No Go/Rust/Python conformance implementation is
 required. The exact-integer mapping is retained only as named A/B experiment
 evidence; protocol version 1 uses the benchmarked exact binary64 evaluation

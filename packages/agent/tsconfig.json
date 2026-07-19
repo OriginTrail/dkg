@@ -11,6 +11,7 @@
     { "path": "../chain" },
     { "path": "../storage" },
     { "path": "../publisher" },
-    { "path": "../query" }
+    { "path": "../query" },
+    { "path": "../wal" }
   ]
 }

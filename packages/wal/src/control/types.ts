@@ -35,6 +35,11 @@ export interface RollbackHighWater {
   updatedAtMs: number;
 }
 
+export interface RollbackProtectionStatus {
+  state: 'available' | 'blocked';
+  reason?: string;
+}
+
 export interface RetryQueueEntry {
   key: string;
   kind: string;

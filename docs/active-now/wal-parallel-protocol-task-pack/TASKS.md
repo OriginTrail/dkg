@@ -589,16 +589,16 @@ membership, and chain authority rather than provider inventory.
 
 ### Acceptance area
 
-- [ ] A replica reports complete only for the exact author checkpoints named by
+- [x] A replica reports complete only for the exact author checkpoints named by
       a currently valid signed vector and membership checkpoint.
-- [ ] Stale, expired, rolled-back, forked, wrong-view, wrong-policy, and
+- [x] Stale, expired, rolled-back, forked, wrong-view, wrong-policy, and
       same-position/different-hash evidence fails closed with stable status.
-- [ ] Private roots and metadata are not served under `unknown-freshness`.
-- [ ] Curator key rotation, HA failover, rollback-file restore/loss, author epoch
+- [x] Private roots and metadata are not served under `unknown-freshness`.
+- [x] Curator key rotation, HA failover, rollback-file restore/loss, author epoch
       rotation, and open-author indexing tests match the frozen rules.
-- [ ] The curator cannot author content or replace an author's checkpoint; a
+- [x] The curator cannot author content or replace an author's checkpoint; a
       serving cache has no authority beyond availability.
-- [ ] Existing DKG membership and delegation golden tests remain unchanged and
+- [x] Existing DKG membership and delegation golden tests remain unchanged and
       pass through the adapter boundary.
 
 ---

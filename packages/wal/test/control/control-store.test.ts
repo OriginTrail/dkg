@@ -163,12 +163,20 @@ describe('WalControlStore schema and rollback guard', () => {
       Array<{ name: string }>).map(row => row.name);
     for (const name of [
       'admission',
+      'authority_conflicts',
+      'authority_revocations',
+      'authority_sets',
+      'author_checkpoint_evidence',
       'author_lanes',
       'checkpoints',
+      'collection_vector_conflicts',
+      'collection_vector_heads',
+      'collection_vectors',
       'gc_queue',
       'iblt_cache',
       'idempotency',
       'materialization',
+      'membership_checkpoints',
       'object_ranges',
       'peer_state',
       'quarantine',
@@ -205,7 +213,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let value = control(root);
     closeControl(value);
     database = new Database(join(root, 'objects.sqlite'));
-    database.prepare('UPDATE wal_control_schema SET version = 2').run();
+    database.prepare('UPDATE wal_control_schema SET version = 3').run();
     database.close();
     await expectCode(() => control(root), 'WAL_CONTROL_UNSUPPORTED_SCHEMA');
 
@@ -226,6 +234,44 @@ describe('WalControlStore schema and rollback guard', () => {
     database.pragma('user_version = 1');
     database.close();
     await expectCode(() => control(missingObjects), 'WAL_CONTROL_INVALID_CONFIGURATION');
+  });
+
+  it('migrates schema version 1 to authority-aware version 2 transactionally', async () => {
+    const root = await temporary('migration-v1-v2');
+    await prepare(root);
+    let value = control(root);
+    closeControl(value);
+    let database = new Database(join(root, 'objects.sqlite'));
+    database.pragma('foreign_keys = OFF');
+    for (const table of [
+      'collection_vector_heads',
+      'collection_vector_conflicts',
+      'collection_vectors',
+      'author_checkpoint_evidence',
+      'membership_checkpoints',
+      'authority_revocations',
+      'authority_conflicts',
+      'authority_sets',
+    ]) database.exec(`DROP TABLE ${table}`);
+    database.prepare('UPDATE wal_control_schema SET version = 1').run();
+    database.close();
+
+    await expectCode(
+      () => control(root, { migrationHook: () => { throw new Error('v1 to v2 migration crash'); } }),
+      'WAL_CONTROL_IO',
+    );
+    database = new Database(join(root, 'objects.sqlite'));
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(1);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeUndefined();
+    database.close();
+
+    let hookCalls = 0;
+    value = control(root, { migrationHook: () => { hookCalls += 1; } });
+    expect(hookCalls).toBe(1);
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(2);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
+    database.close();
   });
 
   it('rejects invalid configuration, unsafe index paths, and use after close', async () => {
@@ -375,10 +421,62 @@ describe('WalControlStore schema and rollback guard', () => {
     closeControl(value);
     await unlink(join(root, 'rollback-high-water.sqlite'));
     const blocked = control(root);
+    expect(blocked.rollbackProtectionStatus()).toEqual({
+      state: 'blocked', reason: 'rollback-high-water-missing',
+    });
     expect(blocked.integrityScan()).toEqual(expect.objectContaining({
       state: 'blocked', reasons: ['rollback-high-water-missing'],
     }));
     await expectCode(() => blocked.getRollbackHighWater(first.collectionId), 'WAL_CONTROL_BLOCKED');
+    blocked.installVerifiedRollbackRecovery({
+      ...first,
+      vectorEpoch: 3n,
+      vectorNumber: 1n,
+      vectorId: bytes('vector-epoch-3-1'),
+      updatedAtMs: 70,
+    });
+    expect(blocked.rollbackProtectionStatus()).toEqual({ state: 'available' });
+    expect(blocked.getRollbackHighWater(first.collectionId)).toEqual(expect.objectContaining({
+      vectorEpoch: 3n, vectorNumber: 1n, vectorId: bytes('vector-epoch-3-1'), updatedAtMs: 70,
+    }));
+    await expectCode(() => blocked.installVerifiedRollbackRecovery(first), 'WAL_CONTROL_BLOCKED');
+  });
+
+  it('refuses trusted rollback recovery when the durable control guard is missing', async () => {
+    const root = await temporary('recovery-no-control-guard');
+    await prepare(root);
+    let value = control(root);
+    closeControl(value);
+    await unlink(join(root, 'rollback-high-water.sqlite'));
+    value = control(root);
+    const database = (value as unknown as { database: Database.Database }).database;
+    database.prepare('DELETE FROM rollback_guard').run();
+    await expectCode(() => value.installVerifiedRollbackRecovery({
+      collectionId: bytes('collection'),
+      vectorEpoch: 1n,
+      vectorNumber: 0n,
+      vectorId: bytes('vector'),
+      updatedAtMs: 100,
+    }), 'WAL_CONTROL_CORRUPT');
+    expect(value.rollbackProtectionStatus()).toEqual({
+      state: 'blocked', reason: 'rollback-high-water-missing',
+    });
+  });
+
+  it('reports a lost in-process rollback database handle as unavailable', async () => {
+    const root = await temporary('rollback-handle-unavailable');
+    await prepare(root);
+    const value = control(root);
+    const internal = value as unknown as {
+      rollbackDatabase?: Database.Database;
+      blockedReason?: string;
+    };
+    internal.rollbackDatabase!.close();
+    internal.rollbackDatabase = undefined;
+    internal.blockedReason = undefined;
+    expect(value.rollbackProtectionStatus()).toEqual({
+      state: 'blocked', reason: 'rollback-high-water-unavailable',
+    });
   });
 });
 

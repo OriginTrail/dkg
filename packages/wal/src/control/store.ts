@@ -21,6 +21,7 @@ import { blobU64, bytesEqual, fixedBytes, MAX_U64, safeInteger, u64Blob } from '
 import {
   WAL_CONTROL_SCHEMA_SQL,
   WAL_CONTROL_SCHEMA_VERSION,
+  WAL_CONTROL_MIGRATION_1_TO_2_SQL,
   WAL_ROLLBACK_SCHEMA_SQL,
   WAL_ROLLBACK_SCHEMA_VERSION,
 } from './schema.js';
@@ -35,6 +36,7 @@ import type {
   RetryState,
   RetryQueueEntry,
   RollbackHighWater,
+  RollbackProtectionStatus,
   VectorRecord,
   WalControlIntegrity,
   WalObjectOrigin,
@@ -241,6 +243,7 @@ export class WalControlStore {
   private rollbackDatabase?: Database.Database;
   private readonly mutex: AsyncMutex;
   private readonly now: () => number;
+  private readonly busyTimeoutMs: number;
   private readonly transactionHook?: WalControlStoreOptions['transactionHook'];
   private blockedReason?: string;
   private closed = false;
@@ -278,6 +281,7 @@ export class WalControlStore {
       1,
     );
     const busyTimeoutMs = safeInteger(options.busyTimeoutMs ?? 30_000, 'busyTimeoutMs', 1);
+    this.busyTimeoutMs = busyTimeoutMs;
     this.now = options.now ?? Date.now;
     this.transactionHook = options.transactionHook;
     this.mutex = mutexFor(this.indexPath);
@@ -1040,6 +1044,38 @@ export class WalControlStore {
     return 'advanced';
   }
 
+  rollbackProtectionStatus(): RollbackProtectionStatus {
+    this.assertOpen();
+    if (this.blockedReason !== undefined) return { state: 'blocked', reason: this.blockedReason };
+    if (this.rollbackDatabase === undefined) return { state: 'blocked', reason: 'rollback-high-water-unavailable' };
+    return { state: 'available' };
+  }
+
+  /**
+   * Trusted WAL-007 boundary. The caller must threshold-verify the matching
+   * RollbackRecoveryV1 and required-cohort minimum before invoking this method.
+   */
+  installVerifiedRollbackRecovery(input: RollbackHighWater): void {
+    this.assertOpen();
+    const collection = fixedBytes(input.collectionId, 32, 'collectionId');
+    const vectorId = fixedBytes(input.vectorId, 32, 'vectorId');
+    const epoch = u64Blob(input.vectorEpoch, 'vectorEpoch');
+    const number = u64Blob(input.vectorNumber, 'vectorNumber');
+    const updatedAtMs = safeInteger(input.updatedAtMs, 'updatedAtMs');
+    if (this.blockedReason !== 'rollback-high-water-missing' || existsSync(this.rollbackPath)) {
+      controlError('WAL_CONTROL_BLOCKED', 'rollback recovery is allowed only for a confirmed missing high-water file');
+    }
+    const guard = this.database.prepare('SELECT guard_id FROM rollback_guard WHERE singleton = 1').get() as
+      GuardRow | undefined;
+    if (guard === undefined) controlError('WAL_CONTROL_CORRUPT', 'control database has no rollback guard to recover');
+    this.createRollbackDatabase(guard.guard_id, this.busyTimeoutMs);
+    this.rollbackDatabase!.prepare(`
+      INSERT INTO high_water(collection_id, vector_epoch, vector_number, vector_id, updated_at_ms)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(collection, epoch, number, vectorId, updatedAtMs);
+    this.blockedReason = undefined;
+  }
+
   integrityScan(): WalControlIntegrity {
     this.assertOpen();
     const reasons: string[] = [];
@@ -1130,6 +1166,18 @@ export class WalControlStore {
     if (table !== undefined) {
       const row = this.database.prepare('SELECT version FROM wal_control_schema WHERE singleton = 1').get() as
         VersionRow | undefined;
+      if (row?.version === 1) {
+        this.database.exec('BEGIN IMMEDIATE');
+        try {
+          this.database.exec(WAL_CONTROL_MIGRATION_1_TO_2_SQL);
+          hook?.();
+          this.database.exec('COMMIT');
+        } catch (error) {
+          this.database.exec('ROLLBACK');
+          throw error;
+        }
+        return;
+      }
       if (row?.version !== WAL_CONTROL_SCHEMA_VERSION) {
         controlError('WAL_CONTROL_UNSUPPORTED_SCHEMA', `unsupported WAL control schema version ${row?.version ?? 'missing'}`);
       }

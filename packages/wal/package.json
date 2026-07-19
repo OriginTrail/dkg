@@ -30,6 +30,11 @@
       "import": "./dist/control/index.js",
       "default": "./dist/control/index.js"
     },
+    "./authority": {
+      "types": "./dist/authority/index.d.ts",
+      "import": "./dist/authority/index.js",
+      "default": "./dist/authority/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
