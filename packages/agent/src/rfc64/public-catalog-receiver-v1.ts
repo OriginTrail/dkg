@@ -9,31 +9,32 @@
  * only enqueues and pumps; the fetch/verify/stage work runs on the pool after
  * the announcement handler has returned.
  *
- * Per hinted head it: (1) deduplicates against both in-flight work and heads
- * already durably staged, (2) fetches the exact head by digest (the transport
- * re-verifies structure + issuer signature), and (3) durably stages the
- * verified head into the control-object store. It STOPS there — Gate 1 never
- * admits candidate rows, activates catalog state, or advances any SWM/VM
- * pointer. Correctness comes from pull: a dropped or failed announcement is
- * simply re-triggered by a later hint or a future reconcile cadence.
+ * Per hinted head it deduplicates exact work, retains every distinct provider,
+ * serializes mutations for one author-catalog scope, and delegates the full
+ * fetch/verify/activate/applied-inventory transaction to a reconciler. Durable
+ * applied state -- never mere control-object staging -- is the restart dedup
+ * boundary. Correctness still comes from pull: a dropped or failed hint is
+ * retriggered by a later announcement or reconcile cadence.
  */
 
-import type {
-  FetchedRfc64PublicCatalogHeadV1,
-  Rfc64PublicCatalogHeadAnnouncementV1,
-} from './public-catalog-transport-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
-/** Side effects the scheduler drives; all supplied by the wired service. */
-export interface Rfc64PublicCatalogReceiverStagerV1 {
-  /** True when the exact head is already durably staged (restart/prior-fetch dedup). */
-  isHeadStaged(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
-  /** Fetch the exact head by digest; null == authoritative not-found. */
-  fetchHead(
+export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
+
+/** Full semantic reconciliation supplied by the wired service. */
+export interface Rfc64PublicCatalogReceiverReconcilerV1 {
+  /** True only when this exact inventory head is durably recorded as applied. */
+  isHeadApplied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
+  /**
+   * Fetch, verify, activate, exact-post-read, then durably commit applied state.
+   * The operation must be idempotent so a restart can repair the semantic-store
+   * / SQLite crash gap by replaying it.
+   */
+  reconcileHead(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): Promise<FetchedRfc64PublicCatalogHeadV1 | null>;
-  /** Durably stage the verified head. Must not return before the write is durable. */
-  stageHead(fetched: FetchedRfc64PublicCatalogHeadV1): Promise<void>;
+    signal: AbortSignal,
+  ): Promise<Rfc64PublicCatalogReconcileResultV1>;
 }
 
 export interface Rfc64PublicCatalogReceiverOptionsV1 {
@@ -41,11 +42,13 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
   readonly maxConcurrent?: number;
   /** Max queued distinct heads before new hints are dropped. Default 1024. */
   readonly maxQueue?: number;
-  /** Max fetch attempts per head before giving up. Default 3. */
+  /** Max reconcile attempts per provider before giving up on that provider. Default 3. */
   readonly maxAttempts?: number;
+  /** Max distinct providers retained for one exact head. Default 8. */
+  readonly maxProvidersPerHead?: number;
   /** Base backoff between attempts (doubled per retry). Default 250ms. */
   readonly retryBackoffMs?: number;
-  readonly onHeadStaged?: (
+  readonly onHeadApplied?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
@@ -58,40 +61,53 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
 export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly scheduled: number;
   readonly dedupedInFlight: number;
-  readonly dedupedAlreadyStaged: number;
-  readonly staged: number;
+  readonly dedupedAlreadyApplied: number;
+  readonly applied: number;
+  readonly stagedOnly: number;
   readonly notFound: number;
   readonly failed: number;
   readonly droppedQueueFull: number;
+  readonly droppedProviders: number;
   readonly inFlight: number;
   readonly queued: number;
 }
 
 interface ReceiverTaskV1 {
   readonly key: string;
+  readonly scopeKey: string;
+  readonly providers: ReceiverProviderV1[];
+  readonly providerKeys: Set<string>;
+}
+
+interface ReceiverProviderV1 {
+  readonly key: string;
+  readonly peerId: string;
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  readonly remotePeerId: string;
 }
 
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
   maxQueue: 1024,
   maxAttempts: 3,
+  maxProvidersPerHead: 8,
   retryBackoffMs: 250,
 });
 
 export class Rfc64PublicCatalogReceiverV1 {
-  readonly #stager: Rfc64PublicCatalogReceiverStagerV1;
+  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
   readonly #maxConcurrent: number;
   readonly #maxQueue: number;
   readonly #maxAttempts: number;
+  readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
-  readonly #onHeadStaged?: Rfc64PublicCatalogReceiverOptionsV1['onHeadStaged'];
+  readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   readonly #queue: ReceiverTaskV1[] = [];
-  /** Every head key currently queued or in-flight — the dedup set. */
-  readonly #pendingKeys = new Set<string>();
+  /** Every exact head currently queued or in-flight, including alternate peers. */
+  readonly #pendingByKey = new Map<string, ReceiverTaskV1>();
+  /** One semantic writer per exact author-catalog scope. */
+  readonly #activeScopeKeys = new Set<string>();
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
@@ -99,29 +115,36 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   #scheduled = 0;
   #dedupedInFlight = 0;
-  #dedupedAlreadyStaged = 0;
-  #staged = 0;
+  #dedupedAlreadyApplied = 0;
+  #applied = 0;
+  #stagedOnly = 0;
   #notFound = 0;
   #failed = 0;
   #droppedQueueFull = 0;
+  #droppedProviders = 0;
 
   constructor(
-    stager: Rfc64PublicCatalogReceiverStagerV1,
+    reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
-    this.#stager = stager;
+    this.#reconciler = reconciler;
     this.#maxConcurrent = positiveInt(options.maxConcurrent, DEFAULTS.maxConcurrent);
     this.#maxQueue = positiveInt(options.maxQueue, DEFAULTS.maxQueue);
     this.#maxAttempts = positiveInt(options.maxAttempts, DEFAULTS.maxAttempts);
+    this.#maxProvidersPerHead = positiveInt(
+      options.maxProvidersPerHead,
+      DEFAULTS.maxProvidersPerHead,
+    );
     this.#retryBackoffMs = nonNegativeInt(options.retryBackoffMs, DEFAULTS.retryBackoffMs);
-    this.#onHeadStaged = options.onHeadStaged;
+    this.#onHeadApplied = options.onHeadApplied;
     this.#onError = options.onError;
   }
 
   /**
-   * Enqueue an announced head for fetch+stage. Non-blocking and synchronous:
-   * it never awaits the fetch, so the transport's ACK path is not stalled.
-   * Duplicate (already queued/in-flight) heads and post-close hints are dropped.
+   * Enqueue an announced head for reconciliation. Non-blocking and synchronous:
+   * it never awaits network or storage work, so the ACK path is not stalled.
+   * Duplicate heads contribute alternate providers instead of creating a second
+   * semantic writer.
    */
   schedule(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -130,16 +153,33 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (this.#closed) return;
     this.#scheduled += 1;
     const key = headKey(announcement);
-    if (this.#pendingKeys.has(key)) {
+    const existing = this.#pendingByKey.get(key);
+    if (existing !== undefined) {
       this.#dedupedInFlight += 1;
+      const providerKey = providerContextKey(remotePeerId, announcement);
+      if (!existing.providerKeys.has(providerKey)) {
+        if (existing.providers.length >= this.#maxProvidersPerHead) {
+          this.#droppedProviders += 1;
+          return;
+        }
+        existing.providerKeys.add(providerKey);
+        existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
+      }
       return;
     }
     if (this.#queue.length >= this.#maxQueue) {
       this.#droppedQueueFull += 1;
       return;
     }
-    this.#pendingKeys.add(key);
-    this.#queue.push({ key, announcement, remotePeerId });
+    const providerKey = providerContextKey(remotePeerId, announcement);
+    const task: ReceiverTaskV1 = {
+      key,
+      scopeKey: catalogScopeKey(announcement),
+      providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
+      providerKeys: new Set([providerKey]),
+    };
+    this.#pendingByKey.set(key, task);
+    this.#queue.push(task);
     this.#pump();
   }
 
@@ -159,7 +199,8 @@ export class Rfc64PublicCatalogReceiverV1 {
       return;
     }
     this.#closed = true;
-    this.#queue.length = 0;
+    const abandoned = this.#queue.splice(0);
+    for (const task of abandoned) this.#pendingByKey.delete(task.key);
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
     this.#resolveIdle();
@@ -169,11 +210,13 @@ export class Rfc64PublicCatalogReceiverV1 {
     return Object.freeze({
       scheduled: this.#scheduled,
       dedupedInFlight: this.#dedupedInFlight,
-      dedupedAlreadyStaged: this.#dedupedAlreadyStaged,
-      staged: this.#staged,
+      dedupedAlreadyApplied: this.#dedupedAlreadyApplied,
+      applied: this.#applied,
+      stagedOnly: this.#stagedOnly,
       notFound: this.#notFound,
       failed: this.#failed,
       droppedQueueFull: this.#droppedQueueFull,
+      droppedProviders: this.#droppedProviders,
       inFlight: this.#active.size,
       queued: this.#queue.length,
     });
@@ -181,10 +224,17 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   #pump(): void {
     while (!this.#closed && this.#active.size < this.#maxConcurrent && this.#queue.length > 0) {
-      const task = this.#queue.shift()!;
+      const taskIndex = this.#queue.findIndex(
+        (candidate) => !this.#activeScopeKeys.has(candidate.scopeKey),
+      );
+      if (taskIndex < 0) return;
+      const [task] = this.#queue.splice(taskIndex, 1);
+      if (task === undefined) return;
+      this.#activeScopeKeys.add(task.scopeKey);
       const run = this.#runTask(task).finally(() => {
         this.#active.delete(run);
-        this.#pendingKeys.delete(task.key);
+        this.#activeScopeKeys.delete(task.scopeKey);
+        this.#pendingByKey.delete(task.key);
         if (!this.#closed) this.#pump();
         if (this.#isIdle()) this.#resolveIdle();
       });
@@ -194,32 +244,61 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   async #runTask(task: ReceiverTaskV1): Promise<void> {
     let lastError: unknown;
-    for (let attempt = 0; attempt < this.#maxAttempts; attempt += 1) {
+    const notFoundProviders = new Set<string>();
+    const attemptsByProvider = new Map<string, number>();
+    let providerCursor = 0;
+    while (true) {
       if (this.#closing.signal.aborted) return;
-      try {
-        if (await this.#stager.isHeadStaged(task.announcement)) {
-          this.#dedupedAlreadyStaged += 1;
-          return;
-        }
-        const fetched = await this.#stager.fetchHead(task.remotePeerId, task.announcement);
-        if (fetched === null) {
+      const selection = nextEligibleProvider(
+        task.providers,
+        notFoundProviders,
+        attemptsByProvider,
+        this.#maxAttempts,
+        providerCursor,
+      );
+      if (selection === null) {
+        if (
+          task.providers.length > 0
+          && task.providers.every((provider) => notFoundProviders.has(provider.key))
+        ) {
           this.#notFound += 1;
           return;
         }
-        await this.#stager.stageHead(fetched);
-        this.#staged += 1;
-        this.#safeNotify(() => this.#onHeadStaged?.(task.announcement, task.remotePeerId));
+        this.#failed += 1;
+        this.#safeNotify(() => this.#onError?.(task.providers[0]!.announcement, lastError));
+        return;
+      }
+      const { provider, nextCursor } = selection;
+      providerCursor = nextCursor;
+      const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
+      attemptsByProvider.set(provider.key, providerAttempt);
+      try {
+        if (await this.#reconciler.isHeadApplied(provider.announcement)) {
+          this.#dedupedAlreadyApplied += 1;
+          return;
+        }
+        const result = await this.#reconciler.reconcileHead(
+          provider.peerId,
+          provider.announcement,
+          this.#closing.signal,
+        );
+        if (result === 'not-found') {
+          notFoundProviders.add(provider.key);
+          continue;
+        }
+        if (result === 'staged-only') {
+          this.#stagedOnly += 1;
+          return;
+        }
+        this.#applied += 1;
+        this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
         return;
       } catch (error) {
         lastError = error;
         if (this.#closing.signal.aborted) return;
-        if (attempt + 1 >= this.#maxAttempts) break;
-        await this.#backoff(attempt);
+        await this.#backoff(providerAttempt - 1);
       }
     }
-    if (this.#closing.signal.aborted) return;
-    this.#failed += 1;
-    this.#safeNotify(() => this.#onError?.(task.announcement, lastError));
   }
 
   #backoff(attempt: number): Promise<void> {
@@ -277,6 +356,46 @@ function headKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
     a.catalogHeadObjectDigest,
     a.signatureVariantDigest,
   ].join('\n');
+}
+
+function catalogScopeKey(a: Rfc64PublicCatalogHeadAnnouncementV1): string {
+  return [
+    a.networkId,
+    a.contextGraphId,
+    a.subGraphName ?? '',
+    a.authorAddress,
+    a.catalogEra,
+  ].join('\n');
+}
+
+function providerContextKey(
+  peerId: string,
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+): string {
+  return `${peerId}\n${announcement.policyDigest}`;
+}
+
+function nextEligibleProvider(
+  providers: readonly ReceiverProviderV1[],
+  notFoundProviders: ReadonlySet<string>,
+  attemptsByProvider: ReadonlyMap<string, number>,
+  maxAttempts: number,
+  cursor: number,
+): { readonly provider: ReceiverProviderV1; readonly nextCursor: number } | null {
+  for (let offset = 0; offset < providers.length; offset += 1) {
+    const index = (cursor + offset) % providers.length;
+    const provider = providers[index];
+    if (
+      provider !== undefined
+      && !notFoundProviders.has(provider.key)
+      && (attemptsByProvider.get(provider.key) ?? 0) < maxAttempts
+    ) {
+      // Keep this monotonic. A modulo cursor would select the first provider
+      // again when a new provider is appended after the first attempt.
+      return { provider, nextCursor: cursor + offset + 1 };
+    }
+  }
+  return null;
 }
 
 function positiveInt(value: number | undefined, fallback: number): number {

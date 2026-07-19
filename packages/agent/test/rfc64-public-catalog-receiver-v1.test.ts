@@ -2,12 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64PublicCatalogReceiverV1,
-  type Rfc64PublicCatalogReceiverStagerV1,
+  type Rfc64PublicCatalogReceiverReconcilerV1,
+  type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
-import type {
-  FetchedRfc64PublicCatalogHeadV1,
-  Rfc64PublicCatalogHeadAnnouncementV1,
-} from '../src/rfc64/public-catalog-transport-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 
 function announcement(
   overrides: Partial<Rfc64PublicCatalogHeadAnnouncementV1> = {},
@@ -19,7 +17,7 @@ function announcement(
     subGraphName: null,
     authorAddress: '0x2222222222222222222222222222222222222222',
     catalogEra: '0',
-    catalogVersion: '0',
+    catalogVersion: '1',
     policyDigest: `0x${'71'.repeat(32)}`,
     catalogHeadObjectDigest: `0x${'aa'.repeat(32)}`,
     signatureVariantDigest: `0x${'bb'.repeat(32)}`,
@@ -31,167 +29,279 @@ function headWith(objectDigest: string): Rfc64PublicCatalogHeadAnnouncementV1 {
   return announcement({ catalogHeadObjectDigest: objectDigest as `0x${string}` & string });
 }
 
-const FAKE_FETCHED = { envelope: {}, issuerSignature: {} } as unknown as FetchedRfc64PublicCatalogHeadV1;
-
-function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   let resolve!: (v: T) => void;
-  let reject!: (e: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function reconciler(
+  reconcileHead: Rfc64PublicCatalogReceiverReconcilerV1['reconcileHead'],
+  isHeadApplied: Rfc64PublicCatalogReceiverReconcilerV1['isHeadApplied'] = async () => false,
+): Rfc64PublicCatalogReceiverReconcilerV1 {
+  return { isHeadApplied, reconcileHead };
 }
 
 describe('RFC-64 public catalog receiver scheduler v1', () => {
-  it('fetches, durably stages, and reports the staged head', async () => {
-    const staged: FetchedRfc64PublicCatalogHeadV1[] = [];
-    const onHeadStaged = vi.fn();
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => FAKE_FETCHED,
-      stageHead: async (f) => { staged.push(f); },
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager, { onHeadStaged });
+  it('reconciles and reports one durably applied inventory head', async () => {
+    const appliedPeers: string[] = [];
+    const onHeadApplied = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async (peerId) => { appliedPeers.push(peerId); return 'applied'; }),
+      { onHeadApplied },
+    );
     receiver.schedule(announcement(), 'peerA');
     await receiver.whenIdle();
 
-    expect(staged).toEqual([FAKE_FETCHED]);
-    expect(onHeadStaged).toHaveBeenCalledTimes(1);
-    expect(receiver.stats()).toMatchObject({ scheduled: 1, staged: 1, notFound: 0, failed: 0 });
+    expect(appliedPeers).toEqual(['peerA']);
+    expect(onHeadApplied).toHaveBeenCalledTimes(1);
+    expect(receiver.stats()).toMatchObject({ scheduled: 1, applied: 1, notFound: 0, failed: 0 });
   });
 
-  it('schedule() returns synchronously without awaiting the fetch (ACK path is not stalled)', () => {
-    const fetchStarted = deferred<void>();
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => { fetchStarted.resolve(); return false; },
-      fetchHead: () => new Promise(() => {}), // never resolves
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager);
-    const returned = receiver.schedule(announcement(), 'peerA');
-    // schedule returns void synchronously even though fetch never completes.
-    expect(returned).toBeUndefined();
+  it('schedule returns synchronously without awaiting reconciliation', () => {
+    const started = deferred<void>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async () => {
+      started.resolve();
+      return new Promise<Rfc64PublicCatalogReconcileResultV1>(() => {});
+    }));
+    expect(receiver.schedule(announcement(), 'peerA')).toBeUndefined();
     expect(receiver.stats().scheduled).toBe(1);
   });
 
-  it('deduplicates a head already in flight', async () => {
-    const gate = deferred<FetchedRfc64PublicCatalogHeadV1 | null>();
-    let fetchCalls = 0;
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => { fetchCalls += 1; return gate.promise; },
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager);
+  it('deduplicates one head while retaining an alternate provider', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const peers: string[] = [];
+    let calls = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      calls += 1;
+      if (calls === 1) return gate.promise;
+      return 'applied';
+    }), { maxAttempts: 2, retryBackoffMs: 0 });
+
     receiver.schedule(announcement(), 'peerA');
-    receiver.schedule(announcement(), 'peerB'); // same head identity → in-flight dedup
+    receiver.schedule(announcement(), 'peerB');
     expect(receiver.stats().dedupedInFlight).toBe(1);
-    gate.resolve(FAKE_FETCHED);
+    gate.resolve('not-found');
     await receiver.whenIdle();
-    expect(fetchCalls).toBe(1);
-    expect(receiver.stats()).toMatchObject({ scheduled: 2, dedupedInFlight: 1, staged: 1 });
+
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({ scheduled: 2, applied: 1, notFound: 0 });
   });
 
-  it('skips a head that is already durably staged (no fetch)', async () => {
-    const fetchHead = vi.fn(async () => FAKE_FETCHED);
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => true,
-      fetchHead,
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager);
+  it('never retries an authoritative not-found peer while a viable peer can retry', async () => {
+    const peers: string[] = [];
+    let peerBAttempts = 0;
+    const firstAttempt = deferred<void>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        firstAttempt.resolve();
+        return 'not-found';
+      }
+      peerBAttempts += 1;
+      if (peerBAttempts === 1) throw new Error('peerB transient');
+      return 'applied';
+    }), { maxAttempts: 3, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerA');
+    await firstAttempt.promise;
+    receiver.schedule(announcement(), 'peerB');
+    await receiver.whenIdle();
+
+    expect(peers).toEqual(['peerA', 'peerB', 'peerB']);
+    expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
+  });
+
+  it('tries a newly retained provider even when the first provider used its only attempt', async () => {
+    const peers: string[] = [];
+    const firstAttempt = deferred<void>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        firstAttempt.resolve();
+        return 'not-found';
+      }
+      return 'applied';
+    }), { maxAttempts: 1, retryBackoffMs: 0 });
+    receiver.schedule(announcement(), 'peerA');
+    await firstAttempt.promise;
+    receiver.schedule(announcement(), 'peerB');
+    await receiver.whenIdle();
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
+  });
+
+  it('round-robins transient failures with a bounded per-provider budget', async () => {
+    const peers: string[] = [];
+    const firstAttempt = deferred<void>();
+    const onError = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      firstAttempt.resolve();
+      throw new Error(`${peerId} transient`);
+    }), { maxAttempts: 2, retryBackoffMs: 0, onError });
+    receiver.schedule(announcement(), 'peerA');
+    await firstAttempt.promise;
+    receiver.schedule(announcement(), 'peerB');
+    await receiver.whenIdle();
+    expect(peers).toEqual(['peerA', 'peerB', 'peerA', 'peerB']);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(receiver.stats()).toMatchObject({ applied: 0, failed: 1 });
+  });
+
+  it('retains a same-peer announcement under a rotated accepted policy', async () => {
+    const oldPolicy = `0x${'71'.repeat(32)}`;
+    const newPolicy = `0x${'72'.repeat(32)}`;
+    const firstResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const seenPolicies: string[] = [];
+    let calls = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      seenPolicies.push(head.policyDigest);
+      calls += 1;
+      if (calls === 1) return firstResult.promise;
+      return 'applied';
+    }), { maxAttempts: 1, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ policyDigest: oldPolicy as never }), 'peerA');
+    receiver.schedule(announcement({ policyDigest: newPolicy as never }), 'peerA');
+    firstResult.resolve('not-found');
+    await receiver.whenIdle();
+
+    expect(seenPolicies).toEqual([oldPolicy, newPolicy]);
+    expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
+  });
+
+  it('caps retained providers for one exact head', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => gate.promise),
+      { maxProvidersPerHead: 2 },
+    );
+    receiver.schedule(announcement(), 'peerA');
+    receiver.schedule(announcement(), 'peerB');
+    receiver.schedule(announcement(), 'peerC');
+    expect(receiver.stats()).toMatchObject({ dedupedInFlight: 2, droppedProviders: 1 });
+    gate.resolve('applied');
+    await receiver.whenIdle();
+  });
+
+  it('skips an exact head only when durable applied state says complete', async () => {
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(reconcileHead, async () => true),
+    );
     receiver.schedule(announcement(), 'peerA');
     await receiver.whenIdle();
-    expect(fetchHead).not.toHaveBeenCalled();
-    expect(receiver.stats()).toMatchObject({ dedupedAlreadyStaged: 1, staged: 0 });
+    expect(reconcileHead).not.toHaveBeenCalled();
+    expect(receiver.stats()).toMatchObject({ dedupedAlreadyApplied: 1, applied: 0 });
   });
 
-  it('records not-found without staging', async () => {
-    const stageHead = vi.fn(async () => {});
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => null,
-      stageHead,
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager);
+  it('does not treat a not-found response as applied', async () => {
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => 'not-found'),
+    );
     receiver.schedule(announcement(), 'peerA');
     await receiver.whenIdle();
-    expect(stageHead).not.toHaveBeenCalled();
-    expect(receiver.stats()).toMatchObject({ notFound: 1, staged: 0 });
+    expect(receiver.stats()).toMatchObject({ notFound: 1, applied: 0 });
   });
 
-  it('drops distinct heads when the queue is full', async () => {
-    const gate = deferred<FetchedRfc64PublicCatalogHeadV1 | null>();
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => gate.promise,
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager, { maxConcurrent: 1, maxQueue: 1 });
-    receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer'); // active
-    receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer'); // queued
-    receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer'); // dropped (queue full)
+  it('drops distinct heads when the bounded queue is full', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => gate.promise),
+      { maxConcurrent: 1, maxQueue: 1 },
+    );
+    receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer');
+    receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
+    receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
-    gate.resolve(null);
+    gate.resolve('not-found');
     await receiver.whenIdle();
   });
 
-  it('retries transient fetch failures with bounded backoff then succeeds', async () => {
+  it('retries transient failures with bounded backoff', async () => {
     let attempts = 0;
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => {
-        attempts += 1;
-        if (attempts < 3) throw new Error('transient network failure');
-        return FAKE_FETCHED;
-      },
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager, { maxAttempts: 3, retryBackoffMs: 1 });
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error('transient network failure');
+      return 'applied';
+    }), { maxAttempts: 3, retryBackoffMs: 1 });
     receiver.schedule(announcement(), 'peerA');
     await receiver.whenIdle();
     expect(attempts).toBe(3);
-    expect(receiver.stats()).toMatchObject({ staged: 1, failed: 0 });
+    expect(receiver.stats()).toMatchObject({ applied: 1, failed: 0 });
   });
 
-  it('gives up after maxAttempts and reports failure', async () => {
+  it('reports failure after maxAttempts', async () => {
     const onError = vi.fn();
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => { throw new Error('down'); },
-      stageHead: async () => {},
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager, { maxAttempts: 2, retryBackoffMs: 1, onError });
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => { throw new Error('down'); }),
+      { maxAttempts: 2, retryBackoffMs: 1, onError },
+    );
     receiver.schedule(announcement(), 'peerA');
     await receiver.whenIdle();
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(receiver.stats()).toMatchObject({ failed: 1, staged: 0 });
+    expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
   });
 
-  it('close() awaits in-flight stage writes and rejects new work', async () => {
-    const stageGate = deferred<void>();
-    let stageDone = false;
-    const stager: Rfc64PublicCatalogReceiverStagerV1 = {
-      isHeadStaged: async () => false,
-      fetchHead: async () => FAKE_FETCHED,
-      stageHead: async () => { await stageGate.promise; stageDone = true; },
-    };
-    const receiver = new Rfc64PublicCatalogReceiverV1(stager);
-    receiver.schedule(announcement(), 'peerA');
-    // Let the task reach the stage await.
+  it('serializes different heads in one catalog scope', async () => {
+    const firstGate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      calls += 1;
+      if (calls === 1) await firstGate.promise;
+      active -= 1;
+      return 'applied';
+    }), { maxConcurrent: 4 });
+    receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peerA');
+    receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peerB');
     await Promise.resolve();
+    expect(calls).toBe(1);
+    firstGate.resolve('applied');
+    await receiver.whenIdle();
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+  });
+
+  it('allows independent catalog scopes to use the bounded pool concurrently', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    let active = 0;
+    let maxActive = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await gate.promise;
+      active -= 1;
+      return 'applied';
+    }), { maxConcurrent: 2 });
+    receiver.schedule(announcement(), 'peerA');
+    receiver.schedule(announcement({ authorAddress: '0x3333333333333333333333333333333333333333' as never }), 'peerB');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(maxActive).toBe(2);
+    gate.resolve('applied');
+    await receiver.whenIdle();
+  });
+
+  it('close awaits in-flight reconciliation, passes an abort signal, and rejects new work', async () => {
+    const reconcileGate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    let observedSignal: AbortSignal | undefined;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peer, _head, signal) => {
+      observedSignal = signal;
+      return reconcileGate.promise;
+    }));
+    receiver.schedule(announcement(), 'peerA');
     await Promise.resolve();
     const closing = receiver.close();
-    let closed = false;
-    void closing.then(() => { closed = true; });
-    await Promise.resolve();
-    expect(closed).toBe(false); // close is blocked on the in-flight stage write
-    stageGate.resolve();
+    expect(observedSignal?.aborted).toBe(true);
+    reconcileGate.resolve('applied');
     await closing;
-    expect(stageDone).toBe(true);
-    // Post-close schedules are dropped.
-    receiver.schedule(announcement({ catalogHeadObjectDigest: `0x${'cc'.repeat(32)}` as never }), 'peerA');
+    receiver.schedule(headWith(`0x${'cc'.repeat(32)}`), 'peerA');
     expect(receiver.stats().scheduled).toBe(1);
   });
 });

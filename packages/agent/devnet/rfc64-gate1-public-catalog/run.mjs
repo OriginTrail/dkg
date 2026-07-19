@@ -138,7 +138,9 @@ async function main() {
       && published.failedPeers.length === 0,
     receiverStagedExactHead: staged.matchesExactHead === true
       && staged.readBackFromControlStore === published.headObjectDigest,
-    exactlyOneDurableStage: staged.receiverStats?.staged === 1 && staged.receiverStats?.failed === 0,
+    exactlyOneDurableStage: staged.receiverStats?.stagedOnly === 1
+      && staged.receiverStats?.applied === 0
+      && staged.receiverStats?.failed === 0,
     noKaSwmActivation: Array.isArray(staged.activeContextGraphs)
       && staged.activeContextGraphs.length === 0,
   };

@@ -8,15 +8,16 @@
  *     {@link ProtocolRouter} (admission-gated exactly like every other node
  *     protocol; on a chain-free node admission is disabled and it is open),
  *   - routes untrusted availability hints into the {@link Rfc64PublicCatalogReceiverV1}
- *     scheduler (fetch-by-digest → transport re-verify → durable stage; no
- *     activation),
+ *     scheduler, whose production reconciler owns fetch, semantic activation,
+ *     exact post-read, and durable applied-inventory commit,
  *   - answers the transport's open-policy check from the accepted-policy
  *     registry ({@link Rfc64AcceptedOpenCatalogPolicyRegistryV1}),
  *   - and provides the author path: produce a genesis head, durably stage it,
  *     then best-effort announce its availability to peers.
  *
- * Gate-1 boundary: no candidate-row admission, no KA/SWM/VM activation, no
- * invite-only policy, no successor heads.
+ * Omitting a reconciler retains a staging-only diagnostic mode for the earlier
+ * Gate-1A demo. That mode never reports a head as applied and never uses staged
+ * control objects as restart dedup state.
  */
 
 import {
@@ -45,9 +46,16 @@ import {
 } from './open-catalog-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
+  type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
+import {
+  Rfc64PublicCatalogNativeTransportV1,
+  type Rfc64PublicCatalogNativeAuthorizationInputV1,
+  type Rfc64PublicCatalogNativeAuthorizationV1,
+  type Rfc64PublicCatalogNativeTransportOptionsV1,
+} from './public-catalog-native-transport-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   Rfc64PublicCatalogTransportV1,
@@ -61,6 +69,8 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   readonly receiver?: Rfc64PublicCatalogReceiverOptionsV1;
+  /** Full production native content/reconciliation path. Omission is diagnostic-only. */
+  readonly native?: Rfc64PublicCatalogServiceNativeOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
   /**
@@ -74,6 +84,32 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+}
+
+export type Rfc64PublicCatalogHeadFetchClientV1 = Pick<
+  Rfc64PublicCatalogTransportV1,
+  'fetchCatalogHead'
+>;
+
+export type Rfc64PublicCatalogContentFetchClientV1 = Pick<
+  Rfc64PublicCatalogNativeTransportV1,
+  'fetchCatalogObject' | 'fetchKaBundle'
+>;
+
+export interface Rfc64PublicCatalogReconcilerClientsV1 {
+  readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
+  readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
+  readonly transportTimeoutMs: number;
+}
+
+export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
+  Rfc64PublicCatalogNativeTransportOptionsV1,
+  'readCatalogObjectByDigest' | 'readKaBundleByDigest'
+> {
+  /** Construct exactly one reconciler around the service-owned transports. */
+  readonly createReconciler: (
+    clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>,
+  ) => Rfc64PublicCatalogReceiverReconcilerV1;
 }
 
 export interface PublishOpenAuthorCatalogGenesisInputV1 {
@@ -111,6 +147,7 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #policies = new Rfc64AcceptedOpenCatalogPolicyRegistryV1();
   readonly #receiver: Rfc64PublicCatalogReceiverV1;
   readonly #transport: Rfc64PublicCatalogTransportV1;
+  readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
   #started = false;
   #closed = false;
@@ -120,19 +157,6 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#verifyIssuerSignature =
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
-
-    this.#receiver = new Rfc64PublicCatalogReceiverV1(
-      {
-        isHeadStaged: (announcement) => this.#isHeadStaged(announcement),
-        fetchHead: (remotePeerId, announcement) =>
-          this.#transport.fetchCatalogHead(remotePeerId, announcement, this.#sendOptions()),
-        stageHead: (fetched) => this.#stageFetchedHead(fetched),
-      },
-      {
-        ...options.receiver,
-        onHeadStaged: options.onHeadStaged ?? options.receiver?.onHeadStaged,
-      },
-    );
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
@@ -144,6 +168,27 @@ export class Rfc64PublicCatalogServiceV1 {
         this.#receiver.schedule(announcement, remotePeerId);
       },
     });
+
+    this.#nativeTransport = options.native === undefined
+      ? undefined
+      : new Rfc64PublicCatalogNativeTransportV1(options.router, {
+        readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
+        readKaBundleByDigest: options.native.readKaBundleByDigest,
+        authorizeOpenCatalogOperation: (input) => this.#authorizeNativeOperation(input),
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
+    const reconciler = options.native === undefined
+      ? {
+        isHeadApplied: async () => false,
+        reconcileHead: (remotePeerId, announcement, signal) =>
+          this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
+      } satisfies Rfc64PublicCatalogReceiverReconcilerV1
+      : options.native.createReconciler({
+        headTransport: this.#transport,
+        contentTransport: this.#nativeTransport!,
+        transportTimeoutMs: this.#transportTimeoutMs,
+      });
+    this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
   }
 
   get started(): boolean {
@@ -160,8 +205,16 @@ export class Rfc64PublicCatalogServiceV1 {
   start(): void {
     if (this.#closed) throw new Error('RFC-64 public catalog service is closed');
     if (this.#started) return;
-    this.#transport.start();
-    this.#started = true;
+    this.#nativeTransport?.start();
+    try {
+      // Register the announcement protocol last so no callback can schedule
+      // reconciliation before the content-fetch protocols are live.
+      this.#transport.start();
+      this.#started = true;
+    } catch (cause) {
+      this.#nativeTransport?.stop();
+      throw cause;
+    }
   }
 
   /** Stop serving, drain in-flight receiver work, then release. Idempotent. */
@@ -169,8 +222,14 @@ export class Rfc64PublicCatalogServiceV1 {
     if (this.#closed) return;
     this.#closed = true;
     this.#started = false;
-    this.#transport.stop();
-    await this.#receiver.close();
+    try {
+      // Keep both outbound transports live until the scheduler has drained.
+      // Post-close availability callbacks are harmless: schedule() rejects them.
+      await this.#receiver.close();
+    } finally {
+      this.#transport.stop();
+      this.#nativeTransport?.stop();
+    }
   }
 
   /**
@@ -254,22 +313,33 @@ export class Rfc64PublicCatalogServiceV1 {
     return { timeoutMs: this.#transportTimeoutMs };
   }
 
-  async #isHeadStaged(
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): Promise<boolean> {
-    const stored = await this.#controlObjects.getVerifiedObject({
-      objectDigest: announcement.catalogHeadObjectDigest,
-      signatureVariantDigest: announcement.signatureVariantDigest,
-      verifyIssuerSignature: this.#verifyIssuerSignature,
+  async #authorizeNativeOperation(
+    input: Rfc64PublicCatalogNativeAuthorizationInputV1,
+  ): Promise<Rfc64PublicCatalogNativeAuthorizationV1 | null> {
+    const record = this.#policies.lookup(input.networkId, input.contextGraphId);
+    if (record === null || record.policy.accessPolicy !== 0) return null;
+    return Object.freeze({
+      accessPolicy: 0,
+      policyDigest: record.policyDigest,
     });
-    return stored !== null;
   }
 
-  async #stageFetchedHead(fetched: {
-    readonly envelope: SignedControlEnvelopeV1;
-    readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
-  }): Promise<void> {
+  async #stageHeadOnly(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    signal: AbortSignal,
+    onHeadStaged?: Rfc64PublicCatalogServiceOptionsV1['onHeadStaged'],
+  ): Promise<'not-found' | 'staged-only'> {
+    if (signal.aborted) throw signal.reason;
+    const fetched = await this.#transport.fetchCatalogHead(
+      remotePeerId,
+      announcement,
+      this.#sendOptions(),
+    );
+    if (fetched === null) return 'not-found';
     await this.#controlObjects.stageVerifiedObjects([fetched]);
+    onHeadStaged?.(announcement, remotePeerId);
+    return 'staged-only';
   }
 
   #requireStarted(): void {

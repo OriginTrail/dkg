@@ -123,10 +123,16 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
     expect(stagedDigest).toBe(published.headObjectDigest);
 
     const receiverStats = receiver.rfc64PublicCatalogStatsV1();
-    expect(receiverStats?.receiver).toMatchObject({ staged: 1, notFound: 0, failed: 0 });
+    expect(receiverStats?.receiver).toMatchObject({
+      stagedOnly: 1,
+      applied: 0,
+      notFound: 0,
+      failed: 0,
+    });
 
-    // Re-announcing the identical head is deduped against durable state — no
-    // second fetch/stage.
+    // Re-announcing the identical head may replay the idempotent diagnostic
+    // stage, because staging alone is deliberately no longer the completion
+    // boundary. Only a durable applied-inventory record may suppress work.
     const republished = await author.publishOpenAuthorCatalogGenesisV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -138,8 +144,11 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
 
     const afterStats = receiver.rfc64PublicCatalogStatsV1();
-    expect(afterStats?.receiver.staged).toBe(1); // still exactly one durable stage
-    expect(afterStats?.receiver.dedupedAlreadyStaged).toBeGreaterThanOrEqual(1);
+    expect(afterStats?.receiver).toMatchObject({
+      stagedOnly: 2,
+      applied: 0,
+      dedupedAlreadyApplied: 0,
+    });
 
     // NO KA/SWM activation: the head lives only in the control-object cache;
     // the receiver never activated the CG as queryable knowledge.
@@ -174,6 +183,9 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
       signatureVariantDigest: published.signatureVariantDigest,
     });
     expect(stagedDigest).toBeNull();
-    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver.staged).toBe(0);
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      stagedOnly: 0,
+      applied: 0,
+    });
   }, 60_000);
 });
