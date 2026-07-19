@@ -3,6 +3,7 @@
 // unverified low-level reopen callback.
 export {
   InventoryV1CandidateError,
+  type CandidateCatalogPrecommitResultV1,
   type CandidateBucketDiffTraversalV1,
   type CandidateBucketHeaderV1,
   type CandidateBucketLoadKeyV1,
