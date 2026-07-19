@@ -5,8 +5,10 @@ on:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
       - 'packages/agent/src/rfc64/inventory-v1/**'
+      - 'packages/agent/src/rfc64/author-catalog-producer.ts'
       - 'packages/agent/test/rfc64-inventory-v1-*.test.ts'
       - 'packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts'
+      - 'packages/agent/test/rfc64-author-catalog-producer.test.ts'
       - 'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'
       - 'packages/agent/test/fixtures/rfc64-agent-inventory-lifecycle-child.ts'
       - 'packages/agent/vitest.unit.config.ts'
@@ -62,3 +64,4 @@ jobs:
           --config vitest.unit.config.ts
           test/rfc64-inventory-v1
           test/rfc64-agent-inventory-lifecycle.test.ts
+          test/rfc64-author-catalog-producer.test.ts
