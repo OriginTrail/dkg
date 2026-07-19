@@ -106,8 +106,20 @@ const MOVED_PREFIX_FAULT_BOUNDARIES = FULL_RECOVERY_MANIFEST.flatMap((member) =>
   `resume.prefix.${member}.inventory-directory-fsync`,
 ] as const) satisfies readonly InventoryV1QuarantineBoundary[];
 
-const JOURNAL_RESTART_FAULT_BOUNDARIES = [
-  'target-exclusivity-proven',
+const JOURNAL_PREFIX_FAULT_BOUNDARIES = [
+  'resume.prefix.journal.file-fsync',
+  'resume.prefix.journal.generation-directory-fsync',
+  'resume.prefix.journal.inventory-directory-fsync',
+] as const satisfies readonly InventoryV1QuarantineBoundary[];
+
+const JOURNAL_AUTOMATIC_FAULT_BOUNDARIES = [
+  'begin.source.journal.file-fsync',
+  'begin.source.main.file-fsync',
+  'begin.inventory-directory.fsync-after-quarantine-root',
+  'begin.quarantine-root.fsync-after-generation',
+  'begin.marker.write',
+  'begin.marker.file-fsync',
+  'begin.inventory-directory.fsync-after-marker',
   'resume.source.journal.file-fsync-after-quiescence',
   'resume.source.main.file-fsync-after-quiescence',
   'resume.member.journal.rename',
@@ -120,12 +132,6 @@ const JOURNAL_RESTART_FAULT_BOUNDARIES = [
   'resume.member.main.inventory-directory-fsync',
   'resume.marker.unlink',
   'resume.inventory-directory.fsync-after-marker-unlink',
-] as const satisfies readonly InventoryV1QuarantineBoundary[];
-
-const JOURNAL_PREFIX_FAULT_BOUNDARIES = [
-  'resume.prefix.journal.file-fsync',
-  'resume.prefix.journal.generation-directory-fsync',
-  'resume.prefix.journal.inventory-directory-fsync',
 ] as const satisfies readonly InventoryV1QuarantineBoundary[];
 
 function expectedFullManifestTrace(
@@ -1221,6 +1227,33 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     }
   });
 
+  it('fails closed on rollback-journal evidence beside a WAL-mode main header', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    createIncompatibleOwnedInventory(path, 'wal-header-journal');
+    const wal = new DatabaseSync(path);
+    wal.exec('PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(TRUNCATE);');
+    wal.close();
+    expect(readFileSync(path).subarray(18, 20)).toEqual(Buffer.from([2, 2]));
+
+    const journalEvidence = HOSTILE_SIDECAR_BYTES.journal;
+    const opener = createInventoryV1TestOpener({
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+      closeTarget: (close, reason) => {
+        close();
+        if (reason === 'automatic-schema-quarantine') {
+          writeFileSync(`${path}-journal`, journalEvidence);
+        }
+      },
+    });
+    await expect(opener(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'ambiguous-database'),
+    );
+    expect(readFileSync(`${path}-journal`)).toEqual(journalEvidence);
+    expect(existsSync(`${path}.rebuild-required`)).toBe(false);
+    expect(quarantineGenerations(path)).toEqual([]);
+  });
+
   it('rejects pre-existing mixed journal modes before SQLite can mutate either sidecar', async () => {
     for (const mixedMember of ['wal', 'shm'] as const) {
       const dataDirectory = temporaryDataDirectory();
@@ -2056,7 +2089,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     }
   });
 
-  it('does not move a zero-prefix journal manifest before proving a raw SQLite holder is gone', async () => {
+  it('fails closed without opening or moving a restarted zero-prefix journal manifest', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
     const generation = join(
@@ -2091,7 +2124,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
-          (error: unknown) => expectOpenErrorCode(error, 'database-busy'),
+          (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
         );
         expect(fileOracle(path)).toEqual(before.main);
         expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
@@ -2106,6 +2139,42 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       holder.exec('ROLLBACK');
       holder.close();
     }
+  });
+
+  it('leaves a zero-prefix journal marker with a WAL-mode main untouched', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    const generation = join(
+      dirname(path),
+      'quarantine',
+      'inventory-v1-1234567890-9797979797979797',
+    );
+    mkdirSync(generation, { recursive: true });
+    createIncompatibleOwnedInventory(path, 'wal-marker-journal');
+    const wal = new DatabaseSync(path);
+    wal.exec('PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(TRUNCATE);');
+    wal.close();
+    writeFileSync(`${path}-journal`, HOSTILE_SIDECAR_BYTES.journal);
+    const marker = Buffer.from(JSON.stringify({
+      version: 1,
+      quarantineDirectory: generation,
+      members: ['journal', 'main'],
+    }));
+    writeFileSync(`${path}.rebuild-required`, marker);
+    const before = {
+      main: fileOracle(path),
+      journal: fileOracle(`${path}-journal`),
+      marker: fileOracle(`${path}.rebuild-required`),
+      destinationNames: readdirSync(generation).sort(),
+    };
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'ambiguous-database'),
+    );
+    expect(fileOracle(path)).toEqual(before.main);
+    expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+    expect(fileOracle(`${path}.rebuild-required`)).toEqual(before.marker);
+    expect(readdirSync(generation).sort()).toEqual(before.destinationNames);
   });
 
   it('resumes a partial recovery-marker move before rebuilding', async () => {
@@ -2286,6 +2355,22 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
         );
         const path = databasePath(dataDirectory);
 
+        if (members[0] === 'journal' && movedPrefix === 0) {
+          const before = new Map(members.map((member) => {
+            const evidence = recoverySourcePath(path, member);
+            return [evidence, fileOracle(evidence)] as const;
+          }));
+          const markerBefore = fileOracle(`${path}.rebuild-required`);
+          await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+            (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+          );
+          expect(fileOracle(`${path}.rebuild-required`)).toEqual(markerBefore);
+          for (const [evidence, oracle] of before) {
+            expect(fileOracle(evidence)).toEqual(oracle);
+          }
+          continue;
+        }
+
         const foundation = await openInventoryV1(dataDirectory);
         try {
           assertInitializedInventory(path);
@@ -2384,56 +2469,6 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     }
   }, 180_000);
 
-  it('recovers journal evidence in a fresh process after SIGKILL at every restart-proof and move boundary', async () => {
-    for (const boundary of JOURNAL_RESTART_FAULT_BOUNDARIES) {
-      const dataDirectory = temporaryDataDirectory();
-      const path = databasePath(dataDirectory);
-      const label = `journal-fault-${boundary}`;
-      const seeded = seedPendingRecoveryTopology(
-        dataDirectory,
-        JOURNAL_RECOVERY_MANIFEST,
-        0,
-        label,
-      );
-      const tracePath = join(dataDirectory, `trace-${boundary}.jsonl`);
-      const trace = await killAtInventoryBoundary(dataDirectory, boundary, tracePath, {
-        DKG_RFC64_CHILD_PROTECT_EVIDENCE: '1',
-      });
-      expect(trace.map((entry) => entry.boundary)).toEqual(
-        JOURNAL_RESTART_FAULT_BOUNDARIES.slice(
-          0,
-          JOURNAL_RESTART_FAULT_BOUNDARIES.indexOf(boundary) + 1,
-        ),
-      );
-      const killedEvidence = new Map<RecoveryMember, FileOracle>();
-      for (const member of JOURNAL_RECOVERY_MANIFEST) {
-        const source = recoverySourcePath(path, member);
-        const destination = recoveryDestinationPath(seeded.generation, member);
-        expect(existsSync(source) || existsSync(destination)).toBe(true);
-        killedEvidence.set(member, fileOracle(existsSync(source) ? source : destination));
-      }
-
-      try {
-        await reopenInventoryInFreshProcess(dataDirectory);
-      } catch (cause) {
-        throw new Error(`fresh-process journal recovery failed after ${boundary}`, { cause });
-      }
-      assertInitializedInventory(path);
-      assertRecoveredManifestEvidence(
-        path,
-        JOURNAL_RECOVERY_MANIFEST,
-        label,
-        seeded.generation,
-        seeded.hashes,
-      );
-      for (const member of JOURNAL_RECOVERY_MANIFEST) {
-        expect(fileOracle(recoveryDestinationPath(seeded.generation, member))).toEqual(
-          killedEvidence.get(member),
-        );
-      }
-    }
-  }, 120_000);
-
   it('recovers a journal moved-prefix in a fresh process after SIGKILL at every prefix durability boundary', async () => {
     for (const boundary of JOURNAL_PREFIX_FAULT_BOUNDARIES) {
       const dataDirectory = temporaryDataDirectory();
@@ -2478,6 +2513,77 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       );
     }
   }, 60_000);
+
+  it('preserves or resumes automatic journal quarantine at every crash boundary', async () => {
+    for (const boundary of JOURNAL_AUTOMATIC_FAULT_BOUNDARIES) {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      const label = `automatic-journal-fault-${boundary}`;
+      createIncompatibleOwnedInventory(path, label);
+      const tracePath = join(dataDirectory, `trace-${boundary}.jsonl`);
+      const trace = await killAtInventoryBoundary(dataDirectory, boundary, tracePath, {
+        DKG_RFC64_CHILD_SYNTHETIC_JOURNAL: '1',
+      });
+      expect(trace.map((entry) => entry.boundary)).toEqual([
+        'target-exclusivity-proven',
+        ...JOURNAL_AUTOMATIC_FAULT_BOUNDARIES.slice(
+          0,
+          JOURNAL_AUTOMATIC_FAULT_BOUNDARIES.indexOf(boundary) + 1,
+        ),
+      ]);
+
+      const markerPath = `${path}.rebuild-required`;
+      const generation = quarantineGenerations(path).find((candidate) =>
+        existsSync(recoveryDestinationPath(candidate, 'journal'))
+        || existsSync(recoveryDestinationPath(candidate, 'main'))
+        || existsSync(markerPath));
+      const journalAtDestination = generation !== undefined
+        && existsSync(recoveryDestinationPath(generation, 'journal'));
+
+      if (existsSync(markerPath) && !journalAtDestination) {
+        const before = {
+          main: fileOracle(path),
+          journal: fileOracle(`${path}-journal`),
+          marker: fileOracle(markerPath),
+          destinationNames: generation === undefined ? [] : readdirSync(generation).sort(),
+        };
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+            (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+          );
+          expect(fileOracle(path)).toEqual(before.main);
+          expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+          expect(fileOracle(markerPath)).toEqual(before.marker);
+          if (generation !== undefined) {
+            expect(readdirSync(generation).sort()).toEqual(before.destinationNames);
+          }
+        }
+        continue;
+      }
+
+      const killedEvidence = new Map<RecoveryMember, FileOracle>();
+      const committedMembers = journalAtDestination
+        ? JOURNAL_RECOVERY_MANIFEST
+        : (['main'] as const);
+      for (const member of committedMembers) {
+        const source = recoverySourcePath(path, member);
+        const destination = generation === undefined
+          ? undefined
+          : recoveryDestinationPath(generation, member);
+        const evidence = existsSync(source) ? source : destination;
+        if (evidence !== undefined && existsSync(evidence)) {
+          killedEvidence.set(member, fileOracle(evidence));
+        }
+      }
+
+      await reopenInventoryInFreshProcess(dataDirectory);
+      assertInitializedInventory(path);
+      const recoveredGeneration = evidenceGeneration(path);
+      for (const [member, oracle] of killedEvidence) {
+        expect(fileOracle(recoveryDestinationPath(recoveredGeneration, member))).toEqual(oracle);
+      }
+    }
+  }, 120_000);
 
   it('recovers in a fresh process after SIGKILL at every moved-prefix re-fsync boundary', async () => {
     for (const boundary of MOVED_PREFIX_FAULT_BOUNDARIES) {
