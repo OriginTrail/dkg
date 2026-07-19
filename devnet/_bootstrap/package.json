@@ -12,7 +12,8 @@
     "test:rfc64-evidence": "vitest run --config vitest.evidence.config.ts"
   },
   "dependencies": {
-    "ethers": "^6.16.0"
+    "ethers": "^6.16.0",
+    "rdf-canonize": "^5.0.0"
   },
   "devDependencies": {
     "vitest": "^4.0.18"

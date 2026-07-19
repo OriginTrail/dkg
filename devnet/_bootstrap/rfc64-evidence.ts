@@ -6,10 +6,32 @@
  * Harnesses pass their observations in after those protocol-owned operations
  * finish, then persist the returned fail-closed comparison artifact.
  */
-import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { canonicalize } from '../../packages/core/src/crypto/canonicalize.js';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+  parse as parsePath,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+import rdfCanonize from 'rdf-canonize';
 import { parseDeterministicKnowledgeAssetUal } from '../../packages/core/src/ka-content-scope.js';
 
 export const RFC64_SEMANTIC_SNAPSHOT_SCHEMA =
@@ -20,6 +42,8 @@ export const RFC64_DEVNET_EVIDENCE_SCHEMA =
 const SEMANTIC_MANIFEST_DOMAIN =
   'rfc64-semantic-nquads-manifest/v1\n';
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
+const TIMEZONE_QUALIFIED_ISO_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 export type Sha256Digest = `sha256:${string}`;
 
@@ -30,7 +54,7 @@ export interface Rfc64KnowledgeAssetObservation {
 }
 
 export interface CanonicalSemanticNQuads {
-  /** RDFC-1.0 canonical, deduplicated, lexically sorted N-Quads lines. */
+  /** RDFC-1.0 canonical, placement-neutral, lexically sorted S/P/O lines. */
   readonly lines: readonly string[];
   /** Canonical lines joined with LF and one trailing LF when non-empty. */
   readonly text: string;
@@ -198,16 +222,68 @@ function nquadsInputText(input: string | readonly string[]): string {
   return input.join('\n');
 }
 
+const DEFAULT_GRAPH_TERM = Object.freeze({
+  termType: 'DefaultGraph' as const,
+  value: '',
+});
+
 /**
- * Canonicalize a semantic RDF dataset with the protocol's RDFC-1.0 helper,
- * then explicitly deduplicate and sort its lines for byte-stable evidence.
+ * Parse the received rows and project away their physical graph placement.
+ * RFC-64 semantic equality is defined over S/P/O. A repeated projected triple
+ * is rejected at this boundary; silently turning a duplicate-bearing response
+ * into a set would hide responder/store faults and corrupt the recorded count.
+ */
+function receivedSemanticProjection(
+  input: string | readonly string[],
+): string {
+  // rdf-canonize parses into an RDF dataset and therefore legitimately folds
+  // exact duplicate lines. Parse each received row independently so evidence
+  // can reject duplicates before dataset set-semantics erase that signal.
+  const received = nquadsInputText(input)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .flatMap((line, index) => {
+      const parsed = rdfCanonize.NQuads.parse(`${line}\n`);
+      if (parsed.length !== 1) {
+        throw new Rfc64EvidenceValidationError(
+          `semantic N-Quads row ${index} did not decode to exactly one quad`,
+        );
+      }
+      return parsed;
+    });
+  const projected = received.map((quad) => ({
+    ...quad,
+    graph: DEFAULT_GRAPH_TERM,
+  }));
+  const seen = new Set<string>();
+  for (const quad of projected) {
+    const line = rdfCanonize.NQuads.serialize([quad]).trimEnd();
+    if (seen.has(line)) {
+      throw new Rfc64EvidenceValidationError(
+        `Duplicate received semantic S/P/O projection: ${line}`,
+      );
+    }
+    seen.add(line);
+  }
+  return rdfCanonize.NQuads.serialize(projected);
+}
+
+/**
+ * Project physical N-Quads to semantic S/P/O, reject duplicate projected rows,
+ * and canonicalize blank nodes with the protocol's RDFC-1.0 helper.
  */
 export async function canonicalizeSemanticNQuads(
   input: string | readonly string[],
 ): Promise<CanonicalSemanticNQuads> {
   let canonical: string;
   try {
-    canonical = await canonicalize(nquadsInputText(input));
+    canonical = await rdfCanonize.canonize(receivedSemanticProjection(input), {
+      algorithm: 'RDFC-1.0',
+      inputFormat: 'application/n-quads',
+      format: 'application/n-quads',
+      maxWorkFactor: 1,
+    });
   } catch (error) {
     throw new Rfc64EvidenceValidationError(
       `Invalid semantic N-Quads: ${
@@ -216,19 +292,23 @@ export async function canonicalizeSemanticNQuads(
     );
   }
 
-  const lines = [...new Set(
-    canonical
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0),
-  )].sort(compareText);
+  const lines = canonical
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .sort(compareText);
+  if (new Set(lines).size !== lines.length) {
+    throw new Rfc64EvidenceValidationError(
+      'RDFC-1.0 emitted duplicate semantic projection rows',
+    );
+  }
   const text = lines.length === 0 ? '' : `${lines.join('\n')}\n`;
-  return {
-    lines,
+  return Object.freeze({
+    lines: Object.freeze(lines),
     text,
     quadCount: lines.length,
     sha256: sha256Text(text),
-  };
+  });
 }
 
 function ualsDigest(assets: readonly Rfc64KnowledgeAssetEvidenceV1[]): Sha256Digest {
@@ -249,6 +329,35 @@ function semanticManifestDigest(
   return sha256Text(
     `${SEMANTIC_MANIFEST_DOMAIN}${stableJsonStringify(manifest)}`,
   );
+}
+
+function closeSemanticSnapshot(
+  snapshot: Rfc64SemanticSnapshotV1,
+): Rfc64SemanticSnapshotV1 {
+  const knowledgeAssets = Object.freeze(snapshot.knowledgeAssets.map((asset) =>
+    Object.freeze({
+      ual: asset.ual,
+      quadCount: asset.quadCount,
+      semanticNQuadsSha256: asset.semanticNQuadsSha256,
+    })));
+  return Object.freeze({
+    schemaVersion: RFC64_SEMANTIC_SNAPSHOT_SCHEMA,
+    kaCount: snapshot.kaCount,
+    quadCount: snapshot.quadCount,
+    ualsSha256: snapshot.ualsSha256,
+    semanticNQuadsSha256: snapshot.semanticNQuadsSha256,
+    knowledgeAssets,
+  });
+}
+
+function closeComparison(
+  comparison: Rfc64SnapshotComparisonV1,
+): Rfc64SnapshotComparisonV1 {
+  return Object.freeze({
+    passed: comparison.passed,
+    mismatches: Object.freeze(comparison.mismatches.map((mismatch) =>
+      Object.freeze({ ...mismatch }))),
+  });
 }
 
 /** Build a compact, order-independent semantic snapshot from raw observations. */
@@ -395,7 +504,7 @@ export function validateRfc64SemanticSnapshot(
       `snapshot.semanticNQuadsSha256 ${snapshot.semanticNQuadsSha256} does not equal computed ${actualSemanticDigest}`,
     );
   }
-  return snapshot;
+  return closeSemanticSnapshot(snapshot);
 }
 
 /** Compare two validated snapshots and return a stable, granular diff. */
@@ -403,14 +512,14 @@ export function compareRfc64SemanticSnapshots(
   expected: Rfc64SemanticSnapshotV1,
   observed: Rfc64SemanticSnapshotV1,
 ): Rfc64SnapshotComparisonV1 {
-  validateRfc64SemanticSnapshot(expected);
-  validateRfc64SemanticSnapshot(observed);
+  const closedExpected = validateRfc64SemanticSnapshot(expected);
+  const closedObserved = validateRfc64SemanticSnapshot(observed);
 
   const expectedByUal = new Map(
-    expected.knowledgeAssets.map((asset) => [asset.ual, asset] as const),
+    closedExpected.knowledgeAssets.map((asset) => [asset.ual, asset] as const),
   );
   const observedByUal = new Map(
-    observed.knowledgeAssets.map((asset) => [asset.ual, asset] as const),
+    closedObserved.knowledgeAssets.map((asset) => [asset.ual, asset] as const),
   );
   const allUals = [...new Set([
     ...expectedByUal.keys(),
@@ -450,7 +559,7 @@ export function compareRfc64SemanticSnapshots(
     }
   }
 
-  return { passed: mismatches.length === 0, mismatches };
+  return closeComparison({ passed: mismatches.length === 0, mismatches });
 }
 
 /** Compare and throw on any missing, unexpected, or content-mismatched KA. */
@@ -476,17 +585,22 @@ function canonicalFailure(value: Rfc64FailureV1, label: string): Rfc64FailureV1 
   if (typeof value.retryable !== 'boolean') {
     throw new Rfc64EvidenceValidationError(`${label}.retryable must be boolean`);
   }
-  return {
+  return Object.freeze({
     code: requiredLabel(value.code, `${label}.code`),
     message: requiredLabel(value.message, `${label}.message`),
     retryable: value.retryable,
-  };
+  });
 }
 
 function canonicalInstant(value: Date | string, label: string): {
   readonly epochMs: number;
   readonly iso: string;
 } {
+  if (typeof value === 'string' && !TIMEZONE_QUALIFIED_ISO_RE.test(value)) {
+    throw new Rfc64EvidenceValidationError(
+      `${label} must be an ISO timestamp with Z or an explicit UTC offset`,
+    );
+  }
   const date = value instanceof Date ? value : new Date(value);
   const epochMs = date.getTime();
   if (!Number.isFinite(epochMs)) {
@@ -522,8 +636,10 @@ export function createRfc64DevnetEvidence(
     throw new Rfc64EvidenceValidationError('attemptCount must be at least 1');
   }
 
-  validateRfc64SemanticSnapshot(input.expected);
-  if (input.observed !== null) validateRfc64SemanticSnapshot(input.observed);
+  const expected = validateRfc64SemanticSnapshot(input.expected);
+  const observed = input.observed === null
+    ? null
+    : validateRfc64SemanticSnapshot(input.observed);
   const terminalFailure = input.terminalFailure == null
     ? null
     : canonicalFailure(input.terminalFailure, 'terminalFailure');
@@ -544,7 +660,7 @@ export function createRfc64DevnetEvidence(
         `retryFailures[${index}].attempt must be between 1 and attemptCount - 1`,
       );
     }
-    return { attempt, ...canonical } satisfies Rfc64RetryFailureV1;
+    return Object.freeze({ attempt, ...canonical }) satisfies Rfc64RetryFailureV1;
   }).sort((left, right) => left.attempt - right.attempt);
   for (let index = 1; index < failures.length; index += 1) {
     if (failures[index - 1]!.attempt === failures[index]!.attempt) {
@@ -559,38 +675,38 @@ export function createRfc64DevnetEvidence(
     );
   }
 
-  const comparison: Rfc64SnapshotComparisonV1 = input.observed === null
-    ? {
+  const comparison: Rfc64SnapshotComparisonV1 = observed === null
+    ? closeComparison({
         passed: false,
         mismatches: [{
           code: 'OBSERVED_SNAPSHOT_MISSING',
-          expected: input.expected.semanticNQuadsSha256,
+          expected: expected.semanticNQuadsSha256,
           observed: null,
         }],
-      }
-    : compareRfc64SemanticSnapshots(input.expected, input.observed);
+      })
+    : compareRfc64SemanticSnapshots(expected, observed);
 
-  return {
+  return Object.freeze({
     schemaVersion: RFC64_DEVNET_EVIDENCE_SCHEMA,
     gate,
     observer,
     sourcePeerId,
-    timing: {
+    timing: Object.freeze({
       startedAt: startedAt.iso,
       completedAt: completedAt.iso,
       durationMs: completedAt.epochMs - startedAt.epochMs,
-    },
-    attempts: {
+    }),
+    attempts: Object.freeze({
       total: attemptCount,
       retries: attemptCount - 1,
-      failures,
-    },
-    expected: input.expected,
-    observed: input.observed,
+      failures: Object.freeze(failures),
+    }),
+    expected,
+    observed,
     comparison,
     terminalFailure,
     passed: comparison.passed && terminalFailure === null,
-  };
+  });
 }
 
 function stableJsonValue(value: unknown, path: string, ancestors: Set<object>): unknown {
@@ -604,12 +720,44 @@ function stableJsonValue(value: unknown, path: string, ancestors: Set<object>): 
     return Object.is(value, -0) ? 0 : value;
   }
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new Rfc64EvidenceValidationError(
+        `${path} must not use a custom array prototype`,
+      );
+    }
     if (ancestors.has(value)) {
       throw new Rfc64EvidenceValidationError(`${path} contains a cycle`);
     }
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some((key) => typeof key === 'symbol')) {
+      throw new Rfc64EvidenceValidationError(`${path} must not contain symbol keys`);
+    }
+    const allowedKeys = new Set<string>(['length']);
+    for (let index = 0; index < value.length; index += 1) {
+      allowedKeys.add(String(index));
+      if (!Object.hasOwn(value, index)) {
+        throw new Rfc64EvidenceValidationError(`${path} must not be a sparse array`);
+      }
+    }
+    for (const key of ownKeys as string[]) {
+      if (!allowedKeys.has(key)) {
+        throw new Rfc64EvidenceValidationError(
+          `${path} must not contain custom array property ${JSON.stringify(key)}`,
+        );
+      }
+      if (key === 'length') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      if (!('value' in descriptor) || !descriptor.enumerable) {
+        throw new Rfc64EvidenceValidationError(
+          `${path}[${key}] must be an enumerable data property`,
+        );
+      }
+    }
     ancestors.add(value);
-    const result = value.map((entry, index) =>
-      stableJsonValue(entry, `${path}[${index}]`, ancestors));
+    const result = Array.from({ length: value.length }, (_, index) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))!;
+      return stableJsonValue(descriptor.value, `${path}[${index}]`, ancestors);
+    });
     ancestors.delete(value);
     return result;
   }
@@ -625,9 +773,24 @@ function stableJsonValue(value: unknown, path: string, ancestors: Set<object>): 
     }
     ancestors.add(value);
     const source = value as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    for (const key of Object.keys(source).sort(compareText)) {
-      const entry = source[key];
+    const ownKeys = Reflect.ownKeys(source);
+    if (ownKeys.some((key) => typeof key === 'symbol')) {
+      throw new Rfc64EvidenceValidationError(`${path} must not contain symbol keys`);
+    }
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of (ownKeys as string[]).sort(compareText)) {
+      const descriptor = Object.getOwnPropertyDescriptor(source, key)!;
+      if (!('value' in descriptor)) {
+        throw new Rfc64EvidenceValidationError(
+          `${path}.${key} must not be an accessor property`,
+        );
+      }
+      if (!descriptor.enumerable) {
+        throw new Rfc64EvidenceValidationError(
+          `${path}.${key} must not be a hidden non-enumerable property`,
+        );
+      }
+      const entry = descriptor.value;
       if (entry === undefined || typeof entry === 'bigint' || typeof entry === 'function') {
         throw new Rfc64EvidenceValidationError(
           `${path}.${key} is not a stable JSON value`,
@@ -646,15 +809,235 @@ export function stableJsonStringify(value: unknown): string {
   return `${JSON.stringify(stableJsonValue(value, '$', new Set()), null, 2)}\n`;
 }
 
-/** Write a byte-stable JSON artifact and return its exact byte count/digest. */
+interface DirectoryTopologyEntry {
+  readonly path: string;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+function lstatOptional(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function assertDirectory(path: string, stat: Stats): void {
+  if (stat.isSymbolicLink()) {
+    throw new Rfc64EvidenceValidationError(
+      `artifact directory topology contains a symbolic link: ${path}`,
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new Rfc64EvidenceValidationError(
+      `artifact directory topology contains a non-directory: ${path}`,
+    );
+  }
+}
+
+function ensureArtifactDirectoryTopology(
+  directory: string,
+): readonly DirectoryTopologyEntry[] {
+  const root = parsePath(directory).root;
+  const relativeDirectory = relative(root, directory);
+  const components = relativeDirectory.length === 0
+    ? []
+    : relativeDirectory.split(sep);
+  const entries: DirectoryTopologyEntry[] = [];
+  let current = root;
+
+  const rootStat = lstatSync(root);
+  assertDirectory(root, rootStat);
+  entries.push({ path: root, dev: rootStat.dev, ino: rootStat.ino });
+
+  for (const component of components) {
+    current = join(current, component);
+    let stat = lstatOptional(current);
+    if (stat === null) {
+      try {
+        mkdirSync(current, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      stat = lstatSync(current);
+    }
+    assertDirectory(current, stat);
+    entries.push({ path: current, dev: stat.dev, ino: stat.ino });
+  }
+  return Object.freeze(entries.map((entry) => Object.freeze(entry)));
+}
+
+function assertArtifactDirectoryTopology(
+  entries: readonly DirectoryTopologyEntry[],
+): void {
+  for (const expected of entries) {
+    const actual = lstatOptional(expected.path);
+    if (actual === null) {
+      throw new Rfc64EvidenceValidationError(
+        `artifact directory disappeared during publication: ${expected.path}`,
+      );
+    }
+    assertDirectory(expected.path, actual);
+    if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
+      throw new Rfc64EvidenceValidationError(
+        `artifact directory topology changed during publication: ${expected.path}`,
+      );
+    }
+  }
+}
+
+function assertArtifactTargetReplaceable(target: string): void {
+  const stat = lstatOptional(target);
+  if (stat === null) return;
+  if (stat.isSymbolicLink()) {
+    throw new Rfc64EvidenceValidationError(
+      `artifact target must not be a symbolic link: ${target}`,
+    );
+  }
+  if (!stat.isFile()) {
+    throw new Rfc64EvidenceValidationError(
+      `artifact target must be a regular file: ${target}`,
+    );
+  }
+}
+
+function verifyPublishedArtifact(target: string, expectedJson: string): void {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const fd = openSync(target, fsConstants.O_RDONLY | noFollow);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new Rfc64EvidenceValidationError(
+        `published artifact is not a regular file: ${target}`,
+      );
+    }
+    if ((stat.mode & 0o777) !== 0o600) {
+      throw new Rfc64EvidenceValidationError(
+        `published artifact mode must be 0600, got 0${(stat.mode & 0o777).toString(8)}`,
+      );
+    }
+    if (readFileSync(fd, 'utf8') !== expectedJson) {
+      throw new Rfc64EvidenceValidationError(
+        `published artifact bytes changed during publication: ${target}`,
+      );
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fsyncArtifactDirectory(
+  directory: string,
+  topology: readonly DirectoryTopologyEntry[],
+): void {
+  const expected = topology[topology.length - 1]!;
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const directoryOnly = fsConstants.O_DIRECTORY ?? 0;
+  const fd = openSync(
+    directory,
+    fsConstants.O_RDONLY | noFollow | directoryOnly,
+  );
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isDirectory() || stat.dev !== expected.dev || stat.ino !== expected.ino) {
+      throw new Rfc64EvidenceValidationError(
+        `artifact directory handle does not match checked topology: ${directory}`,
+      );
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function cleanupTemporaryArtifact(
+  temporaryPath: string,
+  topology: readonly DirectoryTopologyEntry[],
+): void {
+  try {
+    assertArtifactDirectoryTopology(topology);
+  } catch {
+    // Do not traverse a directory topology which changed under us.
+    return;
+  }
+  try {
+    unlinkSync(temporaryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+/**
+ * Atomically publish byte-stable JSON through a same-directory 0600 temporary
+ * file, fsync the file and containing directory, and reject symlinked or
+ * changing path topology throughout the operation.
+ */
 export function writeStableJsonArtifact(
   path: string,
   value: unknown,
 ): WrittenStableJsonArtifact {
-  const target = requiredLabel(path, 'path');
+  const requestedTarget = requiredLabel(path, 'path');
+  const target = resolve(requestedTarget);
+  const targetName = basename(target);
+  if (targetName.length === 0) {
+    throw new Rfc64EvidenceValidationError('path must identify an artifact file');
+  }
   const json = stableJsonStringify(value);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, json, { encoding: 'utf8', mode: 0o600 });
+  const directory = dirname(target);
+  const topology = ensureArtifactDirectoryTopology(directory);
+  assertArtifactDirectoryTopology(topology);
+  assertArtifactTargetReplaceable(target);
+
+  const temporaryPath = join(
+    directory,
+    `.${targetName}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  let temporaryFd: number | null = null;
+  let renamed = false;
+  try {
+    temporaryFd = openSync(
+      temporaryPath,
+      fsConstants.O_WRONLY
+        | fsConstants.O_CREAT
+        | fsConstants.O_EXCL
+        | noFollow,
+      0o600,
+    );
+    const opened = fstatSync(temporaryFd);
+    if (!opened.isFile()) {
+      throw new Rfc64EvidenceValidationError(
+        `temporary artifact is not a regular file: ${temporaryPath}`,
+      );
+    }
+    fchmodSync(temporaryFd, 0o600);
+    writeFileSync(temporaryFd, json, { encoding: 'utf8' });
+    fsyncSync(temporaryFd);
+    closeSync(temporaryFd);
+    temporaryFd = null;
+
+    assertArtifactDirectoryTopology(topology);
+    assertArtifactTargetReplaceable(target);
+    renameSync(temporaryPath, target);
+    renamed = true;
+
+    assertArtifactDirectoryTopology(topology);
+    verifyPublishedArtifact(target, json);
+    fsyncArtifactDirectory(directory, topology);
+    assertArtifactDirectoryTopology(topology);
+  } catch (error) {
+    if (temporaryFd !== null) {
+      try {
+        closeSync(temporaryFd);
+      } catch {
+        // Preserve the primary publication error.
+      }
+    }
+    if (!renamed) cleanupTemporaryArtifact(temporaryPath, topology);
+    throw error;
+  }
   return {
     byteLength: Buffer.byteLength(json, 'utf8'),
     sha256: sha256Text(json),
