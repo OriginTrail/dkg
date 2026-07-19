@@ -1087,10 +1087,9 @@ function assertDenseArray(
 }
 
 function isAdministrativeRole(value: string): value is CgAdministrativeDelegationRoleV1 {
-  return value === 'checkpoint-delegation'
-    || value === 'policy'
-    || value === 'retention'
-    || value === 'roster';
+  return CG_ADMINISTRATIVE_DELEGATION_ROLES_V1.includes(
+    value as CgAdministrativeDelegationRoleV1,
+  );
 }
 
 function u64(value: unknown, label: string): bigint {
