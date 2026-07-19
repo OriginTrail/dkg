@@ -25,6 +25,7 @@ import {
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
   deriveAuthorCatalogScopeFromHeadV1,
   type AssertionCoordinateV1,
@@ -245,6 +246,10 @@ export interface PublishOpenAuthorCatalogSuccessorAssetResultV1 {
   readonly catalogRowDigest: Digest32V1;
   readonly bundleDigest: Digest32V1;
   readonly contentDigest: Digest32V1;
+  /** Exact verified graph-scoped author seal committed by the catalog row. */
+  readonly sealDigest: Digest32V1;
+  /** Checked safe-integer form of the verified public projection triple count. */
+  readonly activatedTripleCount: number;
   readonly contentByteLength: ByteLengthV1;
   readonly bundleByteLength: ByteLengthV1;
   readonly kaUal: string;
@@ -254,6 +259,12 @@ export interface PublishOpenAuthorCatalogExactSetSuccessorResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly headObjectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
+  /** Detached exact catalog scope derived from the signed successor head. */
+  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
+  /** Canonical digest independently recomputed from `catalogScope`. */
+  readonly catalogScopeDigest: Digest32V1;
+  /** Exact signed bucket row count, sourced independently of head `totalRows`. */
+  readonly signedBucketRowCount: CountV1;
   /** Strictly increasing by mathematical KA ID. */
   readonly assets: readonly Readonly<PublishOpenAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
@@ -487,11 +498,28 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       announcement,
       peers,
     });
+    const catalogScope = Object.freeze({ ...scope }) as Readonly<AuthorCatalogScopeV1>;
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
+    const signedBucketRowCount = produced.publication.bucket?.payload.rows.length.toString();
+    if (
+      signedBucketRowCount === undefined
+      || signedBucketRowCount !== head.payload.totalRows
+      || produced.assets.some(
+        (asset) => asset.projection.catalogScopeDigest !== catalogScopeDigest,
+      )
+    ) {
+      throw new Error('RFC-64 successor evidence differs from its verified signed catalog scope');
+    }
     const assets = produced.assets.map((asset) => Object.freeze({
       kaId: asset.row.kaId,
       catalogRowDigest: asset.sealBinding.catalogRowDigest,
       bundleDigest: asset.bundleDigest,
       contentDigest: asset.projection.projectionDigest,
+      sealDigest: asset.sealBinding.sealDigest,
+      activatedTripleCount: countToSafeInteger(
+        asset.projection.publicTripleCount,
+        `RFC-64 successor asset ${asset.row.kaId} public triple count`,
+      ),
       contentByteLength: asset.projection.projectionByteLength,
       bundleByteLength: asset.row.transfer.byteLength,
       kaUal: asset.projection.kaUal,
@@ -500,6 +528,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       announcement: delivery.announcement,
       headObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
+      catalogScope,
+      catalogScopeDigest,
+      signedBucketRowCount: signedBucketRowCount as CountV1,
       assets: Object.freeze(assets),
       inventoryRowCount: head.payload.totalRows,
       announcedPeers: delivery.announcedPeers,
@@ -761,6 +792,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     return deployment;
   }
+}
+
+function countToSafeInteger(value: CountV1, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed.toString() !== value) {
+    throw new Error(`${label} is outside the exact safe-integer evidence boundary`);
+  }
+  return parsed;
 }
 
 interface PublicOpenRootLaneHistoryV1 {
