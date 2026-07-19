@@ -11,6 +11,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Messenger } from './p2p/messenger.js';
 import { encrypt, decrypt, x25519SharedSecret, ed25519ToX25519Public } from './encryption.js';
+import {
+  verifyAgentMessageManifest,
+  type AgentMessageManifest,
+} from './agent-message-manifest.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
@@ -71,6 +75,15 @@ export type ChatHandler = (
   // layer treats it as "no dedup possible" and inserts the row
   // unconditionally — i.e. legacy on-the-wire behaviour is preserved.
   messageId?: string,
+  // Agent-addressed messaging (V1). Set ONLY when the inbound chat carried
+  // a signed agent manifest that `handleIncoming` cryptographically verified
+  // (see agent-message-manifest.ts). `senderAgentAddress` is the authenticated
+  // `0x…` identity of the sending agent (independent of which node relayed it);
+  // `recipientAgentAddress` is the agent this message was addressed to. Both
+  // are undefined for legacy node-addressed chats, so existing handlers that
+  // don't take these args keep working unchanged.
+  senderAgentAddress?: string,
+  recipientAgentAddress?: string,
 ) => void | Promise<void>;
 
 /**
@@ -228,7 +241,15 @@ export class MessageHandler {
   async sendChat(
     recipientPeerId: string,
     text: string,
-    options: { contextGraphId?: string; messageId?: string } = {},
+    options: {
+      contextGraphId?: string;
+      messageId?: string;
+      // Agent-addressed messaging (V1). When present, the signed manifest is
+      // stamped into the (already encrypted) chat payload so the receiver can
+      // authenticate which agent sent the message. Built + signed one layer up
+      // in `DKGAgent.sendChat`, which owns the agent's signing key.
+      agentManifest?: AgentMessageManifest;
+    } = {},
   ): Promise<{
     delivered: boolean;
     error?: string;
@@ -253,6 +274,17 @@ export class MessageHandler {
         text,
         ...(options.contextGraphId ? { contextGraphId: options.contextGraphId } : {}),
         ...(options.messageId ? { messageId: options.messageId } : {}),
+        // Agent manifest fields ride inside the encrypted payload — the
+        // signature authenticates `from`/`to` at the agent (0x) level while
+        // the transport stays node-addressed. Absent ⇒ legacy node-only chat.
+        ...(options.agentManifest
+          ? {
+              from: options.agentManifest.from,
+              to: options.agentManifest.to,
+              ts: options.agentManifest.ts,
+              sig: options.agentManifest.sig,
+            }
+          : {}),
       }));
 
       const nonce = buildNonce(conversationId, 1);
@@ -542,6 +574,33 @@ export class MessageHandler {
       const senderMessageId =
         typeof parsed.messageId === 'string' ? parsed.messageId : undefined;
 
+      // Agent-addressed messaging (V1): if the payload carries any agent
+      // manifest field, it MUST verify — fail closed. Verifying binds the
+      // sender's `0x` identity to this exact message (id + ts + text), so a
+      // relaying/hosting node cannot forge `from` or replay a stale token.
+      // No manifest ⇒ legacy node-addressed chat, both stay undefined.
+      let senderAgentAddress: string | undefined;
+      let recipientAgentAddress: string | undefined;
+      if (parsed.from !== undefined || parsed.to !== undefined || parsed.sig !== undefined) {
+        const verified = verifyAgentMessageManifest({
+          from: parsed.from,
+          to: parsed.to,
+          sig: parsed.sig,
+          ts: parsed.ts,
+          messageId: senderMessageId,
+          text,
+          nowMs: Date.now(),
+        });
+        if (!verified.ok) {
+          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+            success: false,
+            error: `Invalid agent manifest: ${verified.reason}`,
+          });
+        }
+        senderAgentAddress = verified.manifest.from;
+        recipientAgentAddress = verified.manifest.to;
+      }
+
       // Authorisation check (layered on top of the existing Ed25519
       // signature check above). When unset, all authenticated senders are
       // accepted — this preserves the legacy behaviour for nodes that
@@ -596,6 +655,8 @@ export class MessageHandler {
             senderContextGraphId,
             verifiedContextGraphId,
             senderMessageId,
+            senderAgentAddress,
+            recipientAgentAddress,
           );
         } catch (err) {
           console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);

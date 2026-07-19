@@ -1999,7 +1999,34 @@ export async function runDaemonInner(
   }
 
   let chatDb: DashboardDB | null = null;
-  agent.onChat((text, senderPeerId, _convId, senderContextGraphId, verifiedContextGraphId, messageId) => {
+  agent.onChat((
+    text,
+    senderPeerId,
+    _convId,
+    senderContextGraphId,
+    verifiedContextGraphId,
+    messageId,
+    senderAgentAddress,
+    recipientAgentAddress,
+  ) => {
+    // Agent-addressed messaging (V1): when the sender addressed a specific
+    // agent (`to`), only accept the message if THIS node actually hosts that
+    // agent. The manifest signature was already verified in `messaging.ts`;
+    // this is the routing check that keeps a message meant for 0xB out of
+    // 0xC's inbox (the `to` binding would otherwise be decorative).
+    if (
+      recipientAgentAddress &&
+      !agent
+        .listLocalAgents()
+        .some((a) => a.agentAddress.toLowerCase() === recipientAgentAddress.toLowerCase())
+    ) {
+      log(
+        `CHAT IN  [${shortId(senderPeerId)}] dropped: addressed to agent ` +
+          `${recipientAgentAddress} which this node does not host`,
+      );
+      return;
+    }
+    const fromTag = senderAgentAddress ? ` from=${shortId(senderAgentAddress)}` : '';
     if (chatDb) {
       // `messageId` is forwarded from the encrypted payload (V11+
       // senders). `insertChatMessage` uses it as the dedup key
@@ -2026,6 +2053,8 @@ export async function runDaemonInner(
           peer: senderPeerId,
           text,
           messageId,
+          senderAgent: senderAgentAddress,
+          recipientAgent: recipientAgentAddress,
         });
         writeOutcome = inserted ? 'stored' : 'deduped';
       } catch (err) {
@@ -2037,7 +2066,7 @@ export async function runDaemonInner(
       }
       if (writeOutcome === 'deduped') {
         const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
-        log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag} (deduped): ${text}`);
+        log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}${fromTag} (deduped): ${text}`);
         return;
       }
       // ADR-001: inbound peer chat no longer produces a bell notification —
@@ -2047,7 +2076,7 @@ export async function runDaemonInner(
       // bell-pane `chat_message` notification.
     }
     const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
-    log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
+    log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}${fromTag}: ${text}`);
   });
 
   // Register before network startup. A queued join approval can arrive as

@@ -123,6 +123,11 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import {
+  agentManifestDigestBytes,
+  serializeCompactSignature,
+  type AgentMessageManifest,
+} from './agent-message-manifest.js';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -1746,13 +1751,56 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async sendChat(this: DKGAgent,
     recipientPeerId: string,
     text: string,
-    options: { contextGraphId?: string; messageId?: string } = {},
+    options: {
+      contextGraphId?: string;
+      messageId?: string;
+      // Agent-addressed messaging (V1): the recipient agent's `0x…` identity.
+      // When set, the outgoing chat carries a signed manifest binding THIS
+      // agent's identity as `from` and this address as `to`, so the receiver
+      // can authenticate the sending agent independently of the relaying node.
+      // Requires the agent to hold a signing key for its own identity address;
+      // if it cannot sign, the send fails rather than silently downgrading to
+      // an unauthenticated node-only message the caller did not ask for.
+      recipientAgentAddress?: string;
+    } = {},
   ): Promise<ChatSendResult> {
     if (!this.messageHandler) throw new Error('Agent not started');
     const messageId = options.messageId ?? crypto.randomUUID();
+
+    let agentManifest: AgentMessageManifest | undefined;
+    if (options.recipientAgentAddress) {
+      const from = this.defaultAgentAddress;
+      if (!from) {
+        throw new Error(
+          'Cannot send agent-addressed message: this node has no agent identity ' +
+            'address (defaultAgentAddress).',
+        );
+      }
+      const signAs = this.chain.signMessageAs?.bind(this.chain);
+      if (!signAs) {
+        throw new Error(
+          'Cannot send agent-addressed message: chain adapter does not support ' +
+            'signMessageAs (no agent signing key available).',
+        );
+      }
+      // `ethers.getAddress` validates + checksum-normalizes both ends (throws
+      // on a malformed recipient address — a clean 4xx-able error for callers).
+      const fromAddr = ethers.getAddress(from);
+      const toAddr = ethers.getAddress(options.recipientAgentAddress);
+      const ts = Date.now();
+      const digest = agentManifestDigestBytes({ from: fromAddr, to: toAddr, messageId, ts, text });
+      // Sign as the agent's OWN identity address (not the node operational
+      // key) — mirrors the publisher author-seal path (dkg-publisher.ts). Throws
+      // if `fromAddr` is absent from the adapter's signer pool, which correctly
+      // fails the send instead of shipping an unauthenticated message.
+      const sig = await signAs(fromAddr, digest);
+      agentManifest = { from: fromAddr, to: toAddr, ts, sig: serializeCompactSignature(sig) };
+    }
+
     const result = await this.messageHandler.sendChat(recipientPeerId, text, {
-      ...options,
+      contextGraphId: options.contextGraphId,
       messageId,
+      agentManifest,
     });
 
     if (result.delivered) {

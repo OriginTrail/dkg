@@ -156,14 +156,27 @@ export function registerChatTools(
               "distinct concerns (the local node's chosen scope " +
               'should not silently appear on every outgoing chat).',
           ),
+        recipientAgentAddress: z
+          .string()
+          .optional()
+          .describe(
+            "Optional recipient AGENT identity — its 0x EVM address. When " +
+              'set, the message is cryptographically signed by THIS agent and ' +
+              'addressed to that specific agent, so the receiver can ' +
+              'authenticate the sender (and route to the right local agent) ' +
+              'independently of which node relayed it. Supply it ALONGSIDE ' +
+              '`to` (the node/peer to dial); in V1 you provide both. Requires ' +
+              'this agent to hold its own identity signing key.',
+          ),
       },
     },
-    async ({ to, text, contextGraphId }): Promise<ToolResult> => {
+    async ({ to, text, contextGraphId, recipientAgentAddress }): Promise<ToolResult> => {
       try {
         const result = await client.sendChat({
           to,
           text,
           ...(contextGraphId ? { contextGraphId } : {}),
+          ...(recipientAgentAddress ? { recipientAgentAddress } : {}),
         });
         if (result.delivered) {
           return ok(`Delivered to ${to}.`);
@@ -354,9 +367,13 @@ export function registerChatTools(
         const lines = filtered.map((m) => {
           const arrow = m.direction === 'in' ? '←' : '→';
           const who = formatPeer(m.peer, names);
+          // Agent-addressed messaging (V1): when the message carried a verified
+          // agent identity, surface the authenticated `0x…` sender so the
+          // operator/agent sees who it is really from (not just the node).
+          const agentTag = m.senderAgent ? ` [agent ${m.senderAgent}]` : '';
           const undeliveredTag =
             m.direction === 'out' && m.delivered === false ? ' [UNDELIVERED]' : '';
-          return `- ${arrow} ${who} · ${formatTs(m.ts)}${undeliveredTag}\n    ${m.text.replace(/\n/g, '\n    ')}`;
+          return `- ${arrow} ${who}${agentTag} · ${formatTs(m.ts)}${undeliveredTag}\n    ${m.text.replace(/\n/g, '\n    ')}`;
         });
         const header =
           dir === 'in'
