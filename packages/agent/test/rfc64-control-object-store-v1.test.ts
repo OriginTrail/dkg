@@ -24,7 +24,9 @@ import {
   RFC64_CONTROL_OBJECT_STORE_ERROR_CODES_V1,
   RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
   RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
+  RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY,
   RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+  RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64ControlObjectStoreErrorV1,
   createRfc64ControlObjectStoreTestOpenerV1,
   openRfc64ControlObjectStoreV1,
@@ -107,6 +109,9 @@ describe('RFC-64 durable control-object store v1', () => {
 
     expect(result).toEqual({
       durable: true,
+      namespaceDurability: process.platform === 'win32'
+        ? RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY
+        : RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY,
       objects: [{
         objectDigest: fixture.envelope.objectDigest,
         signatureVariantDigest: pathsFor(dataDir, fixture.envelope).signatureDigest,
@@ -114,6 +119,7 @@ describe('RFC-64 durable control-object store v1', () => {
     });
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.objects)).toBe(true);
+    expect(store.namespaceDurability).toBe(result.namespaceDurability);
 
     const paths = pathsFor(dataDir, fixture.envelope);
     const unsigned = JSON.parse(await readFile(paths.object, 'utf8')) as Record<string, unknown>;
@@ -226,10 +232,19 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.temp-fsynced',
       'signature.renamed',
       'signature.parent-fsynced',
+      'object.existing-fsynced',
+      'object.existing-parent-fsynced',
+      'signature.existing-fsynced',
+      'signature.existing-parent-fsynced',
     ]);
     boundaries.length = 0;
     await store.stageVerifiedObjects([fixture]);
-    expect(boundaries).toEqual([]);
+    expect(boundaries).toEqual([
+      'object.existing-fsynced',
+      'object.existing-parent-fsynced',
+      'signature.existing-fsynced',
+      'signature.existing-parent-fsynced',
+    ]);
   });
 
   it('requires an unforgeable signature proof bound to the exact envelope before I/O', async () => {
@@ -324,8 +339,10 @@ describe('RFC-64 durable control-object store v1', () => {
     const dataDir = await temporaryDataDirectory();
     const fixture = await signedFixture('8');
     let injected = false;
+    const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
       boundary: (boundary) => {
+        boundaries.push(boundary);
         if (boundary === 'object.renamed' && !injected) {
           injected = true;
           throw new Error('injected post-rename fault');
@@ -338,7 +355,10 @@ describe('RFC-64 durable control-object store v1', () => {
       .rejects.toMatchObject({ code: 'control-store-durability' });
     expect(await readFile(paths.object, 'utf8')).toContain('dkg-rfc64-control-store-test-v1');
     await expect(stat(paths.signature)).rejects.toMatchObject({ code: 'ENOENT' });
+    boundaries.length = 0;
     await expect(store.stageVerifiedObjects([fixture])).resolves.toMatchObject({ durable: true });
+    expect(boundaries).toContain('object.existing-fsynced');
+    expect(boundaries).toContain('object.existing-parent-fsynced');
   });
 
   it('rejects symlinked store topology instead of following it', async () => {

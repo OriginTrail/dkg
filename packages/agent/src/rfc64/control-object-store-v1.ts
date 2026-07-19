@@ -43,6 +43,14 @@ export const RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH =
 export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = 0o700;
 export const RFC64_CONTROL_OBJECT_STORE_FILE_MODE = 0o600;
 export const RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS = 16;
+export const RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY =
+  'posix-atomic-rename-directory-fsync-v1' as const;
+export const RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY =
+  'windows-file-flush-atomic-rename-v1' as const;
+
+export type Rfc64ControlObjectStoreNamespaceDurabilityV1 =
+  | typeof RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY
+  | typeof RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY;
 
 const OBJECTS_DIRECTORY = 'objects';
 const SIGNATURES_DIRECTORY = 'signatures';
@@ -85,11 +93,15 @@ export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
   | 'object.temp-fsynced'
   | 'object.renamed'
   | 'object.parent-fsynced'
+  | 'object.existing-fsynced'
+  | 'object.existing-parent-fsynced'
   | 'signature.temp-written'
   | 'signature.temp-mode-secured'
   | 'signature.temp-fsynced'
   | 'signature.renamed'
-  | 'signature.parent-fsynced';
+  | 'signature.parent-fsynced'
+  | 'signature.existing-fsynced'
+  | 'signature.existing-parent-fsynced';
 
 interface Rfc64ControlObjectStoreIoV1 {
   readonly boundary: (boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1) => void;
@@ -112,8 +124,10 @@ export interface StagedVerifiedControlObjectV1 {
 }
 
 export interface StageVerifiedControlObjectsResultV1 {
-  /** Every named file and containing directory has crossed its fsync boundary. */
+  /** Every named file and platform-supported containing-directory barrier has completed. */
   readonly durable: true;
+  /** Explicitly fences later semantic ref publication from weaker namespace barriers. */
+  readonly namespaceDurability: Rfc64ControlObjectStoreNamespaceDurabilityV1;
   readonly objects: readonly StagedVerifiedControlObjectV1[];
 }
 
@@ -134,6 +148,7 @@ export interface StoredVerifiedControlObjectV1 {
 export interface Rfc64ControlObjectStoreV1 {
   readonly rootPath: string;
   readonly closed: boolean;
+  readonly namespaceDurability: Rfc64ControlObjectStoreNamespaceDurabilityV1;
   /**
    * Durably stage immutable unsigned envelopes and detached signature variants.
    * Success does not advance a semantic ref or make any catalog authoritative.
@@ -197,6 +212,9 @@ interface PreparedStoredControlObjectV1 {
 class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closed = false;
   #operationTail: Promise<void> = Promise.resolve();
+  readonly namespaceDurability = process.platform === 'win32'
+    ? RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY
+    : RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY;
 
   constructor(
     readonly rootPath: string,
@@ -225,6 +243,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       }
       return Object.freeze({
         durable: true as const,
+        namespaceDurability: this.namespaceDurability,
         objects: Object.freeze(result),
       });
     });
@@ -519,6 +538,13 @@ async function stageExactFile(
     if (!bytesEqual(existing, bytes)) {
       fail('control-store-corrupt', `existing ${kind} bytes differ for the same digest key`);
     }
+    // A prior attempt can fail after rename but before the parent-directory
+    // barrier. Re-establish both barriers before an idempotent retry reports
+    // success; merely observing the exact bytes is not a durability proof.
+    await fsyncRegularFile(targetPath, `existing ${kind}`);
+    io.boundary(`${kind}.existing-fsynced`);
+    await fsyncDirectory(dirname(targetPath));
+    io.boundary(`${kind}.existing-parent-fsynced`);
     return;
   }
 
@@ -680,6 +706,11 @@ function assertOwner(uid: number, label: string): void {
 }
 
 async function fsyncDirectory(path: string): Promise<void> {
+  // Match the inventory-v1 durability primitive: Node maps fsync to
+  // FlushFileBuffers on Windows, which rejects directory handles with EPERM.
+  // Regular files are still flushed before rename (and again on idempotent
+  // recovery); the directory barrier is available only on POSIX backends.
+  if (process.platform === 'win32') return;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
     handle = await open(path, constants.O_RDONLY);
@@ -691,6 +722,29 @@ async function fsyncDirectory(path: string): Promise<void> {
   } catch (cause) {
     if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
     fail('control-store-durability', `failed to fsync directory ${path}`, cause);
+  } finally {
+    if (handle !== null) await handle.close().catch(() => undefined);
+  }
+}
+
+async function fsyncRegularFile(path: string, label: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    // FlushFileBuffers requires a write-capable Windows handle. POSIX retains
+    // a read-only descriptor so an idempotent recovery never gains write access.
+    handle = await open(
+      path,
+      process.platform === 'win32' ? 'r+' : constants.O_RDONLY | noFollow,
+    );
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      fail('control-store-unsafe-path', `${label} fsync target is not a regular file`);
+    }
+    await handle.sync();
+  } catch (cause) {
+    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
+    fail('control-store-durability', `failed to fsync ${label}`, cause);
   } finally {
     if (handle !== null) await handle.close().catch(() => undefined);
   }
