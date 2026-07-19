@@ -544,6 +544,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             },
           }),
           inventory: persistence.inventory,
+          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
