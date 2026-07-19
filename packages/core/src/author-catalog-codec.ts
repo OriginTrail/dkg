@@ -406,7 +406,7 @@ export function assertAuthorCatalogRowV1(
 
   assertCatalogScalar(() => assertCanonicalKaId(row.kaId, 'kaId'));
   assertAssertionCoordinateV1(row.assertionCoordinate);
-  assertCatalogU64(row.assertionVersion, 'assertionVersion');
+  assertCatalogPositiveU64(row.assertionVersion, 'assertionVersion');
   if (row.projectionId !== KA_TRANSFER_PROJECTION_V1) {
     fail('catalog-schema', `projectionId must be ${KA_TRANSFER_PROJECTION_V1}`);
   }
@@ -608,6 +608,14 @@ function assertCatalogU64(value: unknown, label: string): bigint {
   } catch (cause) {
     fail('catalog-scalar', `${label} is not a canonical DecimalU64V1`, cause);
   }
+}
+
+function assertCatalogPositiveU64(value: unknown, label: string): bigint {
+  const parsed = assertCatalogU64(value, label);
+  if (parsed < 1n) {
+    fail('catalog-scalar', `${label} must be a positive DecimalU64V1`);
+  }
+  return parsed;
 }
 
 function parseCatalogU256(value: unknown, label: string): bigint {
