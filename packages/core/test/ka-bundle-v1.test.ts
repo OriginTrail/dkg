@@ -60,9 +60,13 @@ describe('RFC-64 dormant opaque KA bundle framing', () => {
   it('rejects shared backing memory before copying, parsing, or hashing', () => {
     const sharedProjection = new Uint8Array(new SharedArrayBuffer(1));
     sharedProjection[0] = 0x61;
+    const sharedSeal = new Uint8Array(new SharedArrayBuffer(1));
+    sharedSeal[0] = 0x62;
     const sharedBundle = new Uint8Array(new SharedArrayBuffer(16));
 
     expect(() => encodeOpaqueKaBundleV1(sharedProjection, new Uint8Array()))
+      .toThrow(/shared backing memory/);
+    expect(() => encodeOpaqueKaBundleV1(new Uint8Array(), sharedSeal))
       .toThrow(/shared backing memory/);
     expect(() => decodeOpaqueKaBundleV1(sharedBundle)).toThrow(/shared backing memory/);
   });
@@ -79,6 +83,10 @@ describe('RFC-64 dormant opaque KA bundle framing', () => {
       return;
     }
     if ((backing as ArrayBuffer & { readonly resizable?: boolean }).resizable !== true) return;
+    expect(() => encodeOpaqueKaBundleV1(new Uint8Array(backing), new Uint8Array()))
+      .toThrow(/resizable backing memory/);
+    expect(() => encodeOpaqueKaBundleV1(new Uint8Array(), new Uint8Array(backing)))
+      .toThrow(/resizable backing memory/);
     expect(() => decodeOpaqueKaBundleV1(new Uint8Array(backing)))
       .toThrow(/resizable backing memory/);
   });
