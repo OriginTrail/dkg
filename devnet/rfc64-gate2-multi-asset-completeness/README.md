@@ -41,38 +41,34 @@ their keys, and caps depth, nodes, strings, input bytes, and output bytes.
 
 ## Real two-process adapter mapping
 
-The adapter should build one raw artifact from these product values. Entries
-marked **gap** exist in the internal producer result but are not yet carried by
-`PublishOpenAuthorCatalogExactSetSuccessorResultV1`; exposing detached read-only
-copies is the minimal product-to-harness adapter seam.
+The connected adapter builds one raw artifact from these product values. The
+author-side result fields are detached, read-only observations of the already
+verified signed successor and its durable bundles.
 
 | Contract field | Product source |
 | --- | --- |
-| `authored.catalogScope` | **gap:** expose the exact `deriveAuthorCatalogScopeFromHeadV1(head.payload)` snapshot from `publishOpenAuthorCatalogExactSetSuccessorV1` |
-| `authored.declaredCatalogScopeDigest` | **gap:** expose `result.assets[0].projection.catalogScopeDigest` (and retain the producer's all-assets equality check) |
+| `authored.catalogScope` | `PublishOpenAuthorCatalogExactSetSuccessorResultV1.catalogScope`, derived from the actual signed successor head |
+| `authored.declaredCatalogScopeDigest` | `.catalogScopeDigest`, checked against predecessor scope and every verified asset projection |
 | `authored.catalogHeadDigest` | existing public result `.headObjectDigest` |
 | `authored.catalogHeadTotalRows` | existing public result `.inventoryRowCount` (assigned directly from `head.payload.totalRows`) |
-| `authored.signedBucketRowCount` | **gap:** expose `produced.publication.bucket.payload.rows.length.toString()` independently of head count |
+| `authored.signedBucketRowCount` | `.signedBucketRowCount`, sourced independently from the signed bucket |
 | `authored.signedRows[].kaId` | existing public result `.assets[].kaId` |
 | `authored.signedRows[].catalogRowDigest` | existing public result `.assets[].catalogRowDigest` |
 | `authored.signedRows[].contentDigest` | existing public result `.assets[].contentDigest` |
-| `authored.signedRows[].sealDigest` | **gap:** expose internal `produced.assets[].sealBinding.sealDigest` |
+| `authored.signedRows[].sealDigest` | `.assets[].sealDigest` |
 | `authored.signedRows[].bundleDigest` | existing public result `.assets[].bundleDigest` |
 | `authored.signedRows[].kaUal` | existing public result `.assets[].kaUal` |
-| `authored.signedRows[].activatedTripleCount` | **gap:** expose a checked safe-integer conversion of internal `produced.assets[].projection.publicTripleCount` |
+| `authored.signedRows[].activatedTripleCount` | `.assets[].activatedTripleCount`, a checked safe-integer conversion |
 | `received.catalogHeadDigest` | `Rfc64PublicCatalogNativeMultiAssetActivationEvidenceV1.catalogHeadDigest` |
 | `received.declaredInventoryDigest` | `.inventoryDigest`, also equal to the durable applied-head post-read |
 | `received.inventoryRowCount` | `.inventoryRowCount` |
 | `received.activatedRows` | `.rows`, projected to the seven contract row fields (omit `swmGraph` and `authorship`) |
 
-The receiver side is already sufficient. The author side needs the five
-read-only gaps above; without them, a harness would have to synthesize scope,
-bucket count, seal, or triple-count claims from its own request instead of
-recording verified product output. After that small seam, orchestration can
-expose the exact-set publish and multi-row synchronization calls through two real
-DKGAgent child processes, carry these values verbatim, read the receiver's
-durable applied head using the exposed scope digest, and use a separate connected
-Gate 2 schema to make a real gate disposition.
+The receiver side and author side are now both sufficient for a connected
+adapter. The orchestration exposes exact-set publication and multi-row
+synchronization through two real DKGAgent child processes, carries these values
+verbatim, and reads the receiver's durable applied head using the exposed scope
+digest. A separate connected schema makes the real gate disposition.
 
 ## Commands
 

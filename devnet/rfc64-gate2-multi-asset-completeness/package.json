@@ -3,11 +3,21 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Closed product-shaped Gate 2 exact-set evidence contract with production-compatible scope and applied-inventory digests; never asserts a gate pass.",
+  "description": "Connected two-process Gate 2 exact-set harness plus its closed product-shaped completeness contract.",
+  "dependencies": {
+    "@multiformats/multiaddr": "^13.0.3",
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*",
+    "ethers": "^6.16.0"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --experimental-strip-types --test test/completeness.test.ts",
     "generate": "node --experimental-strip-types src/cli/generate.ts",
-    "verify": "node --experimental-strip-types src/cli/verify.ts"
+    "verify": "node --experimental-strip-types src/cli/verify.ts",
+    "live:generate": "node --import tsx run.ts",
+    "live:verify": "node --import tsx verify-live.ts"
   }
 }
