@@ -252,6 +252,17 @@ export class Rfc64PublicCatalogServiceV1 {
     return this.#policies.accept(buildOpenOwnerContextGraphPolicyV1(input));
   }
 
+  /** Resolve the locally accepted open-policy digest for one exact catalog scope. */
+  acceptedOpenPolicyDigestForCatalogScope(scopeInput: AuthorCatalogScopeV1): Digest32V1 {
+    const scope = snapshotCatalogScope(scopeInput);
+    const held = this.#policies.lookup(scope.networkId, scope.contextGraphId);
+    if (held === null) {
+      throw new Error('RFC-64 catalog scope has no locally accepted open policy');
+    }
+    assertOpenPolicyMatchesCatalogScope(held, held, scope);
+    return held.policyDigest;
+  }
+
   start(): void {
     if (this.#closed) throw new Error('RFC-64 public catalog service is closed');
     if (this.#started) return;
@@ -300,7 +311,7 @@ export class Rfc64PublicCatalogServiceV1 {
     const issuedAt = input.issuedAt;
     const effectiveAt = input.catalogIssuerDelegationEffectiveAt;
     const expiresAt = input.catalogIssuerDelegationExpiresAt;
-    const peers = snapshotAnnouncementPeers(input.peers);
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
     const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
     assertOpenPolicyMatchesCatalogScope(input.policy, heldPolicy, scope);
     const policyDigest = heldPolicy!.policyDigest;
@@ -386,7 +397,8 @@ export class Rfc64PublicCatalogServiceV1 {
     const announcement = parseRfc64PublicCatalogHeadAnnouncementV1(
       encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
     );
-    const peers = snapshotAnnouncementPeers(input.peers);
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
+    this.#assertAcceptedOpenAnnouncement(announcement);
     return this.#announceCatalogHeadSnapshot(announcement, peers);
   }
 
@@ -431,6 +443,22 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
+  #assertAcceptedOpenAnnouncement(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): void {
+    const held = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);
+    if (
+      held === null
+      || held.policy.accessPolicy !== 0
+      || held.policyDigest !== announcement.policyDigest
+      || held.policy.source.kind !== 'owner-signed-unregistered'
+      || held.policy.source.ownerAddress !== announcement.authorAddress
+    ) {
+      throw new Error(
+        'RFC-64 catalog announcement is not bound to the locally accepted open policy',
+      );
+    }
+  }
   async #authorizeNativeOperation(
     input: Rfc64PublicCatalogNativeAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogNativeAuthorizationV1 | null> {
@@ -465,6 +493,40 @@ export class Rfc64PublicCatalogServiceV1 {
       throw new Error('RFC-64 public catalog service is not started');
     }
   }
+}
+
+export function snapshotRfc64PublicCatalogAnnouncementPeersV1(
+  input: readonly string[],
+): readonly string[] {
+  if (!Array.isArray(input)) {
+    throw new TypeError('RFC-64 catalog announcement peers must be an array');
+  }
+  if (input.length > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) {
+    throw new RangeError(
+      `RFC-64 catalog announcement accepts at most `
+      + `${RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1} peers`,
+    );
+  }
+  const seen = new Set<string>();
+  const peers: string[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const peerId = input[index];
+    const byteLength = typeof peerId === 'string' ? UTF8.encode(peerId).byteLength : 0;
+    if (
+      typeof peerId !== 'string'
+      || byteLength === 0
+      || byteLength > RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1
+      || peerId.trim() !== peerId
+    ) {
+      throw new TypeError(`RFC-64 catalog announcement peer ${index} is invalid`);
+    }
+    if (seen.has(peerId)) {
+      throw new TypeError(`RFC-64 catalog announcement peer ${index} is duplicated`);
+    }
+    seen.add(peerId);
+    peers.push(peerId);
+  }
+  return Object.freeze(peers);
 }
 
 function snapshotCatalogScope(input: AuthorCatalogScopeV1): Readonly<AuthorCatalogScopeV1> {
@@ -528,36 +590,4 @@ function assertExactDurableStageReceipt(
       throw new Error('RFC-64 control-object store receipt changed an exact staged object');
     }
   }
-}
-
-function snapshotAnnouncementPeers(input: readonly string[]): readonly string[] {
-  if (!Array.isArray(input)) {
-    throw new TypeError('RFC-64 catalog announcement peers must be an array');
-  }
-  if (input.length > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) {
-    throw new RangeError(
-      `RFC-64 catalog announcement accepts at most `
-      + `${RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1} peers`,
-    );
-  }
-  const seen = new Set<string>();
-  const peers: string[] = [];
-  for (let index = 0; index < input.length; index += 1) {
-    const peerId = input[index];
-    const byteLength = typeof peerId === 'string' ? UTF8.encode(peerId).byteLength : 0;
-    if (
-      typeof peerId !== 'string'
-      || byteLength === 0
-      || byteLength > RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1
-      || peerId.trim() !== peerId
-    ) {
-      throw new TypeError(`RFC-64 catalog announcement peer ${index} is invalid`);
-    }
-    if (seen.has(peerId)) {
-      throw new TypeError(`RFC-64 catalog announcement peer ${index} is duplicated`);
-    }
-    seen.add(peerId);
-    peers.push(peerId);
-  }
-  return Object.freeze(peers);
 }

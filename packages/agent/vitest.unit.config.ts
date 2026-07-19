@@ -131,6 +131,7 @@ export default defineConfig({
       "test/rfc64-public-catalog-native-gate1.integration.test.ts",
       "test/rfc64-persistent-catalog-provider-v1.test.ts",
       "test/rfc64-public-catalog-successor-producer-v1.test.ts",
+      "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

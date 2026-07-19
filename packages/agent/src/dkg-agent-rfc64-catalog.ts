@@ -19,8 +19,17 @@
  */
 
 import {
+  ZERO_DIGEST32_V1,
+  assertSignedAuthorCatalogBucketEnvelopeV1,
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  createOperationContext,
+  computeControlSignatureVariantDigestHex,
+  deriveAuthorCatalogScopeFromHeadV1,
+  type AssertionCoordinateV1,
+  type ByteLengthV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type CatalogSealDeploymentProfileV1,
   type OperationContext,
   type ContextGraphIdV1,
   type Digest32V1,
@@ -33,7 +42,9 @@ import {
   type CountV1,
   assertCanonicalChainId,
   assertNetworkIdV1,
-  type CatalogSealDeploymentProfileV1,
+  type SignedAuthorCatalogBucketEnvelopeV1,
+  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -43,8 +54,10 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
 import type { Rfc64PublicCatalogReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
+import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
   Rfc64PublicCatalogServiceV1,
+  snapshotRfc64PublicCatalogAnnouncementPeersV1,
   type PublishOpenAuthorCatalogGenesisResultV1,
   type AnnounceRfc64PublicCatalogHeadInputV1,
   type AnnounceRfc64PublicCatalogHeadResultV1,
@@ -61,6 +74,14 @@ import {
   type Rfc64PublicOpenCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
+import {
+  Rfc64PublicCatalogSuccessorProducerV1,
+  type Rfc64PublicCatalogIssuerAuthorizationV1,
+} from './rfc64/public-catalog-successor-producer-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  type Rfc64PublicCatalogHeadAnnouncementV1,
+} from './rfc64/public-catalog-transport-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64OpenCatalogAuthorSignerV1 {
@@ -157,6 +178,38 @@ export function snapshotRfc64CatalogDeploymentProfileV1(
     assertedAtChainId: input.assertedAtChainId,
     assertedAtKav10Address,
   });
+}
+
+export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
+  /** Exact durable predecessor returned by genesis or a prior successor. */
+  readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
+  /** Same author/catalog key that signed the predecessor. */
+  readonly author: Rfc64OpenCatalogAuthorSignerV1;
+  /** Exact signed authorization returned by genesis publication. */
+  readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly projectionBytes: Uint8Array;
+  readonly seal: CanonicalGraphScopedAuthorSealV1;
+  readonly deployment: CatalogSealDeploymentProfileV1;
+  /** Successor head timestamp; defaults to now. */
+  readonly issuedAt?: TimestampMsV1;
+  /** Peers to announce head availability to after both durable barriers. */
+  readonly peers: readonly string[];
+}
+
+export interface PublishOpenAuthorCatalogSuccessorResultV1 {
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly headObjectDigest: Digest32V1;
+  readonly signatureVariantDigest: Digest32V1;
+  readonly catalogRowDigest: Digest32V1;
+  readonly bundleDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
+  readonly contentByteLength: ByteLengthV1;
+  readonly bundleByteLength: ByteLengthV1;
+  readonly kaUal: string;
+  readonly inventoryRowCount: CountV1;
+  readonly announcedPeers: readonly string[];
+  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
@@ -256,6 +309,103 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Public/open author path for one exact root-lane successor. The predecessor
+   * is reloaded from durable provider storage, the hardened producer performs
+   * every authorship/bundle/projection check, and announcement happens only
+   * after exact bundle and control-object durability receipts.
+   */
+  async publishOpenAuthorCatalogSuccessorV1(
+    this: DKGAgent,
+    params: PublishOpenAuthorCatalogSuccessorParamsV1,
+  ): Promise<PublishOpenAuthorCatalogSuccessorResultV1> {
+    const service = this.requireRfc64PublicCatalogServiceV1();
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) {
+      throw new Error('RFC-64 persistence is not available');
+    }
+    const history = await loadPublicOpenRootLaneHistoryV1(persistence, params.previousHead);
+    const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    const policyDigest = service.acceptedOpenPolicyDigestForCatalogScope(scope);
+    const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
+    if (authorAddress !== scope.authorAddress) {
+      throw new Error('RFC-64 successor author must equal the exact predecessor author');
+    }
+    if (
+      params.catalogIssuerAuthorization.catalogIssuerDelegation.objectDigest
+      !== history.previousHead.payload.catalogIssuerDelegationDigest
+    ) {
+      throw new Error(
+        'RFC-64 successor authorization does not match the predecessor delegation digest',
+      );
+    }
+
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: persistence.controlObjects,
+      stageKaBundle: persistence.kaBundles.putKaBundle,
+    });
+    const produced = await producer.produceAndStage({
+      previousHead: history.previousHead,
+      previousDirectoryPath: history.previousDirectoryPath,
+      previousBucket: history.previousBucket,
+      assertionCoordinate: params.assertionCoordinate,
+      projectionBytes: params.projectionBytes,
+      seal: params.seal,
+      deployment: params.deployment,
+      issuedAt: params.issuedAt ?? (Date.now().toString() as TimestampMsV1),
+      catalogSigner: {
+        issuer: authorAddress,
+        signDigest: (objectDigest) => params.author.signMessage(objectDigest),
+      },
+      catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+    });
+    const head = produced.publication.head;
+    const headKeys = produced.stagedControlObjects.objects.find(
+      (keys) => keys.objectDigest === head.objectDigest,
+    );
+    const expectedSignatureVariantDigest = computeControlSignatureVariantDigestHex(
+      head.objectDigest,
+      head.signature,
+    );
+    if (
+      headKeys === undefined
+      || headKeys.signatureVariantDigest !== expectedSignatureVariantDigest
+    ) {
+      throw new Error('RFC-64 successor control store returned no exact durable head receipt');
+    }
+    const announcement: Rfc64PublicCatalogHeadAnnouncementV1 = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: head.payload.networkId,
+      contextGraphId: head.payload.contextGraphId,
+      subGraphName: head.payload.subGraphName,
+      authorAddress: head.payload.authorAddress,
+      catalogEra: head.payload.era,
+      catalogVersion: head.payload.version,
+      policyDigest,
+      catalogHeadObjectDigest: headKeys.objectDigest,
+      signatureVariantDigest: headKeys.signatureVariantDigest,
+    });
+    const delivery = await service.announceCatalogHead({
+      announcement,
+      peers,
+    });
+    return Object.freeze({
+      announcement: delivery.announcement,
+      headObjectDigest: headKeys.objectDigest,
+      signatureVariantDigest: headKeys.signatureVariantDigest,
+      catalogRowDigest: produced.sealBinding.catalogRowDigest,
+      bundleDigest: produced.bundleDigest,
+      contentDigest: produced.projection.projectionDigest,
+      contentByteLength: produced.projection.projectionByteLength,
+      bundleByteLength: produced.row.transfer.byteLength,
+      kaUal: produced.projection.kaUal,
+      inventoryRowCount: head.payload.totalRows,
+      announcedPeers: delivery.announcedPeers,
+      failedPeers: delivery.failedPeers,
+    });
+  }
+
+  /**
    * Read a head back from the control-object store by its exact digests — the
    * "durably staged the exact head" proof. Returns null when not staged.
    */
@@ -315,6 +465,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       catalogHeadDigest,
     );
     return evidence === undefined ? null : Object.freeze({ ...evidence });
+  }
+
+  /** Read a fresh copy of one exact durably staged opaque KA bundle. */
+  readRfc64StagedKaBundleV1(
+    this: DKGAgent,
+    bundleDigest: Digest32V1,
+  ): Promise<Uint8Array | null> {
+    return this.rfc64PersistenceV1?.kaBundles.readKaBundleByDigest(bundleDigest)
+      ?? Promise.resolve(null);
   }
 
   /** Await the receiver scheduler draining all queued + in-flight fetch/stage work. */
@@ -453,4 +612,63 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     return deployment;
   }
+}
+
+interface PublicOpenRootLaneHistoryV1 {
+  readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
+  readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
+  readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
+}
+
+async function loadPublicOpenRootLaneHistoryV1(
+  persistence: Rfc64PersistenceV1,
+  ref: Rfc64StagedAuthorCatalogHeadRefV1,
+): Promise<PublicOpenRootLaneHistoryV1> {
+  const storedHead = await persistence.controlObjects.getVerifiedObject({
+    objectDigest: ref.objectDigest,
+    signatureVariantDigest: ref.signatureVariantDigest,
+    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+  });
+  if (storedHead === null) throw new Error('RFC-64 predecessor head is not durably staged');
+  assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+  const previousHead = storedHead.envelope;
+  if (
+    previousHead.payload.subGraphName !== null
+    || previousHead.payload.bucketCount !== '1'
+    || previousHead.payload.directoryHeight !== '0'
+    || (previousHead.payload.totalRows !== '0' && previousHead.payload.totalRows !== '1')
+  ) {
+    throw new Error('RFC-64 predecessor is outside the public/open root-lane slice');
+  }
+
+  const storedRoot = await persistence.controlObjects.getVerifiedObjectByDigest({
+    objectDigest: previousHead.payload.directoryRootDigest,
+    verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+  });
+  if (storedRoot === null) throw new Error('RFC-64 predecessor directory root is not staged');
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
+    storedRoot.envelope,
+    previousHead.payload.bucketCount,
+  );
+  const root = storedRoot.envelope;
+  const descriptor = root.payload.entries[0];
+  if (descriptor === undefined || !('bucketDigest' in descriptor)) {
+    throw new Error('RFC-64 predecessor root has no level-zero bucket descriptor');
+  }
+
+  let previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null = null;
+  if (descriptor.bucketDigest !== ZERO_DIGEST32_V1) {
+    const storedBucket = await persistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest: descriptor.bucketDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (storedBucket === null) throw new Error('RFC-64 predecessor bucket is not staged');
+    assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
+    previousBucket = storedBucket.envelope;
+  }
+  return Object.freeze({
+    previousHead,
+    previousDirectoryPath: Object.freeze([root]),
+    previousBucket,
+  });
 }
