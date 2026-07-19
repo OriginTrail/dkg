@@ -1713,6 +1713,19 @@ export class DKGAgent extends DKGAgentBase {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
     }
+    // OT-RFC-64 inventory consumers are now stopped. Release the exclusive
+    // inventory foundation before the triple store closes, but finish the
+    // remaining teardown even when close enters its deliberate fail-stop
+    // state. The original close failure is re-thrown after teardown so the
+    // operator receives a failed shutdown rather than a false success.
+    let inventoryCloseFailed = false;
+    let inventoryCloseFailure: unknown;
+    try {
+      this.closeRfc64InventoryV1();
+    } catch (error) {
+      inventoryCloseFailed = true;
+      inventoryCloseFailure = error;
+    }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
     // exits. See docs/bugs/wm-persistence-regression.md.
@@ -1734,6 +1747,7 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.started = false;
+    if (inventoryCloseFailed) throw inventoryCloseFailure;
   }
 
   /**

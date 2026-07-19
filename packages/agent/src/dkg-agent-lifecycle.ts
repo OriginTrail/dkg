@@ -932,19 +932,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
 
-    // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking, so
-    // the local store is clean before this node serves or syncs anything.
-    // Marker-gated (runs once per data dir), never throws, no-op on stores
-    // that never accepted oversized literals (Blazegraph).
-    await runOversizeSweep({
-      store: this.store,
-      dataDir: this.config.dataDir,
-      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-      logInfo: (message) => this.log.info(ctx, message),
-      logWarn: (message) => this.log.warn(ctx, message),
-    });
+    // OT-RFC-64: persistent inventory ownership and the complete bounded
+    // startup purge precede node.start(), protocol registration, and every
+    // network consumer. No dataDir intentionally leaves the feature dormant.
+    await this.prepareRfc64InventoryV1();
+    try {
+      // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
+      // so the local store is clean before this node serves or syncs anything.
+      // Marker-gated (runs once per data dir), never throws, no-op on stores
+      // that never accepted oversized literals (Blazegraph).
+      await runOversizeSweep({
+        store: this.store,
+        dataDir: this.config.dataDir,
+        recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+        logInfo: (message) => this.log.info(ctx, message),
+        logWarn: (message) => this.log.warn(ctx, message),
+      });
 
-    await this.node.start();
+      await this.node.start();
+    } catch (cause) {
+      try {
+        this.closeRfc64InventoryV1();
+      } catch (closeCause) {
+        throw new AggregateError(
+          [cause, closeCause],
+          'DKG node startup and RFC-64 inventory cleanup both failed',
+        );
+      }
+      throw cause;
+    }
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
