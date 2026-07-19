@@ -16,6 +16,7 @@ import {
   type Rfc64PersistenceV1,
 } from './rfc64/persistence-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -999,6 +1000,9 @@ export class DKGAgentBase {
    * while dormant (no dataDir) or after `stop()`.
    */
   protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** Exact process-local post-verification evidence, keyed by applied head. */
+  protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
+    new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();

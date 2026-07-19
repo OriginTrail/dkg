@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import type { Rfc64ControlObjectOperationsV1 } from '../src/rfc64/control-object-store-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
   Rfc64PublicCatalogServiceV1,
   type Rfc64PublicCatalogReconcilerClientsV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
@@ -338,6 +339,61 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       .rejects.toThrow('genesis durability barrier failed');
     expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
     expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
+  it('reports exact explicit announce ACK/failures and rejects unbounded peers pre-send', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+    });
+    const policy = acceptPolicy(service);
+    const head = announcement(policy.policyDigest);
+    let attempt = 0;
+    router.sendResponse = async () => Uint8Array.of(attempt++ === 0 ? 1 : 2);
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: head,
+      peers: ['peer-ack', 'peer-fail'],
+    });
+    expect(result.announcement).toEqual(head);
+    expect(result.announcement).not.toBe(head);
+    expect(result.announcedPeers).toEqual(['peer-ack']);
+    expect(result.failedPeers).toEqual([{
+      peerId: 'peer-fail',
+      error: expect.stringContaining('invalid acknowledgement'),
+    }]);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.announcedPeers)).toBe(true);
+    expect(Object.isFrozen(result.failedPeers)).toBe(true);
+
+    const sendsBefore = countEvent(
+      router,
+      `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
+    );
+    await expect(service.announceCatalogHead({
+      announcement: head,
+      peers: Array.from(
+        { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 + 1 },
+        (_, index) => `peer-${index}`,
+      ),
+    })).rejects.toThrow(/at most 64 peers/);
+    const sparsePeers = new Array<string>(2);
+    sparsePeers[0] = 'peer-ok';
+    await expect(service.announceCatalogHead({
+      announcement: head,
+      peers: sparsePeers,
+    })).rejects.toThrow(/peer 1 is invalid/);
+    await expect(service.announceCatalogHead({
+      announcement: head,
+      peers: ['é'.repeat(129)],
+    })).rejects.toThrow(/peer 0 is invalid/);
+    expect(countEvent(
+      router,
+      `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
+    )).toBe(sendsBefore);
     await service.close();
   });
 

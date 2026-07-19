@@ -30,6 +30,7 @@ import type {
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
+  CatalogSealDeploymentProfileV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -1046,6 +1047,14 @@ export interface DKGAgentConfig {
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */
   networkIdentity?: DkgNetworkIdentity;
+  /**
+   * Locally trusted RFC-64 catalog-seal deployment tuple. This deterministic
+   * override is intended for chain-free devnets; production nodes normally
+   * derive the same tuple from their configured chain adapter. It is snapshotted
+   * and validated during `DKGAgent.create()` and is never accepted from catalog
+   * announcement wire data.
+   */
+  rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

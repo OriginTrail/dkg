@@ -400,7 +400,10 @@ import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
 import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
-import { Rfc64CatalogMethods } from './dkg-agent-rfc64-catalog.js';
+import {
+  Rfc64CatalogMethods,
+  snapshotRfc64CatalogDeploymentProfileV1,
+} from './dkg-agent-rfc64-catalog.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -692,6 +695,9 @@ export class DKGAgent extends DKGAgentBase {
         inputConfig.syncContextGraphPriorities,
       ),
     });
+    const rfc64CatalogDeploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
+      config.rfc64CatalogDeploymentProfile,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -792,7 +798,12 @@ export class DKGAgent extends DKGAgentBase {
       networkId: computedNetworkId,
       chainId: adapterChainId ?? config.networkIdentity?.chainId,
     };
-    const resolvedConfig: ResolvedDKGAgentConfig = { ...config, genesisId, networkIdentity };
+    const resolvedConfig: ResolvedDKGAgentConfig = {
+      ...config,
+      genesisId,
+      networkIdentity,
+      rfc64CatalogDeploymentProfile,
+    };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';

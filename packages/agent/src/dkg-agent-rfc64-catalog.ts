@@ -31,18 +31,36 @@ import {
   type DecimalU64V1,
   type AuthorCatalogScopeV1,
   type CountV1,
+  assertCanonicalChainId,
+  assertNetworkIdV1,
+  type CatalogSealDeploymentProfileV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
+import type { Rfc64PublicCatalogReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
 import {
   Rfc64PublicCatalogServiceV1,
   type PublishOpenAuthorCatalogGenesisResultV1,
+  type AnnounceRfc64PublicCatalogHeadInputV1,
+  type AnnounceRfc64PublicCatalogHeadResultV1,
+  type Rfc64PublicCatalogReconcilerClientsV1,
+  type Rfc64PublicCatalogServiceNativeOptionsV1,
   type Rfc64PublicCatalogServiceStatsV1,
 } from './rfc64/public-catalog-service-v1.js';
+import {
+  Rfc64PublicCatalogNativeReceiverV1,
+  type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
+} from './rfc64/public-catalog-native-receiver-v1.js';
+import {
+  createRfc64PublicOpenCatalogNativeReconcilerV1,
+  type Rfc64PublicOpenCatalogDeploymentResolverV1,
+} from './rfc64/public-catalog-native-reconciler-v1.js';
+import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64OpenCatalogAuthorSignerV1 {
@@ -88,6 +106,59 @@ export interface Rfc64StagedCatalogIssuerDelegationRefV1 {
   readonly signatureVariantDigest: Digest32V1;
 }
 
+/** Exact durable applied-head key exposed for devnet evidence collection. */
+export interface Rfc64AppliedCatalogHeadRefV1 {
+  readonly catalogScopeDigest: Digest32V1;
+  readonly authorAddress: EvmAddressV1;
+}
+
+/**
+ * Validate and detach a locally configured deployment tuple from caller-owned
+ * state. Exported so `DKGAgent.create()` can snapshot the override before any
+ * asynchronous startup work begins.
+ */
+export function snapshotRfc64CatalogDeploymentProfileV1(
+  input: CatalogSealDeploymentProfileV1 | undefined,
+): Readonly<CatalogSealDeploymentProfileV1> | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('rfc64CatalogDeploymentProfile must be a plain object');
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('rfc64CatalogDeploymentProfile must be a plain object');
+  }
+  const keys = Object.keys(input).sort();
+  const expectedKeys = [
+    'assertedAtChainId',
+    'assertedAtKav10Address',
+    'networkId',
+  ];
+  if (
+    keys.length !== expectedKeys.length
+    || keys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    throw new TypeError(
+      'rfc64CatalogDeploymentProfile must contain exactly networkId, '
+      + 'assertedAtChainId, and assertedAtKav10Address',
+    );
+  }
+  assertNetworkIdV1(input.networkId);
+  assertCanonicalChainId(input.assertedAtChainId, 'assertedAtChainId');
+  if (!ethers.isAddress(input.assertedAtKav10Address)) {
+    throw new TypeError('assertedAtKav10Address must be a non-zero EVM address');
+  }
+  const assertedAtKav10Address = input.assertedAtKav10Address.toLowerCase() as EvmAddressV1;
+  if (assertedAtKav10Address === `0x${'00'.repeat(20)}`) {
+    throw new TypeError('assertedAtKav10Address must be a non-zero EVM address');
+  }
+  return Object.freeze({
+    networkId: input.networkId,
+    assertedAtChainId: input.assertedAtChainId,
+    assertedAtKav10Address,
+  });
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /**
    * Construct + start the public catalog service on the production router.
@@ -100,6 +171,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
+      native: this.createRfc64PublicCatalogNativeOptionsV1(),
     });
     service.start();
     this.rfc64PublicCatalogServiceV1 = service;
@@ -110,7 +182,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogServiceV1(this: DKGAgent): Promise<void> {
     const service = this.rfc64PublicCatalogServiceV1;
     this.rfc64PublicCatalogServiceV1 = undefined;
-    await service?.close();
+    try {
+      await service?.close();
+    } finally {
+      this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+    }
   }
 
   /**
@@ -171,6 +247,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Explicit best-effort availability fan-out for an already durable head. */
+  announceRfc64PublicCatalogHeadV1(
+    this: DKGAgent,
+    input: AnnounceRfc64PublicCatalogHeadInputV1,
+  ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
+    return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead(input);
+  }
+
   /**
    * Read a head back from the control-object store by its exact digests — the
    * "durably staged the exact head" proof. Returns null when not staged.
@@ -206,6 +290,33 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return stored.envelope.objectDigest as Digest32V1;
   }
 
+  /** Read the exact durable applied-head record; returns null while dormant/missing. */
+  readRfc64AppliedCatalogHeadV1(
+    this: DKGAgent,
+    ref: Rfc64AppliedCatalogHeadRefV1,
+  ): AppliedCatalogHeadSnapshotV1 | null {
+    return this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
+      ref.catalogScopeDigest,
+      ref.authorAddress,
+    ) ?? null;
+  }
+
+  /**
+   * Read the receiver's exact post-verification synchronization evidence for
+   * one head in this process. Durable restart truth remains the applied-head
+   * API above; this process-local record proves the semantic post-read that
+   * immediately preceded that durable commit.
+   */
+  readRfc64PublicCatalogSynchronizationEvidenceV1(
+    this: DKGAgent,
+    catalogHeadDigest: Digest32V1,
+  ): Rfc64PublicCatalogNativeSynchronizationEvidenceV1 | null {
+    const evidence = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
+      catalogHeadDigest,
+    );
+    return evidence === undefined ? null : Object.freeze({ ...evidence });
+  }
+
   /** Await the receiver scheduler draining all queued + in-flight fetch/stage work. */
   whenRfc64PublicCatalogReceiverIdleV1(this: DKGAgent): Promise<void> {
     const service = this.rfc64PublicCatalogServiceV1;
@@ -224,5 +335,122 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
     }
     return service;
+  }
+
+  /** Build native mode only when a local deployment source exists. */
+  private createRfc64PublicCatalogNativeOptionsV1(
+    this: DKGAgent,
+  ): Rfc64PublicCatalogServiceNativeOptionsV1 | undefined {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) return undefined;
+    if (
+      this.config.rfc64CatalogDeploymentProfile === undefined
+      && this.chain.chainId === 'none'
+    ) {
+      return undefined;
+    }
+    this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+    const resolveDeployment: Rfc64PublicOpenCatalogDeploymentResolverV1 =
+      (announcement, signal) => this.resolveRfc64CatalogDeploymentProfileV1(
+        announcement.networkId,
+        signal,
+      );
+    return Object.freeze({
+      readCatalogObjectByDigest: async (objectDigest: Digest32V1) => {
+        const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
+          objectDigest,
+          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        });
+        return stored?.envelope ?? null;
+      },
+      readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
+        const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
+          headTransport: clients.headTransport,
+          contentTransport: clients.contentTransport,
+          controlObjects: persistence.controlObjects,
+          inventory: persistence.inventory,
+          store: this.store,
+          transportTimeoutMs: clients.transportTimeoutMs,
+        });
+        const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+          nativeReceiver: Object.freeze({
+            synchronizePublicOpenCatalog: async (...args) => {
+              const evidence = await nativeReceiver.synchronizePublicOpenCatalog(...args);
+              this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
+                evidence.catalogHeadDigest,
+                evidence,
+              );
+              return evidence;
+            },
+          }),
+          inventory: persistence.inventory,
+          resolveDeployment,
+        });
+        const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
+          isHeadApplied: (announcement) => {
+            this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
+            return reconciler.isHeadApplied(announcement);
+          },
+          reconcileHead: (remotePeerId, announcement, signal) =>
+            reconciler.reconcileHead(remotePeerId, announcement, signal),
+        };
+        return Object.freeze(deploymentAwareReconciler);
+      },
+    });
+  }
+
+  /** Reject a stale applied-head dedupe before trusting any durable row. */
+  private assertRfc64CatalogNetworkMatchesTrustedSourceV1(
+    this: DKGAgent,
+    catalogNetworkId: NetworkIdV1,
+  ): void {
+    const trustedNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.chain.chainId;
+    if (trustedNetworkId === 'none') {
+      throw new Error(
+        'RFC-64 native reconciliation requires a trusted chain or '
+        + 'rfc64CatalogDeploymentProfile override',
+      );
+    }
+    if (trustedNetworkId !== catalogNetworkId) {
+      throw new Error(
+        `RFC-64 catalog network ${catalogNetworkId} differs from locally trusted `
+        + `deployment network ${trustedNetworkId}`,
+      );
+    }
+  }
+
+  /** Resolve only from the create-time snapshot or this node's chain adapter. */
+  private async resolveRfc64CatalogDeploymentProfileV1(
+    this: DKGAgent,
+    catalogNetworkId: NetworkIdV1,
+    signal: AbortSignal,
+  ): Promise<CatalogSealDeploymentProfileV1> {
+    if (signal.aborted) throw signal.reason;
+    this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(catalogNetworkId);
+    let deployment = this.config.rfc64CatalogDeploymentProfile;
+    if (deployment === undefined) {
+      if (this.chain.chainId === 'none') {
+        throw new Error(
+          'RFC-64 native reconciliation requires a trusted chain or '
+          + 'rfc64CatalogDeploymentProfile override',
+        );
+      }
+      const [chainId, kav10Address] = await Promise.all([
+        this.chain.getEvmChainId(),
+        this.chain.getKnowledgeAssetsLifecycleAddress(),
+      ]);
+      if (signal.aborted) throw signal.reason;
+      deployment = snapshotRfc64CatalogDeploymentProfileV1({
+        networkId: this.chain.chainId as NetworkIdV1,
+        assertedAtChainId: chainId.toString() as never,
+        assertedAtKav10Address: kav10Address as EvmAddressV1,
+      });
+      if (deployment === undefined) {
+        throw new Error('RFC-64 chain deployment profile resolution failed');
+      }
+    }
+    return deployment;
   }
 }

@@ -73,11 +73,17 @@ import type {
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   Rfc64PublicCatalogTransportV1,
+  encodeRfc64PublicCatalogHeadAnnouncementV1,
+  parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
 
 /** Default per-peer announce/fetch deadline (ms). */
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
+/** Hard fan-out bound for one explicit best-effort announcement call. */
+export const RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 = 64;
+const RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1 = 256;
+const UTF8 = new TextEncoder();
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -149,6 +155,21 @@ export interface PublishOpenAuthorCatalogGenesisResultV1 {
   /** Peers the announcement was acknowledged by. */
   readonly announcedPeers: readonly string[];
   /** Peers whose announcement failed (best-effort; correctness comes from pull). */
+  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+}
+
+export interface AnnounceRfc64PublicCatalogHeadInputV1 {
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /** Unique peer IDs; at most RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1. */
+  readonly peers: readonly string[];
+}
+
+export interface AnnounceRfc64PublicCatalogHeadResultV1 {
+  /** Validated immutable snapshot used for every delivery attempt. */
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /** Input-order peers that returned the exact transport ACK. */
+  readonly announcedPeers: readonly string[];
+  /** Input-order peers whose bounded attempt threw or returned a non-ACK. */
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
@@ -279,7 +300,7 @@ export class Rfc64PublicCatalogServiceV1 {
     const issuedAt = input.issuedAt;
     const effectiveAt = input.catalogIssuerDelegationEffectiveAt;
     const expiresAt = input.catalogIssuerDelegationExpiresAt;
-    const peers = Object.freeze(Array.from(input.peers));
+    const peers = snapshotAnnouncementPeers(input.peers);
     const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
     assertOpenPolicyMatchesCatalogScope(input.policy, heldPolicy, scope);
     const policyDigest = heldPolicy!.policyDigest;
@@ -305,7 +326,6 @@ export class Rfc64PublicCatalogServiceV1 {
     ]);
     assertExactDurableStageReceipt(stagedDelegation, [delegationEnvelope]);
     const delegationKeys = stagedDelegation.objects[0]!;
-
     const produced = await produceEmptyAuthorCatalogGenesisV1({
       scope,
       catalogIssuerDelegationDigest: delegationEnvelope.objectDigest as Digest32V1,
@@ -339,30 +359,35 @@ export class Rfc64PublicCatalogServiceV1 {
       signatureVariantDigest: headKeys.signatureVariantDigest,
     });
 
-    const announcedPeers: string[] = [];
-    const failedPeers: Array<{ peerId: string; error: string }> = [];
-    for (const peerId of peers) {
-      try {
-        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions());
-        announcedPeers.push(peerId);
-      } catch (error) {
-        failedPeers.push({
-          peerId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    const delivery = await this.#announceCatalogHeadSnapshot(announcement, peers);
 
     return Object.freeze({
-      announcement,
+      announcement: delivery.announcement,
       headObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
       catalogIssuerAuthorization: delegation.authorization,
       catalogIssuerDelegationObjectDigest: delegationKeys.objectDigest,
       catalogIssuerDelegationSignatureVariantDigest: delegationKeys.signatureVariantDigest,
-      announcedPeers: Object.freeze(announcedPeers),
-      failedPeers: Object.freeze(failedPeers),
+      announcedPeers: delivery.announcedPeers,
+      failedPeers: delivery.failedPeers,
     });
+  }
+
+  /**
+   * Best-effort availability fan-out for an already durable head (including a
+   * successor produced by a separate authoring path). The announcement and
+   * peer list are fully snapshotted before the first send; one peer failure
+   * never suppresses later attempts.
+   */
+  async announceCatalogHead(
+    input: AnnounceRfc64PublicCatalogHeadInputV1,
+  ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
+    this.#requireStarted();
+    const announcement = parseRfc64PublicCatalogHeadAnnouncementV1(
+      encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
+    );
+    const peers = snapshotAnnouncementPeers(input.peers);
+    return this.#announceCatalogHeadSnapshot(announcement, peers);
   }
 
   /** Idle-await the receiver (tests / graceful shutdown coordination). */
@@ -380,6 +405,30 @@ export class Rfc64PublicCatalogServiceV1 {
 
   #sendOptions(): SendOptions {
     return { timeoutMs: this.#transportTimeoutMs };
+  }
+
+  async #announceCatalogHeadSnapshot(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    peers: readonly string[],
+  ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
+    const announcedPeers: string[] = [];
+    const failedPeers: Array<{ peerId: string; error: string }> = [];
+    for (const peerId of peers) {
+      try {
+        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions());
+        announcedPeers.push(peerId);
+      } catch (error) {
+        failedPeers.push({
+          peerId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return Object.freeze({
+      announcement,
+      announcedPeers: Object.freeze(announcedPeers),
+      failedPeers: Object.freeze(failedPeers.map((failure) => Object.freeze(failure))),
+    });
   }
 
   async #authorizeNativeOperation(
@@ -479,4 +528,36 @@ function assertExactDurableStageReceipt(
       throw new Error('RFC-64 control-object store receipt changed an exact staged object');
     }
   }
+}
+
+function snapshotAnnouncementPeers(input: readonly string[]): readonly string[] {
+  if (!Array.isArray(input)) {
+    throw new TypeError('RFC-64 catalog announcement peers must be an array');
+  }
+  if (input.length > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) {
+    throw new RangeError(
+      `RFC-64 catalog announcement accepts at most `
+      + `${RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1} peers`,
+    );
+  }
+  const seen = new Set<string>();
+  const peers: string[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const peerId = input[index];
+    const byteLength = typeof peerId === 'string' ? UTF8.encode(peerId).byteLength : 0;
+    if (
+      typeof peerId !== 'string'
+      || byteLength === 0
+      || byteLength > RFC64_PUBLIC_CATALOG_PEER_ID_MAX_BYTES_V1
+      || peerId.trim() !== peerId
+    ) {
+      throw new TypeError(`RFC-64 catalog announcement peer ${index} is invalid`);
+    }
+    if (seen.has(peerId)) {
+      throw new TypeError(`RFC-64 catalog announcement peer ${index} is duplicated`);
+    }
+    seen.add(peerId);
+    peers.push(peerId);
+  }
+  return Object.freeze(peers);
 }
