@@ -25,10 +25,10 @@ export const EIP191_SIGNATURE_BYTES = 65;
 export const MAX_EIP1271_SIGNATURE_BYTES = 4096;
 export const MAX_CONTROL_SIGNATURE_VARIANT_BYTES = 16 * 1024;
 
-export const CONTROL_OBJECT_SIGNATURE_SUITES = [
+export const CONTROL_OBJECT_SIGNATURE_SUITES = Object.freeze([
   'eip191-personal-sign-digest-v1',
   'eip1271-current-finalized-v1',
-] as const;
+] as const);
 
 export type ControlObjectSignatureSuite = (typeof CONTROL_OBJECT_SIGNATURE_SUITES)[number];
 
@@ -318,8 +318,11 @@ function assertUnsignedControlEnvelopeFields(
   if (/[ -]/u.test(envelope.objectType)) {
     throw new Error('Control-object type is outside the canonical string bounds');
   }
-  if (!CONTROL_OBJECT_SIGNATURE_SUITES.includes(envelope.signatureSuite)) {
-    throw new Error(`Unsupported control-object signature suite: ${String(envelope.signatureSuite)}`);
+  if (
+    envelope.signatureSuite !== 'eip191-personal-sign-digest-v1'
+    && envelope.signatureSuite !== 'eip1271-current-finalized-v1'
+  ) {
+    throw new Error('Unsupported control-object signature suite');
   }
   assertCanonicalEvmAddress(envelope.issuer, 'issuer');
 
