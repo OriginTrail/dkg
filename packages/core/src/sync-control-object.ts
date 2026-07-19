@@ -496,9 +496,12 @@ function assertExactKeys(
     throw new Error(`${label} must not contain symbol properties`);
   }
   const strings = actual as string[];
+  // Sort both sides so the helper is a true exact-key validator and does not
+  // silently depend on each call site pre-sorting `expected`.
+  const sortedExpected = [...expected].sort();
   if (
     strings.length !== expected.length
-    || [...strings].sort().some((key, index) => key !== expected[index])
+    || [...strings].sort().some((key, index) => key !== sortedExpected[index])
   ) {
     throw new Error(`${label} has unknown or missing fields`);
   }
