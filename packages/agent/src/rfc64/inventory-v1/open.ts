@@ -52,7 +52,7 @@ type DatabaseSyncV1 = InstanceType<SqliteModuleV1['DatabaseSync']>;
 
 const RECOVERY_MARKER_SUFFIX = '.rebuild-required';
 const QUARANTINE_DIRECTORY = 'quarantine';
-const OWNED_FILE_SUFFIXES = ['', '-wal', '-shm'] as const;
+const OWNED_FILE_SUFFIXES = ['', '-journal', '-wal', '-shm'] as const;
 const LEASE_DATABASE_NAME = 'inventory-v1.lease.sqlite3';
 const LEASE_FILE_SUFFIXES = ['', '-journal'] as const;
 const LEASE_APPLICATION_ID = 0x444b364c;
@@ -269,8 +269,13 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     }
     this.#database = null;
     try {
-      beginQuarantine(this.databasePath, this.lifecycle);
-      finishPendingQuarantine(this.sqlite, this.databasePath, this.lifecycle);
+      const freshMarker = beginQuarantine(this.databasePath, this.lifecycle);
+      finishPendingQuarantine(
+        this.sqlite,
+        this.databasePath,
+        this.lifecycle,
+        freshMarker,
+      );
       this.#database = openOrRebuildOwnedDatabase(
         this.sqlite,
         this.databasePath,
@@ -630,6 +635,7 @@ function openOrRebuildOwnedDatabase(
     createSecureEmptyFile(databasePath);
   } else {
     assertOwnedUnitOwners(databasePath);
+    assertTargetJournalModeCoherence(databasePath);
     assertExistingTargetHeader(databasePath);
   }
 
@@ -665,8 +671,8 @@ function openOrRebuildOwnedDatabase(
       assertDatabaseQuiescent(database, lifecycle);
       closeInventoryTarget(database, 'automatic-schema-quarantine', lifecycle);
       database = null;
-      beginQuarantine(databasePath, lifecycle);
-      finishPendingQuarantine(sqlite, databasePath, lifecycle);
+      const freshMarker = beginQuarantine(databasePath, lifecycle);
+      finishPendingQuarantine(sqlite, databasePath, lifecycle, freshMarker);
       return openOrRebuildOwnedDatabase(sqlite, databasePath, lifecycle);
     }
     applyAndVerifyPragmas(database);
@@ -744,8 +750,8 @@ function openOrRebuildOwnedDatabase(
       }
       closeInventoryTarget(database, 'automatic-corrupt-quarantine', lifecycle);
       database = null;
-      beginQuarantine(databasePath, lifecycle);
-      finishPendingQuarantine(sqlite, databasePath, lifecycle);
+      const freshMarker = beginQuarantine(databasePath, lifecycle);
+      finishPendingQuarantine(sqlite, databasePath, lifecycle, freshMarker);
       return openOrRebuildOwnedDatabase(sqlite, databasePath, lifecycle);
     }
     closeProbe();
@@ -760,6 +766,21 @@ function openOrRebuildOwnedDatabase(
       'database-io',
       created ? 'failed to initialize RFC-64 inventory database' : 'failed to open RFC-64 inventory database',
       { cause: error },
+    );
+  }
+}
+
+function assertTargetJournalModeCoherence(databasePath: string): void {
+  if (
+    pathEntryExists(`${databasePath}-journal`)
+    && (
+      pathEntryExists(`${databasePath}-wal`)
+      || pathEntryExists(`${databasePath}-shm`)
+    )
+  ) {
+    throw new InventoryV1OpenError(
+      'ambiguous-database',
+      'inventory target mixes rollback-journal and WAL evidence and will not be opened or modified',
     );
   }
 }
@@ -1130,11 +1151,6 @@ $ErrorActionPreference = 'Stop'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $userSid = $identity.User
 $defaultOwnerSid = $identity.Owner
-$administratorsSid = [System.Security.Principal.SecurityIdentifier]::new(
-  [System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,
-  $null
-)
-$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 $target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
 $acl = if ([System.IO.Directory]::Exists($target)) {
   [System.IO.Directory]::GetAccessControl(
@@ -1148,20 +1164,9 @@ $acl = if ([System.IO.Directory]::Exists($target)) {
   )
 }
 $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
-# An elevated Windows token may create entries with its distinct default-owner
-# SID (normally BUILTIN\Administrators) even though the process account SID is
-# the user. GitHub-hosted and service runners may also pre-create the caller's
-# temp root with BUILTIN\Administrators as owner while the active token is an
-# administrator. Accept that one exact well-known group only when it is active
-# in this token; arbitrary token groups are deliberately not accepted.
-$isActiveAdministratorsOwner = (
-  $owner.Value -eq $administratorsSid.Value -and
-  $principal.IsInRole($administratorsSid)
-)
 if (
   $owner.Value -ne $userSid.Value -and
-  $owner.Value -ne $defaultOwnerSid.Value -and
-  -not $isActiveAdministratorsOwner
+  $owner.Value -ne $defaultOwnerSid.Value
 ) {
   [Console]::Error.WriteLine(
     "owner SID $($owner.Value) is neither token user $($userSid.Value) nor token default owner $($defaultOwnerSid.Value)"
@@ -1204,7 +1209,9 @@ if (
 function assertOwnedUnitOwners(databasePath: string): void {
   for (const suffix of OWNED_FILE_SUFFIXES) {
     const path = `${databasePath}${suffix}`;
-    if (pathEntryExists(path)) assertFilesystemOwner(path);
+    if (pathEntryExists(path)) {
+      assertOwnedRegularFile(path, `inventory database${suffix}`);
+    }
   }
 }
 
@@ -1355,7 +1362,11 @@ function fsyncRegularFile(path: string, label: string): void {
   assertOwnedRegularFile(path, label);
   let descriptor: number | undefined;
   try {
-    descriptor = openSync(path, 'r');
+    // Windows implements fsync with FlushFileBuffers, which rejects a handle
+    // opened for read-only access with EPERM. The entry is already an owned
+    // regular file; opening r+ grants the required handle access without
+    // changing bytes, while POSIX retains its narrower read-only descriptor.
+    descriptor = openSync(path, process.platform === 'win32' ? 'r+' : 'r');
     fsyncSync(descriptor);
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to fsync ${label}`, { cause });
@@ -1374,16 +1385,18 @@ function pathEntryExists(path: string): boolean {
   }
 }
 
-type RecoveryMemberV1 = 'wal' | 'shm' | 'main';
+type RecoveryMemberV1 = 'journal' | 'wal' | 'shm' | 'main';
 type RecoveryMembersV1 =
   | readonly ['main']
+  | readonly ['journal', 'main']
   | readonly ['wal', 'main']
   | readonly ['shm', 'main']
   | readonly ['wal', 'shm', 'main'];
 
-const ALL_RECOVERY_MEMBERS = ['wal', 'shm', 'main'] as const satisfies readonly RecoveryMemberV1[];
+const ALL_RECOVERY_MEMBERS = ['journal', 'wal', 'shm', 'main'] as const satisfies readonly RecoveryMemberV1[];
 const RECOVERY_MEMBER_ARRAYS = new Set([
   '["main"]',
+  '["journal","main"]',
   '["wal","main"]',
   '["shm","main"]',
   '["wal","shm","main"]',
@@ -1400,6 +1413,13 @@ type RecoveryMemberLocationV1 = 'source' | 'destination';
 interface RecoveryTopologyV1 {
   readonly locations: ReadonlyMap<RecoveryMemberV1, RecoveryMemberLocationV1>;
   readonly movedCount: number;
+}
+
+interface FreshRecoveryMarkerAuthorizationV1 {
+  readonly databasePath: string;
+  readonly markerPath: string;
+  readonly quarantineDirectory: string;
+  readonly members: RecoveryMembersV1;
 }
 
 function assertQuarantineDurabilityAvailable(
@@ -1420,12 +1440,12 @@ function assertQuarantineDurabilityAvailable(
 function beginQuarantine(
   databasePath: string,
   lifecycle: InventoryV1LifecycleAdapter,
-): void {
+): FreshRecoveryMarkerAuthorizationV1 | null {
   assertQuarantineDurabilityAvailable(lifecycle);
   const markerPath = recoveryMarkerPath(databasePath);
   if (pathEntryExists(markerPath)) {
     rejectSymlink(markerPath, 'inventory recovery marker');
-    return;
+    return null;
   }
   const members = inspectSourceMembersForNewMarker(databasePath);
   for (const member of members) {
@@ -1472,12 +1492,19 @@ function beginQuarantine(
   lifecycle.boundary('begin.marker.file-fsync');
   fsyncDirectory(inventoryDirectory);
   lifecycle.boundary('begin.inventory-directory.fsync-after-marker');
+  return Object.freeze({
+    databasePath,
+    markerPath,
+    quarantineDirectory,
+    members,
+  });
 }
 
 function finishPendingQuarantine(
   sqlite: SqliteModuleV1,
   databasePath: string,
   lifecycle: InventoryV1LifecycleAdapter,
+  freshMarkerAuthorization: FreshRecoveryMarkerAuthorizationV1 | null = null,
 ): void {
   const markerPath = recoveryMarkerPath(databasePath);
   if (!pathEntryExists(markerPath)) return;
@@ -1499,6 +1526,14 @@ function finishPendingQuarantine(
     readBoundedRecoveryMarker(markerPath),
     inventoryDirectory,
   );
+  const sourceQuiescenceAlreadyProven = freshMarkerAuthorization !== null
+    && freshMarkerAuthorization.databasePath === databasePath
+    && freshMarkerAuthorization.markerPath === markerPath
+    && freshMarkerAuthorization.quarantineDirectory === marker.quarantineDirectory
+    && freshMarkerAuthorization.members.length === marker.members.length
+    && freshMarkerAuthorization.members.every(
+      (member, index) => marker.members[index] === member,
+    );
   if (!pathEntryExists(marker.quarantineDirectory)) {
     throw new InventoryV1OpenError(
       'database-io',
@@ -1509,14 +1544,41 @@ function finishPendingQuarantine(
   assertSameFilesystem(inventoryDirectory, marker.quarantineDirectory, 'inventory quarantine generation');
 
   let topology = inspectRecoveryTopology(marker, databasePath);
+  if (
+    marker.members[0] === 'journal'
+    && topology.movedCount < marker.members.length
+  ) {
+    assertRollbackJournalMainHeader(databasePath);
+  }
   // A crash may have occurred after rename but before that move's file or
   // directory barriers. Re-establish durability for the observed moved prefix
   // before either continuing or deleting the marker.
   fsyncMovedRecoveryPrefix(marker, topology, inventoryDirectory, lifecycle);
   if (topology.movedCount === 0) {
-    // Only a complete source unit may be reopened. Once even one member has
-    // moved, SQLite must never see the partial source topology.
-    assertPendingUnitQuiescent(sqlite, databasePath, lifecycle);
+    // A zero-move marker never authorizes namespace mutation by itself. Prove
+    // zero-timeout exclusivity while the complete source unit, including any
+    // rollback journal, remains at its original pathname. A live raw SQLite
+    // holder therefore leaves every source member, destination, and marker
+    // untouched. Once the first prefix member has moved, that durable prefix
+    // is the restart witness that this proof completed before any rename.
+    if (marker.members[0] === 'journal') {
+      // SQLite 3.39+ canonicalizes /dev/fd and /proc/self/fd aliases before
+      // opening the database. An alias probe can therefore derive the real
+      // source journal pathname and recover, zero, or delete the evidence it
+      // is meant to protect. A freshly created marker may continue because
+      // its caller proved target exclusivity before close and still holds the
+      // lifetime DK6L lease. A zero-move marker reached after restart has no
+      // equally non-mutating proof primitive in Node 22.5, so preserve the
+      // complete unit and require offline recovery.
+      if (!sourceQuiescenceAlreadyProven) {
+        throw new InventoryV1OpenError(
+          'durability-unavailable',
+          'zero-move rollback-journal recovery requires offline exclusivity proof',
+        );
+      }
+    } else {
+      assertPendingUnitQuiescent(sqlite, databasePath, lifecycle);
+    }
     topology = inspectRecoveryTopology(marker, databasePath);
     if (topology.movedCount !== 0) {
       throw new InventoryV1OpenError(
@@ -1535,18 +1597,13 @@ function finishPendingQuarantine(
 
   for (const member of marker.members) {
     if (topology.locations.get(member) === 'destination') continue;
-    const source = recoverySourcePath(databasePath, member);
-    const destination = recoveryDestinationPath(marker.quarantineDirectory, member);
-    assertOwnedRegularFile(source, `inventory ${member} evidence`);
-    assertSameFilesystem(source, marker.quarantineDirectory, `inventory ${member} evidence`);
-    renameNoOverwriteUnderLease(source, destination);
-    lifecycle.boundary(`resume.member.${member}.rename`);
-    fsyncRegularFile(destination, `moved inventory ${member} evidence`);
-    lifecycle.boundary(`resume.member.${member}.file-fsync`);
-    fsyncDirectory(marker.quarantineDirectory);
-    lifecycle.boundary(`resume.member.${member}.generation-directory-fsync`);
-    fsyncDirectory(inventoryDirectory);
-    lifecycle.boundary(`resume.member.${member}.inventory-directory-fsync`);
+    moveRecoveryMember(
+      marker,
+      databasePath,
+      member,
+      inventoryDirectory,
+      lifecycle,
+    );
   }
 
   topology = inspectRecoveryTopology(marker, databasePath);
@@ -1560,6 +1617,27 @@ function finishPendingQuarantine(
   lifecycle.boundary('resume.marker.unlink');
   fsyncDirectory(inventoryDirectory);
   lifecycle.boundary('resume.inventory-directory.fsync-after-marker-unlink');
+}
+
+function moveRecoveryMember(
+  marker: RecoveryMarkerV1,
+  databasePath: string,
+  member: RecoveryMemberV1,
+  inventoryDirectory: string,
+  lifecycle: InventoryV1LifecycleAdapter,
+): void {
+  const source = recoverySourcePath(databasePath, member);
+  const destination = recoveryDestinationPath(marker.quarantineDirectory, member);
+  assertOwnedRegularFile(source, `inventory ${member} evidence`);
+  assertSameFilesystem(source, marker.quarantineDirectory, `inventory ${member} evidence`);
+  renameNoOverwriteUnderLease(source, destination);
+  lifecycle.boundary(`resume.member.${member}.rename`);
+  fsyncRegularFile(destination, `moved inventory ${member} evidence`);
+  lifecycle.boundary(`resume.member.${member}.file-fsync`);
+  fsyncDirectory(marker.quarantineDirectory);
+  lifecycle.boundary(`resume.member.${member}.generation-directory-fsync`);
+  fsyncDirectory(inventoryDirectory);
+  lifecycle.boundary(`resume.member.${member}.inventory-directory-fsync`);
 }
 
 function fsyncMovedRecoveryPrefix(
@@ -1590,7 +1668,24 @@ function inspectSourceMembersForNewMarker(databasePath: string): RecoveryMembers
     assertOwnedRegularFile(source, `inventory ${member} evidence`);
     present.push(member);
   }
+  if (present[0] === 'journal') {
+    assertRollbackJournalMainHeader(databasePath);
+  }
   return assertRecoveryMembers(present);
+}
+
+function assertRollbackJournalMainHeader(databasePath: string): void {
+  const identity = readValidSqliteHeaderIdentity(databasePath);
+  if (
+    identity === null
+    || identity.writeVersion !== 1
+    || identity.readVersion !== 1
+  ) {
+    throw new InventoryV1OpenError(
+      'ambiguous-database',
+      'rollback-journal evidence with a non-rollback main header requires offline recovery',
+    );
+  }
 }
 
 function inspectRecoveryTopology(
@@ -1903,6 +1998,8 @@ type CorruptDatabaseOwnershipV1 = 'owned' | 'ambiguous' | 'foreign' | 'newer';
 interface SqliteHeaderIdentityV1 {
   applicationId: number;
   userVersion: number;
+  writeVersion: number;
+  readVersion: number;
 }
 
 function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabaseOwnershipV1 {
@@ -1925,6 +2022,8 @@ function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdenti
     return {
       applicationId: header.readUInt32BE(68),
       userVersion: header.readUInt32BE(60),
+      writeVersion: header[18],
+      readVersion: header[19],
     };
   } catch (cause) {
     throw new InventoryV1OpenError(
