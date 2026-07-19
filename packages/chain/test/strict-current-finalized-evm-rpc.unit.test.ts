@@ -83,6 +83,10 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       'eth_call',
     ]);
     expect(server.calls.map(({ id }) => id)).toEqual([1, 2, 3, 4]);
+    // The raw transport must emit valid JSON-RPC 2.0 request envelopes. The
+    // loopback records the parsed request body verbatim, so this fails at
+    // runtime if postJsonRpc drops or changes the version field.
+    expect(server.calls.map(({ jsonrpc }) => jsonrpc)).toEqual(['2.0', '2.0', '2.0', '2.0']);
     expect(server.calls[0]!.params).toEqual([]);
     expect(server.calls[1]!.params).toEqual(['finalized', false]);
     const hashReference = { blockHash: BLOCK_HASH, requireCanonical: true };
@@ -264,6 +268,39 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       'eth_getCode',
       'eth_call',
       'eth_getBlockByNumber',
+    ]);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('propagates a transport resource-limit from the number profile without the post-read sandwich', async () => {
+    const base = successfulHandler();
+    const first = await startRpcServer((call, response, request) => {
+      if (call.method !== 'eth_call') return base(call, response, request);
+      // A transport/local body-cap resource-limit is NOT anchor-dependent, so it
+      // must propagate immediately rather than be held for the hash sandwich the
+      // way an execution (out-of-gas) resource-limit is.
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'transfer-encoding': 'chunked',
+      });
+      response.write(' '.repeat(40_000));
+      response.end(' '.repeat(30_000));
+    });
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+
+    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'resource-limit' });
+    // No fifth post-read eth_getBlockByNumber: the transport resource-limit was
+    // not held, unlike the anchor-dependent execution resource-limit above.
+    expect(first.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
     ]);
     expect(second.calls).toHaveLength(0);
   });

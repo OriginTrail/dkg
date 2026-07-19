@@ -71,7 +71,6 @@ const MAX_U64 = 18_446_744_073_709_551_615n;
 const MAX_U256 =
   115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
 const RPC_CALL_GAS_QUANTITY = `0x${CONTROL_EIP1271_GAS_LIMIT_V1.toString(16)}`;
-const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
 
 /**
  * Build one strict raw-JSON-RPC adapter from trusted local chain configuration.
@@ -172,6 +171,36 @@ export function createStrictCurrentFinalizedEvmChainAdapterV1(
   return Object.freeze(adapter);
 }
 
+/**
+ * Result of a numbered-block contract read that is held across the post-read
+ * hash sandwich: either the decoded return, or an anchor-dependent failure that
+ * is only re-thrown once the sandwich confirms the finalized anchor.
+ */
+type NumberedContractOutcomeV1 =
+  | { readonly kind: 'return'; readonly data: string }
+  | { readonly kind: 'held-failure'; readonly error: CurrentFinalizedEvmCallErrorV1 };
+
+/**
+ * Numbered-block reads are anchor-dependent: `no-code`, `revert`,
+ * `malformed-return`, and an execution-cap `resource-limit` can all be
+ * manufactured by a reorg, so the fallback holds exactly these until the
+ * post-read hash sandwich confirms the anchor. A transport or local
+ * `resource-limit` is not anchor-dependent and must propagate immediately.
+ */
+function isAnchorDependentNumberedFailure(
+  cause: unknown,
+): cause is CurrentFinalizedEvmCallErrorV1 {
+  return (
+    cause instanceof CurrentFinalizedEvmCallErrorV1
+    && (
+      cause.code === 'no-code'
+      || cause.code === 'revert'
+      || cause.code === 'malformed-return'
+      || cause instanceof AnchorDependentResourceLimitErrorV1
+    )
+  );
+}
+
 async function executeEndpointAttempt(
   config: StrictRpcConfigSnapshotV1,
   endpoint: string,
@@ -220,32 +249,23 @@ async function executeEndpointAttempt(
     // same-endpoint post-read closes the hash sandwich. Hold anchor-dependent
     // outcomes until then, so a reorg cannot manufacture no-code/revert, a
     // malformed return, or an execution-cap failure and poison admission.
-    let anchorDependentFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
-    let provisionalReturnData: string | undefined;
+    let numbered: NumberedContractOutcomeV1;
     try {
       const code = await rpc(
         'eth_getCode',
         Object.freeze([request.to, anchor.blockNumberQuantity]),
       );
       assertDeployedCode(code);
-      provisionalReturnData = parseContractReturn(
-        await rpc('eth_call', Object.freeze([callObject, anchor.blockNumberQuantity])),
-        request.maxReturnBytes,
-      );
+      numbered = {
+        kind: 'return',
+        data: parseContractReturn(
+          await rpc('eth_call', Object.freeze([callObject, anchor.blockNumberQuantity])),
+          request.maxReturnBytes,
+        ),
+      };
     } catch (cause) {
-      if (
-        cause instanceof CurrentFinalizedEvmCallErrorV1
-        && (
-          cause.code === 'no-code'
-          || cause.code === 'revert'
-          || cause.code === 'malformed-return'
-          || isAnchorDependentResourceLimit(cause)
-        )
-      ) {
-        anchorDependentFailure = cause;
-      } else {
-        throw cause;
-      }
+      if (!isAnchorDependentNumberedFailure(cause)) throw cause;
+      numbered = { kind: 'held-failure', error: cause };
     }
 
     const postAnchor = parseFinalizedAnchor(
@@ -261,11 +281,8 @@ async function executeEndpointAttempt(
         'Block-number fallback hash sandwich did not preserve the resolved finalized anchor',
       );
     }
-    if (anchorDependentFailure !== undefined) throw anchorDependentFailure;
-    if (provisionalReturnData === undefined) {
-      throw unavailable('Block-number fallback produced no contract result');
-    }
-    returnData = provisionalReturnData;
+    if (numbered.kind === 'held-failure') throw numbered.error;
+    returnData = numbered.data;
   }
 
   return Object.freeze({
@@ -708,17 +725,22 @@ function resourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
   return new CurrentFinalizedEvmCallErrorV1('resource-limit', message);
 }
 
-function anchorDependentResourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
-  const error = resourceLimited(message);
-  ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1.add(error);
-  return error;
+/**
+ * A `resource-limit` produced by numbered-block `eth_call` execution (the fixed
+ * gas cap). Unlike a transport or local resource limit it is anchor-dependent,
+ * so the block-number fallback must hold it until the same-endpoint post-read
+ * confirms the finalized anchor did not reorg. Encoding this as a distinct error
+ * type keeps the classification on the error object itself rather than a global
+ * side-channel tag consulted far from where the error is produced.
+ */
+class AnchorDependentResourceLimitErrorV1 extends CurrentFinalizedEvmCallErrorV1 {
+  constructor(message: string) {
+    super('resource-limit', message);
+  }
 }
 
-function isAnchorDependentResourceLimit(
-  error: CurrentFinalizedEvmCallErrorV1,
-): boolean {
-  return error.code === 'resource-limit'
-    && ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1.has(error);
+function anchorDependentResourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
+  return new AnchorDependentResourceLimitErrorV1(message);
 }
 
 function cancelled(message: string): CurrentFinalizedEvmCallErrorV1 {
