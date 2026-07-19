@@ -9,8 +9,8 @@ import {
   type KaIdV1,
 } from '@origintrail-official/dkg-core';
 
-import { computeRfc64AppliedInventoryDigestV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
+  computeRfc64AppliedInventoryDigestV1,
   Rfc64PublicCatalogInventoryCompletenessErrorV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
   type Rfc64PublicCatalogInventoryEvidenceRowV1,
@@ -59,7 +59,13 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
     expect(repeated).toEqual(evidence);
   });
 
-  it('preserves the exact Gate-1 digest framing for a one-row set', () => {
+  it('preserves the exact Gate-1 empty and one-row digest vectors', () => {
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(SCOPE);
+    expect(computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest,
+      rows: [],
+    })).toBe('0xcd36c729c972b50de1b2e562fa7e2200513d8ba282af29ebf4e403a806605aee');
+
     const only = row(7);
     const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({
       catalogScope: SCOPE,
@@ -67,16 +73,31 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
       expectedRows: [only],
       observedRows: [only],
     });
-    expect(evidence.inventoryDigest).toBe(computeRfc64AppliedInventoryDigestV1({
+    const recomputed = computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest,
+      rows: [only],
+    });
+    expect(recomputed).toBe('0x6b258dc6f104ad042aec38da7837d9ba53f292af96eecd70f4e71dfb9a53e2f2');
+    expect(evidence.inventoryDigest).toBe(recomputed);
+  });
+
+  it('uses numeric KA-ID order for 2 vs 10 and matches the completeness digest', () => {
+    const two = row(2);
+    const ten = row(10);
+    const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '2' as CountV1,
+      expectedRows: [two, ten],
+      observedRows: [ten, two],
+    });
+    const recomputed = computeRfc64AppliedInventoryDigestV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(SCOPE),
-      rows: [{
-        catalogRowDigest: only.catalogRowDigest,
-        contentDigest: only.contentDigest,
-        sealDigest: only.sealDigest,
-        kaUal: only.kaUal,
-        activatedTripleCount: only.activatedTripleCount,
-      }],
-    }));
+      rows: [ten, two],
+    });
+
+    expect(recomputed).toBe('0x6d273d5f5fc1acbfe6836168c7159b747fe3df549d2d5bddcd8bf409ff58ea01');
+    expect(recomputed).not.toBe('0x7fdb1bfd439ccde258f1061d728cc555337ee1764b1188cf36c519ece1d7abb5');
+    expect(recomputed).toBe(evidence.inventoryDigest);
   });
 
   it.each([

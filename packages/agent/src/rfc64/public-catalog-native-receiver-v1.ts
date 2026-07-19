@@ -58,7 +58,6 @@ import {
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
-import { sha256 } from '@noble/hashes/sha2.js';
 import {
   quadsToNQuads,
   readExactGraphPaged,
@@ -80,6 +79,7 @@ import type {
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
 import {
+  computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
   type Rfc64PublicCatalogInventoryEvidenceRowV1,
 } from './public-catalog-inventory-completeness-v1.js';
@@ -98,8 +98,6 @@ import type {
 } from './public-catalog-transport-v1.js';
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-const UTF8_ENCODER = new TextEncoder();
-const APPLIED_INVENTORY_DIGEST_DOMAIN_V1 = 'dkg-rfc64-applied-inventory-v1\n';
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
@@ -1565,48 +1563,6 @@ async function activateExactPublicProjection(
       activatedTripleCount: expectedTripleCount,
     }),
   };
-}
-
-export interface Rfc64AppliedInventoryDigestRowV1 {
-  readonly catalogRowDigest: Digest32V1;
-  readonly contentDigest: Digest32V1;
-  readonly sealDigest: Digest32V1;
-  readonly kaUal: string;
-  readonly activatedTripleCount: number;
-}
-
-/** Compute an applied inventory commitment from exact semantic post-read evidence. */
-export function computeRfc64AppliedInventoryDigestV1(input: {
-  readonly catalogScopeDigest: Digest32V1;
-  readonly rows: readonly Rfc64AppliedInventoryDigestRowV1[];
-}): Digest32V1 {
-  const hasher = sha256.create();
-  hasher.update(UTF8_ENCODER.encode(APPLIED_INVENTORY_DIGEST_DOMAIN_V1));
-  hasher.update(ethers.getBytes(input.catalogScopeDigest));
-  hasher.update(encodeU64(input.rows.length, 'inventory row count'));
-  for (const row of [...input.rows].sort((left, right) => left.kaUal.localeCompare(right.kaUal))) {
-    hasher.update(ethers.getBytes(row.catalogRowDigest));
-    hasher.update(ethers.getBytes(row.contentDigest));
-    hasher.update(ethers.getBytes(row.sealDigest));
-    const ual = UTF8_ENCODER.encode(row.kaUal);
-    hasher.update(encodeU64(ual.byteLength, 'KA UAL byte length'));
-    hasher.update(ual);
-    hasher.update(encodeU64(row.activatedTripleCount, 'activated triple count'));
-  }
-  return ethers.hexlify(hasher.digest()) as Digest32V1;
-}
-
-function encodeU64(value: number, label: string): Uint8Array {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    fail('catalog-native-receiver-activation', `${label} is not a safe unsigned integer`);
-  }
-  const result = new Uint8Array(8);
-  let remaining = BigInt(value);
-  for (let index = result.length - 1; index >= 0; index -= 1) {
-    result[index] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
-  return result;
 }
 
 /**
