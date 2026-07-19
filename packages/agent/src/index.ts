@@ -42,6 +42,7 @@ export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
 export * from './rfc64/public-catalog-native-transport-v1.js';
 export * from './rfc64/public-catalog-native-receiver-v1.js';
+export * from './rfc64/public-catalog-successor-producer-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {
