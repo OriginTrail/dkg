@@ -148,6 +148,17 @@ describe('ContextGraphPolicyV1 codec', () => {
       ...POLICY,
       governanceContractAddress: null,
     })).toThrow(/cg-policy-governance/);
+    // Unregistered source must reject a non-null governance tuple: keep the base
+    // POLICY's finalized governance chain/contract and change only source.kind.
+    // Covers the governanceChainId/governanceContractAddress !== null arm.
+    expect(() => assertContextGraphPolicyV1({
+      ...POLICY,
+      source: {
+        kind: 'owner-signed-unregistered',
+        ownerAddress: ISSUER,
+        ownerAuthorityEra: '0',
+      },
+    })).toThrow(/cg-policy-governance/);
   });
 
   it('keeps contribution policy independent and closes its authority branch', () => {
