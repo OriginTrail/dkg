@@ -8,6 +8,7 @@ export {
   type CandidateBucketLoadKeyV1,
   type CandidateBucketPageV1,
   type CandidateBucketPutResultV1,
+  type CandidateBucketRowSnapshotV1,
   type CandidateBucketRowV1,
   type CandidateBucketRowsTraversalV1,
   type CandidateSessionGcBatchResultV1,
@@ -15,6 +16,7 @@ export {
   type InventoryV1CandidateErrorCode,
   type Rfc64InventoryV1CandidateApi,
   type VerifiedCandidateBucketLoadV1,
+  type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
 export {
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,

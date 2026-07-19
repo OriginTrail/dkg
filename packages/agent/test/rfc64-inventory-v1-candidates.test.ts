@@ -118,6 +118,74 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
       .toThrowError(expect.objectContaining({ code: 'candidate-traversal-closed' }));
   });
 
+  it('mints unforgeable row capabilities only for live pinned traversals', async () => {
+    const inventory = await readyInventory();
+    const otherInventory = await readyInventory();
+    const session = inventory.createCandidateSession();
+    const sourceRow = makeRow(1n, 'verified-row-capability');
+    const head = makeHead('1', '60');
+    const loaded = inventory.putVerifiedCandidateBucket(
+      makeNonEmptyLoad(session, head, [sourceRow]),
+    );
+
+    const traversal = inventory.beginCandidateBucketRows(loaded.loadKey);
+    const page = inventory.pageCandidateBucketRows(traversal, null, 1);
+    const candidate = page.rows[0];
+    expect(candidate).toBeDefined();
+    expect(Object.getPrototypeOf(candidate.verifiedRow)).toBeNull();
+    expect(Object.isFrozen(candidate.verifiedRow)).toBe(true);
+    expect(Object.keys(candidate.verifiedRow)).toEqual([]);
+    expect(Object.isFrozen(candidate)).toBe(true);
+    expect(Object.isFrozen(candidate.row)).toBe(true);
+    expect(Object.isFrozen(candidate.row.transfer)).toBe(true);
+    expect(Object.isFrozen(candidate.catalogScope)).toBe(true);
+    expect(candidate.catalogScope).toEqual(deriveAuthorCatalogScopeFromHeadV1(head.payload));
+    expect(computeAuthorCatalogScopeDigestV1(candidate.catalogScope))
+      .toBe(candidate.header.catalogScopeDigest);
+
+    const snapshot = inventory.readVerifiedCandidateCatalogRow(candidate.verifiedRow);
+    expect(snapshot).toEqual({
+      catalogScope: candidate.catalogScope,
+      header: candidate.header,
+      disposition: 'present',
+      row: candidate.row,
+      catalogKeyDigest: candidate.catalogKeyDigest,
+      expectedCatalogRowDigest: candidate.expectedCatalogRowDigest,
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+
+    const forged = Object.freeze(Object.create(null)) as typeof candidate.verifiedRow;
+    const serializedClone = JSON.parse(
+      JSON.stringify(candidate.verifiedRow),
+    ) as typeof candidate.verifiedRow;
+    expect(() => inventory.readVerifiedCandidateCatalogRow(forged)).toThrowError(
+      expect.objectContaining({ code: 'candidate-invalid-row-proof' }),
+    );
+    expect(() => inventory.readVerifiedCandidateCatalogRow(serializedClone)).toThrowError(
+      expect.objectContaining({ code: 'candidate-invalid-row-proof' }),
+    );
+    expect(() => inventory.readVerifiedCandidateCatalogRow(
+      candidate.row as unknown as typeof candidate.verifiedRow,
+    )).toThrowError(expect.objectContaining({ code: 'candidate-invalid-row-proof' }));
+    expect(() => otherInventory.readVerifiedCandidateCatalogRow(candidate.verifiedRow))
+      .toThrowError(expect.objectContaining({ code: 'candidate-invalid-row-proof' }));
+
+    expect(inventory.pageCandidateBucketRows(traversal, page.resumeAfter, 1)).toEqual({
+      rows: [],
+      resumeAfter: null,
+    });
+    expect(() => inventory.readVerifiedCandidateCatalogRow(candidate.verifiedRow)).toThrowError(
+      expect.objectContaining({ code: 'candidate-stale-row-proof' }),
+    );
+
+    const explicitlyClosed = inventory.beginCandidateBucketRows(loaded.loadKey);
+    const explicitlyClosedPage = inventory.pageCandidateBucketRows(explicitlyClosed, null, 1);
+    inventory.closeCandidateTraversal(explicitlyClosed);
+    expect(() => inventory.readVerifiedCandidateCatalogRow(
+      explicitlyClosedPage.rows[0].verifiedRow,
+    )).toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
+  });
+
   it('reopens the low-level database, retains the opaque session, and exact-key retries', () => {
     const directory = temporaryDataDirectory();
     const path = join(directory, 'commit-retry.sqlite3');
@@ -154,6 +222,11 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
         makeNonEmptyLoad(session, makeHead('1', '1'), [makeRow(1n, 'fixture')]),
       );
       const invalidatedTraversal = inventory.beginCandidateBucketRows(firstLoad.loadKey);
+      const invalidatedPage = inventory.pageCandidateBucketRows(
+        invalidatedTraversal,
+        null,
+        1,
+      );
 
       failAfterCommittedOnce = true;
       const retried = inventory.putVerifiedCandidateBucket(
@@ -165,6 +238,9 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
         .toBe(retried.header.targetCatalogHeadDigest);
       expect(() => inventory.pageCandidateBucketRows(invalidatedTraversal, null, 1))
         .toThrowError(expect.objectContaining({ code: 'candidate-traversal-closed' }));
+      expect(() => inventory.readVerifiedCandidateCatalogRow(
+        invalidatedPage.rows[0].verifiedRow,
+      )).toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
       expect(inventory.putVerifiedCandidateBucket(
         makeNonEmptyLoad(session, makeHead('1', '1'), [makeRow(1n, 'fixture')]),
       ).status).toBe('existing');
@@ -727,10 +803,15 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
       },
     ]);
     const loaded = inventory.putVerifiedCandidateBucket(original);
+    const traversal = inventory.beginCandidateBucketRows(loaded.loadKey);
+    const verifiedPage = inventory.pageCandidateBucketRows(traversal, null, 1);
 
     expect(() => inventory.putVerifiedCandidateBucket(mutation)).toThrowError(
       expect.objectContaining({ code: 'candidate-conflict' }),
     );
+    expect(() => inventory.readVerifiedCandidateCatalogRow(
+      verifiedPage.rows[0].verifiedRow,
+    )).toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
     expect(() => inventory.getCandidateBucket(loaded.loadKey)).toThrowError(
       expect.objectContaining({ code: 'candidate-session-poisoned' }),
     );
@@ -856,13 +937,30 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
       added2.resumeAfter,
       1,
     )).toEqual({ rows: [], resumeAfter: null });
+    expect(inventory.readVerifiedCandidateCatalogRow(added1.rows[0].verifiedRow))
+      .toMatchObject({
+        disposition: 'present',
+        header: { targetCatalogHeadDigest: newLoad.header.targetCatalogHeadDigest },
+      });
 
     const removed = inventory.pageCandidateBucketRemoved(traversal, null, 1);
     expect(removed.rows.map((entry) => entry.row.kaId)).toEqual([three.kaId]);
+    expect(removed.rows[0]).toMatchObject({
+      disposition: 'removed',
+      header: { targetCatalogHeadDigest: oldLoad.header.targetCatalogHeadDigest },
+    });
+    expect(added1.rows[0]).toMatchObject({
+      disposition: 'present',
+      header: { targetCatalogHeadDigest: newLoad.header.targetCatalogHeadDigest },
+    });
     expect(inventory.pageCandidateBucketRemoved(traversal, removed.resumeAfter, 1)).toEqual({
       rows: [],
       resumeAfter: null,
     });
+    expect(() => inventory.readVerifiedCandidateCatalogRow(added1.rows[0].verifiedRow))
+      .toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
+    expect(() => inventory.readVerifiedCandidateCatalogRow(removed.rows[0].verifiedRow))
+      .toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
   });
 
   it('pins loads, rejects cursor skipping, and releases pins on explicit early close', async () => {
@@ -879,6 +977,8 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     );
     expect(() => inventory.pageCandidateBucketRows(traversal, makeRow(2n, 'x').kaId, 1))
       .toThrowError(expect.objectContaining({ code: 'candidate-cursor-mismatch' }));
+    expect(() => inventory.readVerifiedCandidateCatalogRow(first.rows[0].verifiedRow))
+      .toThrowError(expect.objectContaining({ code: 'candidate-stale-row-proof' }));
     expect(() => inventory.pageCandidateBucketRows(traversal, first.resumeAfter, 1))
       .toThrowError(expect.objectContaining({ code: 'candidate-traversal-closed' }));
 

@@ -60,6 +60,7 @@ declare const CANDIDATE_SESSION_BRAND: unique symbol;
 declare const CANDIDATE_LOAD_KEY_BRAND: unique symbol;
 declare const CANDIDATE_ROWS_TRAVERSAL_BRAND: unique symbol;
 declare const CANDIDATE_DIFF_TRAVERSAL_BRAND: unique symbol;
+declare const VERIFIED_CANDIDATE_CATALOG_ROW_BRAND: unique symbol;
 
 /** Opaque, adapter-local session. No raw session bytes are exposed or accepted. */
 export interface CandidateSessionV1 {
@@ -77,6 +78,15 @@ export interface CandidateBucketRowsTraversalV1 {
 
 export interface CandidateBucketDiffTraversalV1 {
   readonly [CANDIDATE_DIFF_TRAVERSAL_BRAND]: true;
+}
+
+/**
+ * Process-local proof that a row was decoded through a live, pinned traversal
+ * rooted in an opaque verified head/directory/bucket load. SQLite bytes alone
+ * can never construct this capability.
+ */
+export interface VerifiedCandidateCatalogRowV1 {
+  readonly [VERIFIED_CANDIDATE_CATALOG_ROW_BRAND]: true;
 }
 
 export interface VerifiedCandidateBucketLoadV1 {
@@ -100,10 +110,20 @@ export interface CandidateBucketHeaderV1 {
   readonly payloadByteLength: ByteLengthV1;
 }
 
-export interface CandidateBucketRowV1 {
+export interface CandidateBucketRowSnapshotV1 {
+  /** Full canonical catalog scope needed by every later digest/admission check. */
+  readonly catalogScope: AuthorCatalogScopeV1;
+  /** The exact verified bucket/head scope from which this row was traversed. */
+  readonly header: CandidateBucketHeaderV1;
+  /** `removed` rows are deletion candidates, never transfer/admission candidates. */
+  readonly disposition: 'present' | 'removed';
   readonly row: AuthorCatalogRowV1;
   readonly catalogKeyDigest: Digest32V1;
   readonly expectedCatalogRowDigest: Digest32V1;
+}
+
+export interface CandidateBucketRowV1 extends CandidateBucketRowSnapshotV1 {
+  readonly verifiedRow: VerifiedCandidateCatalogRowV1;
 }
 
 export interface CandidateBucketPutResultV1 {
@@ -133,6 +153,8 @@ export type InventoryV1CandidateErrorCode =
   | 'candidate-invalid-load-key'
   | 'candidate-invalid-traversal'
   | 'candidate-traversal-closed'
+  | 'candidate-invalid-row-proof'
+  | 'candidate-stale-row-proof'
   | 'candidate-cursor-mismatch'
   | 'candidate-stream-complete'
   | 'candidate-in-use'
@@ -176,6 +198,9 @@ export interface Rfc64InventoryV1CandidateApi {
     cursor: KaIdV1 | null | undefined,
     limit: number,
   ): CandidateBucketPageV1;
+  readVerifiedCandidateCatalogRow(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+  ): CandidateBucketRowSnapshotV1;
   closeCandidateTraversal(
     traversal: CandidateBucketRowsTraversalV1 | CandidateBucketDiffTraversalV1,
   ): void;
@@ -211,6 +236,7 @@ interface LoadKeyRecordV1 {
   readonly session: SessionRecordV1;
   readonly encoded: EncodedLoadKeyV1;
   readonly expectedHeader: EncodedHeaderV1;
+  readonly publicHeader: CandidateBucketHeaderV1;
   readonly scope: AuthorCatalogScopeV1;
   readonly pinKey: string;
 }
@@ -277,6 +303,24 @@ interface TraversalBaseV1 {
   closeReason: 'normal' | 'poisoned' | 'reopen' | null;
 }
 
+interface VerifiedCandidateCatalogRowRecordV1 {
+  readonly traversalHandle: CandidateBucketRowsTraversalV1 | CandidateBucketDiffTraversalV1;
+  readonly traversal: TraversalRecordV1;
+  readonly load: LoadKeyRecordV1;
+  readonly snapshot: CandidateBucketRowSnapshotV1;
+}
+
+interface DecodedCandidateBucketRowV1 {
+  readonly row: AuthorCatalogRowV1;
+  readonly catalogKeyDigest: Digest32V1;
+  readonly expectedCatalogRowDigest: Digest32V1;
+}
+
+interface CandidateBucketDecodedPageV1 {
+  readonly rows: readonly DecodedCandidateBucketRowV1[];
+  readonly resumeAfter: KaIdV1 | null;
+}
+
 interface RowsTraversalRecordV1 extends TraversalBaseV1 {
   readonly kind: 'rows';
   readonly load: LoadKeyRecordV1;
@@ -304,6 +348,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   readonly #sessionRecords = new Set<SessionRecordV1>();
   readonly #loadKeys = new WeakMap<object, LoadKeyRecordV1>();
   readonly #traversals = new WeakMap<object, TraversalRecordV1>();
+  readonly #verifiedRows = new WeakMap<object, VerifiedCandidateCatalogRowRecordV1>();
   readonly #pins = new Map<string, number>();
   #startupPurgeDone = false;
   #committedOverruns = 0;
@@ -495,13 +540,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         this.requireHeader(record.load);
         return this.queryRowsPage(record.load, canonicalCursor, limit);
       });
+      const verifiedPage = this.mintVerifiedPage(page, traversal, record, record.load);
       if (page.rows.length === 0) {
         record.terminal = true;
         this.closeTraversalRecord(record);
       } else {
         record.expectedCursor = page.resumeAfter;
       }
-      return page;
+      return verifiedPage;
     } catch (cause) {
       this.closeTraversalRecord(record);
       throw normalizeCandidateError('candidate row page failed', cause);
@@ -522,6 +568,31 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     limit: number,
   ): CandidateBucketPageV1 {
     return this.pageDiff(traversal, cursor, limit, 'removed');
+  }
+
+  readVerifiedCandidateCatalogRow(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+  ): CandidateBucketRowSnapshotV1 {
+    this.assertOpen();
+    if (typeof verifiedRow !== 'object' || verifiedRow === null) {
+      throw invalidRowProof();
+    }
+    const proof = this.#verifiedRows.get(verifiedRow as object);
+    if (proof === undefined) throw invalidRowProof();
+    const current = this.#traversals.get(proof.traversalHandle as object);
+    if (
+      current !== proof.traversal
+      || current.closed
+      || current.closeReason !== null
+      || current.sessions.some((session) => session.poisoned)
+      || !current.pins.some((pin) => pin.pinKey === proof.load.pinKey)
+    ) {
+      throw new InventoryV1CandidateError(
+        'candidate-stale-row-proof',
+        'verified candidate row proof no longer belongs to a live pinned traversal',
+      );
+    }
+    return proof.snapshot;
   }
 
   closeCandidateTraversal(
@@ -655,6 +726,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         assertDiffCompatible(oldHeader, newHeader);
         return this.queryDiffPage(record, canonicalCursor, limit, stream);
       });
+      const load = stream === 'added' ? record.newLoad : record.oldLoad;
+      const verifiedPage = this.mintVerifiedPage(
+        page,
+        traversal,
+        record,
+        load,
+        stream === 'removed' ? 'removed' : 'present',
+      );
       if (page.rows.length === 0) {
         if (stream === 'added') record.addedTerminal = true;
         else record.removedTerminal = true;
@@ -664,7 +743,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       } else {
         record.removedExpectedCursor = page.resumeAfter;
       }
-      return page;
+      return verifiedPage;
     } catch (cause) {
       this.closeTraversalRecord(record);
       throw normalizeCandidateError(`candidate ${stream} diff page failed`, cause);
@@ -675,7 +754,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     load: LoadKeyRecordV1,
     cursor: KaIdV1 | null,
     limit: number,
-  ): CandidateBucketPageV1 {
+  ): CandidateBucketDecodedPageV1 {
     assertPageLimit(limit);
     const sql = cursor === null
       ? INVENTORY_V1_STATEMENT_SQL.getRowsFirst
@@ -695,7 +774,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     cursor: KaIdV1 | null,
     limit: number,
     stream: 'added' | 'removed',
-  ): CandidateBucketPageV1 {
+  ): CandidateBucketDecodedPageV1 {
     assertPageLimit(limit);
     const sql = stream === 'added'
       ? (cursor === null
@@ -718,6 +797,40 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     const query = this.prepare(sql);
     const rows = this.statement(() => query.all(parameters) as SqlRowV1[]);
     return decodePage(rows, stream === 'added' ? traversal.newLoad : traversal.oldLoad);
+  }
+
+  private mintVerifiedPage(
+    page: CandidateBucketDecodedPageV1,
+    traversalHandle: CandidateBucketRowsTraversalV1 | CandidateBucketDiffTraversalV1,
+    traversal: TraversalRecordV1,
+    load: LoadKeyRecordV1,
+    disposition: CandidateBucketRowSnapshotV1['disposition'] = 'present',
+  ): CandidateBucketPageV1 {
+    const rows = page.rows.map((decoded): CandidateBucketRowV1 => {
+      const snapshot: CandidateBucketRowSnapshotV1 = Object.freeze({
+        catalogScope: load.scope,
+        header: load.publicHeader,
+        disposition,
+        ...decoded,
+      });
+      const verifiedRow = Object.freeze(
+        Object.create(null),
+      ) as VerifiedCandidateCatalogRowV1;
+      this.#verifiedRows.set(verifiedRow as object, {
+        traversalHandle,
+        traversal,
+        load,
+        snapshot,
+      });
+      return Object.freeze({
+        ...snapshot,
+        verifiedRow,
+      });
+    });
+    return Object.freeze({
+      rows: Object.freeze(rows),
+      resumeAfter: page.resumeAfter,
+    });
   }
 
   private encodeAndVerifyLoad(load: VerifiedCandidateBucketLoadV1): EncodedCandidateLoadV1 {
@@ -870,6 +983,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       session: load.session,
       encoded,
       expectedHeader: cloneHeader(load.header),
+      publicHeader: load.publicHeader,
       scope: Object.freeze({ ...load.scope }),
       pinKey: pinKey(encoded),
     });
@@ -1728,7 +1842,10 @@ function assertVerifiedHeaderScopeBinding(
   }
 }
 
-function decodePage(rows: readonly SqlRowV1[], key: LoadKeyRecordV1): CandidateBucketPageV1 {
+function decodePage(
+  rows: readonly SqlRowV1[],
+  key: LoadKeyRecordV1,
+): CandidateBucketDecodedPageV1 {
   const decoded = rows.map((row) => decodeRow(row, key));
   return Object.freeze({
     rows: Object.freeze(decoded),
@@ -1736,7 +1853,7 @@ function decodePage(rows: readonly SqlRowV1[], key: LoadKeyRecordV1): CandidateB
   });
 }
 
-function decodeRow(row: SqlRowV1, key: LoadKeyRecordV1): CandidateBucketRowV1 {
+function decodeRow(row: SqlRowV1, key: LoadKeyRecordV1): DecodedCandidateBucketRowV1 {
   try {
     if (
       !sqlBlobsEqualV1(row.session_id, key.encoded.session)
@@ -1757,24 +1874,27 @@ function decodeRow(row: SqlRowV1, key: LoadKeyRecordV1): CandidateBucketRowV1 {
       throw new Error('stored assertionCoordinate is not text');
     }
     assertAssertionCoordinateV1(row.assertion_coordinate);
-    const candidate: AuthorCatalogRowV1 = {
+    const transfer = Object.freeze({
+      codec: KA_TRANSFER_CODEC_V1,
+      projectionId: KA_TRANSFER_PROJECTION_V1,
+      projectionDigest: sqlBlobToDigest32V1(row.projection_digest),
+      byteLength: sqlBlobToDecimalU64V1(row.transfer_byte_length_u64be) as ByteLengthV1,
+      chunkSize: sqlBlobToDecimalU64V1(
+        row.transfer_chunk_size_u64be,
+      ) as typeof KA_TRANSFER_CHUNK_SIZE_V1,
+      chunkCount: sqlBlobToDecimalU64V1(row.transfer_chunk_count_u64be) as CountV1,
+      blobDigest: sqlBlobToDigest32V1(row.transfer_blob_digest),
+      chunkTreeRoot: sqlBlobToDigest32V1(row.transfer_chunk_tree_root),
+    });
+    const candidate: AuthorCatalogRowV1 = Object.freeze({
       kaId: sqlBlobToDecimalU256V1(row.ka_id_u256be) as KaIdV1,
       assertionCoordinate: row.assertion_coordinate,
       assertionVersion: sqlBlobToDecimalU64V1(row.assertion_version_u64be),
       projectionId: KA_TRANSFER_PROJECTION_V1,
       projectionDigest: sqlBlobToDigest32V1(row.projection_digest),
       sealDigest: sqlBlobToDigest32V1(row.seal_digest),
-      transfer: {
-        codec: KA_TRANSFER_CODEC_V1,
-        projectionId: KA_TRANSFER_PROJECTION_V1,
-        projectionDigest: sqlBlobToDigest32V1(row.projection_digest),
-        byteLength: sqlBlobToDecimalU64V1(row.transfer_byte_length_u64be) as ByteLengthV1,
-        chunkSize: sqlBlobToDecimalU64V1(row.transfer_chunk_size_u64be) as typeof KA_TRANSFER_CHUNK_SIZE_V1,
-        chunkCount: sqlBlobToDecimalU64V1(row.transfer_chunk_count_u64be) as CountV1,
-        blobDigest: sqlBlobToDigest32V1(row.transfer_blob_digest),
-        chunkTreeRoot: sqlBlobToDigest32V1(row.transfer_chunk_tree_root),
-      },
-    };
+      transfer,
+    });
     assertAuthorCatalogRowV1(candidate);
     const catalogScopeDigest = sqlBlobToDigest32V1(row.catalog_scope_digest);
     const catalogKeyDigest = sqlBlobToDigest32V1(row.catalog_key_digest);
@@ -1789,7 +1909,7 @@ function decodeRow(row: SqlRowV1, key: LoadKeyRecordV1): CandidateBucketRowV1 {
       throw new Error('stored expectedCatalogRowDigest does not match the row');
     }
     return Object.freeze({
-      row: Object.freeze(candidate),
+      row: candidate,
       catalogKeyDigest,
       expectedCatalogRowDigest,
     });
@@ -2012,6 +2132,13 @@ function invalidSession(): InventoryV1CandidateError {
   return new InventoryV1CandidateError(
     'candidate-invalid-session',
     'candidate session is not an adapter-local opaque handle',
+  );
+}
+
+function invalidRowProof(): InventoryV1CandidateError {
+  return new InventoryV1CandidateError(
+    'candidate-invalid-row-proof',
+    'verified candidate row proof is not an adapter-local opaque handle',
   );
 }
 
