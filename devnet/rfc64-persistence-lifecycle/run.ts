@@ -342,7 +342,7 @@ try {
     `repository HEAD changed during harness execution: ${testedRepositoryHead} -> ${finalRepositoryHead}`,
   );
   const artifact = {
-    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v2',
+    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v3',
     gate: 'OT-RFC-64 Gate 0',
     productionBaselineCommit: testedRepositoryHead,
     invocation: 'pnpm test:gate0:rfc64-persistence-lifecycle',
@@ -351,6 +351,20 @@ try {
       trackedSourceCleanBeforeSpawn: true,
       trackedSourceCleanAfterProcesses: true,
     },
+    filesystemSecurity: process.platform === 'win32'
+      ? {
+          platform: 'win32',
+          policy: 'windows-protected-current-user-owner-only-full-control-v1',
+          productionPolicyChecksPassed: true,
+          inheritedAccessRulesAllowed: false,
+          otherSidAllowRulesAllowed: false,
+        }
+      : {
+          platform: process.platform,
+          policy: 'posix-owner-only-mode-v1',
+          requiredFileMode: '0600',
+          requiredDirectoryMode: '0700',
+        },
     runtimeBoundary: {
       agentClass: 'DKGAgent',
       processModel: 'three independent production agent processes',
@@ -365,12 +379,20 @@ try {
     },
     phases: {
       initialRunningOwner: {
+        agentStarted: initial.ready.agentStarted,
         inventoryOperational: initial.ready.inventoryOperational,
+        persistenceClosed: initial.ready.persistenceClosed,
+        staged: initial.ready.staged,
+        verifiedRead: initial.ready.verifiedRead,
         namespaceDurability: initial.ready.namespaceDurability,
         contender: initialProbe,
         snapshot: initialSnapshot,
       },
       gracefulRestart: {
+        agentStarted: gracefulRestart.ready.agentStarted,
+        inventoryOperational: gracefulRestart.ready.inventoryOperational,
+        persistenceClosed: gracefulRestart.ready.persistenceClosed,
+        staged: gracefulRestart.ready.staged,
         priorExit: initialExit,
         verifiedRead: gracefulRestart.ready.verifiedRead,
         contender: gracefulProbe,
@@ -378,6 +400,10 @@ try {
         snapshot: gracefulSnapshot,
       },
       operatingSystemLeaseRecovery: {
+        agentStarted: recovered.ready.agentStarted,
+        inventoryOperational: recovered.ready.inventoryOperational,
+        persistenceClosed: recovered.ready.persistenceClosed,
+        staged: recovered.ready.staged,
         uncleanExit: crashExit,
         verifiedRead: recovered.ready.verifiedRead,
         contender: recoveredProbe,
@@ -402,14 +428,14 @@ try {
     harnessChecksPassed: true,
     gateEvaluation: {
       status: 'not-evaluated',
-      reason: 'final RFC-64 integration has not been assembled',
+      reason: 'raw lifecycle evidence requires separate fail-closed verification',
     },
   };
   const publication = atomicWriteStableJson(artifactPath, artifact);
   log(`harness checks complete; evidence written to ${artifactPath}`);
   log(`artifact publication durability: ${publication.durability}`);
   log(`artifact SHA-256: ${publication.sha256}`);
-  log('Gate 0 remains not evaluated until the final RFC-64 integration is assembled');
+  log('raw Gate 0 evidence remains not evaluated until the separate verifier accepts it');
 } finally {
   for (const child of active) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');

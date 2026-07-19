@@ -27,6 +27,18 @@ Run from the repository root:
 pnpm test:gate0:rfc64-persistence-lifecycle
 ```
 
+The root command has two distinct steps. `:generate` builds and exercises the
+production lifecycle, writing raw evidence with `gateEvaluation.status` set to
+`not-evaluated`. `:verify` then reads that artifact as a closed schema, pins its
+source commit to the current clean tracked `HEAD`, evaluates every required
+runtime/lifecycle/filesystem invariant, and prints `PASS` only after successful
+verification. Either step can be invoked separately:
+
+```sh
+pnpm test:gate0:rfc64-persistence-lifecycle:generate
+pnpm test:gate0:rfc64-persistence-lifecycle:verify
+```
+
 Focused evidence-encoder, repository-state, and artifact-publication tests run with:
 
 ```sh
@@ -39,11 +51,18 @@ The default artifact is:
 devnet/rfc64-persistence-lifecycle/artifacts/gate0-result.json
 ```
 
-Set `DKG_RFC64_GATE0_ARTIFACT` to override that path. The gate deliberately
-does not add an HTTP/API route. Its only control channel is the parent/child
-stdio and process-signal boundary. A shared `scripts/devnet.sh` cluster is not
-required: RFC-64 persistence is acquired before networking, and isolating this
-gate avoids mutating a developer's existing devnet.
+The verifier writes a separate deterministic verdict artifact:
+
+```text
+devnet/rfc64-persistence-lifecycle/artifacts/gate0-verdict.json
+```
+
+Set `DKG_RFC64_GATE0_ARTIFACT` or `DKG_RFC64_GATE0_VERDICT_ARTIFACT` to override
+those paths. The gate deliberately does not add an HTTP/API route. Its only
+control channel is the parent/child stdio and process-signal boundary. A shared
+`scripts/devnet.sh` cluster is not required: RFC-64 persistence is acquired
+before networking, and isolating this gate avoids mutating a developer's existing
+devnet.
 
 Artifact publication uses an exclusive `0600` sibling temporary file, file
 `fsync`, atomic rename, parent-directory topology revalidation, and a parent
@@ -52,6 +71,12 @@ topology validation while reporting that directory `fsync` is unavailable. A
 symlink target or symlink parent is rejected. The runner logs the SHA-256 of the
 final bytes, allowing two runs at the same clean commit to prove byte identity.
 
-This harness can prove that its bounded lifecycle checks completed. It does not
-declare OT-RFC-64 Gate 0 passed: final Gate 0 evaluation remains unavailable until
-the final RFC-64 integration has been assembled and tested at its own exact HEAD.
+The verifier rejects missing or extra fields, non-canonical/lossy JSON, a dirty or
+mismatched source commit, malformed lifecycle evidence, changed file lists or
+digests, unsuccessful exits, non-busy lease probes, and incomplete POSIX mode or
+Windows protected-owner ACL-policy evidence. Mutation tests delete, alter, and
+extend every required schema location.
+
+A PASS on this standalone harness branch covers only the bounded evidence verifier.
+It is not a formal OT-RFC-64 Gate 0 result. Formal evaluation requires running this
+exact generator-plus-verifier command on the assembled integration commit.
