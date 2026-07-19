@@ -6,8 +6,17 @@
  * Block, index, count, length, and Unix-millisecond timestamp fields use u64;
  * chain IDs use u256.
  */
-export type DecimalU64V1 = string;
-export type DecimalU256V1 = string;
+declare const DECIMAL_U64_V1_BRAND: unique symbol;
+declare const DECIMAL_U256_V1_BRAND: unique symbol;
+declare const DIGEST_32_V1_BRAND: unique symbol;
+declare const EVM_ADDRESS_V1_BRAND: unique symbol;
+
+export type DecimalU64V1 = string & {
+  readonly [DECIMAL_U64_V1_BRAND]: true;
+};
+export type DecimalU256V1 = string & {
+  readonly [DECIMAL_U256_V1_BRAND]: true;
+};
 export type ChainIdV1 = DecimalU256V1;
 export type KaIdV1 = DecimalU256V1;
 export type ReservedKaIdV1 = KaIdV1;
@@ -19,8 +28,12 @@ export type IndexV1 = DecimalU64V1;
 export type CountV1 = DecimalU64V1;
 export type ByteLengthV1 = DecimalU64V1;
 export type TimestampMsV1 = DecimalU64V1;
-export type Digest32V1 = string;
-export type EvmAddressV1 = string;
+export type Digest32V1 = string & {
+  readonly [DIGEST_32_V1_BRAND]: true;
+};
+export type EvmAddressV1 = string & {
+  readonly [EVM_ADDRESS_V1_BRAND]: true;
+};
 
 export const MAX_DECIMAL_U64 = 18_446_744_073_709_551_615n;
 export const MAX_DECIMAL_U256 =
@@ -64,7 +77,7 @@ export function assertCanonicalDecimalU256(
 export function assertCanonicalChainId(
   value: unknown,
   label = 'chainId',
-): asserts value is DecimalU256V1 {
+): asserts value is ChainIdV1 {
   assertCanonicalDecimalU256(value, label);
 }
 
@@ -80,7 +93,7 @@ export function assertCanonicalKaId(
 export function assertCanonicalTimestampMs(
   value: unknown,
   label = 'timestampMs',
-): asserts value is DecimalU64V1 {
+): asserts value is TimestampMsV1 {
   assertCanonicalDecimalU64(value, label);
 }
 
@@ -124,38 +137,6 @@ export function assertCanonicalHexBytes(
     throw new Error(
       `${label} must be ${minBytes === maxBytes ? `${minBytes}` : `${minBytes}-${maxBytes}`} lowercase bytes`,
     );
-  }
-}
-
-export function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-/** Require one plain record to contain exactly enumerable string data fields. */
-export function assertExactKeys(
-  record: Record<string, unknown>,
-  expected: readonly string[],
-  label: string,
-): void {
-  const actual = Reflect.ownKeys(record);
-  if (actual.some((key) => typeof key !== 'string')) {
-    throw new Error(`${label} must not contain symbol properties`);
-  }
-  const strings = actual as string[];
-  const sortedExpected = [...expected].sort();
-  if (
-    strings.length !== sortedExpected.length
-    || [...strings].sort().some((key, index) => key !== sortedExpected[index])
-  ) {
-    throw new Error(`${label} has unknown or missing fields`);
-  }
-  for (const key of strings) {
-    const descriptor = Object.getOwnPropertyDescriptor(record, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} fields must be enumerable data properties`);
-    }
   }
 }
 

@@ -6,13 +6,12 @@ import {
 } from './canonical-json.js';
 import {
   assertCanonicalDigest,
-  assertExactKeys,
-  isPlainRecord,
   parseCanonicalDecimalU64,
   type ByteLengthV1,
   type CountV1,
   type Digest32V1,
 } from './sync-wire-scalars.js';
+import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
 
 export const KA_TRANSFER_CODEC_V1 = 'dkg-ka-bundle-v1' as const;
 export const KA_TRANSFER_PROJECTION_V1 = 'cg-shared-v1' as const;
