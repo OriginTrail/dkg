@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "adapter-process.ts",
+    "model.test.ts",
+    "model.ts",
+    "run.ts",
+    "verifier.test.ts",
+    "verifier.ts",
+    "verify.ts"
+  ]
+}
