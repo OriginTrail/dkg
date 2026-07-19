@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Bounded Gate-1 receiver for one public/open root-lane catalog row.
+ * Bounded receiver for one public/open root-lane catalog bucket.
  *
- * The supported first vertical slice is intentionally narrow: one successor
- * head, one bucket, one row, root context-graph lane, and one complete bundle.
+ * The supported vertical slice is intentionally narrow: one successor head,
+ * one bucket with 1..1,024 rows, the root context-graph lane, and complete
+ * bundles for every signed row.
  * Every network hop is RFC-64 catalog-native. Activation happens only after
  * signed head/path/bucket verification, transfer verification, canonical
  * projection verification, one atomic projection-plus-seal replace, exact
@@ -16,6 +17,7 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   ZERO_DIGEST32_V1,
   assertAuthorCatalogHeadScopeBindingV1,
   assertAuthorCatalogScopeV1,
@@ -43,6 +45,7 @@ import {
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
+  type CountV1,
   type Digest32V1,
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
@@ -71,6 +74,10 @@ import type {
   AppliedCatalogHeadSnapshotV1,
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
+import {
+  verifyRfc64PublicCatalogInventoryCompletenessV1,
+  type Rfc64PublicCatalogInventoryEvidenceRowV1,
+} from './public-catalog-inventory-completeness-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
@@ -121,6 +128,28 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
+export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
+  extends Rfc64PublicCatalogInventoryEvidenceRowV1 {
+  readonly swmGraph: string;
+  /** Exact signed delegation/head/path/bucket/row authorization closure. */
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+}
+
+/** Exact evidence for one bounded multi-asset successor inventory. */
+export interface Rfc64PublicCatalogNativeMultiAssetActivationEvidenceV1 {
+  readonly inventoryDigest: Digest32V1;
+  readonly catalogHeadDigest: Digest32V1;
+  readonly inventoryRowCount: number;
+  readonly activatedTripleCount: number;
+  /** Strictly increasing by mathematical KA ID. */
+  readonly rows: readonly Readonly<Rfc64PublicCatalogNativeActivatedRowEvidenceV1>[];
+  readonly appliedHeadStatus: 'applied' | 'existing';
+}
+
+export type Rfc64PublicCatalogNativeSuccessorEvidenceV1 =
+  | Rfc64PublicCatalogNativeActivationEvidenceV1
+  | Rfc64PublicCatalogNativeMultiAssetActivationEvidenceV1;
+
 /** Exact durable evidence for the canonical empty catalog bootstrap. */
 export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
   /** Digest of the exact empty applied inventory (zero rows). */
@@ -134,7 +163,7 @@ export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
 
 export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1 =
   | Rfc64PublicCatalogNativeGenesisEvidenceV1
-  | Rfc64PublicCatalogNativeActivationEvidenceV1;
+  | Rfc64PublicCatalogNativeSuccessorEvidenceV1;
 
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-input'
@@ -200,11 +229,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           announcement,
           trustedScope,
           trustedDeployment,
-          'successor',
+          'one-successor',
           signal,
         );
-        if (evidence.inventoryRowCount !== 1) {
-          fail('catalog-native-receiver-slice', 'one-row synchronization returned genesis evidence');
+        if (evidence.inventoryRowCount !== 1 || !('catalogRowDigest' in evidence)) {
+          fail('catalog-native-receiver-slice', 'one-row synchronization returned non-one-row evidence');
         }
         return evidence;
       },
@@ -212,8 +241,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   }
 
   /**
-   * Fetch and apply either the canonical empty genesis or the bounded one-row
-   * successor. This is the production-facing entrypoint for a fresh receiver:
+   * Fetch and apply either the canonical empty genesis or one bounded
+   * 1..1,024-row successor. This is the production-facing entrypoint for a fresh receiver:
    * callers do not need to seed durable history out of band.
    */
   async synchronizePublicOpenCatalog(
@@ -265,7 +294,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           'genesis',
           signal,
         );
-        if (evidence.inventoryRowCount !== 0) {
+        if (evidence.inventoryRowCount !== 0 || !('stagedObjectCount' in evidence)) {
           fail('catalog-native-receiver-slice', 'genesis bootstrap returned successor evidence');
         }
         return evidence;
@@ -278,7 +307,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     deployment: CatalogSealDeploymentProfileV1,
-    expected: 'any' | 'genesis' | 'successor',
+    expected: 'any' | 'genesis' | 'one-successor',
     signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
     throwIfAborted(signal);
@@ -301,10 +330,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         signal,
       );
     }
-    if (expected === 'successor' && claimsGenesisHistory(head)) {
+    if (expected === 'one-successor' && claimsGenesisHistory(head)) {
       fail('catalog-native-receiver-slice', 'one-row synchronization does not accept genesis');
     }
-    return this.synchronizeOnePublicOpenRowFetched(
+    if (expected === 'one-successor' && head.payload.totalRows !== '1') {
+      fail('catalog-native-receiver-slice', 'one-row synchronization does not accept multi-row heads');
+    }
+    return this.synchronizeBoundedPublicOpenCatalogFetched(
       remotePeerId,
       announcement,
       trustedCatalogScope,
@@ -440,22 +472,22 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     });
   }
 
-  private async synchronizeOnePublicOpenRowFetched(
+  private async synchronizeBoundedPublicOpenCatalogFetched(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     deployment: CatalogSealDeploymentProfileV1,
     fetchedHead: FetchedRfc64PublicCatalogHeadV1,
     signal: AbortSignal | undefined,
-  ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
+  ): Promise<Rfc64PublicCatalogNativeSuccessorEvidenceV1> {
     const head = fetchedHead.envelope;
-    assertFirstSliceHead(head);
+    const expectedRowCount = assertBoundedSuccessorHead(head);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
     const currentAppliedHead = this.options.inventory.readAppliedCatalogHeadV1(
       catalogScopeDigest,
       head.payload.authorAddress,
     );
-    const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head);
+    const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head, expectedRowCount);
     const scope = nativeScope(announcement, trustedCatalogScope, head);
     const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
       remotePeerId,
@@ -502,8 +534,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'successor directory path is invalid', cause);
     }
-    if (descriptor.rowCount !== '1' || descriptor.bucketDigest === ZERO_DIGEST32_V1) {
-      fail('catalog-native-receiver-slice', 'first receiver slice requires one non-empty bucket row');
+    if (
+      descriptor.rowCount !== head.payload.totalRows
+      || descriptor.bucketDigest === ZERO_DIGEST32_V1
+    ) {
+      fail(
+        'catalog-native-receiver-slice',
+        'bounded receiver requires one non-empty bucket containing the exact head row count',
+      );
     }
 
     const fetchedBucket = await this.options.contentTransport.fetchCatalogObject(
@@ -531,7 +569,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         bucket.issuer !== head.issuer
         || bucket.objectDigest !== descriptor.bucketDigest
         || bucket.payload.bucketId !== descriptor.bucketId
-        || bucket.payload.rows.length !== 1
+        || bucket.payload.rows.length !== expectedRowCount
         || bucket.payload.rows.length.toString() !== descriptor.rowCount
         || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
           !== descriptor.byteLength
@@ -541,81 +579,127 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
     }
-    const row = bucket.payload.rows[0];
-    if (row === undefined) {
-      fail('catalog-native-receiver-catalog', 'verified one-row bucket did not contain its row');
+    const preparedRows: Array<{
+      readonly row: AuthorCatalogRowV1;
+      readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+      readonly projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
+      readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
+      readonly projectionBytes: Uint8Array;
+      readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
+    }> = [];
+    for (const row of bucket.payload.rows) {
+      throwIfAborted(signal);
+      let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+      try {
+        const authorshipToken = verifyAuthorCatalogRowAuthorshipV1({
+          catalogIssuerDelegation: fetchedDelegation.envelope,
+          catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
+          parentAuthorAgentEvidence: null,
+          catalogHead: head,
+          catalogHeadSignature: fetchedHead.issuerSignature,
+          directoryPathEnvelopes: [directory],
+          directoryPathSignatures: [fetchedDirectory.issuerSignature],
+          directoryPathProof,
+          catalogBucket: bucket,
+          catalogBucketSignature: fetchedBucket.issuerSignature,
+          targetKaId: row.kaId,
+        });
+        authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipToken);
+      } catch (cause) {
+        fail(
+          'catalog-native-receiver-authorization',
+          `catalog row ${row.kaId} is not authorized by the exact direct-author delegation closure`,
+          cause,
+        );
+      }
+
+      const bundle = await this.options.contentTransport.fetchKaBundle(
+        remotePeerId,
+        {
+          ...scope,
+          kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+          blobDigest: row.transfer.blobDigest,
+          byteLength: row.transfer.byteLength as never,
+        },
+        { timeoutMs: this.#timeoutMs, signal },
+      );
+      if (bundle === null) {
+        fail('catalog-native-receiver-not-found', `catalog row ${row.kaId} KA bundle was not found`);
+      }
+
+      let projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
+      let sealBinding: VerifiedCatalogSealBindingSnapshotV1;
+      let projectionBytes: Uint8Array;
+      try {
+        const transferred = verifyTransferredCatalogBundleV1(head, row, bundle, deployment);
+        const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
+          transferred,
+          head,
+          row,
+          deployment,
+        );
+        sealBinding = readVerifiedCatalogSealBindingV1(
+          transferredMetadata.catalogSealBinding,
+        );
+        assertRecoverableAuthorAttestationV1(sealBinding);
+        const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
+        projectionMetadata = readVerifiedCgSharedProjectionMetadataV1(
+          projection,
+          transferred,
+          head,
+          row,
+          deployment,
+        );
+        projectionBytes = readVerifiedCgSharedProjectionBytesV1(
+          projection,
+          transferred,
+          head,
+          row,
+          deployment,
+        );
+      } catch (cause) {
+        fail(
+          'catalog-native-receiver-transfer',
+          `KA bundle or shared projection verification failed for row ${row.kaId}`,
+          cause,
+        );
+      }
+      const expectedEvidence = Object.freeze({
+        kaId: row.kaId,
+        catalogRowDigest: projectionMetadata.catalogRowDigest,
+        contentDigest: projectionMetadata.projectionDigest,
+        sealDigest: sealBinding.sealDigest,
+        bundleDigest: row.transfer.blobDigest,
+        kaUal: projectionMetadata.kaUal,
+        activatedTripleCount: Number(projectionMetadata.publicTripleCount),
+      }) satisfies Rfc64PublicCatalogInventoryEvidenceRowV1;
+      preparedRows.push(Object.freeze({
+        row,
+        authorship,
+        projectionMetadata,
+        sealBinding,
+        projectionBytes,
+        expectedEvidence,
+      }));
     }
 
-    let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+    const expectedRows = preparedRows.map((prepared) => prepared.expectedEvidence);
+    // Fail closed on exact count/order/UAL/content evidence before the first
+    // semantic mutation. The second call below joins these expectations to
+    // independent exact post-reads.
     try {
-      const authorshipToken = verifyAuthorCatalogRowAuthorshipV1({
-        catalogIssuerDelegation: fetchedDelegation.envelope,
-        catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
-        parentAuthorAgentEvidence: null,
-        catalogHead: head,
-        catalogHeadSignature: fetchedHead.issuerSignature,
-        directoryPathEnvelopes: [directory],
-        directoryPathSignatures: [fetchedDirectory.issuerSignature],
-        directoryPathProof,
-        catalogBucket: bucket,
-        catalogBucketSignature: fetchedBucket.issuerSignature,
-        targetKaId: row.kaId,
+      verifyRfc64PublicCatalogInventoryCompletenessV1({
+        catalogScope: trustedCatalogScope,
+        expectedTotalRows: head.payload.totalRows as CountV1,
+        expectedRows,
+        observedRows: expectedRows,
       });
-      authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipToken);
     } catch (cause) {
       fail(
-        'catalog-native-receiver-authorization',
-        'catalog row is not authorized by the exact direct-author delegation closure',
+        'catalog-native-receiver-catalog',
+        'signed catalog rows do not form one exact bounded inventory',
         cause,
       );
-    }
-
-    const bundle = await this.options.contentTransport.fetchKaBundle(
-      remotePeerId,
-      {
-        ...scope,
-        kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
-        blobDigest: row.transfer.blobDigest,
-        byteLength: row.transfer.byteLength as never,
-      },
-      { timeoutMs: this.#timeoutMs, signal },
-    );
-    if (bundle === null) {
-      fail('catalog-native-receiver-not-found', 'catalog row KA bundle was not found');
-    }
-
-    let projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
-    let sealBinding: VerifiedCatalogSealBindingSnapshotV1;
-    let projectionBytes: Uint8Array;
-    try {
-      const transferred = verifyTransferredCatalogBundleV1(head, row, bundle, deployment);
-      const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
-        transferred,
-        head,
-        row,
-        deployment,
-      );
-      sealBinding = readVerifiedCatalogSealBindingV1(
-        transferredMetadata.catalogSealBinding,
-      );
-      assertRecoverableAuthorAttestationV1(sealBinding);
-      const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
-      projectionMetadata = readVerifiedCgSharedProjectionMetadataV1(
-        projection,
-        transferred,
-        head,
-        row,
-        deployment,
-      );
-      projectionBytes = readVerifiedCgSharedProjectionBytesV1(
-        projection,
-        transferred,
-        head,
-        row,
-        deployment,
-      );
-    } catch (cause) {
-      fail('catalog-native-receiver-transfer', 'KA bundle or shared projection verification failed', cause);
     }
 
     try {
@@ -629,19 +713,58 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified catalog objects could not be staged', cause);
     }
 
-    const activation = await activateExactPublicProjection(
-      this.options.store,
-      head,
-      row,
-      projectionMetadata.kaUal,
-      projectionBytes,
-      Number(projectionMetadata.publicTripleCount),
-      sealBinding,
+    const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
+    for (const prepared of preparedRows) {
+      throwIfAborted(signal);
+      const activation = await activateExactPublicProjection(
+        this.options.store,
+        head,
+        prepared.row,
+        prepared.projectionMetadata.kaUal,
+        prepared.projectionBytes,
+        Number(prepared.projectionMetadata.publicTripleCount),
+        prepared.sealBinding,
+      );
+      activatedRows.push(Object.freeze({
+        ...activation.evidence,
+        swmGraph: activation.swmGraph,
+        authorship: prepared.authorship,
+      }));
+    }
+    let completion: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
+    try {
+      completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
+        catalogScope: trustedCatalogScope,
+        expectedTotalRows: head.payload.totalRows as CountV1,
+        expectedRows,
+        observedRows: activatedRows.map((row) => ({
+          kaId: row.kaId,
+          catalogRowDigest: row.catalogRowDigest,
+          contentDigest: row.contentDigest,
+          sealDigest: row.sealDigest,
+          bundleDigest: row.bundleDigest,
+          kaUal: row.kaUal,
+          activatedTripleCount: row.activatedTripleCount,
+        })),
+      });
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-activation',
+        'semantic post-reads do not equal the exact signed inventory',
+        cause,
+      );
+    }
+    const activatedTripleCount = activatedRows.reduce(
+      (total, row) => total + row.activatedTripleCount,
+      0,
     );
+    if (!Number.isSafeInteger(activatedTripleCount)) {
+      fail('catalog-native-receiver-activation', 'total activated triple count is not a safe integer');
+    }
 
     let appliedHeadStatus: 'applied' | 'existing';
     if (replay) {
-      if (currentAppliedHead!.appliedInventoryDigest !== activation.inventoryDigest) {
+      if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
         fail(
           'catalog-native-receiver-history',
           'durable applied-head digest differs from exact semantic post-read',
@@ -655,9 +778,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           authorAddress: head.payload.authorAddress,
           expectedCurrentCatalogHeadDigest: head.payload.previousHeadDigest,
           currentCatalogHeadDigest: head.objectDigest as Digest32V1,
-          appliedInventoryDigest: activation.inventoryDigest,
+          appliedInventoryDigest: completion.inventoryDigest,
           catalogVersion: head.payload.version,
-          inventoryRowCount: '1' as never,
+          inventoryRowCount: head.payload.totalRows,
         }).status;
       } catch (cause) {
         const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
@@ -667,7 +790,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         if (
           reconciled === null
           || reconciled.currentCatalogHeadDigest !== head.objectDigest
-          || reconciled.appliedInventoryDigest !== activation.inventoryDigest
+          || !isExactAppliedSuccessorSnapshot(
+            reconciled,
+            head,
+            completion.inventoryDigest,
+          )
         ) {
           fail(
             'catalog-native-receiver-history',
@@ -679,17 +806,46 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       }
     }
 
+    const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      head.payload.authorAddress,
+    );
+    if (!isExactAppliedSuccessorSnapshot(
+      durablePostRead,
+      head,
+      completion.inventoryDigest,
+    )) {
+      fail(
+        'catalog-native-receiver-history',
+        'successor durable post-read differs in head, digest, version, or exact row count',
+      );
+    }
+
+    if (activatedRows.length === 1) {
+      const [only] = activatedRows;
+      if (only === undefined) {
+        fail('catalog-native-receiver-activation', 'one-row completion lost its activation row');
+      }
+      return Object.freeze({
+        inventoryDigest: completion.inventoryDigest,
+        catalogHeadDigest: head.objectDigest as Digest32V1,
+        catalogRowDigest: only.catalogRowDigest,
+        contentDigest: only.contentDigest,
+        bundleDigest: only.bundleDigest,
+        kaUal: only.kaUal,
+        inventoryRowCount: 1 as const,
+        activatedTripleCount: only.activatedTripleCount,
+        swmGraph: only.swmGraph,
+        authorship: only.authorship,
+        appliedHeadStatus,
+      });
+    }
     return Object.freeze({
-      inventoryDigest: activation.inventoryDigest,
+      inventoryDigest: completion.inventoryDigest,
       catalogHeadDigest: head.objectDigest as Digest32V1,
-      catalogRowDigest: projectionMetadata.catalogRowDigest,
-      contentDigest: projectionMetadata.projectionDigest,
-      bundleDigest: row.transfer.blobDigest,
-      kaUal: projectionMetadata.kaUal,
-      inventoryRowCount: 1 as const,
-      activatedTripleCount: Number(projectionMetadata.publicTripleCount),
-      swmGraph: activation.swmGraph,
-      authorship,
+      inventoryRowCount: activatedRows.length,
+      activatedTripleCount,
+      rows: Object.freeze(activatedRows),
       appliedHeadStatus,
     });
   }
@@ -914,6 +1070,7 @@ function isExactEmptyGenesisSnapshot(
 function assertMonotonicSuccessorHistory(
   current: AppliedCatalogHeadSnapshotV1 | null,
   head: SignedAuthorCatalogHeadEnvelopeV1,
+  expectedRowCount: number,
 ): boolean {
   if (current === null) {
     fail(
@@ -922,7 +1079,10 @@ function assertMonotonicSuccessorHistory(
     );
   }
   if (current.currentCatalogHeadDigest === head.objectDigest) {
-    if (current.catalogVersion !== head.payload.version || current.inventoryRowCount !== '1') {
+    if (
+      current.catalogVersion !== head.payload.version
+      || current.inventoryRowCount !== expectedRowCount.toString()
+    ) {
       fail('catalog-native-receiver-history', 'replayed head differs from its durable applied state');
     }
     return true;
@@ -939,20 +1099,43 @@ function assertMonotonicSuccessorHistory(
   return false;
 }
 
-function assertFirstSliceHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
+function assertBoundedSuccessorHead(head: SignedAuthorCatalogHeadEnvelopeV1): number {
+  let totalRows = 0;
+  try {
+    totalRows = Number(BigInt(head.payload.totalRows));
+  } catch {}
   if (
     head.payload.subGraphName !== null
     || head.payload.bucketCount !== '1'
     || head.payload.directoryHeight !== '0'
-    || head.payload.totalRows !== '1'
+    || !Number.isSafeInteger(totalRows)
+    || totalRows < 1
+    || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
     || head.payload.version === '0'
     || head.payload.previousHeadDigest === null
   ) {
     fail(
       'catalog-native-receiver-slice',
-      'first receiver slice requires one root-lane row in a non-genesis successor',
+      `bounded receiver requires 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor bucket`,
     );
   }
+  return totalRows;
+}
+
+function isExactAppliedSuccessorSnapshot(
+  current: AppliedCatalogHeadSnapshotV1 | null,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  inventoryDigest: Digest32V1,
+): boolean {
+  return current !== null
+    && current.catalogScopeDigest === computeAuthorCatalogScopeDigestV1(
+      deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    )
+    && current.authorAddress === head.payload.authorAddress
+    && current.currentCatalogHeadDigest === head.objectDigest
+    && current.appliedInventoryDigest === inventoryDigest
+    && current.catalogVersion === head.payload.version
+    && current.inventoryRowCount === head.payload.totalRows;
 }
 
 function nativeScope(
@@ -1031,7 +1214,10 @@ async function activateExactPublicProjection(
   projectionBytes: Uint8Array,
   expectedTripleCount: number,
   sealBinding: VerifiedCatalogSealBindingSnapshotV1,
-): Promise<{ swmGraph: string; inventoryDigest: Digest32V1 }> {
+): Promise<{
+  readonly swmGraph: string;
+  readonly evidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
+}> {
   let projectionText: string;
   let quads;
   try {
@@ -1097,15 +1283,14 @@ async function activateExactPublicProjection(
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
-    inventoryDigest: computeRfc64AppliedInventoryDigestV1({
-      catalogScopeDigest: sealBinding.catalogScopeDigest,
-      rows: [{
-        catalogRowDigest: sealBinding.catalogRowDigest,
-        contentDigest: row.projectionDigest,
-        sealDigest: sealBinding.sealDigest,
-        kaUal,
-        activatedTripleCount: expectedTripleCount,
-      }],
+    evidence: Object.freeze({
+      kaId: row.kaId,
+      catalogRowDigest: sealBinding.catalogRowDigest,
+      contentDigest: row.projectionDigest,
+      sealDigest: sealBinding.sealDigest,
+      bundleDigest: row.transfer.blobDigest,
+      kaUal,
+      activatedTripleCount: expectedTripleCount,
     }),
   };
 }

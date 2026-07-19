@@ -49,6 +49,9 @@ import {
   Rfc64PublicCatalogNativeReceiverV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
+  verifyRfc64PublicCatalogInventoryCompletenessV1,
+} from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import {
   Rfc64PublicCatalogNativeTransportV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import {
@@ -74,6 +77,8 @@ const MISSING_DELEGATION_DIGEST = `0x${'76'.repeat(32)}` as Digest32V1;
 const KA_NUMBER = 7n;
 const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
 const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
+const SECOND_KA_NUMBER = 8n;
+const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
 const PROJECTION =
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
@@ -243,6 +248,138 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).resolves.toMatchObject({
       envelope: { objectDigest: fixture.catalogIssuerDelegation.objectDigest },
     });
+  }, 30_000);
+
+  it('activates every row in one exact bounded multi-asset inventory before one head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const observed = fixture.createCasObservedReceiver();
+
+    const evidence = await fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      observed.receiver,
+    );
+    if (!('rows' in evidence)) throw new Error('two-row successor returned non-multi evidence');
+    const expectedRows = [fixture.rowBundle, fixture.secondRowBundle].map((bundle) => ({
+      kaId: bundle.row.kaId,
+      catalogRowDigest: computeAuthorCatalogRowDigestV1(
+        fixture.scopeDigest,
+        bundle.row,
+      ),
+      contentDigest: bundle.row.projectionDigest,
+      sealDigest: bundle.row.sealDigest,
+      bundleDigest: bundle.row.transfer.blobDigest,
+      kaUal: bundle.kaUal,
+      activatedTripleCount: 2,
+    }));
+    const expected = verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: fixture.scope,
+      expectedTotalRows: '2' as never,
+      expectedRows,
+      observedRows: expectedRows,
+    });
+
+    expect(evidence).toMatchObject({
+      inventoryDigest: expected.inventoryDigest,
+      catalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      inventoryRowCount: 2,
+      activatedTripleCount: 4,
+      appliedHeadStatus: 'applied',
+    });
+    expect(evidence.rows.map((row) => ({
+      kaId: row.kaId,
+      kaUal: row.kaUal,
+      bundleDigest: row.bundleDigest,
+      activatedTripleCount: row.activatedTripleCount,
+    }))).toEqual(expectedRows.map((row) => ({
+      kaId: row.kaId,
+      kaUal: row.kaUal,
+      bundleDigest: row.bundleDigest,
+      activatedTripleCount: row.activatedTripleCount,
+    })));
+    expect(evidence.rows.map((row) => row.swmGraph)).toEqual([
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`,
+    ]);
+    expect(evidence.rows.every((row) => Object.isFrozen(row.authorship))).toBe(true);
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentCatalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+        appliedInventoryDigest: expected.inventoryDigest,
+        inventoryRowCount: '2',
+      }),
+    );
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+      appliedInventoryDigest: expected.inventoryDigest,
+      inventoryRowCount: '2',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('verifies all multi-asset bundles before staging, SWM mutation, or applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    fixture.receiverBundleFetch.mockClear();
+    const fetchKaBundle: Rfc64PublicCatalogNativeTransportV1['fetchKaBundle'] =
+      async (...args) => {
+        const bundle = await fixture.receiverBundleFetch(...args);
+        if (
+          bundle === null
+          || args[1].blobDigest !== fixture.secondRowBundle.row.transfer.blobDigest
+        ) {
+          return bundle;
+        }
+        const tampered = bundle.slice();
+        tampered[tampered.length - 1] ^= 0x01;
+        return tampered;
+      };
+    const observed = fixture.createCasObservedReceiver({
+      fetchCatalogObject: fixture.receiverObjectFetch,
+      fetchKaBundle,
+    });
+
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
+    expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('keeps the one-row compatibility entrypoint fail-closed for a multi-row head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    fixture.receiverObjectFetch.mockClear();
+    fixture.receiverBundleFetch.mockClear();
+    const observed = fixture.createCasObservedReceiver();
+
+    await expect(fixture.synchronize(
+      fixture.multiAssetAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
+    expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
   it('rejects a signed genesis whose directory is not exactly empty', async () => {
@@ -670,6 +807,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     expiresAt: '1773899999999',
   });
   const rowBundle = await buildRowBundle(signingWallet);
+  const secondRowBundle = await buildRowBundle(signingWallet, {
+    kaNumber: SECOND_KA_NUMBER,
+    assertionCoordinate: 'gate-2-object',
+  });
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope,
     catalogIssuerDelegationDigest: catalogIssuerDelegation.objectDigest,
@@ -690,6 +831,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     selectedBucketId: '0' as never,
     nextRows: [rowBundle.row],
     issuedAt: '1773900001000' as never,
+    signer,
+  });
+  const multiAssetSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: successor.head,
+    previousDirectoryPath: successor.directoryPath,
+    previousBucket: successor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row],
+    issuedAt: '1773900001002' as never,
     signer,
   });
   const governedSuccessor = await produceSparseAuthorCatalogSuccessorV1({
@@ -736,6 +886,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...governedGenesis.stagedObjects,
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
+      ...multiAssetSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -746,8 +897,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   );
   const authorObjectRead = vi.fn(async (digest: Digest32V1) =>
     authorObjects.get(digest) ?? null);
+  const bundleBytesByDigest = new Map<string, Uint8Array>([
+    [rowBundle.row.transfer.blobDigest, rowBundle.bundleBytes],
+    [secondRowBundle.row.transfer.blobDigest, secondRowBundle.bundleBytes],
+  ]);
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
-    digest === rowBundle.row.transfer.blobDigest ? rowBundle.bundleBytes : null);
+    bundleBytesByDigest.get(digest) ?? null);
   const verifiedObjects = await Promise.all(
     [
       catalogIssuerDelegation,
@@ -758,6 +913,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...governedGenesis.stagedObjects,
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
+      ...multiAssetSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -786,6 +942,9 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const genesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === genesis.head.objectDigest,
   );
+  const multiAssetHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === multiAssetSuccessor.head.objectDigest,
+  );
   const governedGenesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === governedGenesis.head.objectDigest,
   );
@@ -809,6 +968,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   );
   if (headKeys === undefined) throw new Error('successor head was not staged');
   if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
+  if (multiAssetHeadKeys === undefined) throw new Error('multi-asset successor head was not staged');
   if (governedGenesisHeadKeys === undefined) throw new Error('governed genesis head was not staged');
   if (governedSuccessorHeadKeys === undefined) throw new Error('governed successor head was not staged');
   if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
@@ -882,6 +1042,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     catalogVersion: genesis.head.payload.version,
     catalogHeadObjectDigest: genesisHeadKeys.objectDigest,
     signatureVariantDigest: genesisHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const multiAssetAnnouncement = Object.freeze({
+    ...announcement,
+    catalogVersion: multiAssetSuccessor.head.payload.version,
+    catalogHeadObjectDigest: multiAssetHeadKeys.objectDigest,
+    signatureVariantDigest: multiAssetHeadKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
   const competingAnnouncement = Object.freeze({
     ...announcement,
@@ -1002,12 +1168,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     receiver,
     receiverBundleFetch,
     missingDelegationAnnouncement,
+    multiAssetAnnouncement,
+    multiAssetSuccessor,
     receiverDirectory: receiverOpened.directory,
     receiverHeadFetch,
     receiverObjectFetch,
     receiverPersistence,
     receiverStore,
     rowBundle,
+    secondRowBundle,
     scope,
     scopeDigest,
     successor,
@@ -1155,13 +1324,20 @@ function alternateRecoveryEncoding(signature: string): string {
 
 async function buildRowBundle(
   signingWallet: ethers.Wallet = AUTHOR_WALLET,
-): Promise<{ row: AuthorCatalogRowV1; bundleBytes: Uint8Array }> {
+  options: {
+    readonly kaNumber?: bigint;
+    readonly assertionCoordinate?: string;
+  } = {},
+): Promise<{ row: AuthorCatalogRowV1; bundleBytes: Uint8Array; kaUal: string }> {
+  const kaNumber = options.kaNumber ?? KA_NUMBER;
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
     authorAddress: AUTHOR,
-    reservedKaId: BigInt(KA_ID),
+    reservedKaId: BigInt(kaId),
   });
   const authorSignature = ethers.Signature.from(await signingWallet.signTypedData(
     typedData.domain,
@@ -1176,10 +1352,10 @@ async function buildRowBundle(
     authorSchemeVersion: '1',
     assertedAtChainId: '20430',
     assertedAtKav10Address: KAV10,
-    reservedKaId: KA_ID,
+    reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: UAL,
+    kaUal,
     assertionVersion: '1',
     publicTripleCount: '2',
     privateTripleCount: '0',
@@ -1192,8 +1368,8 @@ async function buildRowBundle(
   );
   const byteLength = BigInt(encoded.bundleBytes.byteLength);
   const row = {
-    kaId: KA_ID,
-    assertionCoordinate: 'gate-1-object',
+    kaId,
+    assertionCoordinate: options.assertionCoordinate ?? 'gate-1-object',
     assertionVersion: '1',
     projectionId: 'cg-shared-v1',
     projectionDigest: encoded.projectionDigest,
@@ -1210,5 +1386,5 @@ async function buildRowBundle(
     },
   } as unknown as AuthorCatalogRowV1;
   assertAuthorCatalogRowV1(row);
-  return { row, bundleBytes: encoded.bundleBytes };
+  return { row, bundleBytes: encoded.bundleBytes, kaUal };
 }
