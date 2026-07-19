@@ -81,6 +81,7 @@ const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
 const SECOND_KA_NUMBER = 8n;
 const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
 const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
+const THIRD_KA_NUMBER = 9n;
 const PROJECTION =
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
@@ -491,7 +492,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.multiAssetSuccessor.head.objectDigest);
-    await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(false);
+    await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(true);
 
     const restartedReceiver = fixture.createReceiver(fixture.receiverPersistence.inventory);
     const repaired = await fixture.synchronizeAny(
@@ -511,6 +512,186 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )).toMatchObject({
       currentCatalogHeadDigest: fixture.removalSuccessor.head.objectDigest,
       inventoryRowCount: '1',
+    });
+  }, 30_000);
+
+  it('rolls back an omitted row and earlier target activations when a later target post-read fails', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
+    await fixture.synchronizeAny(fixture.threeAssetAnnouncement);
+    const firstGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`;
+    const omittedGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    const laterGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${THIRD_KA_NUMBER}`;
+    const firstSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: 'gate-1-object' as never,
+    });
+    const omittedSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: 'gate-2-object' as never,
+    });
+    const laterSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: 'gate-2-replacement-object' as never,
+    });
+    const foreignAuthor = '0x9999999999999999999999999999999999999999' as EvmAddressV1;
+    const foreignGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${foreignAuthor}/77`;
+    const foreignSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: foreignAuthor,
+      assertionCoordinate: 'transition-foreign-object' as never,
+    });
+    await fixture.receiverStore.insert([
+      {
+        subject: 'https://example.org/predecessor-only',
+        predicate: 'https://schema.org/name',
+        object: '"Exact predecessor sentinel"',
+        graph: firstGraph,
+      },
+      {
+        subject: 'https://example.org/transition-foreign',
+        predicate: 'https://schema.org/name',
+        object: '"Foreign transition sentinel"',
+        graph: foreignGraph,
+      },
+      {
+        subject: foreignSeal.subject,
+        predicate: 'https://example.org/foreignTransitionSeal',
+        object: '"owned elsewhere"',
+        graph: foreignSeal.metaGraph,
+      },
+    ]);
+    const predecessorFirst = await readExactSemanticPairForTest(
+      fixture.receiverStore,
+      firstGraph,
+      firstSeal.metaGraph,
+      firstSeal.subject,
+    );
+    const predecessorOmitted = await readExactSemanticPairForTest(
+      fixture.receiverStore,
+      omittedGraph,
+      omittedSeal.metaGraph,
+      omittedSeal.subject,
+    );
+    const predecessorLater = await readExactSemanticPairForTest(
+      fixture.receiverStore,
+      laterGraph,
+      laterSeal.metaGraph,
+      laterSeal.subject,
+    );
+    const foreignBefore = await readExactSemanticPairForTest(
+      fixture.receiverStore,
+      foreignGraph,
+      foreignSeal.metaGraph,
+      foreignSeal.subject,
+    );
+    expect(predecessorFirst.graph).toHaveLength(3);
+    const activatedGraphs: string[] = [];
+    let failLaterPostRead = true;
+    const faultStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            await target.replaceGraphAndSubject!(...args);
+            if (args[1].length > 0) activatedGraphs.push(args[0]);
+          };
+        }
+        if (property === 'query') {
+          return async (...args: Parameters<TripleStore['query']>) => {
+            if (
+              failLaterPostRead
+              && args[1]?.source === 'rfc64-public-catalog-native-post-read'
+              && args[0].includes(`<${laterGraph}>`)
+            ) {
+              failLaterPostRead = false;
+              throw new Error('injected later-row exact post-read failure');
+            }
+            return target.query(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const failed = fixture.createCasObservedReceiver(undefined, faultStore);
+
+    await expect(fixture.synchronizeAny(
+      fixture.replacementAnnouncement,
+      failed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-activation' });
+
+    expect(activatedGraphs.slice(0, 2)).toEqual([firstGraph, laterGraph]);
+    expect(failed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.threeAssetSuccessor.head.objectDigest);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      firstGraph,
+      firstSeal.metaGraph,
+      firstSeal.subject,
+    )).resolves.toEqual(predecessorFirst);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      omittedGraph,
+      omittedSeal.metaGraph,
+      omittedSeal.subject,
+    )).resolves.toEqual(predecessorOmitted);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      laterGraph,
+      laterSeal.metaGraph,
+      laterSeal.subject,
+    )).resolves.toEqual(predecessorLater);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      foreignGraph,
+      foreignSeal.metaGraph,
+      foreignSeal.subject,
+    )).resolves.toEqual(foreignBefore);
+
+    const retried = await fixture.synchronizeAny(fixture.replacementAnnouncement);
+    expect(retried).toMatchObject({
+      catalogHeadDigest: fixture.replacementSuccessor.head.objectDigest,
+      inventoryRowCount: 2,
+      removedRowCount: 1,
+      appliedHeadStatus: 'applied',
+    });
+    await expect(fixture.receiverStore.hasGraph(firstGraph)).resolves.toBe(true);
+    await expect(fixture.receiverStore.hasGraph(omittedGraph)).resolves.toBe(false);
+    await expect(fixture.receiverStore.hasGraph(laterGraph)).resolves.toBe(true);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      firstGraph,
+      firstSeal.metaGraph,
+      firstSeal.subject,
+    )).resolves.not.toEqual(predecessorFirst);
+    await expect(readExactSemanticPairForTest(
+      fixture.receiverStore,
+      foreignGraph,
+      foreignSeal.metaGraph,
+      foreignSeal.subject,
+    )).resolves.toEqual(foreignBefore);
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.replacementSuccessor.head.objectDigest,
+      inventoryRowCount: '2',
     });
   }, 30_000);
 
@@ -1003,6 +1184,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     kaNumber: SECOND_KA_NUMBER,
     assertionCoordinate: 'gate-2-object',
   });
+  const thirdRowBundle = await buildRowBundle(signingWallet, {
+    kaNumber: THIRD_KA_NUMBER,
+    assertionCoordinate: 'gate-2-replacement-object',
+  });
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope,
     catalogIssuerDelegationDigest: catalogIssuerDelegation.objectDigest,
@@ -1041,6 +1226,24 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     selectedBucketId: '0' as never,
     nextRows: [rowBundle.row],
     issuedAt: '1773900001003' as never,
+    signer,
+  });
+  const threeAssetSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: multiAssetSuccessor.head,
+    previousDirectoryPath: multiAssetSuccessor.directoryPath,
+    previousBucket: multiAssetSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, secondRowBundle.row, thirdRowBundle.row],
+    issuedAt: '1773900001004' as never,
+    signer,
+  });
+  const replacementSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: threeAssetSuccessor.head,
+    previousDirectoryPath: threeAssetSuccessor.directoryPath,
+    previousBucket: threeAssetSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row, thirdRowBundle.row],
+    issuedAt: '1773900001005' as never,
     signer,
   });
   const governedSuccessor = await produceSparseAuthorCatalogSuccessorV1({
@@ -1089,6 +1292,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...successor.stagedObjects,
       ...multiAssetSuccessor.stagedObjects,
       ...removalSuccessor.stagedObjects,
+      ...threeAssetSuccessor.stagedObjects,
+      ...replacementSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -1102,6 +1307,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const bundleBytesByDigest = new Map<string, Uint8Array>([
     [rowBundle.row.transfer.blobDigest, rowBundle.bundleBytes],
     [secondRowBundle.row.transfer.blobDigest, secondRowBundle.bundleBytes],
+    [thirdRowBundle.row.transfer.blobDigest, thirdRowBundle.bundleBytes],
   ]);
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
     bundleBytesByDigest.get(digest) ?? null);
@@ -1117,6 +1323,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...successor.stagedObjects,
       ...multiAssetSuccessor.stagedObjects,
       ...removalSuccessor.stagedObjects,
+      ...threeAssetSuccessor.stagedObjects,
+      ...replacementSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -1151,6 +1359,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const removalHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === removalSuccessor.head.objectDigest,
   );
+  const replacementHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === replacementSuccessor.head.objectDigest,
+  );
+  const threeAssetHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === threeAssetSuccessor.head.objectDigest,
+  );
   const governedGenesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === governedGenesis.head.objectDigest,
   );
@@ -1176,6 +1390,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
   if (multiAssetHeadKeys === undefined) throw new Error('multi-asset successor head was not staged');
   if (removalHeadKeys === undefined) throw new Error('removal successor head was not staged');
+  if (replacementHeadKeys === undefined) throw new Error('replacement successor head was not staged');
+  if (threeAssetHeadKeys === undefined) throw new Error('three-asset successor head was not staged');
   if (governedGenesisHeadKeys === undefined) throw new Error('governed genesis head was not staged');
   if (governedSuccessorHeadKeys === undefined) throw new Error('governed successor head was not staged');
   if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
@@ -1261,6 +1477,18 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     catalogVersion: removalSuccessor.head.payload.version,
     catalogHeadObjectDigest: removalHeadKeys.objectDigest,
     signatureVariantDigest: removalHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const replacementAnnouncement = Object.freeze({
+    ...announcement,
+    catalogVersion: replacementSuccessor.head.payload.version,
+    catalogHeadObjectDigest: replacementHeadKeys.objectDigest,
+    signatureVariantDigest: replacementHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const threeAssetAnnouncement = Object.freeze({
+    ...announcement,
+    catalogVersion: threeAssetSuccessor.head.payload.version,
+    catalogHeadObjectDigest: threeAssetHeadKeys.objectDigest,
+    signatureVariantDigest: threeAssetHeadKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
   const competingAnnouncement = Object.freeze({
     ...announcement,
@@ -1390,6 +1618,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     multiAssetSuccessor,
     removalAnnouncement,
     removalSuccessor,
+    replacementAnnouncement,
+    replacementSuccessor,
     receiverDirectory: receiverOpened.directory,
     receiverHeadFetch,
     receiverObjectFetch,
@@ -1397,6 +1627,9 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     receiverStore,
     rowBundle,
     secondRowBundle,
+    thirdRowBundle,
+    threeAssetAnnouncement,
+    threeAssetSuccessor,
     scope,
     scopeDigest,
     successor,
@@ -1434,6 +1667,33 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       signal,
     ),
   };
+}
+
+async function readExactSemanticPairForTest(
+  store: TripleStore,
+  graph: string,
+  sealMetaGraph: string,
+  sealSubject: string,
+): Promise<{
+  readonly graph: readonly Readonly<Record<string, string>>[];
+  readonly seal: readonly Readonly<Record<string, string>>[];
+}> {
+  const [graphResult, sealResult] = await Promise.all([
+    store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+    ),
+    store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${sealMetaGraph}> { `
+        + `<${sealSubject}> ?p ?o } } ORDER BY ?p ?o`,
+    ),
+  ]);
+  if (graphResult.type !== 'bindings' || sealResult.type !== 'bindings') {
+    throw new Error('exact semantic pair test read did not return bindings');
+  }
+  return Object.freeze({
+    graph: Object.freeze(graphResult.bindings.map((row) => Object.freeze({ ...row }))),
+    seal: Object.freeze(sealResult.bindings.map((row) => Object.freeze({ ...row }))),
+  });
 }
 
 async function buildDirectCatalogIssuerDelegation(options: {
