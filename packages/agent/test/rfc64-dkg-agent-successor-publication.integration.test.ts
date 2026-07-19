@@ -32,6 +32,8 @@ const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const KA_NUMBER = 7n;
 const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
 const KA_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
+const SECOND_KA_NUMBER = 8n;
+const THIRD_KA_NUMBER = 9n;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
 const PROJECTION = new TextEncoder().encode(
@@ -128,6 +130,87 @@ describe('RFC-64 DKGAgent public/open successor publication', () => {
     const reopenedBundle = await reopened.readRfc64StagedKaBundleV1(firstResult.bundleDigest);
     expect(reopenedBundle).toEqual(stagedBundle);
     expect(reopenedBundle).not.toBe(stagedBundle);
+  }, 60_000);
+
+  it('reloads multi-row durable history and grows a canonical exact set one KA at a time', async () => {
+    const dataDir = await createDataDir('multi-row-history');
+    const agent = await startAgent('successor-multi-row-history', dataDir);
+    const genesis = await publishGenesis(agent);
+    const firstSeal = await authorSeal();
+    const secondSeal = await authorSeal(SECOND_KA_NUMBER);
+    const thirdSeal = await authorSeal(THIRD_KA_NUMBER);
+    const firstAsset = {
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: firstSeal,
+    };
+    const secondAsset = {
+      assertionCoordinate: 'gate-2-object' as never,
+      projectionBytes: PROJECTION,
+      seal: secondSeal,
+    };
+    const thirdAsset = {
+      assertionCoordinate: 'gate-2-object-3' as never,
+      projectionBytes: PROJECTION,
+      seal: thirdSeal,
+    };
+    const first = await agent.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      ...firstAsset,
+      deployment: DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [],
+    });
+    const second = await agent.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: first.headObjectDigest,
+        signatureVariantDigest: first.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [secondAsset, firstAsset],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as TimestampMsV1,
+      peers: [],
+    });
+    const third = await agent.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: second.headObjectDigest,
+        signatureVariantDigest: second.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [thirdAsset, firstAsset, secondAsset],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900003000' as TimestampMsV1,
+      peers: [],
+    });
+
+    const expectedKaIds = [KA_NUMBER, SECOND_KA_NUMBER, THIRD_KA_NUMBER]
+      .map((number) => ((BigInt(AUTHOR) << 96n) | number).toString());
+    expect(second.announcement.catalogVersion).toBe('2');
+    expect(second.inventoryRowCount).toBe('2');
+    expect(third.announcement.catalogVersion).toBe('3');
+    expect(third.inventoryRowCount).toBe('3');
+    expect(third.assets.map(({ kaId }) => kaId)).toEqual(expectedKaIds);
+    expect(third.assets.map(({ kaUal }) => kaUal)).toEqual(
+      [KA_NUMBER, SECOND_KA_NUMBER, THIRD_KA_NUMBER]
+        .map((number) => `did:dkg:${NETWORK_ID}/${AUTHOR}/${number}`),
+    );
+    expect(await agent.readRfc64StagedAuthorCatalogHeadV1({
+      objectDigest: third.headObjectDigest,
+      signatureVariantDigest: third.signatureVariantDigest,
+    })).toBe(third.headObjectDigest);
+    for (const asset of third.assets) {
+      const staged = await agent.readRfc64StagedKaBundleV1(asset.bundleDigest);
+      expect(staged).not.toBeNull();
+      expect(decodeOpaqueKaBundleV1(staged!).projectionBytes).toEqual(PROJECTION);
+    }
   }, 60_000);
 
   it('rejects a mismatched signed authorization before signing or durable staging', async () => {
@@ -249,13 +332,15 @@ async function directAuthorization(contextGraphId: ContextGraphIdV1) {
   return produced.authorization;
 }
 
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(kaNumber = KA_NUMBER): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
     authorAddress: AUTHOR,
-    reservedKaId: BigInt(KA_ID),
+    reservedKaId: BigInt(kaId),
   });
   const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
     typedData.domain,
@@ -270,10 +355,10 @@ async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
     authorSchemeVersion: '1',
     assertedAtChainId: DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address: KAV10,
-    reservedKaId: KA_ID,
+    reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: KA_UAL,
+    kaUal,
     assertionVersion: '1',
     publicTripleCount: '2',
     privateTripleCount: '0',

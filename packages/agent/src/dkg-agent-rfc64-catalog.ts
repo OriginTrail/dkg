@@ -20,6 +20,7 @@
 
 import {
   ZERO_DIGEST32_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
@@ -34,6 +35,7 @@ import {
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
+  type KaIdV1,
   type NetworkIdV1,
   type SubGraphNameV1,
   type TimestampMsV1,
@@ -81,6 +83,7 @@ import type {
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
   type Rfc64PublicCatalogIssuerAuthorizationV1,
+  type Rfc64PublicCatalogSuccessorAssetInputV1,
 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -206,6 +209,22 @@ export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   readonly peers: readonly string[];
 }
 
+/** One member of the complete live set supplied to an ordinary successor. */
+export type Rfc64OpenCatalogSuccessorAssetInputV1 =
+  Rfc64PublicCatalogSuccessorAssetInputV1;
+
+export interface PublishOpenAuthorCatalogExactSetSuccessorParamsV1 {
+  /** Exact durable predecessor returned by genesis or a prior successor. */
+  readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
+  readonly author: Rfc64OpenCatalogAuthorSignerV1;
+  readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  /** Complete 1..1024-row live set; input order does not affect the signed head. */
+  readonly assets: readonly Rfc64OpenCatalogSuccessorAssetInputV1[];
+  readonly deployment: CatalogSealDeploymentProfileV1;
+  readonly issuedAt?: TimestampMsV1;
+  readonly peers: readonly string[];
+}
+
 export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly headObjectDigest: Digest32V1;
@@ -216,6 +235,27 @@ export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly contentByteLength: ByteLengthV1;
   readonly bundleByteLength: ByteLengthV1;
   readonly kaUal: string;
+  readonly inventoryRowCount: CountV1;
+  readonly announcedPeers: readonly string[];
+  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+}
+
+export interface PublishOpenAuthorCatalogSuccessorAssetResultV1 {
+  readonly kaId: KaIdV1;
+  readonly catalogRowDigest: Digest32V1;
+  readonly bundleDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
+  readonly contentByteLength: ByteLengthV1;
+  readonly bundleByteLength: ByteLengthV1;
+  readonly kaUal: string;
+}
+
+export interface PublishOpenAuthorCatalogExactSetSuccessorResultV1 {
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly headObjectDigest: Digest32V1;
+  readonly signatureVariantDigest: Digest32V1;
+  /** Strictly increasing by mathematical KA ID. */
+  readonly assets: readonly Readonly<PublishOpenAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
@@ -336,6 +376,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     params: PublishOpenAuthorCatalogSuccessorParamsV1,
   ): Promise<PublishOpenAuthorCatalogSuccessorResultV1> {
+    const result = await this.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: params.previousHead,
+      author: params.author,
+      catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: params.assertionCoordinate,
+        projectionBytes: params.projectionBytes,
+        seal: params.seal,
+      }],
+      deployment: params.deployment,
+      issuedAt: params.issuedAt,
+      peers: params.peers,
+    });
+    const asset = result.assets[0];
+    if (asset === undefined) {
+      throw new Error('RFC-64 one-row successor returned no exact asset evidence');
+    }
+    return Object.freeze({
+      announcement: result.announcement,
+      headObjectDigest: result.headObjectDigest,
+      signatureVariantDigest: result.signatureVariantDigest,
+      catalogRowDigest: asset.catalogRowDigest,
+      bundleDigest: asset.bundleDigest,
+      contentDigest: asset.contentDigest,
+      contentByteLength: asset.contentByteLength,
+      bundleByteLength: asset.bundleByteLength,
+      kaUal: asset.kaUal,
+      inventoryRowCount: result.inventoryRowCount,
+      announcedPeers: result.announcedPeers,
+      failedPeers: result.failedPeers,
+    });
+  }
+
+  /**
+   * Public/open author path for a complete bounded exact set. Canonical RFC-64
+   * ordinary-successor rules still require exactly one KA delta from the
+   * predecessor; callers grow a catalog through successive exact sets.
+   */
+  async publishOpenAuthorCatalogExactSetSuccessorV1(
+    this: DKGAgent,
+    params: PublishOpenAuthorCatalogExactSetSuccessorParamsV1,
+  ): Promise<PublishOpenAuthorCatalogExactSetSuccessorResultV1> {
     const service = this.requireRfc64PublicCatalogServiceV1();
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
@@ -362,13 +444,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
     });
-    const produced = await producer.produceAndStage({
+    const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,
       previousBucket: history.previousBucket,
-      assertionCoordinate: params.assertionCoordinate,
-      projectionBytes: params.projectionBytes,
-      seal: params.seal,
+      assets: params.assets,
       deployment: params.deployment,
       issuedAt: params.issuedAt ?? (Date.now().toString() as TimestampMsV1),
       catalogSigner: {
@@ -407,16 +487,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       announcement,
       peers,
     });
+    const assets = produced.assets.map((asset) => Object.freeze({
+      kaId: asset.row.kaId,
+      catalogRowDigest: asset.sealBinding.catalogRowDigest,
+      bundleDigest: asset.bundleDigest,
+      contentDigest: asset.projection.projectionDigest,
+      contentByteLength: asset.projection.projectionByteLength,
+      bundleByteLength: asset.row.transfer.byteLength,
+      kaUal: asset.projection.kaUal,
+    }));
     return Object.freeze({
       announcement: delivery.announcement,
       headObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
-      catalogRowDigest: produced.sealBinding.catalogRowDigest,
-      bundleDigest: produced.bundleDigest,
-      contentDigest: produced.projection.projectionDigest,
-      contentByteLength: produced.projection.projectionByteLength,
-      bundleByteLength: produced.row.transfer.byteLength,
-      kaUal: produced.projection.kaUal,
+      assets: Object.freeze(assets),
       inventoryRowCount: head.payload.totalRows,
       announcedPeers: delivery.announcedPeers,
       failedPeers: delivery.failedPeers,
@@ -676,7 +760,7 @@ async function loadPublicOpenRootLaneHistoryV1(
     previousHead.payload.subGraphName !== null
     || previousHead.payload.bucketCount !== '1'
     || previousHead.payload.directoryHeight !== '0'
-    || (previousHead.payload.totalRows !== '0' && previousHead.payload.totalRows !== '1')
+    || BigInt(previousHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
   ) {
     throw new Error('RFC-64 predecessor is outside the public/open root-lane slice');
   }
@@ -695,6 +779,15 @@ async function loadPublicOpenRootLaneHistoryV1(
   if (descriptor === undefined || !('bucketDigest' in descriptor)) {
     throw new Error('RFC-64 predecessor root has no level-zero bucket descriptor');
   }
+  if (descriptor.rowCount !== previousHead.payload.totalRows) {
+    throw new Error('RFC-64 predecessor root row count does not match its head');
+  }
+  if (
+    (previousHead.payload.totalRows === '0')
+    !== (descriptor.bucketDigest === ZERO_DIGEST32_V1)
+  ) {
+    throw new Error('RFC-64 predecessor empty-bucket descriptor is inconsistent');
+  }
 
   let previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null = null;
   if (descriptor.bucketDigest !== ZERO_DIGEST32_V1) {
@@ -705,6 +798,9 @@ async function loadPublicOpenRootLaneHistoryV1(
     if (storedBucket === null) throw new Error('RFC-64 predecessor bucket is not staged');
     assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
     previousBucket = storedBucket.envelope;
+    if (previousBucket.payload.rows.length !== Number(previousHead.payload.totalRows)) {
+      throw new Error('RFC-64 predecessor bucket row count does not match its head');
+    }
   }
   return Object.freeze({
     previousHead,
