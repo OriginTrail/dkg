@@ -12,6 +12,7 @@
  */
 
 import {
+  AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
@@ -20,6 +21,7 @@ import {
   assertAuthorCatalogDirectoryNodeScopeBindingV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   buildAuthorAttestationTypedData,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   computeAuthorCatalogScopeDigestV1,
@@ -40,6 +42,7 @@ import {
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
+  type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -53,6 +56,11 @@ import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
+import {
+  readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogRowAuthorshipV1,
+  type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
+} from './catalog-row-authorship.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
@@ -61,6 +69,7 @@ import type {
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+  type FetchedRfc64PublicCatalogObjectV1,
   type Rfc64PublicCatalogNativeFetchScopeV1,
   type Rfc64PublicCatalogNativeTransportV1,
 } from './public-catalog-native-transport-v1.js';
@@ -102,6 +111,8 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly inventoryRowCount: 1;
   readonly activatedTripleCount: number;
   readonly swmGraph: string;
+  /** Exact signed delegation/head/path/bucket/row authorization closure. */
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
@@ -112,7 +123,7 @@ export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
   readonly catalogHeadDigest: Digest32V1;
   readonly inventoryRowCount: 0;
   readonly activatedTripleCount: 0;
-  readonly stagedObjectCount: 2;
+  readonly stagedObjectCount: 3;
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
@@ -125,6 +136,7 @@ export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-not-found'
   | 'catalog-native-receiver-slice'
   | 'catalog-native-receiver-catalog'
+  | 'catalog-native-receiver-authorization'
   | 'catalog-native-receiver-transfer'
   | 'catalog-native-receiver-activation'
   | 'catalog-native-receiver-history';
@@ -293,6 +305,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
     const replay = assertEmptyGenesisHistory(current, head, inventoryDigest);
     const scope = nativeScope(announcement, head);
+    const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
+      remotePeerId,
+      scope,
+      head,
+      signal,
+    );
     const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
       remotePeerId,
       {
@@ -335,6 +353,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
 
     try {
       await this.options.controlObjects.stageVerifiedObjects([
+        fetchedDelegation,
         fetchedDirectory,
         fetchedHead,
       ]);
@@ -386,7 +405,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       catalogHeadDigest: head.objectDigest as Digest32V1,
       inventoryRowCount: 0 as const,
       activatedTripleCount: 0 as const,
-      stagedObjectCount: 2 as const,
+      stagedObjectCount: 3 as const,
       appliedHeadStatus,
     });
   }
@@ -409,6 +428,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
     const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head);
     const scope = nativeScope(announcement, head);
+    const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
+      remotePeerId,
+      scope,
+      head,
+      signal,
+    );
 
     const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
       remotePeerId,
@@ -439,10 +464,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'directory root is not bound to the successor head', cause);
     }
 
+    let directoryPathProof: ReturnType<typeof verifyAuthorCatalogDirectoryPathV1>;
     let descriptor: ReturnType<typeof readVerifiedAuthorCatalogBucketDescriptorV1>;
     try {
-      const path = verifyAuthorCatalogDirectoryPathV1(head, [directory], '0' as never);
-      descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(path, head);
+      directoryPathProof = verifyAuthorCatalogDirectoryPathV1(head, [directory], '0' as never);
+      descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(directoryPathProof, head);
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'successor directory path is invalid', cause);
     }
@@ -488,6 +514,30 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     const row = bucket.payload.rows[0];
     if (row === undefined) {
       fail('catalog-native-receiver-catalog', 'verified one-row bucket did not contain its row');
+    }
+
+    let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+    try {
+      const authorshipToken = verifyAuthorCatalogRowAuthorshipV1({
+        catalogIssuerDelegation: fetchedDelegation.envelope,
+        catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
+        parentAuthorAgentEvidence: null,
+        catalogHead: head,
+        catalogHeadSignature: fetchedHead.issuerSignature,
+        directoryPathEnvelopes: [directory],
+        directoryPathSignatures: [fetchedDirectory.issuerSignature],
+        directoryPathProof,
+        catalogBucket: bucket,
+        catalogBucketSignature: fetchedBucket.issuerSignature,
+        targetKaId: row.kaId,
+      });
+      authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipToken);
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-authorization',
+        'catalog row is not authorized by the exact direct-author delegation closure',
+        cause,
+      );
     }
 
     const bundle = await this.options.contentTransport.fetchKaBundle(
@@ -540,6 +590,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
 
     try {
       await this.options.controlObjects.stageVerifiedObjects([
+        fetchedDelegation,
         fetchedHead,
         fetchedDirectory,
         fetchedBucket,
@@ -608,7 +659,56 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       inventoryRowCount: 1 as const,
       activatedTripleCount: Number(projectionMetadata.publicTripleCount),
       swmGraph: activation.swmGraph,
+      authorship,
       appliedHeadStatus,
+    });
+  }
+
+  private async fetchDirectAuthorCatalogIssuerDelegation(
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogNativeFetchScopeV1,
+    head: SignedAuthorCatalogHeadEnvelopeV1,
+    signal: AbortSignal | undefined,
+  ): Promise<FetchedRfc64PublicCatalogObjectV1 & {
+    readonly envelope: SignedAuthorCatalogIssuerDelegationEnvelopeV1;
+  }> {
+    let fetched: FetchedRfc64PublicCatalogObjectV1 | null;
+    try {
+      fetched = await this.options.contentTransport.fetchCatalogObject(
+        remotePeerId,
+        {
+          ...scope,
+          kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+          targetObjectType: AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+          targetObjectDigest: head.payload.catalogIssuerDelegationDigest,
+        },
+        { timeoutMs: this.#timeoutMs, signal },
+      );
+    } catch (cause) {
+      if (signal?.aborted) throw signal.reason;
+      fail(
+        'catalog-native-receiver-authorization',
+        'catalog issuer delegation fetch or generic signature verification failed',
+        cause,
+      );
+    }
+    if (fetched === null) {
+      fail('catalog-native-receiver-not-found', 'catalog issuer delegation was not found');
+    }
+    throwIfAborted(signal);
+    try {
+      assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(fetched.envelope);
+      assertDirectAuthorCatalogIssuerDelegationBindingV1(fetched.envelope, head);
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-authorization',
+        'catalog issuer delegation is not the exact direct-author authority for this head',
+        cause,
+      );
+    }
+    return Object.freeze({
+      envelope: fetched.envelope,
+      issuerSignature: fetched.issuerSignature,
     });
   }
 
@@ -752,6 +852,44 @@ function nativeScope(
     policyDigest: announcement.policyDigest,
     catalogHeadObjectDigest: head.objectDigest as Digest32V1,
   });
+}
+
+/** Gate 1 accepts only an author-signed issuer grant with no parent-agent hop. */
+function assertDirectAuthorCatalogIssuerDelegationBindingV1(
+  delegation: SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+): void {
+  const left = delegation.payload;
+  const right = head.payload;
+  if (
+    delegation.objectDigest !== right.catalogIssuerDelegationDigest
+    || delegation.issuer !== left.authorAddress
+    || left.authorAuthorityEvidenceDigest !== null
+    || left.catalogIssuerKey !== head.issuer
+  ) {
+    throw new Error(
+      'delegation digest, direct author issuer, null parent evidence, or catalog issuer key differs',
+    );
+  }
+  if (
+    left.networkId !== right.networkId
+    || left.contextGraphId !== right.contextGraphId
+    || left.governanceChainId !== right.governanceChainId
+    || left.governanceContractAddress !== right.governanceContractAddress
+    || left.ownershipTransitionDigest !== right.ownershipTransitionDigest
+    || left.subGraphName !== right.subGraphName
+    || left.authorAddress !== right.authorAddress
+    || left.catalogEra !== right.era
+  ) {
+    throw new Error('delegation scope, governance tuple, author, lane, or era differs from head');
+  }
+  if (
+    (left.catalogEra === '0') !== (left.previousDelegationDigest === null)
+    || BigInt(right.issuedAt) < BigInt(left.effectiveAt)
+    || BigInt(right.issuedAt) >= BigInt(left.expiresAt)
+  ) {
+    throw new Error('delegation history or half-open validity interval does not authorize head');
+  }
 }
 
 async function activateExactPublicProjection(
