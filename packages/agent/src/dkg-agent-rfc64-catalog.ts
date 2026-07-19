@@ -66,6 +66,7 @@ import {
   type Rfc64PublicCatalogServiceStatsV1,
 } from './rfc64/public-catalog-service-v1.js';
 import {
+  Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
@@ -74,6 +75,9 @@ import {
   type Rfc64PublicOpenCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
+import type {
+  Rfc64PublicCatalogReconciliationFailureV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
   type Rfc64PublicCatalogIssuerAuthorizationV1,
@@ -132,6 +136,11 @@ export interface Rfc64AppliedCatalogHeadRefV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly authorAddress: EvmAddressV1;
 }
+
+export {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  type Rfc64PublicCatalogReconciliationFailureV1,
+} from './rfc64/public-catalog-reconciliation-failure-v1.js';
 
 /**
  * Validate and detach a locally configured deployment tuple from caller-owned
@@ -225,6 +234,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       router: this.router,
       controlObjects: persistence.controlObjects,
       native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      receiver: {
+        onError: (announcement, error) => {
+          this.rfc64PublicCatalogReconciliationFailuresV1.record(
+            announcement.catalogHeadObjectDigest,
+            error,
+          );
+        },
+      },
     });
     service.start();
     this.rfc64PublicCatalogServiceV1 = service;
@@ -239,6 +256,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       await service?.close();
     } finally {
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
+      this.rfc64PublicCatalogReconciliationFailuresV1.clear();
     }
   }
 
@@ -467,6 +485,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return evidence === undefined ? null : Object.freeze({ ...evidence });
   }
 
+  /**
+   * Read the immutable process-local terminal failure for one announced head.
+   * This is diagnostic evidence only; it is neither durable nor an input to
+   * receiver retry, deduplication, reconciliation, or authorization decisions.
+   */
+  readRfc64PublicCatalogReconciliationFailureV1(
+    this: DKGAgent,
+    catalogHeadDigest: Digest32V1,
+  ): Rfc64PublicCatalogReconciliationFailureV1 | null {
+    const failure = this.rfc64PublicCatalogReconciliationFailuresV1.read(
+      catalogHeadDigest,
+    );
+    return failure === null
+      ? null
+      : Object.freeze({
+        catalogHeadDigest: failure.catalogHeadDigest,
+        errorName: failure.errorName,
+        errorCode: failure.errorCode,
+      });
+  }
+
   /** Read a fresh copy of one exact durably staged opaque KA bundle. */
   readRfc64StagedKaBundleV1(
     this: DKGAgent,
@@ -574,9 +613,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
     }
     if (trustedNetworkId !== catalogNetworkId) {
-      throw new Error(
-        `RFC-64 catalog network ${catalogNetworkId} differs from locally trusted `
-        + `deployment network ${trustedNetworkId}`,
+      throw new Rfc64PublicCatalogNativeReceiverErrorV1(
+        'catalog-native-receiver-authorization',
+        'catalog network differs from the locally trusted deployment network',
       );
     }
   }

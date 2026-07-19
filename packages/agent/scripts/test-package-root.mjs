@@ -42,6 +42,7 @@ const blockedRfc64Modules = [
   'public-catalog-native-reconciler-v1.js',
   'public-catalog-native-receiver-v1.js',
   'public-catalog-native-transport-v1.js',
+  'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-issuer-delegation-v1.js',

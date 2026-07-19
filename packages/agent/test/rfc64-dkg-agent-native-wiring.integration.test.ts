@@ -162,6 +162,9 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       stagedObjectCount: 3,
       appliedHeadStatus: 'applied',
     });
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.headObjectDigest,
+    )).toBeNull();
     expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
       applied: 1,
       stagedOnly: 0,
@@ -178,9 +181,12 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       applied: 1,
       dedupedAlreadyApplied: 1,
     });
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.headObjectDigest,
+    )).toBeNull();
   }, 60_000);
 
-  it('fails closed when wire network identity differs from the local deployment', async () => {
+  it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
     const [author, receiver] = await Promise.all([
       startNativeAgent('mismatch-author'),
       startNativeAgent('mismatch-receiver', {
@@ -216,6 +222,21 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       applied: 0,
       failed: 1,
     });
+    const failure = receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.headObjectDigest,
+    );
+    expect(failure).toEqual({
+      catalogHeadDigest: published.headObjectDigest,
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-authorization',
+    });
+    expect(Object.isFrozen(failure)).toBe(true);
+
+    await receiver.stop();
+    agents.splice(agents.indexOf(receiver), 1);
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.headObjectDigest,
+    )).toBeNull();
   }, 60_000);
 
   it('rejects a stale-network durable dedupe after restart under a new local pin', async () => {
@@ -272,5 +293,12 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(restartedReceiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
       published.headObjectDigest,
     )).toBeNull();
+    expect(restartedReceiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.headObjectDigest,
+    )).toEqual({
+      catalogHeadDigest: published.headObjectDigest,
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-authorization',
+    });
   }, 60_000);
 });
