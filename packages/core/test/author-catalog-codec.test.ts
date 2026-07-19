@@ -25,7 +25,6 @@ import {
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
-  iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
   parseCanonicalAuthorCatalogScopeV1,
   type AssertionCoordinateV1,
@@ -72,7 +71,9 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
 
     const unicodeLane = validatedLane({ contextGraphId: 'cg', subGraphName: 'café' });
     const coordinate = validatedCoordinate('name λ');
-    expect(iriComponentV1('AZaz09-._~ /é')).toBe('AZaz09-._~%20%2F%C3%A9');
+    // The percent-encoding contract (%2F for '/', %20 for space, %C3%A9 for 'é')
+    // is proven through the public builders above and the subject below; the raw
+    // encoder is intentionally private.
     expect(buildCatalogAssertionSubjectV1(unicodeLane, AUTHOR as EvmAddressV1, coordinate))
       .toBe(
         `did:dkg:context-graph:v1/subgraph/cg/caf%C3%A9/assertion/${AUTHOR}/name%20%CE%BB`,

@@ -86,16 +86,27 @@ export interface CatalogLaneV1 {
   readonly subGraphName: SubGraphNameV1 | null;
 }
 
-/** Exact nine-key scope committed by every author-catalog era. */
-export interface AuthorCatalogScopeV1 extends CatalogLaneV1 {
+/**
+ * Governance tuple for an author-catalog scope: either both fields identify the
+ * registering contract, or both are null (unregistered). Expressing the
+ * paired-null invariant in the type makes the impossible mixed state
+ * unrepresentable; the canonical wire object always carries both keys.
+ */
+export type AuthorCatalogGovernanceV1 =
+  | { readonly governanceChainId: null; readonly governanceContractAddress: null }
+  | { readonly governanceChainId: ChainIdV1; readonly governanceContractAddress: EvmAddressV1 };
+
+/** Common author-catalog scope fields shared by both governance variants. */
+export interface AuthorCatalogScopeFieldsV1 extends CatalogLaneV1 {
   readonly networkId: NetworkIdV1;
-  readonly governanceChainId: ChainIdV1 | null;
-  readonly governanceContractAddress: EvmAddressV1 | null;
   readonly ownershipTransitionDigest: Digest32V1 | null;
   readonly authorAddress: EvmAddressV1;
   readonly era: DecimalU64V1;
   readonly bucketCount: CountV1;
 }
+
+/** Exact nine-key scope committed by every author-catalog era. */
+export type AuthorCatalogScopeV1 = AuthorCatalogScopeFieldsV1 & AuthorCatalogGovernanceV1;
 
 /** Exact seven-key live author-catalog row. */
 export interface AuthorCatalogRowV1 {
@@ -197,8 +208,14 @@ export function isCatalogForbiddenCodePointV1(codePoint: number): boolean {
   );
 }
 
-/** Percent-encode one already canonical catalog-v1 identifier component. */
-export function iriComponentV1(value: string): string {
+/**
+ * Low-level UTF-8 percent-encoder for one catalog path component. Kept private:
+ * it validates only NFC/byte-length, not the catalog identifier grammar, so it
+ * must only be called with values already checked by the component validators
+ * (context-graph id, subgraph name, assertion coordinate). Public callers go
+ * through the higher-level builders below.
+ */
+function percentEncodeUtf8Component(value: string): string {
   const identifier = assertNfcUtf8Identifier(
     value,
     'IRI component',
@@ -219,10 +236,10 @@ export function iriComponentV1(value: string): string {
 /** Build the prefix-free root/subgraph assertion scope used by catalog-v1 seals. */
 export function buildCatalogAssertionScopeV1(lane: CatalogLaneV1): CatalogAssertionScopeV1 {
   assertCatalogLaneV1(lane);
-  const context = iriComponentV1(lane.contextGraphId);
+  const context = percentEncodeUtf8Component(lane.contextGraphId);
   const result = lane.subGraphName === null
     ? `v1/root/${context}`
-    : `v1/subgraph/${context}/${iriComponentV1(lane.subGraphName)}`;
+    : `v1/subgraph/${context}/${percentEncodeUtf8Component(lane.subGraphName)}`;
   return result as CatalogAssertionScopeV1;
 }
 
@@ -237,7 +254,7 @@ export function buildCatalogAssertionSubjectV1(
   assertAssertionCoordinateV1(assertionCoordinate);
   return (
     `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
-    + `/assertion/${authorAddress}/${iriComponentV1(assertionCoordinate)}`
+    + `/assertion/${authorAddress}/${percentEncodeUtf8Component(assertionCoordinate)}`
   ) as CatalogAssertionSubjectV1;
 }
 
