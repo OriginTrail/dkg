@@ -50,6 +50,7 @@ export {
 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 export * from './rfc64/public-catalog-successor-producer-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
+export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {

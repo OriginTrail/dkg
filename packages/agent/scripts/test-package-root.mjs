@@ -57,6 +57,7 @@ const blockedRfc64Modules = [
   'persistence-layout-v1.js',
   'persistence-root-ownership-v1-internal.js',
   'persistence-v1.js',
+  'policy-cell-v1.js',
   'public-catalog-inventory-completeness-v1.js',
   'public-catalog-native-reconciler-v1.js',
   'public-catalog-native-receiver-v1.js',
