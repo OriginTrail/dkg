@@ -25,11 +25,15 @@ const PROJECTIONS = [
   '<https://example.org/fixture-2> <https://schema.org/name> "Two" .\n',
   '<https://example.org/fixture-3> <https://schema.org/name> "Three" .\n',
 ];
+const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
 
 function sample(): any {
   const fixture: any = JSON.parse(JSON.stringify(generateCompleteFixture(3)));
   fixture.authored.signedRows.forEach((row: any, index: number) => {
-    row.contentDigest = sha256Digest(PROJECTIONS[index]!);
+    row.contentDigest = sha256Digest(
+      KA_PROJECTION_DIGEST_DOMAIN_V1,
+      PROJECTIONS[index]!,
+    );
     fixture.received.activatedRows[index].contentDigest = row.contentDigest;
   });
   fixture.received.declaredInventoryDigest = computeAppliedInventoryDigest(
