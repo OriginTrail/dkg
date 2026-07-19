@@ -245,6 +245,39 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
+  it('rejects an aggregate over-budget exact set before signing or staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    const asset = {
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: new Uint8Array(
+        RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 - 4_096,
+      ),
+      seal: await authorSeal(AUTHOR_WALLET),
+    };
+
+    await expect(producer.produceAndStageExactSet({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assets: Array.from({ length: 9 }, () => asset),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: { issuer: AUTHOR, signDigest },
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
   it('rejects a non-author attestation before either durable staging callback', async () => {
     const { genesis, authorization } = await producerHistory();
     const stageKaBundle = vi.fn(durableBundleReceipt);
@@ -434,6 +467,49 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(signDigest).not.toHaveBeenCalled();
     expect(stageKaBundle).not.toHaveBeenCalled();
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('snapshots a stateful projection getter once before validation and encoding', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+      durable: true as const,
+      namespaceDurability: 'test-exact-durable' as never,
+      objects: Object.freeze([]),
+    }));
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    let projectionReads = 0;
+    const asset = {
+      assertionCoordinate: 'gate-1-object' as never,
+      get projectionBytes() {
+        projectionReads += 1;
+        return projectionReads === 1
+          ? PROJECTION
+          : new Uint8Array(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1);
+      },
+      seal: await authorSeal(AUTHOR_WALLET),
+    };
+
+    const result = await producer.produceAndStageExactSet({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assets: [asset],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+
+    expect(projectionReads).toBe(1);
+    expect(decodeOpaqueKaBundleV1(result.assets[0]!.bundleBytes).projectionBytes).toEqual(
+      PROJECTION,
+    );
+    expect(stageKaBundle).toHaveBeenCalledOnce();
+    expect(stageVerifiedObjects).toHaveBeenCalledOnce();
   });
 
   it('fails control-object staging only after the bundle is durably staged first', async () => {

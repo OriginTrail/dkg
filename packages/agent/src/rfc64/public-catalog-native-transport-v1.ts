@@ -26,6 +26,7 @@ import {
   canonicalizeSignedControlEnvelopeBytes,
   computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
+  parseCanonicalDecimalU64,
   parseCanonicalSignedControlEnvelope,
   type ContextGraphAccessPolicyV1,
   type ContextGraphIdV1,
@@ -58,6 +59,46 @@ export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_RESPONSE_MAX_BYTES_V1 =
 /** First vertical slice resource ceiling; protocol descriptors may advertise more. */
 export const RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 =
   8 * 1024 * 1024;
+/**
+ * Maximum logical bytes in every complete bundle committed by one exact-set
+ * successor. This keeps the 1..1,024-row slice useful for small assets while
+ * bounding a producer/receiver batch to 64 MiB (eight maximum-size bundles,
+ * or 1,024 bundles averaging 64 KiB).
+ */
+export const RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1 =
+  64 * 1024 * 1024;
+
+/** Add one canonical signed-row byte length to the shared V1 exact-set budget. */
+export function addRfc64PublicCatalogExactSetBundleBytesV1(
+  currentTotal: bigint,
+  byteLength: DecimalU64V1,
+): bigint {
+  const ceiling = BigInt(RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1);
+  if (typeof currentTotal !== 'bigint' || currentTotal < 0n || currentTotal > ceiling) {
+    throw new RangeError('current exact-set bundle-byte total is outside the V1 ceiling');
+  }
+  const nextTotal = currentTotal + parseCanonicalDecimalU64(
+    byteLength,
+    'exact-set bundle byteLength',
+  );
+  if (nextTotal > ceiling) {
+    throw new RangeError(
+      `exact-set bundle bytes exceed the V1 ${RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1}-byte ceiling`,
+    );
+  }
+  return nextTotal;
+}
+
+/** Validate canonical row byte lengths before a receiver fetches any bundle. */
+export function assertRfc64PublicCatalogExactSetBundleBytesV1(
+  byteLengths: readonly DecimalU64V1[],
+): bigint {
+  let total = 0n;
+  for (const byteLength of byteLengths) {
+    total = addRfc64PublicCatalogExactSetBundleBytesV1(total, byteLength);
+  }
+  return total;
+}
 
 const FETCH_NOT_FOUND = 0;
 const FETCH_FOUND = 1;

@@ -68,7 +68,10 @@ import type {
   StageVerifiedControlObjectsResultV1,
 } from './control-object-store-v1.js';
 import { assertRecoverableAuthorAttestationV1 } from './public-catalog-native-receiver-v1.js';
-import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from './public-catalog-native-transport-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1,
+  addRfc64PublicCatalogExactSetBundleBytesV1,
+} from './public-catalog-native-transport-v1.js';
 
 export type Rfc64PublicCatalogSuccessorProducerErrorCodeV1 =
   | 'catalog-successor-producer-input'
@@ -494,6 +497,8 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
       `assets must contain 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} entries`,
     );
   }
+  const snapshots: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1[] = [];
+  let aggregateBundleBytes = 0n;
   for (let index = 0; index < assets.length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(assets, String(index));
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
@@ -502,9 +507,57 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
         'assets must contain only enumerable data elements',
       );
     }
+    const asset = descriptor.value as Rfc64PublicCatalogSuccessorAssetInputV1;
+    try {
+      // Snapshot each caller-owned field exactly once. In particular, no
+      // stateful projectionBytes getter can change validation vs encoding.
+      const assertionCoordinate = asset?.assertionCoordinate;
+      const projectionInput = asset?.projectionBytes;
+      const sealInput = asset?.seal;
+      if (!(projectionInput instanceof Uint8Array)) {
+        throw new TypeError('projectionBytes must be a Uint8Array');
+      }
+      // Reject a projection that cannot possibly fit the Gate-1 transport
+      // before allocating its detached snapshot.
+      if (
+        BigInt(projectionInput.byteLength)
+        > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)
+          - MIN_KA_BUNDLE_BYTES_V1
+      ) {
+        throw new RangeError('projection exceeds the Gate-1 complete-bundle ceiling');
+      }
+      const projectionBytes = new Uint8Array(projectionInput);
+      const sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(sealInput);
+      const seal = parseCanonicalGraphScopedAuthorSealV1(sealBytes);
+      const bundleByteLength = calculateOpaqueKaBundleByteLengthV1(
+        BigInt(projectionBytes.byteLength),
+        BigInt(sealBytes.byteLength),
+      );
+      if (bundleByteLength > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
+        throw new RangeError('bundle exceeds the Gate-1 complete-bundle ceiling');
+      }
+      const canonicalBundleByteLength = bundleByteLength.toString() as ByteLengthV1;
+      aggregateBundleBytes = addRfc64PublicCatalogExactSetBundleBytesV1(
+        aggregateBundleBytes,
+        canonicalBundleByteLength,
+      );
+      snapshots.push(Object.freeze({
+        assertionCoordinate,
+        projectionBytes,
+        seal,
+        sealBytes,
+        bundleByteLength,
+      }));
+    } catch (cause) {
+      fail(
+        'catalog-successor-producer-input',
+        'projection, seal, or exact-set bundle-byte budget is not canonical',
+        cause,
+      );
+    }
   }
-  const prepared = assets.map((asset) => prepareRowAndBundle(
-    asset,
+  const prepared = snapshots.map((snapshot) => prepareRowAndBundle(
+    snapshot,
     input.previousHead,
     input.deployment,
   ));
@@ -525,48 +578,35 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
   return Object.freeze(prepared);
 }
 
+interface PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1 {
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly projectionBytes: Uint8Array;
+  readonly seal: CanonicalGraphScopedAuthorSealV1;
+  readonly sealBytes: Uint8Array;
+  readonly bundleByteLength: bigint;
+}
+
 function prepareRowAndBundle(
-  asset: Rfc64PublicCatalogSuccessorAssetInputV1,
+  asset: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1,
   previousHead: SignedAuthorCatalogHeadEnvelopeV1,
   deploymentInput: CatalogSealDeploymentProfileV1,
 ) {
-  let sealBytes: Uint8Array;
-  let seal: CanonicalGraphScopedAuthorSealV1;
   let encoded: ReturnType<typeof encodeOpaqueKaBundleV1>;
   let row: AuthorCatalogRowV1;
   try {
-    if (!(asset?.projectionBytes instanceof Uint8Array)) {
-      throw new TypeError('projectionBytes must be a Uint8Array');
-    }
-    // Reject a projection that cannot possibly fit the Gate-1 transport before
-    // canonicalizing the seal or allocating/copying a complete bundle.
-    if (
-      BigInt(asset.projectionBytes.byteLength)
-      > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)
-        - MIN_KA_BUNDLE_BYTES_V1
-    ) {
-      throw new RangeError('projection exceeds the Gate-1 complete-bundle ceiling');
-    }
-    const assertionCoordinate = asset?.assertionCoordinate;
-    sealBytes = canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal);
-    seal = parseCanonicalGraphScopedAuthorSealV1(sealBytes);
-    const bundleByteLength = calculateOpaqueKaBundleByteLengthV1(
-      BigInt(asset.projectionBytes.byteLength),
-      BigInt(sealBytes.byteLength),
-    );
-    if (bundleByteLength > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
-      throw new RangeError('bundle exceeds the Gate-1 complete-bundle ceiling');
-    }
-    encoded = encodeOpaqueKaBundleV1(asset.projectionBytes, sealBytes);
+    encoded = encodeOpaqueKaBundleV1(asset.projectionBytes, asset.sealBytes);
     const byteLength = BigInt(encoded.bundleBytes.byteLength);
+    if (byteLength !== asset.bundleByteLength) {
+      throw new Error('encoded bundle length differs from its exact-set budget snapshot');
+    }
     const chunkCount = ((byteLength - 1n) / KA_TRANSFER_CHUNK_SIZE_BYTES_V1) + 1n;
     row = parseCanonicalAuthorCatalogRowV1(canonicalizeAuthorCatalogRowV1({
-      kaId: seal.reservedKaId,
-      assertionCoordinate,
-      assertionVersion: seal.assertionVersion,
+      kaId: asset.seal.reservedKaId,
+      assertionCoordinate: asset.assertionCoordinate,
+      assertionVersion: asset.seal.assertionVersion,
       projectionId: KA_TRANSFER_PROJECTION_V1,
       projectionDigest: encoded.projectionDigest,
-      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal),
       transfer: {
         codec: KA_TRANSFER_CODEC_V1,
         projectionId: KA_TRANSFER_PROJECTION_V1,
@@ -598,7 +638,7 @@ function prepareRowAndBundle(
       deployment,
       scope,
       row: Object.freeze(row),
-      sealBytes,
+      sealBytes: asset.sealBytes,
       encoded,
       bundleBytes: new Uint8Array(encoded.bundleBytes),
     });

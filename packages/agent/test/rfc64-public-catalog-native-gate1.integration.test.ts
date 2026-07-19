@@ -47,11 +47,13 @@ import {
 import {
   computeRfc64AppliedInventoryDigestV1,
   Rfc64PublicCatalogNativeReceiverV1,
+  rfc64CatalogSignatureVariantDigestV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
   Rfc64PublicCatalogNativeTransportV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import {
@@ -350,6 +352,70 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       observed.receiver,
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
     expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('rejects an over-budget signed exact set before fetching its first bundle', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const declaredBundleByteLength =
+      BigInt(RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1);
+    const built = await buildRowBundle(AUTHOR_WALLET, {
+      kaNumber: 100n,
+      assertionCoordinate: 'budget-row',
+    });
+    const row = {
+      ...built.row,
+      transfer: {
+        ...built.row.transfer,
+        byteLength: declaredBundleByteLength.toString(),
+        chunkCount: (
+          ((declaredBundleByteLength - 1n) / 262_144n) + 1n
+        ).toString(),
+      },
+    } as AuthorCatalogRowV1;
+    assertAuthorCatalogRowV1(row);
+    const successor = await produceSparseAuthorCatalogSuccessorV1({
+      previousHead: fixture.successor.head,
+      previousDirectoryPath: fixture.successor.directoryPath,
+      previousBucket: fixture.successor.bucket,
+      selectedBucketId: '0' as never,
+      nextRows: [fixture.rowBundle.row, row],
+      issuedAt: '1773900001003' as never,
+      signer: {
+        issuer: AUTHOR,
+        signDigest: async (digest) => AUTHOR_WALLET.signMessage(digest),
+      },
+    });
+    for (const envelope of successor.stagedObjects) {
+      fixture.authorObjects.set(envelope.objectDigest, envelope);
+    }
+    const headSignature = await verifyControlEnvelopeIssuerSignatureV1(successor.head);
+    fixture.receiverHeadFetch.mockImplementationOnce(async () => Object.freeze({
+      envelope: successor.head,
+      issuerSignature: headSignature,
+    }));
+    const announcement = Object.freeze({
+      ...fixture.announcement,
+      catalogVersion: successor.head.payload.version,
+      catalogHeadObjectDigest: successor.head.objectDigest,
+      signatureVariantDigest: rfc64CatalogSignatureVariantDigestV1(successor.head),
+    }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+    fixture.receiverBundleFetch.mockClear();
+    const observed = fixture.createCasObservedReceiver();
+
+    await expect(fixture.synchronizeAny(
+      announcement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-slice' });
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
     expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
