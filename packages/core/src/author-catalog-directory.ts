@@ -16,10 +16,10 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   MAX_AUTHOR_CATALOG_DIRECTORY_HEIGHT_V1,
   ZERO_DIGEST32_V1,
-  assertAuthorCatalogHeadV1,
+  assertSignedAuthorCatalogHeadEnvelopeV1,
   computeAuthorCatalogDirectoryHeightV1,
   deriveAuthorCatalogScopeFromHeadV1,
-  type AuthorCatalogHeadV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
 } from './author-catalog-objects.js';
 import {
   assertSignedControlEnvelope,
@@ -51,7 +51,11 @@ export const MAX_AUTHOR_CATALOG_DIRECTORY_PATH_NODES_V1 = 8;
 
 const UTF8 = new TextEncoder();
 
-/** Canonical level-zero descriptor. Zero values denote the absence of a bucket object. */
+/**
+ * Canonical level-zero descriptor. Zero values denote the absence of a bucket
+ * object. This wire shape is not itself proof of directory membership; consumers
+ * that require membership trust must accept VerifiedAuthorCatalogDirectoryPathV1.
+ */
 export interface AuthorCatalogBucketDescriptorV1 {
   readonly bucketId: DecimalU64V1;
   readonly rowCount: CountV1;
@@ -79,6 +83,21 @@ export interface AuthorCatalogDirectoryNodeV1 {
   readonly level: DecimalU64V1;
   readonly firstBucketId: DecimalU64V1;
   readonly entries: readonly AuthorCatalogDirectoryEntryV1[];
+}
+
+declare const VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATH_BRAND_V1: unique symbol;
+
+/**
+ * Process-local proof that one exact bucket descriptor was selected by a
+ * canonical root-to-leaf path under one exact signed author-catalog head.
+ *
+ * This capability deliberately exposes no fields and has no wire encoding.
+ * Only {@link verifyAuthorCatalogDirectoryPathV1} can mint a value accepted by
+ * the module-private runtime registry; structural casts and serialized clones
+ * are rejected by the consumer assertion.
+ */
+export interface VerifiedAuthorCatalogDirectoryPathV1 {
+  readonly [VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATH_BRAND_V1]: true;
 }
 
 export type UnsignedAuthorCatalogDirectoryNodeEnvelopeV1 = UnsignedControlEnvelopeV1 & {
@@ -112,6 +131,20 @@ export class AuthorCatalogDirectoryError extends Error {
     this.name = 'AuthorCatalogDirectoryError';
   }
 }
+
+interface VerifiedAuthorCatalogDirectoryPathStateV1 {
+  readonly headObjectDigest: Digest32V1;
+  readonly catalogScopeDigest: Digest32V1;
+  readonly era: DecimalU64V1;
+  readonly bucketCount: CountV1;
+  readonly directoryRootDigest: Digest32V1;
+  readonly descriptor: Readonly<AuthorCatalogBucketDescriptorV1>;
+}
+
+const VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATHS_V1 = new WeakMap<
+  object,
+  VerifiedAuthorCatalogDirectoryPathStateV1
+>();
 
 /** Validate one canonical directory-node layout in the enclosing catalog's bucket domain. */
 export function assertAuthorCatalogDirectoryNodeV1(
@@ -247,19 +280,23 @@ export function parseCanonicalSignedAuthorCatalogDirectoryNodeEnvelopeV1(
 }
 
 /**
- * Verify one selected root-to-leaf path under a structurally valid catalog head.
+ * Verify one selected root-to-leaf path under an exact signed catalog head.
  *
  * This checks canonical object digests, topology, selected child indexes, immediate
  * child byte lengths, and selected-subtree row counts. It deliberately performs no
  * signature authority, history, full-directory closure, persistence, or RDF work.
+ * The returned process-local capability must be consumed together with the same
+ * exact signed head; it is not a serializable bucket descriptor.
  */
 export function verifyAuthorCatalogDirectoryPathV1(
-  head: AuthorCatalogHeadV1,
+  signedHead: SignedAuthorCatalogHeadEnvelopeV1,
   path: unknown,
   selectedBucketId: DecimalU64V1,
-): AuthorCatalogBucketDescriptorV1 {
-  assertAuthorCatalogHeadV1(head);
+): VerifiedAuthorCatalogDirectoryPathV1 {
+  assertSignedAuthorCatalogHeadEnvelopeV1(signedHead);
+  const head = signedHead.payload;
   const scope = deriveAuthorCatalogScopeFromHeadV1(head);
+  const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   const bucketCount = BigInt(scope.bucketCount);
   const bucketId = assertDirectoryU64(selectedBucketId, 'selectedBucketId');
   if (bucketId >= bucketCount) {
@@ -361,7 +398,73 @@ export function verifyAuthorCatalogDirectoryPathV1(
   if (descriptor.bucketId !== selectedBucketId) {
     fail('catalog-directory-path', 'selected leaf descriptor does not match selectedBucketId');
   }
-  return descriptor;
+
+  const descriptorSnapshot = Object.freeze({
+    bucketDigest: descriptor.bucketDigest,
+    bucketId: descriptor.bucketId,
+    byteLength: descriptor.byteLength,
+    rowCount: descriptor.rowCount,
+  });
+  const state = Object.freeze({
+    headObjectDigest: signedHead.objectDigest as Digest32V1,
+    catalogScopeDigest,
+    era: scope.era,
+    bucketCount: scope.bucketCount,
+    directoryRootDigest: head.directoryRootDigest,
+    descriptor: descriptorSnapshot,
+  });
+  const capability = Object.freeze(Object.create(null)) as
+    VerifiedAuthorCatalogDirectoryPathV1;
+  VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATHS_V1.set(capability as object, state);
+  return capability;
+}
+
+/**
+ * Require a verifier-minted path capability for this exact signed head.
+ *
+ * Signature authority remains a separate admission step. This assertion binds
+ * only canonical envelope bytes, the head-derived catalog scope/era, directory
+ * root, bucket domain, and the selected path proof.
+ */
+export function assertVerifiedAuthorCatalogDirectoryPathForHeadV1(
+  value: unknown,
+  signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+): asserts value is VerifiedAuthorCatalogDirectoryPathV1 {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    fail('catalog-directory-path', 'directory path capability was not minted by this verifier');
+  }
+  const state = VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATHS_V1.get(value as object);
+  if (state === undefined) {
+    fail('catalog-directory-path', 'directory path capability was not minted by this verifier');
+  }
+
+  assertSignedAuthorCatalogHeadEnvelopeV1(signedHead);
+  const scope = deriveAuthorCatalogScopeFromHeadV1(signedHead.payload);
+  const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+  if (
+    state.headObjectDigest !== signedHead.objectDigest
+    || state.catalogScopeDigest !== catalogScopeDigest
+    || state.era !== scope.era
+    || state.bucketCount !== scope.bucketCount
+    || state.directoryRootDigest !== signedHead.payload.directoryRootDigest
+  ) {
+    fail(
+      'catalog-directory-path',
+      'directory path capability is not bound to the supplied signed catalog head',
+    );
+  }
+}
+
+/**
+ * Read the immutable selected descriptor after proving that the opaque path
+ * capability belongs to the supplied exact signed head.
+ */
+export function readVerifiedAuthorCatalogBucketDescriptorV1(
+  value: unknown,
+  signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+): Readonly<AuthorCatalogBucketDescriptorV1> {
+  assertVerifiedAuthorCatalogDirectoryPathForHeadV1(value, signedHead);
+  return VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATHS_V1.get(value as object)!.descriptor;
 }
 
 function assertAuthorCatalogDirectoryNodeStructureV1(

@@ -7,6 +7,7 @@ import {
   assertAuthorCatalogDirectoryNodeScopeBindingV1,
   assertAuthorCatalogDirectoryNodeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  assertVerifiedAuthorCatalogDirectoryPathForHeadV1,
   assertUnsignedAuthorCatalogDirectoryNodeEnvelopeV1,
   canonicalizeAuthorCatalogDirectoryNodePayloadBytesV1,
   canonicalizeAuthorCatalogDirectoryNodePayloadV1,
@@ -16,6 +17,7 @@ import {
   parseCanonicalAuthorCatalogDirectoryNodePayloadV1,
   parseCanonicalSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   parseCanonicalUnsignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  readVerifiedAuthorCatalogBucketDescriptorV1,
   verifyAuthorCatalogDirectoryPathV1,
   type AuthorCatalogBucketDescriptorV1,
   type AuthorCatalogChildDescriptorV1,
@@ -28,9 +30,13 @@ import {
   type AuthorCatalogScopeV1,
 } from '../src/author-catalog-codec.js';
 import {
+  AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   ZERO_DIGEST32_V1,
+  assertSignedAuthorCatalogHeadEnvelopeV1,
   assertAuthorCatalogHeadV1,
+  computeAuthorCatalogHeadObjectDigestV1,
   type AuthorCatalogHeadV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
 } from '../src/author-catalog-objects.js';
 import type {
   SignedControlEnvelopeV1,
@@ -75,7 +81,7 @@ const EMPTY_SIGNED = {
   objectDigest: EMPTY_ROOT_DIGEST,
   signature: EIP191_SIGNATURE,
 } as SignedControlEnvelopeV1;
-const EMPTY_HEAD = validatedHead({
+const EMPTY_HEAD_PAYLOAD = validatedHead({
   networkId: EMPTY_SCOPE.networkId,
   contextGraphId: EMPTY_SCOPE.contextGraphId,
   governanceChainId: EMPTY_SCOPE.governanceChainId,
@@ -93,6 +99,7 @@ const EMPTY_HEAD = validatedHead({
   directoryRootDigest: EMPTY_ROOT_DIGEST,
   issuedAt: '1700000000123',
 });
+const EMPTY_HEAD = signedHeadEnvelope(EMPTY_HEAD_PAYLOAD);
 
 describe('AuthorCatalogDirectoryNodeV1 structural codec', () => {
   it('pins the normative empty-directory payload, envelope, and root digest', () => {
@@ -126,7 +133,12 @@ describe('AuthorCatalogDirectoryNodeV1 structural codec', () => {
     );
     expect(parseCanonicalSignedAuthorCatalogDirectoryNodeEnvelopeV1(signedBytes, '1'))
       .toEqual(EMPTY_SIGNED);
-    expect(verifyAuthorCatalogDirectoryPathV1(EMPTY_HEAD, [EMPTY_SIGNED], '0')).toEqual({
+    const verifiedPath = verifyAuthorCatalogDirectoryPathV1(EMPTY_HEAD, [EMPTY_SIGNED], '0');
+    expect(() => assertVerifiedAuthorCatalogDirectoryPathForHeadV1(
+      verifiedPath,
+      EMPTY_HEAD,
+    )).not.toThrow();
+    expect(readVerifiedAuthorCatalogBucketDescriptorV1(verifiedPath, EMPTY_HEAD)).toEqual({
       bucketDigest: ZERO_DIGEST32_V1,
       bucketId: '0',
       byteLength: '0',
@@ -316,10 +328,14 @@ describe('AuthorCatalogDirectoryNodeV1 structural codec', () => {
 describe('author catalog selected directory paths', () => {
   it('derives both branch and leaf indexes and verifies child bytes/counts/digests', () => {
     const fixture = twoLevelFixture(300n);
-    expect(verifyAuthorCatalogDirectoryPathV1(
+    const verifiedPath = verifyAuthorCatalogDirectoryPathV1(
       fixture.head,
       fixture.path,
       '300',
+    );
+    expect(readVerifiedAuthorCatalogBucketDescriptorV1(
+      verifiedPath,
+      fixture.head,
     )).toEqual(fixture.selectedDescriptor);
     expect(() => verifyAuthorCatalogDirectoryPathV1(fixture.head, fixture.path, '10'))
       .toThrow(/selected childDigest/);
@@ -331,7 +347,10 @@ describe('author catalog selected directory paths', () => {
         : entry),
     }, '512');
     expect(() => verifyAuthorCatalogDirectoryPathV1(
-      { ...fixture.head, directoryRootDigest: wrongDigestRoot.objectDigest },
+      signedHeadEnvelope({
+        ...fixture.head.payload,
+        directoryRootDigest: wrongDigestRoot.objectDigest,
+      }),
       [wrongDigestRoot, fixture.leaf],
       '300',
     )).toThrow(/selected childDigest/);
@@ -343,7 +362,10 @@ describe('author catalog selected directory paths', () => {
         : entry),
     }, '512');
     expect(() => verifyAuthorCatalogDirectoryPathV1(
-      { ...fixture.head, directoryRootDigest: wrongLengthRoot.objectDigest },
+      signedHeadEnvelope({
+        ...fixture.head.payload,
+        directoryRootDigest: wrongLengthRoot.objectDigest,
+      }),
       [wrongLengthRoot, fixture.leaf],
       '300',
     )).toThrow(/child byteLength/);
@@ -355,18 +377,143 @@ describe('author catalog selected directory paths', () => {
         : entry),
     }, '512');
     expect(() => verifyAuthorCatalogDirectoryPathV1(
-      { ...fixture.head, totalRows: '2', directoryRootDigest: wrongCountRoot.objectDigest },
+      signedHeadEnvelope({
+        ...fixture.head.payload,
+        totalRows: '2',
+        directoryRootDigest: wrongCountRoot.objectDigest,
+      }),
       [wrongCountRoot, fixture.leaf],
       '300',
     )).toThrow(/child rowCount/);
   });
 
+  it('mints an opaque exact-head capability and rejects every structural forgery', () => {
+    const fixture = twoLevelFixture(300n);
+    const verifiedPath = verifyAuthorCatalogDirectoryPathV1(
+      fixture.head,
+      fixture.path,
+      '300',
+    );
+    const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(
+      verifiedPath,
+      fixture.head,
+    );
+
+    expect(Object.getPrototypeOf(verifiedPath)).toBeNull();
+    expect(Object.isFrozen(verifiedPath)).toBe(true);
+    expect(Reflect.ownKeys(verifiedPath as object)).toEqual([]);
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(descriptor).toEqual(fixture.selectedDescriptor);
+
+    const structuralDescriptor = Object.freeze({ ...descriptor });
+    expect(() => assertVerifiedAuthorCatalogDirectoryPathForHeadV1(
+      structuralDescriptor,
+      fixture.head,
+    )).toThrow(/not minted/);
+    expect(() => readVerifiedAuthorCatalogBucketDescriptorV1(
+      structuralDescriptor,
+      fixture.head,
+    )).toThrow(/not minted/);
+
+    const frozenClone = Object.freeze({ ...verifiedPath as object });
+    expect(() => readVerifiedAuthorCatalogBucketDescriptorV1(
+      frozenClone,
+      fixture.head,
+    )).toThrow(/not minted/);
+
+    expect(JSON.stringify(verifiedPath)).toBe('{}');
+    expect(() => readVerifiedAuthorCatalogBucketDescriptorV1(
+      JSON.parse(JSON.stringify(verifiedPath)),
+      fixture.head,
+    )).toThrow(/not minted/);
+
+    const otherHead = signedHeadEnvelope({
+      ...fixture.head.payload,
+      issuedAt: '1700000000124',
+    });
+    const otherHeadToken = verifyAuthorCatalogDirectoryPathV1(
+      otherHead,
+      fixture.path,
+      '300',
+    );
+    expect(() => readVerifiedAuthorCatalogBucketDescriptorV1(
+      otherHeadToken,
+      fixture.head,
+    )).toThrow(/not bound to the supplied signed catalog head/);
+    expect(() => readVerifiedAuthorCatalogBucketDescriptorV1(
+      verifiedPath,
+      otherHead,
+    )).toThrow(/not bound to the supplied signed catalog head/);
+  });
+
+  it('rejects mutated roots, paths, and leaf descriptors before minting trust', () => {
+    const fixture = twoLevelFixture(300n);
+    const wrongRootHead = signedHeadEnvelope({
+      ...fixture.head.payload,
+      directoryRootDigest: digest(900_001),
+    });
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      wrongRootHead,
+      fixture.path,
+      '300',
+    )).toThrow(/root objectDigest/);
+
+    const selectedIndex = 300 - 256;
+    const mutatedLeaf = {
+      ...fixture.leaf,
+      payload: {
+        ...fixture.leaf.payload,
+        entries: fixture.leaf.payload.entries.map((entry, index) => index === selectedIndex
+          ? { ...(entry as AuthorCatalogBucketDescriptorV1), rowCount: '2' }
+          : entry),
+      },
+    } as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      fixture.head,
+      [fixture.root, mutatedLeaf],
+      '300',
+    )).toThrow(/digest mismatch/);
+
+    expect(() => verifyAuthorCatalogDirectoryPathV1(
+      fixture.head,
+      [fixture.leaf, fixture.root],
+      '300',
+    )).toThrow(/level 1/);
+  });
+
+  it('keeps the verified descriptor stable after untrusted proof input is mutated', () => {
+    const fixture = twoLevelFixture(300n);
+    const verifiedPath = verifyAuthorCatalogDirectoryPathV1(
+      fixture.head,
+      fixture.path,
+      '300',
+    );
+    const expected = { ...fixture.selectedDescriptor };
+    const selectedIndex = 300 - 256;
+    (fixture.leaf.payload.entries as AuthorCatalogBucketDescriptorV1[])[selectedIndex] = {
+      ...fixture.selectedDescriptor,
+      bucketDigest: digest(900_002),
+      rowCount: '2',
+    };
+
+    const firstRead = readVerifiedAuthorCatalogBucketDescriptorV1(
+      verifiedPath,
+      fixture.head,
+    );
+    const secondRead = readVerifiedAuthorCatalogBucketDescriptorV1(
+      verifiedPath,
+      fixture.head,
+    );
+    expect(firstRead).toBe(secondRead);
+    expect(firstRead).toEqual(expected);
+  });
+
   it('accepts the full eight-node path at the maximum v1 bucket count', () => {
     const fixture = maximumHeightFixture();
     expect(fixture.path).toHaveLength(MAX_AUTHOR_CATALOG_DIRECTORY_PATH_NODES_V1);
-    expect(verifyAuthorCatalogDirectoryPathV1(fixture.head, fixture.path, '0')).toEqual(
-      fixture.selectedDescriptor,
-    );
+    const verifiedPath = verifyAuthorCatalogDirectoryPathV1(fixture.head, fixture.path, '0');
+    expect(readVerifiedAuthorCatalogBucketDescriptorV1(verifiedPath, fixture.head))
+      .toEqual(fixture.selectedDescriptor);
   });
 
   it('rejects omitted, reversed, repeated, sparse, subclassed, accessor, symbol, and custom paths', () => {
@@ -420,7 +567,10 @@ describe('author catalog selected directory paths', () => {
     const node = { ...EMPTY_NODE, entries };
     const signed = signedEnvelope(node, '1');
     const path = [signed];
-    const head = { ...EMPTY_HEAD, directoryRootDigest: signed.objectDigest };
+    const head = signedHeadEnvelope({
+      ...EMPTY_HEAD.payload,
+      directoryRootDigest: signed.objectDigest,
+    });
     const originalIterator = Array.prototype[Symbol.iterator];
     Object.defineProperty(Array.prototype, Symbol.iterator, {
       configurable: true,
@@ -446,7 +596,7 @@ describe('author catalog selected directory paths', () => {
 });
 
 function twoLevelFixture(selectedBucketId: bigint): {
-  readonly head: AuthorCatalogHeadV1;
+  readonly head: SignedAuthorCatalogHeadEnvelopeV1;
   readonly root: SignedAuthorCatalogDirectoryNodeEnvelopeV1;
   readonly leaf: SignedAuthorCatalogDirectoryNodeEnvelopeV1;
   readonly path: SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
@@ -491,8 +641,8 @@ function twoLevelFixture(selectedBucketId: bigint): {
     firstBucketId: '0',
     level: '1',
   }, scope.bucketCount);
-  const head = validatedHead({
-    ...EMPTY_HEAD,
+  const head = signedHeadEnvelope({
+    ...EMPTY_HEAD.payload,
     bucketCount: '512',
     totalRows: '1',
     directoryHeight: '1',
@@ -502,7 +652,7 @@ function twoLevelFixture(selectedBucketId: bigint): {
 }
 
 function maximumHeightFixture(): {
-  readonly head: AuthorCatalogHeadV1;
+  readonly head: SignedAuthorCatalogHeadEnvelopeV1;
   readonly path: SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly selectedDescriptor: AuthorCatalogBucketDescriptorV1;
 } {
@@ -550,8 +700,8 @@ function maximumHeightFixture(): {
     leafToRoot.push(child);
   }
   const path = leafToRoot.reverse();
-  const head = validatedHead({
-    ...EMPTY_HEAD,
+  const head = signedHeadEnvelope({
+    ...EMPTY_HEAD.payload,
     bucketCount: bucketCountWire,
     totalRows: '1',
     directoryHeight: '7',
@@ -628,6 +778,26 @@ function signedEnvelope(
     signature: EIP191_SIGNATURE,
   } as SignedControlEnvelopeV1;
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(signed, bucketCount);
+  return signed;
+}
+
+function signedHeadEnvelope(
+  head: AuthorCatalogHeadV1,
+): SignedAuthorCatalogHeadEnvelopeV1 {
+  const payload = validatedHead(head);
+  const unsigned = {
+    issuer: ISSUER,
+    objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    payload,
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as UnsignedControlEnvelopeV1;
+  const signed = {
+    ...unsigned,
+    objectDigest: computeAuthorCatalogHeadObjectDigestV1(unsigned),
+    signature: EIP191_SIGNATURE,
+  } as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogHeadEnvelopeV1(signed);
   return signed;
 }
 
