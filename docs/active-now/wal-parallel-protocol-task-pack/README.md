@@ -1,6 +1,6 @@
 # WAL parallel-protocol implementation task pack
 
-This directory turns OT-RFC-65 v0.4 into an implementation backlog for
+This directory turns OT-RFC-65 v0.6 into an implementation backlog for
 OriginTrail DKG. It is intentionally created in an isolated worktree based on
 the current remote `main`; it does not reuse or modify the dirty primary
 checkout.
@@ -15,23 +15,28 @@ checkout.
 | Planning branch | `codex/wal-parallel-protocol-task-pack` |
 | Worktree | `/private/tmp/dkg-v9-wal-parallel-protocol-task-pack` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `d139a2a64eb729d007eb6b429e141204e9cf1ce0` |
-| RFC version | `0.5` |
-| RFC SHA-256 | `47d219bdbdda1678dc2f2bcfd4711abe5771a52c7d080986cf4282340337d1af` |
+| RFC source commit | `224501923af36213b47b945958068e4c48de3f9f` |
+| RFC version | `0.6` |
+| RFC SHA-256 | `11c1a48e38fad0f3ccb81cb584c19f270595669d6840d936be3cf1b732ec9784` |
+| Schema SHA-256 | `df5681933e8409ba946c5533e113929f64b4e1de5f4976d15cab1d2740ffe4ea` |
+| Vectors SHA-256 | `1de9c274f027e110b8a8fdbdd4302db744eb7f2d3c0f73166b989600963294a0` |
 
 ## Mandatory system-context contract
 
 [OT-RFC-65-wal-byte-set-reconciliation-sync.md](OT-RFC-65-wal-byte-set-reconciliation-sync.md)
 is the complete, verbatim RFC and is the
 normative system context for **every** task in [TASKS.md](TASKS.md).
+Its normative schema and byte fixtures are mirrored verbatim under
+[`vectors/`](vectors/) and are part of that system context.
 
 A task must not be dispatched by copying only its task section. The task runner
 must receive:
 
 1. the complete contents of `OT-RFC-65-wal-byte-set-reconciliation-sync.md` as
    system context;
-2. the selected `WAL-xxx` task section as the task request;
-3. the current repository and dependency state at execution time.
+2. the complete normative schema and vector files under `vectors/`;
+3. the selected `WAL-xxx` task section as the task request;
+4. the current repository and dependency state at execution time.
 
 The RFC is authoritative when a task summary is shorter or ambiguous. A task
 may narrow its implementation scope, but it may not weaken RFC invariants,
@@ -105,7 +110,9 @@ For every task:
 
 ## Artifacts
 
+- [STATUS.md](STATUS.md) — task execution status with exact branch/commit evidence.
 - [TASKS.md](TASKS.md) — detailed task list and acceptance areas.
 - [COVERAGE.md](COVERAGE.md) — RFC-section and freeze-item coverage matrix.
 - [OT-RFC-65-wal-byte-set-reconciliation-sync.md](OT-RFC-65-wal-byte-set-reconciliation-sync.md) — complete normative RFC system context.
+- [`vectors/`](vectors/) — exact protocol-v1 schema registry and valid/invalid conformance bytes.
 - [OT-RFC-65-comparison-with-OT-RFC-64.md](OT-RFC-65-comparison-with-OT-RFC-64.md) — separate informative comparison.

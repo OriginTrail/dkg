@@ -1,8 +1,10 @@
 ---
-status: implementation-proposal
-version: 0.5
+status: protocol-v1-freeze
+version: 0.6
 audience: protocol, agent, storage, publisher
 protocol_version: 1
+schema: vectors/OT-RFC-65-protocol-v1.schema.json
+vectors: vectors/OT-RFC-65-protocol-v1.json
 ---
 
 # OT-RFC-65: WAL-Replicated SWM/VM
@@ -40,6 +42,13 @@ choice, resumable byte transfer, and transport path selection, but does not
 require an Iroh runtime. IBLT decoding discovers differences efficiently; it is
 never accepted as the authenticated completeness proof.
 
+The normative schema registry and byte fixtures named in the front matter are
+part of this RFC. They freeze every tuple position, numeric enum, domain,
+resource bound, valid vector, and invalid vector used by protocol version 1.
+Two separately written TypeScript implementations consume the same fixtures;
+the fixtures are language-neutral, and no additional implementation language
+is required by this RFC.
+
 Crash recovery, reconnect, late join, backfill, and projection rebuild all use
 the same admission and replay path. A receiver either reconciles retained WAL
 records or installs an authenticated author snapshot and then reconciles the
@@ -73,6 +82,11 @@ The permanent boundary is:
 The WAL proves what was committed. The graph adapter validates RDF semantics and
 materializes query state. A graph database is still central to the product, but
 it is no longer required to prove replication history or completeness.
+
+The files `vectors/OT-RFC-65-protocol-v1.schema.json` and
+`vectors/OT-RFC-65-protocol-v1.json` are normative. Prose names are descriptive;
+the exact numeric enum values, tuple arities, field types, domains, and hard
+limits in the schema registry control when prose is abbreviated.
 
 ## 1. Scope
 
@@ -229,12 +243,20 @@ checkpointDigest = BLAKE3("dkg-wal-checkpoint-sign-v1\0" || canonicalUnsignedChe
 membershipDigest = BLAKE3("dkg-wal-membership-sign-v1\0" || canonicalUnsignedMembership)
 vectorDigest = BLAKE3("dkg-wal-vector-sign-v1\0" || canonicalUnsignedVector)
 cutoverDigest = BLAKE3("dkg-wal-cutover-sign-v1\0" || canonicalUnsignedCutover)
+authorityDigest = BLAKE3("dkg-wal-authority-sign-v1\0" || canonicalUnsignedAuthoritySet)
+receiptDigest = BLAKE3("dkg-wal-receipt-sign-v1\0" || canonicalUnsignedReceipt)
+bootstrapDigest = BLAKE3("dkg-wal-bootstrap-sign-v1\0" || canonicalUnsignedBootstrapManifest)
+rollbackRecoveryDigest = BLAKE3("dkg-wal-rollback-recovery-sign-v1\0" || canonicalUnsignedRollbackRecovery)
 signature = EIP191_secp256k1_sign(the corresponding 32-byte digest)
 ```
 
 Signatures are exactly 65 bytes, recoverable, low-S, and use normalized recovery
 bits. Verification recovers the signer address and compares it with the signed
-author or curator field.
+author or authority-set entry. For a single-author object the unsigned tuple is
+the exact tuple without its final signature. For a threshold-signed object it
+is the exact tuple without its final `signatures` array. Every threshold signer
+signs the same digest; `SignatureEntryV1` values are sorted by address, unique,
+and must meet the referenced authority-set threshold.
 
 ### 4.3 Object IDs
 
@@ -244,6 +266,10 @@ MembershipCheckpointId = BLAKE3("dkg-wal-membership-v1\0" || canonicalSignedMemb
 CheckpointId = BLAKE3("dkg-wal-checkpoint-v1\0" || canonicalSignedCheckpoint)
 VectorId = BLAKE3("dkg-wal-vector-v1\0" || canonicalSignedVector)
 CutoverId = BLAKE3("dkg-wal-cutover-v1\0" || canonicalSignedCutover)
+AuthoritySetId = BLAKE3("dkg-wal-authority-v1\0" || canonicalSignedAuthoritySet)
+ReceiptId = BLAKE3("dkg-wal-receipt-v1\0" || canonicalSignedReceipt)
+BootstrapManifestId = BLAKE3("dkg-wal-bootstrap-v1\0" || canonicalSignedBootstrapManifest)
+RollbackRecoveryId = BLAKE3("dkg-wal-rollback-recovery-v1\0" || canonicalSignedRollbackRecovery)
 ```
 
 ## 5. Namespace and disclosure views
@@ -253,6 +279,13 @@ its disclosure views to namespaces before crossing the adapter boundary so a
 public VM peer cannot learn private SWM object IDs or activity counts.
 
 ```text
+ReplicationCollectionKeyV1 = [
+  networkId,
+  contextGraphId,
+  subGraphNameOrNull,
+  visibility
+]
+
 ReplicationViewKeyV1 = [
   networkId,
   contextGraphId,
@@ -266,7 +299,17 @@ ReplicationViewKeyV1 = [
 namespaceId = BLAKE3(
   "dkg-wal-namespace-v1\0" || canonicalCBOR(ReplicationViewKeyV1)
 )
+
+collectionId = BLAKE3(
+  "dkg-wal-collection-v1\0" || canonicalCBOR(ReplicationCollectionKeyV1)
+)
 ```
+
+Version-1 numeric values are `tier: SWM=0, VM=1` and `visibility:
+PUBLIC=0, PRIVATE=1`. `networkId`, `contextGraphId`, and `subGraphNameOrNull`
+are NFC text bounded by the schema registry. Membership and vectors use the
+stable `collectionId`; object routing and disclosure always use the more exact
+`namespaceId`.
 
 A private request is authorized for one exact view. A member may reconcile
 several views, but roots are never merged across visibility or key epochs.
@@ -319,25 +362,46 @@ DKG payloads use an exact-arity envelope entirely inside `payloadBytes`:
 ```text
 DkgPayloadEnvelopeV1 = [
   version,                    // 1
-  payloadKind,                // MUTATION | MOVE_TIER | SNAPSHOT | POLICY | GENESIS
-  codec,                      // deterministic-cbor-v1
+  payloadKind,                // u16 enum below
+  codec,                      // u16 enum below
   mediaType,
   encryptionOrNull,
   contentBytes                // canonical plaintext or ciphertext
 ]
 
 EncryptionDescriptorV1 = [
-  algorithm,                  // AES-256-GCM in v1
-  keyEpoch,
-  nonce,
-  associatedDataDigest
+  algorithm,                  // 0 = AES-256-GCM
+  keyEpoch,                   // u64
+  nonce,                      // bytes12
+  associatedDataDigest       // bytes32
 ]
 ```
+
+The payload-kind values are `DKG_MUTATION=0`, `RDF_POLICY=1`,
+`SNAPSHOT_MANIFEST=2`, `LEGACY_GENESIS=3`,
+`COLLECTION_VECTOR_MANIFEST=4`, `CUTOVER_COHORT_MANIFEST=5`,
+`MOVE_TIER_SOURCE=6`, and `MOVE_TIER_TARGET=7`. Codec values are
+`DETERMINISTIC_CBOR=0`, `CANONICAL_NQUADS=1`, and `OPAQUE_BYTES=2`.
+`mediaType` is NFC text of at most 128 UTF-8 bytes.
 
 The envelope is signed indirectly because it is part of `WalObjectV1`. It has
 no independent generic-WAL identity. For private payloads, `contentBytes` is
 ciphertext and the associated data binds the namespace, writer, epoch,
 sequence, envelope version, codec, media type, key epoch, and nonce.
+
+`associatedDataDigest` is exactly:
+
+```text
+BLAKE3(
+  "dkg-wal-payload-ad-v1\0" || canonicalCBOR([
+    namespaceId, writerId, writerEpoch, sequence,
+    envelopeVersion, payloadKind, codec, mediaType, keyEpoch, nonce
+  ])
+)
+```
+
+No decryption parameter is unsigned: the descriptor and ciphertext are inside
+the enclosing signed and content-addressed `WalObjectV1`.
 
 ### 6.3 DKG mutation payload
 
@@ -346,7 +410,7 @@ The DKG adapter decodes mutation content as:
 ```text
 DkgMutationV1 = [
   version,
-  operation,                  // PUT | DELETE | MOVE_TIER | RESOLVE | SNAPSHOT
+  operation,                  // u16 enum below
   logicalKey,
   parents,                    // sorted unique WalObjectId[]
   baseHeads,                  // sorted unique WalObjectId[]
@@ -356,6 +420,10 @@ DkgMutationV1 = [
   nonConsensusTimestampMsOrNull
 ]
 ```
+
+Operation values are `PUT=0`, `PATCH=1`, `DELETE=2`, `RESOLVE=3`,
+`SNAPSHOT=4`, `MOVE_TIER_SOURCE=5`, `MOVE_TIER_TARGET=6`, and
+`LEGACY_GENESIS=7`.
 
 These positions are application semantics, not generic replication metadata.
 `DELETE` contains a deterministic deletion mutation, `RESOLVE` references every
@@ -385,16 +453,24 @@ The `rdfMutationOrNull` position contains this exact-arity adapter tuple:
 ```text
 RdfMutationV1 = [
   version,
-  mode,                       // REPLACE | PATCH | DELETE
+  mode,                       // REPLACE=0 | PATCH=1
   baseStateDigest,
   resultStateDigest,
-  replaceGraphs,              // [[graphIri, canonicalNQuadsBytes, quadCount]]
-  replaceSubjects,            // [[graphIri, subjectIri, canonicalNQuadsBytes, quadCount]]
-  deleteNQuadsBytesOrNull,
-  insertNQuadsBytesOrNull,
-  touchedKeys,                // [[graphIri, subjectIri, predicateIri]]
-  sourceSparqlAuditDigestOrNull
+  replaceGraphs,              // sorted unique GraphReplacementV1[]
+  replaceSubjects,            // sorted unique SubjectReplacementV1[]
+  deleteNQuadsBytes,          // empty bytes when none
+  insertNQuadsBytes,          // empty bytes when none
+  touchedKeys,                // sorted unique bytes32[]
+  sourceSparqlAuditBytesOrNull
 ]
+
+GraphReplacementV1 = [graphIri, canonicalNQuadsBytes, quadCount]
+SubjectReplacementV1 = [graphIri, subjectIri, canonicalNQuadsBytes, quadCount]
+
+touchedKey = BLAKE3(
+  "dkg-rdf-touched-key-v1\0" ||
+  canonicalCBOR([graphIri, subjectIri, predicateIri])
+)
 ```
 
 - `REPLACE` may replace exact graphs and exact metadata subjects in one logical
@@ -411,20 +487,57 @@ datasets therefore produce large WAL objects and use the same whole-object range
 transport as every other object; they do not create a second synchronization
 atom.
 
-### 6.6 `MoveTierV1`
+### 6.6 Private-safe tier movement
 
 ```text
-MoveTierV1 = [
-  sourceNamespaceCommitment,
-  targetNamespaceId,
+MoveTierTargetV1 = [
+  version,
+  transitionCommitment,
   targetMutation
+]
+
+MoveTierSourceV1 = [
+  version,
+  transitionNonce,
+  transitionCommitment,
+  targetNamespaceId,
+  targetWalObjectId,
+  sourceHeads,
+  sourceStateDigest,
+  sourceResultDigest
+]
+
+TierTransitionReceiptV1 = [
+  version,
+  transitionCommitment,
+  targetNamespaceId,
+  targetWalObjectId,
+  policyObjectId,
+  curatorVectorId,
+  expiresAtMs,
+  authoritySetId,
+  signatures
 ]
 ```
 
-The source SWM state remains in the WAL. The active view marks it superseded only
-when VM validation reaches the configured finalized chain frontier. A public
-target object does not expose private source IDs; authorized private peers may
-open `sourceNamespaceCommitment` through the source namespace policy.
+The transition commitment is
+
+```text
+BLAKE3(
+  "dkg-wal-move-tier-v1\0" || transitionNonce || sourceNamespaceId ||
+  targetNamespaceId || targetMutationDigest || sourceStateDigest ||
+  sourceResultDigest
+)
+```
+
+`transitionNonce` is a random bytes32 value. The public target contains only the
+randomized commitment and target mutation. It contains no source namespace,
+source WAL-object ID, graph name, key epoch, activity count, or causal shape.
+The private source opening binds the public target ID and is served only under
+the source-view authorization policy. The target remains pending until a
+threshold-valid `TierTransitionReceiptV1` attests that the private side was
+validated; the public receipt contains no private identifier. The source SWM
+state is marked superseded only after that receipt and VM finality both pass.
 
 ### 6.7 `ChainBindingV1`
 
@@ -478,7 +591,7 @@ may be cut only by a new epoch whose first record is an author-signed snapshot.
 ```text
 MembershipCheckpointV1 = [
   version,
-  collection,
+  collectionId,
   checkpointNumber,
   policyEpoch,
   publishMode,
@@ -489,7 +602,8 @@ MembershipCheckpointV1 = [
   rdfPolicyObjectId,
   previousMembershipCheckpointIdOrNull,
   issuedAtMs,
-  signatureByCurator
+  authoritySetId,
+  signatures                 // sorted SignatureEntryV1[]
 ]
 ```
 
@@ -504,15 +618,17 @@ index that author before the collection can report `complete`.
 ```text
 CollectionHeadVectorV1 = [
   version,
-  collection,
+  collectionId,
   membershipCheckpointId,
   expectedNamespaces,         // [[namespaceId, [[writerId, checkpointId]]]]
   vectorEpoch,
   vectorNumber,
+  previousVectorIdOrNull,
   issuedAtMs,
   expiresAtMs,
   finalizedChainFrontierOrNull,
-  signatureByCurator
+  authoritySetId,
+  signatures                  // sorted SignatureEntryV1[]
 ]
 ```
 
@@ -544,17 +660,69 @@ NetworkWalCutoverV1 = [
   rdfAdapterVersion,
   requiredNodeVersion,
   collectionVectorManifestObjectId,
+  cohortManifestObjectId,
   cutoverEpoch,
   activation,
   legacySyncDisabled,
-  signatureByNetworkAuthority
+  authoritySetId,
+  signatures                  // sorted SignatureEntryV1[]
 ]
 ```
 
-The manifest object is an ordinary `WalObjectV1` whose adapter payload contains
+The vector and cohort manifest objects are ordinary `WalObjectV1` values whose
+adapter payloads contain, respectively,
 the sorted complete list of `[collection, vectorId]` entries covered by the
-cutover. Every node must start WAL-authoritative mode with the same `CutoverId`.
+cutover and the exact required-node/active-author cohort. Every node must start
+WAL-authoritative mode with the same `CutoverId`.
 Mixed legacy/WAL authority is rejected.
+
+### 6.12 Threshold authority objects and rotation
+
+```text
+SignatureEntryV1 = [signerAddress, signature]
+
+AuthoritySetV1 = [
+  version,
+  scope,                       // CURATOR=0 | NETWORK=1
+  networkId,
+  authorityEpoch,
+  threshold,
+  signerAddresses,
+  notBeforeMs,
+  expiresAtMs,
+  previousAuthoritySetIdOrNull,
+  emergencyRevocationIds,
+  signatures
+]
+
+RollbackRecoveryV1 = [
+  version,
+  networkId,
+  collectionId,
+  minimumVectorEpoch,
+  minimumVectorNumber,
+  minimumVectorId,
+  recoveryNonce,
+  issuedAtMs,
+  authoritySetId,
+  signatures
+]
+```
+
+Signature entries and signer addresses are sorted, unique, and threshold
+checked against `authoritySetId`. Genesis authority sets are configured trust
+anchors. A rotation is accepted only when signed by the previous current set;
+an emergency revocation must be signed by the current network set and names
+the exact revoked authority IDs. Changing curator authority increments
+`vectorEpoch`, resets `vectorNumber` to zero, and links the prior vector ID.
+Changing network authority increments its authority epoch and cannot lower an
+already activated cutover requirement.
+
+Loss of the rollback high-water file is fail-closed. The node reports
+`unknown-freshness`, serves no private metadata, and accepts no vector until it
+durably installs a threshold-valid `RollbackRecoveryV1` at or above the maximum
+high-water reported by the required cohort. Ordinary graph/WAL snapshots cannot
+restore or lower this guard.
 
 ## 7. Whole-object format and resumable range transfer
 
@@ -580,6 +748,10 @@ WalObjectRangeV1 = [
 The offset addresses the complete canonical `WalObjectV1` encoding, including
 tuple headers, inline payload, and signature. It never addresses an independent
 payload object. Responses are idempotent for the same object ID and byte range.
+`maximumLength` is in `1..1 MiB`. A response contains at least one byte except
+that `offset == totalObjectLength` may return one empty EOF sentinel. Empty
+ranges before EOF, offset-plus-length overflow, and any byte past the advertised
+total are rejected.
 
 A receiver:
 
@@ -600,6 +772,18 @@ identity, or semantic representation. Authenticated encrypted transport
 protects in-flight bytes, while the complete object ID and signature provide
 end-to-end acceptance. Bytes from a provider that fail complete-object
 verification are discarded and the provider is penalized or quarantined.
+
+Staging must not trust sparse-file logical length as quota evidence. An
+implementation either preallocates charged physical space or stores bounded
+range parts and charges both physical part bytes and the union of received
+intervals before assembly. An object may retain at most 65,536 range parts.
+Restart metadata binds the exact `(WalObjectId, totalObjectLength)`; a different
+advertised length cannot resume the same staging entry. Duplicate and
+overlapping bytes are permitted only when they agree. Promotion uses bounded
+read buffers, verifies canonical structure, EIP-191 signature, and whole-object
+BLAKE3 ID, fsyncs the complete file, atomically renames it, and fsyncs the
+parent directory. Cancellation, timeout, quota failure, and abandoned staging
+have bounded cleanup paths.
 
 Large objects are valid. Implementations must stream them without buffering the
 complete payload in memory and must interleave range scheduling so one large
@@ -638,6 +822,37 @@ branchHash = BLAKE3(
 )
 ```
 
+Nibbles are packed high nibble first. If the prefix has odd length, the unused
+low nibble of the final byte is zero; any other value is non-canonical.
+Version-1 diagnostic/bootstrap membership proofs use:
+
+```text
+SetMembershipProofV1 = [
+  version,
+  walObjectId,
+  leafPrefixNibbleLength,
+  leafIds,
+  path
+]
+
+SetProofLevelV1 = [
+  parentPrefixNibbleLength,
+  childBitmap,
+  childNibble,
+  siblings
+]
+
+SetProofSiblingV1 = [nibble, childCount, childHash]
+```
+
+`leafIds` and siblings are strictly sorted and unique. The path is leaf-to-root
+in its logical meaning but encoded in root-to-leaf order, so a verifier walks it
+in reverse. It must terminate at prefix length zero and the exact signed root.
+Duplicate/unsorted leaf IDs, missing or extra siblings, bitmap disagreement,
+bad counts, impossible prefix transitions, a nonzero unused nibble, trailing
+levels, and root mismatch are `INVALID_PROOF`. Proofs remain disposable control
+data and never become reconciled set elements.
+
 The commitment is not another synchronization atom. It is a signed statement
 about the set named by an author checkpoint. Equality of signed `(objectCount,
 objectSetRoot)` values completes reconciliation without transmitting any IBLT
@@ -647,7 +862,7 @@ symbols.
 
 When signed roots differ, protocol v1 uses a rateless Invertible Bloom Lookup
 Table (IBLT) over fixed 32-byte `WalObjectId` keys. Both peers deterministically
-encode the compared sets with the same profile and seed. The receiver subtracts
+encode the compared sets with the same algorithm and seed. The receiver subtracts
 its local symbols from the provider's symbols: common IDs cancel and peeling
 recovers provider-only and receiver-only IDs.
 
@@ -665,16 +880,50 @@ idChecksum = BLAKE3(
 
 reconciliationSeed = BLAKE3(
   "dkg-wal-iblt-seed-v1\0" ||
-  localHeadId || remoteHeadId || requesterNonce
+  requesterHeadId || providerHeadId || requesterNonce
 )
 ```
 
 The requester chooses `requesterNonce` only after receiving the provider's
-signed immutable head. The normative symbol-membership schedule, degree
-distribution, peeling order, integer encoding, overflow behavior, and checksum
-test are fixed by the `ProtocolV1IbltReconciliationAlgorithm` conformance
-vectors before independent implementations are accepted. This name identifies
-a normative algorithm, not a protocol object or synchronization atom. A
+signed immutable head. `requesterNonce` is bytes32. The normative
+`ProtocolV1IbltReconciliationAlgorithm` is integer-only:
+
+```text
+M = 0xda942042e4dd58b5
+SCALE = 2^32
+
+mapState(id) = u64le(first8(BLAKE3(
+  "dkg-wal-iblt-map-v1\0" || reconciliationSeed || id
+)))
+
+index_0 = 0
+state_0 = mapState(id)
+
+after emitting at index_n:
+  state_(n+1) = state_n * M mod 2^64
+  q = floor(2^64 / isqrt(state_(n+1) + 1))
+  distance = max(1, ceil(
+    ((2 * index_n + 3) * (q - SCALE)) / (2 * SCALE)
+  ))
+  index_(n+1) = index_n + distance
+```
+
+`isqrt` is the exact floor integer square root; `ceil(a/b)` for nonnegative
+integers is `(a+b-1)/b`. Every ID contributes first to symbol zero and then to
+the strictly increasing indices above. No floating-point operation or
+implementation math library participates in symbol membership. `count` is a
+signed i64 and overflow fails the attempt. `idXor` and `checksumXor` are
+bytewise XOR. A symbol is pure only when count is exactly `+1` or `-1` and the
+checksum of `idXor` equals `checksumXor`. The decoder always peels the lowest
+available symbol index; a provider-only ID is subtracted from every received
+membership cell and a receiver-only ID is added. Duplicate decoded IDs fail.
+
+The schema and conformance vectors freeze the schedule, signed integer CBOR,
+checksum, subtraction, incremental windows, peel trace, residual-core failure,
+and reconstructed-root result. This name identifies a normative algorithm, not
+a protocol object or synchronization atom. Experimental initial-window sizes,
+growth policy, fallback thresholds, and performance candidates remain outside
+the wire specification and may iterate without changing symbol bytes. A
 provider can generate and cache the same deterministic symbol stream once per
 `(headId, reconciliationSeed)` and serve any requested contiguous window.
 
@@ -722,6 +971,26 @@ that information-theoretic cost disappear.
 IBLT is therefore the normal delta path, while full enumeration is the bounded
 decode-failure and large-backfill path. Neither path enumerates RDF or inspects
 payload bytes.
+
+```text
+GetObjectIdsV1 = [headId, startAfterOrNull, limit]
+
+ObjectIdsPageV1 = [
+  headId,
+  startAfterOrNull,
+  ids,
+  nextStartAfterOrNull,
+  done
+]
+```
+
+`limit` is `1..4096`. `ids` is strictly byte-sorted, unique, greater than
+`startAfterOrNull`, and contains at most `limit` values. A nonfinal page has
+`nextStartAfterOrNull == last(ids)` and `done=false`; a final page has
+`nextStartAfterOrNull=null` and `done=true`. An empty set is represented by one
+final empty page. Omitted, repeated, reordered, extra, truncated, stale-head,
+or cursor-inconsistent pages fail the enumeration. The receiver reports success
+only after exact count and set-root reproduction.
 
 ### 8.4 Reconciliation sequence
 
@@ -794,16 +1063,31 @@ policy; those remain protocol and adapter responsibilities defined here.
 
 ### Requests
 
-Provider discovery is replaceable and outside these three protocol families. A
-node may use configured peers, libp2p routing, rendezvous, or authorized
-provider advertisements. Discovery results are untrusted candidates; protocol
-negotiation, identity binding, authorization, signed heads, and object
-verification establish correctness.
+Provider path discovery is replaceable and outside these three protocol
+families, but trust bootstrap is not unspecified. Every empty node is
+provisioned with the current network-authority trust anchor and at least two
+bootstrap endpoints. It obtains a threshold-signed
+`ProviderBootstrapManifestV1`; gossip, routing, rendezvous, and advertisements
+may add paths only to identities already authorized by that manifest or a newer
+membership checkpoint. A private join additionally requires a member-targeted
+`PrivateBootstrapTicketV1` before any collection metadata is disclosed.
 
 Every request uses this outer shape:
 
 ```text
 FrameV1 = [protocolVersion, messageType, requestId, body]
+
+AuthenticatedRequestV1 = [context, request]
+
+RequestContextV1 = [
+  issuedAtMs,
+  requesterPeerId,
+  targetPeerId,
+  namespaceId,
+  requesterAgentAddressOrNull,
+  identityProofOrNull,
+  privateViewProofOrNull
+]
 ```
 
 The unsigned-varint prefix is the canonical CBOR frame length. Every request
@@ -820,6 +1104,62 @@ Private authorization reuses the existing agent, delegation, and membership
 rules. Replay IDs are cached for the request freshness window. Authorization is
 performed before returning a head vector, checkpoint, object root, count, IBLT
 symbol, ID, object length, or object byte.
+
+The exact identity, delegation, bootstrap, capability, request, response, and
+error tuples are frozen in the schema registry. Core request tuples are:
+
+```text
+GetHeadV1 = [writerId, writerEpochOrNull]
+GetVectorV1 = [collectionId]
+GetCheckpointV1 = [checkpointId]
+AnnounceHeadV1 = [checkpointId]
+CancelV1 = [cancelledRequestId]
+
+GetReconciliationSymbolsV1 = [
+  headId, reconciliationSeed, firstSymbolIndex, symbolCount
+]
+
+ReconciliationSymbolsV1 = [
+  headId, reconciliationSeed, firstSymbolIndex, symbols
+]
+
+GetWalObjectRangeV1 = [walObjectId, offset, maximumLength]
+WalObjectRangeV1 = [walObjectId, totalObjectLength, offset, bytes]
+
+ErrorV1 = [code, retryAfterMsOrNull, detailCodeOrNull]
+```
+
+Message-type values are namespace-local. For `wal-control` they are
+`GET_CAPABILITIES=0`, `CAPABILITIES=1`, `GET_HEAD=2`, `HEAD=3`,
+`GET_VECTOR=4`, `VECTOR=5`, `GET_CHECKPOINT=6`, `CHECKPOINT=7`,
+`ANNOUNCE_HEAD=8`, `ACK=9`, `CANCEL=10`, and `ERROR=255`. For
+`wal-reconcile` they are `GET_RECONCILIATION_SYMBOLS=0`,
+`RECONCILIATION_SYMBOLS=1`, `GET_OBJECT_IDS=2`, `OBJECT_IDS_PAGE=3`,
+`CANCEL=10`, and `ERROR=255`. For `wal-object` they are
+`GET_OBJECT_RANGE=0`, `OBJECT_RANGE=1`, `CANCEL=10`, and `ERROR=255`.
+Stable error values are `UNSUPPORTED_VERSION=0`, `UNAUTHORIZED=1`,
+`STALE_HEAD=2`, `INVALID_RANGE=3`, `RESOURCE_LIMIT=4`, `CANCELLED=5`,
+`INTERNAL_UNAVAILABLE=6`, `NON_CANONICAL=7`, and `INVALID_PROOF=8`.
+
+```text
+ProviderBootstrapManifestV1 = [
+  version, networkId, collectionId, authorityEpoch, providers,
+  notBeforeMs, expiresAtMs, previousManifestIdOrNull,
+  authoritySetId, signatures
+]
+
+ProviderEntryV1 = [peerId, agentAddress, endpoints, namespaceIds]
+
+PrivateBootstrapTicketV1 = [
+  version, collectionId, memberAgentAddress, membershipCheckpointId,
+  providerManifestId, notBeforeMs, expiresAtMs, nonce, ciphertext
+]
+```
+
+The private ticket ciphertext contains the authorized provider entries and is
+encrypted to the current member agent/key epoch. A provider still performs
+normal transport identity binding and current membership authorization; a
+ticket or manifest discovers candidates and does not prove content correctness.
 
 ### Message families
 
@@ -1016,6 +1356,34 @@ For each logical key, the reducer builds the causal DAG from admitted WAL
 objects. `WalObjectId` is only a deterministic processing tie-break, never a
 winner rule.
 
+For an ordinary single-logical-key mutation, `baseHeads` is the exact sorted
+maximal accepted head set read by the compiler and `parents == baseHeads`.
+Creation uses both arrays empty. `RESOLVE` uses every current conflict head in
+both arrays. A snapshot baseline is the only version-1 operation allowed to
+reset both arrays across an author-epoch boundary, under Section 17's covered
+checkpoint rules. Every base head must otherwise be an admitted ancestor-or-
+equal parent in the same logical-key closure. `baseStateDigest` is the digest of
+the deterministic active state produced by exactly `baseHeads`; a mismatch
+rejects admission. `touchedKeys` is the exact sorted set recomputed from all
+delete, insert, graph-replace, and subject-replace scopes. Missing, extra,
+duplicate, or unsorted entries reject admission.
+
+For heads `H`, let `AncestorsInclusive(h)` contain `h` and all transitively
+admitted parents. The common causal set is the intersection of those sets for
+all `h` in `H`; the maximal common base is the sorted set of members in that
+intersection that are not ancestors of another member in the intersection.
+The reducer evaluates that frontier recursively with the same compatibility
+rules. If it is still incompatible, it takes that frontier's own maximal common
+base. The recursion is bounded by the causal-closure limit and terminates at an
+empty genesis state. Arrival order and local graph contents never participate.
+
+Concurrent patches may merge only when their recomputed touched-key sets are
+disjoint, or when every overlap is an add-only value for a predicate explicitly
+declared multi-valued by the same signed policy. Exact delete/insert operations
+then commute; sorted `WalObjectId` order is used only to make processing and
+digest emission reproducible. `REPLACE`, delete-versus-update, incompatible
+tier movement, policy disagreement, and an incomplete resolution conflict.
+
 1. Find maximal causally accepted heads.
 2. Apply compatible successors and approved merges.
 3. If incompatible heads exist, compute their maximal common accepted causal
@@ -1141,6 +1509,20 @@ current chain adapter to verify:
 - publish or update receipt and event location;
 - block hash and configured finality depth.
 
+The effective finality requirement is always:
+
+```text
+max(record.requiredFinalityBlocks, currentSignedNetworkFinalityMinimum)
+```
+
+The author field is therefore only a request for stricter finality and cannot
+weaken chain/network policy. Every pending or active VM branch is re-evaluated
+against the current signed policy after reconfiguration. Raising the network
+minimum can return a previously active branch to `pending` until the new depth
+is reached; lowering it does not bypass the author's stricter value. A record
+above the signed network maximum is rejected as a resource/policy error rather
+than wrapping or truncating the u32 field.
+
 The materializer stores the verified chain frontier with the projection marker.
 A chain watcher periodically rechecks stored block hashes. On reorg or loss of
 finality, the VM branch returns to `pending`, and the reducer restores the last
@@ -1201,6 +1583,54 @@ contains:
 - covered checkpoint and set root;
 - policy, adapter version, and VM chain frontier.
 
+```text
+SnapshotManifestV1 = [
+  version,
+  namespaceId,
+  writerId,
+  newWriterEpoch,
+  coveredWriterEpoch,
+  coveredCheckpointId,
+  coveredObjectSetRoot,
+  coveredObjectCount,
+  compactionFloor,
+  entries,
+  conflicts,
+  policyObjectId,
+  adapterVersion,
+  chainFrontierOrNull
+]
+
+SnapshotEntryV1 = [
+  logicalKey, activeHeadIds, stateDigest, canonicalGraphBytes
+]
+
+SnapshotConflictV1 = [
+  logicalKey, externalHeadIds, commonBaseHeadIds, conflictDigest
+]
+
+SnapshotCustodyReceiptV1 = [
+  version,
+  snapshotObjectId,
+  custodianAgentAddress,
+  custodianPeerId,
+  membershipCheckpointId,
+  notBeforeMs,
+  expiresAtMs,
+  nonce,
+  signature
+]
+```
+
+A snapshot is sequence zero of `newWriterEpoch`, has
+`previousObjectIdOrNull=null`, and its enclosing `DkgMutationV1` has empty
+`parents` and `baseHeads`. The same-author snapshot signature plus the covered
+signed checkpoint, exact covered root/count, and complete inline manifest form
+the new baseline; a post-floor receiver does not fetch an artificial parent
+below the floor. External conflict heads are not re-authored: every referenced
+external head must remain reachable through that author's current retained set
+or authenticated baseline before this snapshot is eligible for compaction.
+
 Default snapshot trigger is 100,000 authored records or 30 days, whichever
 comes first. The thresholds are configurable but are signed into network policy.
 
@@ -1213,6 +1643,15 @@ Ordinary serving of pre-snapshot objects may stop only after:
   authorized custodians;
 - a valid curator vector references the new epoch checkpoint;
 - a 30-day retention grace has elapsed.
+
+Each additional custodian supplies a signed receipt valid through at least the
+end of the retention grace. The two custodians must be distinct, current
+members authorized for that namespace, and different from the author. Removal,
+revocation, expiry, peer/agent mismatch, or a membership checkpoint that no
+longer lists the custodian invalidates its receipt. The author must acquire a
+replacement and a newer vector before serving below the floor may stop. Receipt
+signatures and IDs use the domains in the schema registry; receipts are
+control-plane evidence, not reconciled content atoms.
 
 A peer below `compactionFloor` must install and verify the snapshot before
 reconciling post-snapshot records. Tombstones and conflicts are represented in
@@ -1234,6 +1673,20 @@ Entering parallel mode begins with one maintenance barrier:
 7. resume legacy production and shadow WAL capture.
 
 All changes after this barrier must produce WAL objects in parallel mode.
+
+```text
+LegacyGenesisV1 = [
+  version,
+  collectionId,
+  namespaceId,
+  sourceStateDigest,
+  canonicalGraphBytes,
+  provenanceStatus,           // 0 = unclaimable-legacy
+  migrationPolicyObjectId,
+  barrierVectorId,
+  createdAtMs
+]
+```
 
 ### Backfill and projection rebuild
 
@@ -1311,6 +1764,31 @@ baseline is outside the protocol guarantee.
 
 This is a complete parallel protocol, not a partial canary authority model.
 
+```text
+CutoverCohortManifestV1 = [
+  version,
+  networkId,
+  cutoverEpoch,
+  requiredNodes,
+  activeAuthors,
+  decommissionedPeerIds,
+  minimumBootstrapVectorIds,
+  createdAtMs
+]
+
+RequiredNodeV1 = [peerId, agentAddress]
+ActiveAuthorV1 = [namespaceId, writerId, writerEpoch, checkpointId]
+```
+
+An active node is any non-decommissioned peer identity in the signed deployment
+inventory that served, authored, curated, materialized, or answered readiness
+for a covered collection during the preceding 30 days. An active author is any
+writer lane named by a valid vector during that window and not explicitly
+closed by a signed membership transition. Offline identities remain required;
+operators must restore or explicitly decommission them before cutover. A
+decommissioning decision is part of the signed cohort manifest and cannot be
+inferred from temporary unreachability.
+
 ### 18.2 Cutover gates
 
 Cutover is allowed only when all conditions hold for every collection:
@@ -1343,6 +1821,15 @@ Cutover is allowed only when all conditions hold for every collection:
 8. Promote the verified shadow projection or rebuild production from WAL.
 9. Do not register legacy sync protocols or allow legacy graph writers.
 10. Resume writes.
+
+The signed cutover object and exact `CutoverId` are distributed through the
+configured authority channel and persisted outside graph, shadow projection,
+and ordinary WAL snapshot restore domains before restart. A mismatch or missing
+ID fails startup. A node returning after cutover never registers legacy
+protocols: it verifies the cutover and cohort against its network-authority
+anchor, obtains a current signed bootstrap manifest, installs every required
+baseline/vector at or above `minimumBootstrapVectorIds`, reconciles the WAL,
+rebuilds the projection, and only then becomes ready.
 
 There is no live fallback. Before writes resume, the fleet may abort and return
 to legacy mode. After WAL writes resume, rollback requires another maintenance
@@ -1431,27 +1918,46 @@ packages/cli/src/daemon/routes/
 - global materialization queue with policy-priority scheduling;
 - all queues persist retry state in SQLite.
 
-### Default limits
+### Version-1 hard limits and defaults
 
 | Limit | Default |
 |---|---:|
 | Control frame | 1 MiB |
 | Reconciliation symbols per response | 4,096 |
+| Reconciliation symbols per attempt | 4,194,304 |
 | Decoded IDs per reconciliation attempt | 1,000,000 |
+| Peeling operations per attempt | 67,108,864 |
 | Fallback IDs per page | 4,096 |
+| Fallback pages per attempt | 1,048,576 |
 | WAL-object range | 1 MiB |
 | Concurrent staged ranges per peer | 16 |
+| Staged range parts per object | 65,536 |
+| Concurrent reconciliation streams per peer | 4 |
+| Concurrent object streams per namespace/peer | 2 |
+| Outstanding requests per peer / global | 128 / 1,024 |
 | WAL-object size | 1 GiB policy default, 8 GiB implementation default hard cap |
 | Temporary object staging per peer | 16 GiB |
+| Parents / base heads per mutation | 64 / 64 |
+| Touched keys per mutation | 4,096 |
+| Replaced graphs / subjects per mutation | 64 / 4,096 |
 | Quads per mutation | 1,000,000 policy cap |
 | Conflict heads per logical key | 32 |
+| Authors per vector | 65,536 |
+| Active views per node | 4,096 |
+| Causal-closure depth | 1,000,000 |
+| Snapshot entries / conflict entries | 1,000,000 / 100,000 |
 | Quarantined bytes per peer | 256 MiB |
+| Quarantine retention | 24 hours |
 | Request freshness | 90 seconds |
 | Curator vector validity | 60 seconds |
 | Clock skew | 5 seconds |
 
 Exceeding a hard limit rejects or quarantines the object. It never partially
-materializes it.
+materializes it. Signed network policy may lower a limit but may not raise a
+hard version-1 maximum. Capability negotiation selects the minimum supported
+value and never makes an otherwise invalid object valid. Array counts,
+pagination, causal traversal, range allocation, timers, and queue slots are
+checked before proportional memory or disk allocation.
 
 ## 20. API and readiness
 
@@ -1529,79 +2035,54 @@ The implementation is not cutover-eligible until it proves:
 - a node with a missing or mismatched `CutoverId` cannot enter authoritative
   mode, and no legacy protocol or graph writer is accepted after activation.
 
-## 22. Implementation-freeze checklist
+## 22. Protocol-version-1 freeze resolution
 
-The architecture and version-1 direction are fixed, but the document is not a
-byte-for-byte interoperable implementation specification until the following
-items are resolved and backed by conformance vectors:
+The ten former implementation-freeze items are resolved for protocol version 1.
+This section is a traceability index; the cited prose plus the normative schema
+and vectors control implementation.
 
-1. **Adapter payload envelope vectors.** Freeze numeric values and byte vectors
-   for every `DkgPayloadEnvelopeV1` position and payload kind. Prove that codec,
-   media type, algorithm, key epoch, nonce, associated-data digest, and inline
-   content bytes are all covered by the enclosing WAL-object signature and
-   identity, with no unsigned decryption metadata or independent payload ID.
-2. **Snapshot wire schema and closure.** Define canonical `SnapshotManifestV1`,
-   `LegacyGenesisV1`, and custody-receipt schemas; specify snapshot-object
-   `parents`/`baseHeads`; and prove that a post-compaction receiver can validate
-   causal closure without fetching records below the floor. “Exists on two
-   custodians” requires signed, expiring availability evidence and a policy for
-   custodian removal.
-3. **WalObject, set commitment, and rateless IBLT conformance.** Publish exact
-   tuple, signature, `WalObjectId`, empty/one/split set-root, odd-nibble packing,
-   deterministic seed, symbol-membership, degree-distribution, signed-count,
-   XOR, checksum, subtraction, peeling-order, success, residual-core, overflow,
-   incremental-window, reconstructed-root, and fallback-page vectors. At least
-   two independent implementations must produce byte-identical symbols and
-   decoded differences. No range, payload, or symbol may acquire an independent
-   content identity.
-4. **Reducer conformance.** Normatively relate `parents`, `baseHeads`,
-   `baseStateDigest`, and `touchedKeys`; define multi-base common-state
-   calculation; and publish fixtures for concurrent patches, replace/patch,
-   delete/update, tier movement, and resolution. Prose alone is insufficient
-   for cross-implementation convergence.
-5. **Cross-view privacy for `MOVE_TIER`.** A public VM object must not expose
-   private SWM WAL-object IDs, graph names, epochs, or activity counts. Replace the
-   current direct `sourceHeads` reference with a two-sided transition or an
-   opaque commitment whose private opening is served only in the source view.
-6. **Authority lifecycle and availability.** Specify curator and network-key
-   rotation, vector-epoch transitions, emergency revocation, multi-signer or HA
-   operation, and recovery when the rollback high-water file is lost. The
-   60-second vector validity otherwise makes curator availability a fleet-wide
-   readiness dependency.
-7. **Provider discovery and cold start.** Define how an empty node obtains at
-   least one authorized provider and the current membership/vector without
-   trusting gossip, including private collections whose metadata cannot be
-   publicly advertised.
-8. **Cutover cohort and late nodes.** Define “every active node and author,” the
-   treatment of offline/decommissioned identities, authenticated distribution
-   and persistence of `CutoverId`, and the mandatory bootstrap path for a node
-   that returns after legacy protocols are disabled.
-9. **Complete resource bounds.** Add fixed maxima and pagination rules for
-   parents, base heads, touched keys, graphs, authors per vector, active views,
-   causal-closure depth, snapshot entries, outstanding requests, IBLT symbols,
-   decoded IDs, peeling work, fallback pages, range staging, sparse files, and
-   quarantine retention time. The general bounded-resource invariant is not
-   enough for interoperable rejection behavior.
-10. **VM finality policy.** `requiredFinalityBlocks` in an author-signed WAL object
-    must not let the author weaken network finality. Specify that activation uses
-    the current chain/network policy, with a signed record value serving at most
-    as a stricter request, and define policy behavior across reconfiguration.
+| Freeze item | Normative resolution |
+|---|---|
+| Adapter payload envelope | Section 6.2 freezes numeric payload/codec/crypto values, exact associated data, and whole-object signature/identity coverage. Encryption valid/invalid vectors are published. |
+| Snapshot wire and closure | Section 17 freezes manifest, entry, conflict, legacy-genesis, custody-receipt, new-epoch, empty-parent/base, external-conflict, retention, expiry, and removed-custodian rules. |
+| WalObject, commitment, and IBLT | Sections 4, 6.1, 7, and 8 plus vectors freeze canonical bytes, signatures, IDs, empty/one/split roots, odd-nibble proofs, integer-only mapping, symbols, peeling, failures, reconstruction, and fallback pages. |
+| Reducer convergence | Sections 6.3–6.5 and 13 define parents/base heads/state/touched-key relations, maximal common bases, compatibility, and reducer fixtures. |
+| Cross-view `MOVE_TIER` privacy | Section 6.6 uses a randomized public commitment, private source opening, and privacy-preserving threshold receipt; cross-view invalid vectors contain forbidden-value checks. |
+| Authority lifecycle | Section 6.12 freezes threshold authority sets, rotation, revocation, vector-epoch transition, and fail-closed rollback-guard recovery. |
+| Provider cold start | Section 9 freezes authority-pinned bootstrap manifests and private member-targeted tickets; gossip remains an untrusted path hint. |
+| Cutover cohort and late nodes | Section 18 freezes active/cohort rules, explicit decommissioning, authenticated `CutoverId` persistence, and WAL-only late bootstrap. |
+| Complete resource bounds | Section 19 and the schema registry freeze array, pagination, closure, request, IBLT, range, object, staging, sparse-file, quarantine, and timing maxima. |
+| VM finality | Section 16 uses `max(authorRequest, currentNetworkMinimum)` and re-evaluates on policy change, so an author cannot weaken network policy. |
 
-Closing these items should not change the replicated-bytes architecture. It
-will turn the proposal from an implementation blueprint into a normative wire
-and convergence specification.
+The conformance package contains two separately written TypeScript consumers:
+one generic deterministic-CBOR/protocol reference and one cursor-based,
+schema-specific verifier. Both reproduce canonical encodings, whole-object IDs,
+set roots, IBLT symbols, AES-GCM plaintext, and reducer digests from the same
+language-neutral fixtures. Valid and invalid cases cover empty, boundary,
+duplicate, reordered, truncated, oversized, residual-core, cross-view,
+stale-authority, and downgrade behavior. A generated large-object test stages a
+16 MiB inline payload with a 64 KiB verification buffer, restarts, switches
+range sources, rejects dishonest lengths/conflicting overlaps, and exposes no
+final object before complete canonical/signature/ID verification and atomic
+promotion.
+
+Future tuning may change experimental window/growth/fallback policy without
+changing protocol bytes. Any change to a tuple, enum, domain, hard limit,
+integer mapping schedule, synchronization atom, or normative vector requires a
+new protocol version or an explicit compatible RFC amendment with regenerated
+fixtures.
 
 ## 23. Fixed version-1 decisions
 
 | Area | Decision |
 |---|---|
 | Control codec | RFC 8949 deterministic CBOR exact-arity tuple profile above; no maps in normative signed, hashed, or wire objects. |
-| Signature | Current secp256k1/EIP-191 agent and curator authority, canonical low-S signature. |
+| Signature | Current secp256k1/EIP-191 agent keys and threshold curator/network authority sets, canonical low-S signatures. |
 | Hash | BLAKE3 with explicit domains. |
 | Synchronization atom | One complete canonical `WalObjectV1` with inline opaque payload; no separately addressed payload, blob, chunk, or range. |
 | Range transfer | Ephemeral whole-object byte ranges with local resume state and complete-object verification before atomic promotion. |
 | Set commitment | Deterministic 16-way radix Merkle root, leaf 256, used for authenticated equality and decode verification rather than normal wire traversal. |
-| Set reconciliation | Rateless IBLT over `WalObjectId`, incremental symbol windows, reconstructed-root verification, and bounded sorted-ID fallback. |
+| Set reconciliation | Integer-only `ProtocolV1IbltReconciliationAlgorithm` over `WalObjectId`, incremental symbol windows, lowest-index peeling, reconstructed-root verification, and bounded sorted-ID fallback. |
 | Transport | Existing raw libp2p router with `wal-control`, `wal-reconcile`, and `wal-object` protocol IDs. |
 | Private crypto | Existing Sender Key distribution plus HKDF-SHA256 and AES-256-GCM content inline in the adapter payload envelope. |
 | RDF format | Canonical, sorted, blank-node-free N-Quads. |
@@ -1610,6 +2091,9 @@ and convergence specification.
 | Materialization | Required atomic backend capability; Oxigraph first. |
 | Freshness | Curator vector every 5 seconds, valid 60 seconds, 5-second skew. |
 | Checkpoints | One signed author checkpoint per authored WAL-object transaction. |
+| Authority | Threshold sets with signed rotation/revocation, linked vector epochs, and fail-closed rollback-guard recovery. |
+| Tier movement | Randomized public commitment plus private opening and threshold transition receipt; no private source identifier in public bytes. |
+| Finality | `max(author request, current signed network minimum)` with re-evaluation after policy change. |
 | Rollout | Full parallel shadow protocol, then one network-wide hard cutover. |
 | Legacy fallback | None after cutover. |
 
