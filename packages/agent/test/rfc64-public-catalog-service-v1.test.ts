@@ -36,8 +36,6 @@ import {
 const NETWORK_ID = 'otp:20430' as const;
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/service-lifecycle' as const;
-const GOVERNANCE_CONTRACT =
-  '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const OTHER_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -416,6 +414,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(Object.keys(clients!)).toEqual([
       'headTransport',
       'contentTransport',
+      'resolveTrustedCatalogScope',
       'transportTimeoutMs',
     ]);
     expect(clients!.transportTimeoutMs).toBe(4_321);
@@ -433,6 +432,26 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(Object.isFrozen(clients)).toBe(true);
     expect(Object.isFrozen(clients!.headTransport)).toBe(true);
     expect(Object.isFrozen(clients!.contentTransport)).toBe(true);
+
+    const policy = acceptPolicy(service);
+    expect(clients!.resolveTrustedCatalogScope(announcement(policy.policyDigest))).toEqual({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    });
+    expect(() => clients!.resolveTrustedCatalogScope(announcement(
+      `0x${'cc'.repeat(32)}` as Digest32V1,
+    ))).toThrow('no matching accepted open policy generation');
+    expect(() => clients!.resolveTrustedCatalogScope({
+      ...announcement(policy.policyDigest),
+      authorAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
+    })).toThrow('accepted null-governance owner policy');
 
     service.start();
     service.start();
@@ -570,8 +589,8 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       scope: {
         networkId: NETWORK_ID,
         contextGraphId: CONTEXT_GRAPH_ID,
-        governanceChainId: '20430',
-        governanceContractAddress: GOVERNANCE_CONTRACT,
+        governanceChainId: null,
+        governanceContractAddress: null,
         ownershipTransitionDigest: null,
         subGraphName: null,
         authorAddress: AUTHOR,
@@ -621,6 +640,73 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       stagedOnly: 2,
       applied: 0,
       dedupedAlreadyApplied: 0,
+    });
+    await service.close();
+  });
+
+  it('refuses to stage a governed head under an accepted null-governance policy', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    const onError = vi.fn();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+      receiver: { maxAttempts: 1, retryBackoffMs: 0, onError },
+    });
+    const policy = acceptPolicy(service);
+    const produced = await produceEmptyAuthorCatalogGenesisV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: '20430',
+        governanceContractAddress: '0x2222222222222222222222222222222222222222',
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      } as AuthorCatalogScopeV1,
+      catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+      issuedAt: '1773900000000' as TimestampMsV1,
+      signer: {
+        issuer: AUTHOR,
+        signDigest: (digest) => AUTHOR_WALLET.signMessage(digest),
+      },
+    });
+    const head: Rfc64PublicCatalogHeadAnnouncementV1 = {
+      kind: 'rfc64-author-catalog-head-availability-v1',
+      networkId: produced.head.payload.networkId,
+      contextGraphId: produced.head.payload.contextGraphId,
+      subGraphName: produced.head.payload.subGraphName,
+      authorAddress: produced.head.payload.authorAddress,
+      catalogEra: produced.head.payload.era,
+      catalogVersion: produced.head.payload.version,
+      policyDigest: policy.policyDigest,
+      catalogHeadObjectDigest: produced.head.objectDigest as Digest32V1,
+      signatureVariantDigest: computeControlSignatureVariantDigestHex(
+        produced.head.objectDigest,
+        produced.head.signature,
+      ),
+    };
+    const headBytes = canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1(produced.head);
+    const foundResponse = new Uint8Array(headBytes.byteLength + 1);
+    foundResponse[0] = 1;
+    foundResponse.set(headBytes, 1);
+    router.sendResponse = async () => foundResponse;
+
+    service.start();
+    await router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+    );
+    await service.whenReceiverIdle();
+
+    expect(store.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(service.stats().receiver).toMatchObject({
+      stagedOnly: 0,
+      applied: 0,
+      failed: 1,
     });
     await service.close();
   });

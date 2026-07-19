@@ -24,6 +24,7 @@ import {
   assertSignedControlEnvelope,
   assertSubGraphNameV1,
   canonicalizeSignedControlEnvelopeBytes,
+  computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
   parseCanonicalSignedControlEnvelope,
   type ContextGraphAccessPolicyV1,
@@ -386,6 +387,10 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       const snapshot = readVerifiedControlEnvelopeIssuerSignatureV1(proof);
       if (
         snapshot.objectDigest !== envelope.objectDigest
+        || snapshot.signatureVariantDigest !== computeControlSignatureVariantDigestHex(
+          envelope.objectDigest,
+          envelope.signature,
+        )
         || snapshot.issuer !== envelope.issuer
         || snapshot.signatureSuite !== envelope.signatureSuite
       ) {

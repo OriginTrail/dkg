@@ -7,6 +7,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
+import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-policy-v1.js';
 import {
   createRfc64PublicOpenCatalogNativeReconcilerV1,
   deriveRfc64PublicOpenCatalogScopeV1,
@@ -33,6 +34,15 @@ const DEPLOYMENT = Object.freeze({
   assertedAtChainId: '20430',
   assertedAtKav10Address: KAV10,
 }) as CatalogSealDeploymentProfileV1;
+const ACCEPTED_POLICY = buildOpenOwnerContextGraphPolicyV1({
+  networkId: NETWORK_ID,
+  contextGraphId: CONTEXT_GRAPH_ID,
+  ownerAddress: AUTHOR,
+});
+
+const resolveTrustedCatalogScope = (
+  input: Rfc64PublicCatalogHeadAnnouncementV1,
+) => deriveRfc64PublicOpenCatalogScopeV1(input, ACCEPTED_POLICY);
 
 function announcement(
   catalogVersion = '0',
@@ -94,6 +104,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
+      resolveTrustedCatalogScope,
       resolveDeployment,
     });
     const signal = new AbortController().signal;
@@ -105,8 +116,22 @@ describe('RFC-64 public/open native reconciler v1', () => {
 
     expect(resolveDeployment).toHaveBeenNthCalledWith(1, genesis, signal);
     expect(resolveDeployment).toHaveBeenNthCalledWith(2, successor, signal);
-    expect(synchronize).toHaveBeenNthCalledWith(1, 'peer-a', genesis, DEPLOYMENT, signal);
-    expect(synchronize).toHaveBeenNthCalledWith(2, 'peer-b', successor, DEPLOYMENT, signal);
+    expect(synchronize).toHaveBeenNthCalledWith(
+      1,
+      'peer-a',
+      genesis,
+      resolveTrustedCatalogScope(genesis),
+      DEPLOYMENT,
+      signal,
+    );
+    expect(synchronize).toHaveBeenNthCalledWith(
+      2,
+      'peer-b',
+      successor,
+      resolveTrustedCatalogScope(successor),
+      DEPLOYMENT,
+      signal,
+    );
   });
 
   it('dedupes only an exact fixed public/open applied head', async () => {
@@ -114,6 +139,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
       nativeReceiver: receiver(vi.fn()),
       inventory: { readAppliedCatalogHeadV1 },
+      resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
     const genesis = announcement('0');
@@ -141,12 +167,12 @@ describe('RFC-64 public/open native reconciler v1', () => {
     }
 
     const expectedScopeDigest = computeAuthorCatalogScopeDigestV1(
-      deriveRfc64PublicOpenCatalogScopeV1(successor),
+      deriveRfc64PublicOpenCatalogScopeV1(successor, ACCEPTED_POLICY),
     );
     expect(readAppliedCatalogHeadV1).toHaveBeenLastCalledWith(expectedScopeDigest, AUTHOR);
     expect(() => deriveRfc64PublicOpenCatalogScopeV1(announcement('1', {
       subGraphName: 'not-root' as never,
-    }))).toThrow('root catalog lane');
+    }), ACCEPTED_POLICY)).toThrow('accepted null-governance owner policy');
   });
 
   it('maps only the explicit native not-found error and propagates all other failures', async () => {
@@ -158,6 +184,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
+      resolveTrustedCatalogScope,
       resolveDeployment: async () => DEPLOYMENT,
     });
     const signal = new AbortController().signal;
@@ -186,6 +213,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
+      resolveTrustedCatalogScope,
       resolveDeployment,
     });
     const signal = new AbortController().signal;

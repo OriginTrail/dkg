@@ -14,6 +14,7 @@ import {
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CountV1,
+  type ContextGraphPolicyV1,
 } from '@origintrail-official/dkg-core';
 
 import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
@@ -39,33 +40,55 @@ export type Rfc64PublicOpenCatalogDeploymentResolverV1 = (
   signal: AbortSignal,
 ) => Promise<CatalogSealDeploymentProfileV1>;
 
+/** Resolve the exact catalog scope from independently accepted local policy state. */
+export type Rfc64PublicOpenCatalogTrustedScopeResolverV1 = (
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+) => Readonly<AuthorCatalogScopeV1>;
+
 export interface Rfc64PublicOpenCatalogNativeReconcilerOptionsV1 {
   readonly nativeReceiver: Rfc64PublicOpenCatalogNativeReceiverClientV1;
   readonly inventory: Pick<Rfc64InventoryV1OperationsV1, 'readAppliedCatalogHeadV1'>;
+  /** Resolve from accepted policy state; never reconstruct authority from wire fields alone. */
+  readonly resolveTrustedCatalogScope: Rfc64PublicOpenCatalogTrustedScopeResolverV1;
   /** Resolve the locally trusted deployment tuple; never copy it from the wire. */
   readonly resolveDeployment: Rfc64PublicOpenCatalogDeploymentResolverV1;
 }
 
 /**
- * Derive the one fixed Gate-1 public/open scope represented by an announcement.
+ * Derive the one fixed Gate-1 public/open scope from accepted local policy and
+ * require the announcement to name that exact owner/network/CG/era/root lane.
  * Policy and signature-variant digests are transport/authentication context,
  * not semantic catalog identity, and therefore do not participate.
  */
 export function deriveRfc64PublicOpenCatalogScopeV1(
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  acceptedPolicy: ContextGraphPolicyV1,
 ): AuthorCatalogScopeV1 {
-  if (announcement.subGraphName !== null) {
-    throw new Error('RFC-64 Gate 1 public/open reconciler requires the root catalog lane');
+  if (
+    acceptedPolicy.accessPolicy !== 0
+    || acceptedPolicy.source.kind !== 'owner-signed-unregistered'
+    || acceptedPolicy.networkId !== announcement.networkId
+    || acceptedPolicy.contextGraphId !== announcement.contextGraphId
+    || acceptedPolicy.governanceChainId !== null
+    || acceptedPolicy.governanceContractAddress !== null
+    || acceptedPolicy.ownershipTransitionDigest !== null
+    || acceptedPolicy.era !== announcement.catalogEra
+    || announcement.subGraphName !== null
+    || acceptedPolicy.source.ownerAddress !== announcement.authorAddress
+  ) {
+    throw new Error(
+      'RFC-64 Gate 1 announcement is not bound to the accepted null-governance owner policy',
+    );
   }
   return Object.freeze({
-    networkId: announcement.networkId,
-    contextGraphId: announcement.contextGraphId,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
+    networkId: acceptedPolicy.networkId,
+    contextGraphId: acceptedPolicy.contextGraphId,
+    governanceChainId: acceptedPolicy.governanceChainId,
+    governanceContractAddress: acceptedPolicy.governanceContractAddress,
+    ownershipTransitionDigest: acceptedPolicy.ownershipTransitionDigest,
     subGraphName: null,
-    authorAddress: announcement.authorAddress,
-    era: announcement.catalogEra,
+    authorAddress: acceptedPolicy.source.ownerAddress,
+    era: acceptedPolicy.era,
     bucketCount: '1' as CountV1,
   });
 }
@@ -78,6 +101,7 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
     if (
       typeof options?.nativeReceiver?.synchronizePublicOpenCatalog !== 'function'
       || typeof options?.inventory?.readAppliedCatalogHeadV1 !== 'function'
+      || typeof options?.resolveTrustedCatalogScope !== 'function'
       || typeof options?.resolveDeployment !== 'function'
     ) {
       throw new TypeError('RFC-64 public/open native reconciler dependencies are incomplete');
@@ -87,8 +111,9 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
   async isHeadApplied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
+    const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
-      deriveRfc64PublicOpenCatalogScopeV1(announcement),
+      trustedCatalogScope,
     );
     const current = this.options.inventory.readAppliedCatalogHeadV1(
       catalogScopeDigest,
@@ -109,12 +134,15 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
     signal: AbortSignal,
   ): Promise<Rfc64PublicCatalogReconcileResultV1> {
     throwIfAborted(signal);
+    const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
+    throwIfAborted(signal);
     const deployment = await this.options.resolveDeployment(announcement, signal);
     throwIfAborted(signal);
     try {
       await this.options.nativeReceiver.synchronizePublicOpenCatalog(
         remotePeerId,
         announcement,
+        trustedCatalogScope,
         deployment,
         signal,
       );

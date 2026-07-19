@@ -3,6 +3,8 @@ import {
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   DKGNode,
   ProtocolRouter,
+  canonicalizeSignedControlEnvelopeBytes,
+  computeControlSignatureVariantDigestHex,
   encodeOpaqueKaBundleV1,
   type AuthorCatalogScopeV1,
   type Digest32V1,
@@ -21,6 +23,7 @@ import {
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
   Rfc64PublicCatalogNativeTransportV1,
   type Rfc64PublicCatalogNativeFetchScopeV1,
+  Rfc64PublicCatalogNativeTransportErrorV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
@@ -216,4 +219,92 @@ describe('RFC-64 public catalog native content transport v1', () => {
     }, { timeoutMs: 4_000 })).rejects.toThrow(/policy/);
     expect(providerRead).not.toHaveBeenCalled();
   }, 15_000);
+
+  it('rejects a generic signature proof minted for another exact signature variant', async () => {
+    const produced = await produceEmptyAuthorCatalogGenesisV1({
+      scope: {
+        networkId: 'otp:20430',
+        contextGraphId: '0x1111111111111111111111111111111111111111/variant-binding',
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      } as AuthorCatalogScopeV1,
+      catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+      issuedAt: '1773900000000',
+      signer: {
+        issuer: AUTHOR,
+        signDigest: async (digest) => AUTHOR_WALLET.signMessage(digest),
+      },
+    });
+    const original = produced.directoryPath[0]!;
+    const originalProof = await verifyControlEnvelopeIssuerSignatureV1(original);
+    const alternate = Object.freeze({
+      ...original,
+      signature: alternateRecoveryEncoding(original.signature),
+    }) as SignedControlEnvelopeV1;
+    expect(ethers.verifyMessage(
+      ethers.getBytes(alternate.objectDigest),
+      alternate.signature,
+    ).toLowerCase()).toBe(AUTHOR);
+    expect(computeControlSignatureVariantDigestHex(
+      alternate.objectDigest,
+      alternate.signature,
+    )).not.toBe(computeControlSignatureVariantDigestHex(
+      original.objectDigest,
+      original.signature,
+    ));
+
+    const bytes = canonicalizeSignedControlEnvelopeBytes(alternate);
+    const response = new Uint8Array(bytes.byteLength + 1);
+    response[0] = 1;
+    response.set(bytes, 1);
+    const router = {
+      register: () => {},
+      unregister: () => {},
+      send: async () => response,
+    } as unknown as ProtocolRouter;
+    const verifyIssuerSignature = vi.fn(async () => originalProof);
+    const transport = new Rfc64PublicCatalogNativeTransportV1(router, {
+      readCatalogObjectByDigest: async () => null,
+      readKaBundleByDigest: async () => null,
+      authorizeOpenCatalogOperation: async () => ({
+        accessPolicy: 0,
+        policyDigest: POLICY_DIGEST,
+      }),
+      verifyIssuerSignature,
+    });
+    transports.push(transport);
+    transport.start();
+
+    const scope = {
+      networkId: produced.head.payload.networkId,
+      contextGraphId: produced.head.payload.contextGraphId,
+      subGraphName: produced.head.payload.subGraphName,
+      authorAddress: produced.head.payload.authorAddress,
+      catalogEra: produced.head.payload.era,
+      catalogVersion: produced.head.payload.version,
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: produced.head.objectDigest,
+    } satisfies Rfc64PublicCatalogNativeFetchScopeV1;
+    await expect(transport.fetchCatalogObject('peer-a', {
+      ...scope,
+      kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+      targetObjectType: alternate.objectType,
+      targetObjectDigest: alternate.objectDigest as Digest32V1,
+    })).rejects.toEqual(expect.objectContaining({
+      code: 'catalog-native-signature',
+    }) as Partial<Rfc64PublicCatalogNativeTransportErrorV1>);
+    expect(verifyIssuerSignature).toHaveBeenCalledOnce();
+  });
 });
+
+function alternateRecoveryEncoding(signature: string): string {
+  const recovery = signature.slice(-2);
+  if (recovery === '1b') return `${signature.slice(0, -2)}00`;
+  if (recovery === '1c') return `${signature.slice(0, -2)}01`;
+  throw new Error('test fixture signature did not use canonical v=27/28 encoding');
+}

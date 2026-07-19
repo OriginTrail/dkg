@@ -23,6 +23,7 @@
 
 import {
   assertAuthorCatalogScopeV1,
+  assertAuthorCatalogHeadScopeBindingV1,
   computeControlSignatureVariantDigestHex,
   type ProtocolRouter,
   type SendOptions,
@@ -67,6 +68,10 @@ import {
 import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
+import {
+  deriveRfc64PublicOpenCatalogScopeV1,
+  type Rfc64PublicOpenCatalogTrustedScopeResolverV1,
+} from './public-catalog-native-reconciler-v1.js';
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';
@@ -119,6 +124,7 @@ export type Rfc64PublicCatalogContentFetchClientV1 = Pick<
 export interface Rfc64PublicCatalogReconcilerClientsV1 {
   readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
   readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
+  readonly resolveTrustedCatalogScope: Rfc64PublicOpenCatalogTrustedScopeResolverV1;
   readonly transportTimeoutMs: number;
 }
 
@@ -236,6 +242,8 @@ export class Rfc64PublicCatalogServiceV1 {
           ),
           fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
         }),
+        resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+          this.#resolveTrustedCatalogScope(announcement),
         transportTimeoutMs: this.#transportTimeoutMs,
       }));
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
@@ -415,8 +423,10 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
-  #sendOptions(): SendOptions {
-    return { timeoutMs: this.#transportTimeoutMs };
+  #sendOptions(signal?: AbortSignal): SendOptions {
+    return signal === undefined
+      ? { timeoutMs: this.#transportTimeoutMs }
+      : { timeoutMs: this.#transportTimeoutMs, signal };
   }
 
   async #announceCatalogHeadSnapshot(
@@ -470,6 +480,20 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
+  #resolveTrustedCatalogScope(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): Readonly<AuthorCatalogScopeV1> {
+    const record = this.#policies.lookup(announcement.networkId, announcement.contextGraphId);
+    if (
+      record === null
+      || record.policyDigest !== announcement.policyDigest
+      || record.policy.accessPolicy !== 0
+    ) {
+      throw new Error('RFC-64 announcement has no matching accepted open policy generation');
+    }
+    return deriveRfc64PublicOpenCatalogScopeV1(announcement, record.policy);
+  }
+
   async #stageHeadOnly(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -477,12 +501,24 @@ export class Rfc64PublicCatalogServiceV1 {
     onHeadStaged?: Rfc64PublicCatalogServiceOptionsV1['onHeadStaged'],
   ): Promise<'not-found' | 'staged-only'> {
     if (signal.aborted) throw signal.reason;
+    const trustedCatalogScope = this.#resolveTrustedCatalogScope(announcement);
     const fetched = await this.#transport.fetchCatalogHead(
       remotePeerId,
       announcement,
-      this.#sendOptions(),
+      this.#sendOptions(signal),
     );
     if (fetched === null) return 'not-found';
+    try {
+      assertAuthorCatalogHeadScopeBindingV1(
+        fetched.envelope.payload,
+        trustedCatalogScope,
+      );
+    } catch (cause) {
+      throw new Error(
+        'RFC-64 fetched head differs from the accepted public/open policy scope',
+        { cause },
+      );
+    }
     await this.#controlObjects.stageVerifiedObjects([fetched]);
     onHeadStaged?.(announcement, remotePeerId);
     return 'staged-only';

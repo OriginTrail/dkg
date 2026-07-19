@@ -17,8 +17,12 @@ import {
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   ZERO_DIGEST32_V1,
+  assertAuthorCatalogHeadScopeBindingV1,
+  assertAuthorCatalogScopeV1,
   assertAuthorCatalogBucketScopeBindingV1,
   assertAuthorCatalogDirectoryNodeScopeBindingV1,
+  assertCanonicalChainId,
+  assertNetworkIdV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
@@ -37,6 +41,7 @@ import {
   verifyCgSharedProjectionV1,
   verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
+  type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type Digest32V1,
   type SignedAuthorCatalogBucketEnvelopeV1,
@@ -178,16 +183,23 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   async synchronizeOnePublicOpenRow(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
+    const trustedScope = snapshotTrustedPublicOpenScope(
+      trustedCatalogScope,
+      announcement,
+    );
+    const trustedDeployment = snapshotTrustedDeployment(deployment, trustedScope);
     return this.withScopeSerialization(
-      catalogScopeLockKey(announcement),
+      computeAuthorCatalogScopeDigestV1(trustedScope),
       async () => {
         const evidence = await this.synchronizePublicOpenCatalogSerialized(
           remotePeerId,
           announcement,
-          deployment,
+          trustedScope,
+          trustedDeployment,
           'successor',
           signal,
         );
@@ -207,15 +219,22 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   async synchronizePublicOpenCatalog(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
+    const trustedScope = snapshotTrustedPublicOpenScope(
+      trustedCatalogScope,
+      announcement,
+    );
+    const trustedDeployment = snapshotTrustedDeployment(deployment, trustedScope);
     return this.withScopeSerialization(
-      catalogScopeLockKey(announcement),
+      computeAuthorCatalogScopeDigestV1(trustedScope),
       () => this.synchronizePublicOpenCatalogSerialized(
         remotePeerId,
         announcement,
-        deployment,
+        trustedScope,
+        trustedDeployment,
         'any',
         signal,
       ),
@@ -226,16 +245,23 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   async bootstrapEmptyPublicOpenCatalog(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
+    const trustedScope = snapshotTrustedPublicOpenScope(
+      trustedCatalogScope,
+      announcement,
+    );
+    const trustedDeployment = snapshotTrustedDeployment(deployment, trustedScope);
     return this.withScopeSerialization(
-      catalogScopeLockKey(announcement),
+      computeAuthorCatalogScopeDigestV1(trustedScope),
       async () => {
         const evidence = await this.synchronizePublicOpenCatalogSerialized(
           remotePeerId,
           announcement,
-          deployment,
+          trustedScope,
+          trustedDeployment,
           'genesis',
           signal,
         );
@@ -250,6 +276,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   private async synchronizePublicOpenCatalogSerialized(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     deployment: CatalogSealDeploymentProfileV1,
     expected: 'any' | 'genesis' | 'successor',
     signal: AbortSignal | undefined,
@@ -264,10 +291,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-not-found', 'announced catalog head was not found');
     }
     const head = fetchedHead.envelope;
+    assertFetchedHeadMatchesTrustedScope(head, trustedCatalogScope);
     if (expected === 'genesis' || (expected === 'any' && claimsGenesisHistory(head))) {
       return this.bootstrapEmptyPublicOpenCatalogFetched(
         remotePeerId,
         announcement,
+        trustedCatalogScope,
         fetchedHead,
         signal,
       );
@@ -278,6 +307,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     return this.synchronizeOnePublicOpenRowFetched(
       remotePeerId,
       announcement,
+      trustedCatalogScope,
       deployment,
       fetchedHead,
       signal,
@@ -287,14 +317,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   private async bootstrapEmptyPublicOpenCatalogFetched(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     fetchedHead: FetchedRfc64PublicCatalogHeadV1,
     signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
     const head = fetchedHead.envelope;
     assertEmptyGenesisHead(head);
-    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
-      deriveAuthorCatalogScopeFromHeadV1(head.payload),
-    );
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
     const inventoryDigest = computeRfc64AppliedInventoryDigestV1({
       catalogScopeDigest,
       rows: [],
@@ -304,11 +333,12 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       head.payload.authorAddress,
     );
     const replay = assertEmptyGenesisHistory(current, head, inventoryDigest);
-    const scope = nativeScope(announcement, head);
+    const scope = nativeScope(announcement, trustedCatalogScope, head);
     const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
       remotePeerId,
       scope,
       head,
+      trustedCatalogScope,
       signal,
     );
     const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
@@ -413,25 +443,25 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   private async synchronizeOnePublicOpenRowFetched(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     deployment: CatalogSealDeploymentProfileV1,
     fetchedHead: FetchedRfc64PublicCatalogHeadV1,
     signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     const head = fetchedHead.envelope;
     assertFirstSliceHead(head);
-    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
-      deriveAuthorCatalogScopeFromHeadV1(head.payload),
-    );
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
     const currentAppliedHead = this.options.inventory.readAppliedCatalogHeadV1(
       catalogScopeDigest,
       head.payload.authorAddress,
     );
     const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head);
-    const scope = nativeScope(announcement, head);
+    const scope = nativeScope(announcement, trustedCatalogScope, head);
     const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
       remotePeerId,
       scope,
       head,
+      trustedCatalogScope,
       signal,
     );
 
@@ -668,6 +698,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     remotePeerId: string,
     scope: Rfc64PublicCatalogNativeFetchScopeV1,
     head: SignedAuthorCatalogHeadEnvelopeV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     signal: AbortSignal | undefined,
   ): Promise<FetchedRfc64PublicCatalogObjectV1 & {
     readonly envelope: SignedAuthorCatalogIssuerDelegationEnvelopeV1;
@@ -698,7 +729,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     throwIfAborted(signal);
     try {
       assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(fetched.envelope);
-      assertDirectAuthorCatalogIssuerDelegationBindingV1(fetched.envelope, head);
+      assertDirectAuthorCatalogIssuerDelegationBindingV1(
+        fetched.envelope,
+        head,
+        trustedCatalogScope,
+      );
     } catch (cause) {
       fail(
         'catalog-native-receiver-authorization',
@@ -733,13 +768,95 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   }
 }
 
-function catalogScopeLockKey(announcement: Rfc64PublicCatalogHeadAnnouncementV1): string {
-  return JSON.stringify([
-    announcement.networkId,
-    announcement.contextGraphId,
-    announcement.subGraphName,
-    announcement.authorAddress,
-  ]);
+function snapshotTrustedPublicOpenScope(
+  input: AuthorCatalogScopeV1,
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+): Readonly<AuthorCatalogScopeV1> {
+  const scope = Object.freeze({
+    networkId: input.networkId,
+    contextGraphId: input.contextGraphId,
+    governanceChainId: input.governanceChainId,
+    governanceContractAddress: input.governanceContractAddress,
+    ownershipTransitionDigest: input.ownershipTransitionDigest,
+    subGraphName: input.subGraphName,
+    authorAddress: input.authorAddress,
+    era: input.era,
+    bucketCount: input.bucketCount,
+  });
+  try {
+    assertAuthorCatalogScopeV1(scope);
+    if (
+      scope.governanceChainId !== null
+      || scope.governanceContractAddress !== null
+      || scope.ownershipTransitionDigest !== null
+      || scope.subGraphName !== null
+      || scope.bucketCount !== '1'
+    ) {
+      throw new Error('Gate 1 requires the public/open null-governance root scope');
+    }
+    if (
+      announcement.networkId !== scope.networkId
+      || announcement.contextGraphId !== scope.contextGraphId
+      || announcement.subGraphName !== scope.subGraphName
+      || announcement.authorAddress !== scope.authorAddress
+      || announcement.catalogEra !== scope.era
+    ) {
+      throw new Error('announcement differs from the locally trusted catalog scope');
+    }
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-authorization',
+      'catalog request is not bound to the locally accepted public/open policy scope',
+      cause,
+    );
+  }
+  return scope;
+}
+
+function snapshotTrustedDeployment(
+  input: CatalogSealDeploymentProfileV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+): Readonly<CatalogSealDeploymentProfileV1> {
+  const deployment = Object.freeze({
+    networkId: input.networkId,
+    assertedAtChainId: input.assertedAtChainId,
+    assertedAtKav10Address: input.assertedAtKav10Address,
+  });
+  try {
+    assertNetworkIdV1(deployment.networkId);
+    assertCanonicalChainId(deployment.assertedAtChainId, 'assertedAtChainId');
+    if (
+      !ethers.isAddress(deployment.assertedAtKav10Address)
+      || deployment.assertedAtKav10Address !== deployment.assertedAtKav10Address.toLowerCase()
+    ) {
+      throw new Error('assertedAtKav10Address is not a canonical EVM address');
+    }
+    if (deployment.networkId !== trustedCatalogScope.networkId) {
+      throw new Error('deployment network differs from the locally trusted catalog scope');
+    }
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-authorization',
+      'locally resolved deployment is not bound to the accepted catalog scope',
+      cause,
+    );
+  }
+  return deployment;
+}
+
+function assertFetchedHeadMatchesTrustedScope(
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+): void {
+  try {
+    assertAuthorCatalogHeadScopeBindingV1(head.payload, trustedCatalogScope);
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-authorization',
+      'fetched catalog head differs from the locally accepted public/open policy scope',
+      cause,
+    );
+  }
 }
 
 function claimsGenesisHistory(head: SignedAuthorCatalogHeadEnvelopeV1): boolean {
@@ -840,14 +957,15 @@ function assertFirstSliceHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
 
 function nativeScope(
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
   head: SignedAuthorCatalogHeadEnvelopeV1,
 ): Rfc64PublicCatalogNativeFetchScopeV1 {
   return Object.freeze({
-    networkId: head.payload.networkId,
-    contextGraphId: head.payload.contextGraphId,
-    subGraphName: head.payload.subGraphName,
-    authorAddress: head.payload.authorAddress,
-    catalogEra: head.payload.era,
+    networkId: trustedCatalogScope.networkId,
+    contextGraphId: trustedCatalogScope.contextGraphId,
+    subGraphName: trustedCatalogScope.subGraphName,
+    authorAddress: trustedCatalogScope.authorAddress,
+    catalogEra: trustedCatalogScope.era,
     catalogVersion: head.payload.version,
     policyDigest: announcement.policyDigest,
     catalogHeadObjectDigest: head.objectDigest as Digest32V1,
@@ -858,6 +976,7 @@ function nativeScope(
 function assertDirectAuthorCatalogIssuerDelegationBindingV1(
   delegation: SignedAuthorCatalogIssuerDelegationEnvelopeV1,
   head: SignedAuthorCatalogHeadEnvelopeV1,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
 ): void {
   const left = delegation.payload;
   const right = head.payload;
@@ -882,6 +1001,18 @@ function assertDirectAuthorCatalogIssuerDelegationBindingV1(
     || left.catalogEra !== right.era
   ) {
     throw new Error('delegation scope, governance tuple, author, lane, or era differs from head');
+  }
+  if (
+    left.networkId !== trustedCatalogScope.networkId
+    || left.contextGraphId !== trustedCatalogScope.contextGraphId
+    || left.governanceChainId !== trustedCatalogScope.governanceChainId
+    || left.governanceContractAddress !== trustedCatalogScope.governanceContractAddress
+    || left.ownershipTransitionDigest !== trustedCatalogScope.ownershipTransitionDigest
+    || left.subGraphName !== trustedCatalogScope.subGraphName
+    || left.authorAddress !== trustedCatalogScope.authorAddress
+    || left.catalogEra !== trustedCatalogScope.era
+  ) {
+    throw new Error('delegation differs from the locally trusted public/open catalog scope');
   }
   if (
     (left.catalogEra === '0') !== (left.previousDelegationDigest === null)

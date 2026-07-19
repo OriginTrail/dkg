@@ -67,6 +67,8 @@ const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/native-gate-1' as ContextGraphIdV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const GOVERNANCE_CONTRACT =
+  '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const POLICY_DIGEST = `0x${'75'.repeat(32)}` as Digest32V1;
 const MISSING_DELEGATION_DIGEST = `0x${'76'.repeat(32)}` as Digest32V1;
 const KA_NUMBER = 7n;
@@ -256,6 +258,72 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
   }, 30_000);
 
+  it('rejects a governed-scope genesis under the trusted null-governance policy before any mutation', async () => {
+    const fixture = await setupLiveReceiver();
+    const observed = fixture.createCasObservedReceiver();
+
+    await expect(fixture.bootstrap(
+      fixture.governedGenesisAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
+
+    expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(fixture.authorObjectRead).not.toHaveBeenCalled();
+    expect(fixture.authorBundleRead).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('rejects a governed-scope successor before directory/bundle fetch, staging, CAS, or activation', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    fixture.receiverObjectFetch.mockClear();
+    fixture.receiverBundleFetch.mockClear();
+    fixture.authorObjectRead.mockClear();
+    fixture.authorBundleRead.mockClear();
+    const observed = fixture.createCasObservedReceiver();
+
+    await expect(fixture.synchronize(
+      fixture.governedSuccessorAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
+
+    expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(fixture.authorObjectRead).not.toHaveBeenCalled();
+    expect(fixture.authorBundleRead).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('rejects a locally resolved deployment for another network before head fetch', async () => {
+    const fixture = await setupLiveReceiver();
+    await expect(fixture.receiver.bootstrapEmptyPublicOpenCatalog(
+      'peer-unused',
+      fixture.genesisAnnouncement,
+      fixture.scope,
+      {
+        ...DEPLOYMENT,
+        networkId: 'otp:20431' as NetworkIdV1,
+      },
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
+    expect(fixture.receiverHeadFetch).not.toHaveBeenCalled();
+    expect(fixture.receiverObjectFetch).not.toHaveBeenCalled();
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('threads one AbortSignal and timeout through every head, object, and bundle fetch path', async () => {
     const fixture = await setupLiveReceiver();
     const signal = new AbortController().signal;
@@ -395,6 +463,50 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(fixture.authorBundleRead).not.toHaveBeenCalled();
   }, 30_000);
 
+  it('rejects a delegation proof for another exact signature variant before bundle fetch or mutation', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const staleProof = await verifyControlEnvelopeIssuerSignatureV1(
+      fixture.catalogIssuerDelegation,
+    );
+    const alternateDelegation = Object.freeze({
+      ...fixture.catalogIssuerDelegation,
+      signature: alternateRecoveryEncoding(fixture.catalogIssuerDelegation.signature),
+    }) as SignedAuthorCatalogIssuerDelegationEnvelopeV1;
+    expect(ethers.verifyMessage(
+      ethers.getBytes(alternateDelegation.objectDigest),
+      alternateDelegation.signature,
+    ).toLowerCase()).toBe(AUTHOR);
+    const fetchCatalogObject: Rfc64PublicCatalogNativeTransportV1['fetchCatalogObject'] =
+      async (peerId, request, sendOptions) => {
+        if (request.targetObjectDigest === fixture.catalogIssuerDelegation.objectDigest) {
+          return Object.freeze({
+            envelope: alternateDelegation,
+            issuerSignature: staleProof,
+          });
+        }
+        return fixture.receiverObjectFetch(peerId, request, sendOptions);
+      };
+    fixture.receiverBundleFetch.mockClear();
+    const observed = fixture.createCasObservedReceiver({
+      fetchCatalogObject,
+      fetchKaBundle: fixture.receiverBundleFetch,
+    });
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-authorization' });
+    expect(fixture.receiverBundleFetch).not.toHaveBeenCalled();
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('rejects a cross-lane catalog-issuer delegation before activation or applied-head CAS', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();
@@ -529,11 +641,20 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     era: '0',
     bucketCount: '1',
   } as AuthorCatalogScopeV1;
+  const governedScope = Object.freeze({
+    ...scope,
+    governanceChainId: '20430',
+    governanceContractAddress: GOVERNANCE_CONTRACT,
+    ownershipTransitionDigest: `0x${'57'.repeat(32)}` as Digest32V1,
+  }) as AuthorCatalogScopeV1;
   const signer = {
     issuer: AUTHOR,
     signDigest: async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
   };
   const catalogIssuerDelegation = await buildDirectCatalogIssuerDelegation();
+  const governedCatalogIssuerDelegation = await buildDirectCatalogIssuerDelegation({
+    scope: governedScope,
+  });
   const forgedCatalogIssuerDelegation = Object.freeze({
     ...catalogIssuerDelegation,
     signature: await new ethers.Wallet(`0x${'78'.repeat(32)}`).signMessage(
@@ -555,10 +676,25 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900000000' as never,
     signer,
   });
+  const governedGenesis = await produceEmptyAuthorCatalogGenesisV1({
+    scope: governedScope,
+    catalogIssuerDelegationDigest: governedCatalogIssuerDelegation.objectDigest,
+    issuedAt: '1773900000000' as never,
+    signer,
+  });
   const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   const successor = await produceSparseAuthorCatalogSuccessorV1({
     previousHead: genesis.head,
     previousDirectoryPath: genesis.directoryPath,
+    previousBucket: null,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row],
+    issuedAt: '1773900001000' as never,
+    signer,
+  });
+  const governedSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: governedGenesis.head,
+    previousDirectoryPath: governedGenesis.directoryPath,
     previousBucket: null,
     selectedBucketId: '0' as never,
     nextRows: [rowBundle.row],
@@ -593,11 +729,14 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const authorObjects = new Map<string, SignedControlEnvelopeV1>(
     [
       catalogIssuerDelegation,
+      governedCatalogIssuerDelegation,
       crossLaneDelegation,
       expiredDelegation,
       ...genesis.stagedObjects,
+      ...governedGenesis.stagedObjects,
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
+      ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
       expiredHead,
@@ -612,11 +751,14 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const verifiedObjects = await Promise.all(
     [
       catalogIssuerDelegation,
+      governedCatalogIssuerDelegation,
       crossLaneDelegation,
       expiredDelegation,
       ...genesis.stagedObjects,
+      ...governedGenesis.stagedObjects,
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
+      ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
       expiredHead,
@@ -627,12 +769,28 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
       })),
   );
-  const staged = await authorPersistence.controlObjects.stageVerifiedObjects(verifiedObjects);
+  const stagedObjects: Array<{
+    readonly objectDigest: Digest32V1;
+    readonly signatureVariantDigest: Digest32V1;
+  }> = [];
+  for (let offset = 0; offset < verifiedObjects.length; offset += 16) {
+    const stagedBatch = await authorPersistence.controlObjects.stageVerifiedObjects(
+      verifiedObjects.slice(offset, offset + 16),
+    );
+    stagedObjects.push(...stagedBatch.objects);
+  }
+  const staged = { objects: stagedObjects };
   const headKeys = staged.objects.find(
     (keys) => keys.objectDigest === successor.head.objectDigest,
   );
   const genesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === genesis.head.objectDigest,
+  );
+  const governedGenesisHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === governedGenesis.head.objectDigest,
+  );
+  const governedSuccessorHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === governedSuccessor.head.objectDigest,
   );
   const invalidGenesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === invalidGenesis.head.objectDigest,
@@ -651,6 +809,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   );
   if (headKeys === undefined) throw new Error('successor head was not staged');
   if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
+  if (governedGenesisHeadKeys === undefined) throw new Error('governed genesis head was not staged');
+  if (governedSuccessorHeadKeys === undefined) throw new Error('governed successor head was not staged');
   if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
   if (competingHeadKeys === undefined) throw new Error('competing successor head was not staged');
   if (crossLaneHeadKeys === undefined) throw new Error('cross-lane successor head was not staged');
@@ -728,6 +888,16 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     catalogHeadObjectDigest: competingHeadKeys.objectDigest,
     signatureVariantDigest: competingHeadKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const governedGenesisAnnouncement = Object.freeze({
+    ...genesisAnnouncement,
+    catalogHeadObjectDigest: governedGenesisHeadKeys.objectDigest,
+    signatureVariantDigest: governedGenesisHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const governedSuccessorAnnouncement = Object.freeze({
+    ...announcement,
+    catalogHeadObjectDigest: governedSuccessorHeadKeys.objectDigest,
+    signatureVariantDigest: governedSuccessorHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
   const crossLaneAnnouncement = Object.freeze({
     ...announcement,
     catalogHeadObjectDigest: crossLaneHeadKeys.objectDigest,
@@ -765,32 +935,48 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       Rfc64PersistenceV1['inventory'],
       'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
     >,
-    controlObjects = receiverPersistence.controlObjects,
-  ) => new Rfc64PublicCatalogNativeReceiverV1({
-    headTransport: { fetchCatalogHead: receiverHeadFetch },
-    contentTransport: {
+    controlObjects: Pick<
+      Rfc64PersistenceV1['controlObjects'],
+      'stageVerifiedObjects'
+    > = receiverPersistence.controlObjects,
+    contentTransport: Pick<
+      Rfc64PublicCatalogNativeTransportV1,
+      'fetchCatalogObject' | 'fetchKaBundle'
+    > = {
       fetchCatalogObject: receiverObjectFetch,
       fetchKaBundle: receiverBundleFetch,
     },
+  ) => new Rfc64PublicCatalogNativeReceiverV1({
+    headTransport: { fetchCatalogHead: receiverHeadFetch },
+    contentTransport,
     controlObjects,
     inventory,
     store: receiverStore,
   });
-  const createCasObservedReceiver = () => {
+  const createCasObservedReceiver = (contentTransport?: Pick<
+    Rfc64PublicCatalogNativeTransportV1,
+    'fetchCatalogObject' | 'fetchKaBundle'
+  >) => {
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
         receiverPersistence.inventory,
       ),
     );
+    const stageVerifiedObjects = vi.fn(
+      receiverPersistence.controlObjects.stageVerifiedObjects.bind(
+        receiverPersistence.controlObjects,
+      ),
+    );
     return Object.freeze({
       compareAndSwapAppliedCatalogHeadV1,
+      stageVerifiedObjects,
       receiver: createReceiver({
         readAppliedCatalogHeadV1:
           receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
             receiverPersistence.inventory,
           ),
         compareAndSwapAppliedCatalogHeadV1,
-      }),
+      }, { stageVerifiedObjects }, contentTransport),
     });
   };
   const receiver = createReceiver(receiverPersistence.inventory);
@@ -808,6 +994,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     forgedCatalogIssuerDelegation,
     genesis,
     genesisAnnouncement,
+    governedGenesis,
+    governedGenesisAnnouncement,
+    governedSuccessor,
+    governedSuccessorAnnouncement,
     invalidGenesisAnnouncement,
     receiver,
     receiverBundleFetch,
@@ -818,6 +1008,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     receiverPersistence,
     receiverStore,
     rowBundle,
+    scope,
     scopeDigest,
     successor,
     bootstrap: (
@@ -827,6 +1018,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
       authorNode.peerId,
       selectedAnnouncement,
+      scope,
       DEPLOYMENT,
       signal,
     ),
@@ -837,6 +1029,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ) => selectedReceiver.synchronizeOnePublicOpenRow(
       authorNode.peerId,
       selectedAnnouncement,
+      scope,
       DEPLOYMENT,
       signal,
     ),
@@ -847,6 +1040,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ) => selectedReceiver.synchronizePublicOpenCatalog(
       authorNode.peerId,
       selectedAnnouncement,
+      scope,
       DEPLOYMENT,
       signal,
     ),
@@ -854,26 +1048,38 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
 }
 
 async function buildDirectCatalogIssuerDelegation(options: {
+  readonly scope?: AuthorCatalogScopeV1;
   readonly contextGraphId?: ContextGraphIdV1;
   readonly effectiveAt?: string;
   readonly expiresAt?: string;
 } = {}): Promise<SignedAuthorCatalogIssuerDelegationEnvelopeV1> {
+  const scope = options.scope ?? {
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    era: '0',
+    bucketCount: '1',
+  } as AuthorCatalogScopeV1;
   const unsigned = testUnsignedEnvelope(
     AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
     {
-      authorAddress: AUTHOR,
+      authorAddress: scope.authorAddress,
       authorAuthorityEvidenceDigest: null,
-      catalogEra: '0',
+      catalogEra: scope.era,
       catalogIssuerKey: AUTHOR,
-      contextGraphId: options.contextGraphId ?? CONTEXT_GRAPH_ID,
+      contextGraphId: options.contextGraphId ?? scope.contextGraphId,
       effectiveAt: options.effectiveAt ?? '1773899999000',
       expiresAt: options.expiresAt ?? '1774000000000',
-      governanceChainId: null,
-      governanceContractAddress: null,
-      networkId: NETWORK_ID,
-      ownershipTransitionDigest: null,
+      governanceChainId: scope.governanceChainId,
+      governanceContractAddress: scope.governanceContractAddress,
+      networkId: scope.networkId,
+      ownershipTransitionDigest: scope.ownershipTransitionDigest,
       previousDelegationDigest: null,
-      subGraphName: null,
+      subGraphName: scope.subGraphName,
     },
   );
   return signTestEnvelope(
@@ -938,6 +1144,13 @@ async function signTestEnvelope(
     objectDigest,
     signature: await AUTHOR_WALLET.signMessage(ethers.getBytes(objectDigest)),
   }) as SignedControlEnvelopeV1;
+}
+
+function alternateRecoveryEncoding(signature: string): string {
+  const recovery = signature.slice(-2);
+  if (recovery === '1b') return `${signature.slice(0, -2)}00`;
+  if (recovery === '1c') return `${signature.slice(0, -2)}01`;
+  throw new Error('test fixture signature did not use canonical v=27/28 encoding');
 }
 
 async function buildRowBundle(
