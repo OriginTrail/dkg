@@ -1,0 +1,56 @@
+{
+  "schema": "dkg-wal-000-semantic-oracle-v1",
+  "baselineId": "legacy-swm-vm-v1",
+  "baseCommit": "a6f33e408335930f009c49781684bc79dd322b7b",
+  "matrixDigest": "327d2ae6b1c47d61f7286f67a5ddf41181fe594cd24172c7e977347c97c2b06f",
+  "scenarios": {
+    "memory-layer-lifecycle": {
+      "assertionCount": 46,
+      "assertionDigest": "7636f196ec7482daffe5f44e2a2a5226136c6dbc59eacf79d7dbf5d1a0e7f639",
+      "sourceDigest": "8407353e4d6da489d802231be9bc9e1ab815956f7c00c1fc00a7ee39d0e62fab",
+      "counts": { "passed": 46 }
+    },
+    "swm-conflict-expiry": {
+      "assertionCount": 7,
+      "assertionDigest": "79f092784e593b4c9c8faba64fb6a4e90884d97a49d4169c9a868f034834a0c8",
+      "sourceDigest": "7518afc81f59c45e43e292fe05fd7cd808e17b48eccabd18c6e7ddecd5255315",
+      "counts": { "passed": 7 }
+    },
+    "private-authorization-and-keys": {
+      "assertionCount": 58,
+      "assertionDigest": "9b6789b691fbdff4dbb1eacddff87ec5caa86a141ca5c73dfaa88b7b8e9d4bd9",
+      "sourceDigest": "859392b819125d513ac53d8c03107a56a2e1b9bf202450b145ef96d348056a92",
+      "counts": { "passed": 58 }
+    },
+    "vm-chain-finality-and-reorg": {
+      "assertionCount": 34,
+      "assertionDigest": "5fa2c66f1369416193bf6a5a1f818fee0a0a6887683604159593a9fa805a0400",
+      "sourceDigest": "577f2526cafc5f26b7caca5f129f653fe5b92a7128f8538f3772d15184f59c60",
+      "counts": { "passed": 34 }
+    },
+    "publish-update-and-merkle": {
+      "assertionCount": 77,
+      "assertionDigest": "d942bad6ab28984e83ebe97a5a9df590f2fb1463fba0af818bbc13c0523dc10d",
+      "sourceDigest": "8d4eea833bf2ef66848e8d91d9036667691e4648644c62b3ed49288563655a53",
+      "counts": { "passed": 75, "skipped": 2 }
+    },
+    "private-publisher-boundary": {
+      "assertionCount": 28,
+      "assertionDigest": "641a187e998765719825b486ff2d0c97979b2cecc535656f0a4b5aedf0973507",
+      "sourceDigest": "e705c3f1b8a9b76b8e558abb1d8cbf039ee86322c3d0e934f29394553fc6804d",
+      "counts": { "passed": 28 }
+    },
+    "chain-crypto-contract": {
+      "assertionCount": 31,
+      "assertionDigest": "2ceed0b598a68f046b474b6ccad1e598a3c89df0d9c25003fc8dc16c015e9d3a",
+      "sourceDigest": "5c2ea746d4205318703ab800cbb19ce71e7395fcca294c1867af9f27ad23361e",
+      "counts": { "passed": 31 }
+    },
+    "storage-restart-and-durability": {
+      "assertionCount": 15,
+      "assertionDigest": "32e1cbe41d97e6383cf023342de1d5a50650940078826433f0a4ebf3a39b84c7",
+      "sourceDigest": "a057e09a063651483f9ce95020615bfb93db698773872f3c561be9d681b02e36",
+      "counts": { "passed": 10, "skipped": 5 }
+    }
+  }
+}
