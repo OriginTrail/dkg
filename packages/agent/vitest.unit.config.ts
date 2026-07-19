@@ -130,6 +130,7 @@ export default defineConfig({
       "test/rfc64-public-catalog-native-transport-v1.test.ts",
       "test/rfc64-public-catalog-native-reconciler-v1.test.ts",
       "test/rfc64-public-catalog-native-gate1.integration.test.ts",
+      "test/rfc64-public-catalog-inventory-completeness-v1.test.ts",
       "test/rfc64-persistent-catalog-provider-v1.test.ts",
       "test/rfc64-public-catalog-successor-producer-v1.test.ts",
       "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
