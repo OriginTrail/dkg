@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Closed deterministic Gate 2 multi-asset completeness evidence contract. Fixture harness only: productBoundary is not-connected and gateEvaluation is not-evaluated until a real adapter is wired; output never asserts a real Gate 2 pass.",
+  "description": "Closed product-shaped Gate 2 exact-set evidence contract with production-compatible scope and applied-inventory digests; never asserts a gate pass.",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --experimental-strip-types --test test/completeness.test.ts",
