@@ -1,5 +1,5 @@
-import { readFile, stat, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 
 import {
   computeControlObjectDigestHex,
@@ -23,6 +23,7 @@ import {
   RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
   RFC64_CONTROL_OBJECT_STORE_ERROR_CODES_V1,
   RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
+  RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT,
   RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
   RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY,
   RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
@@ -64,10 +65,18 @@ const finalizedEip1271Call: CurrentFinalizedEvmCallV1 = async (request) => ({
 async function contractSignatureVariantsFixture(): Promise<
   readonly [StageVerifiedControlObjectV1, StageVerifiedControlObjectV1]
 > {
+  const variants = await contractSignatureVariantBatchFixture(2, 'variants');
+  return [variants[0]!, variants[1]!];
+}
+
+async function contractSignatureVariantBatchFixture(
+  count: number,
+  sequence: string,
+): Promise<readonly StageVerifiedControlObjectV1[]> {
   const unsigned = {
     issuer: SAFE,
     objectType: 'dkg-rfc64-control-store-contract-test-v1',
-    payload: { sequence: 'variants' },
+    payload: { sequence },
     signatureEvidence: {
       kind: 'eip1271-current-finalized',
       chainId: '20430',
@@ -76,28 +85,19 @@ async function contractSignatureVariantsFixture(): Promise<
     signatureSuite: 'eip1271-current-finalized-v1',
   } satisfies UnsignedControlEnvelopeV1;
   const objectDigest = computeControlObjectDigestHex(unsigned);
-  const firstEnvelope = {
+  const envelopes = Array.from({ length: count }, (_, index) => ({
     ...unsigned,
     objectDigest,
-    signature: '0x12',
-  } as SignedControlEnvelopeV1;
-  const secondEnvelope = {
-    ...unsigned,
-    objectDigest,
-    signature: '0x1234',
-  } as SignedControlEnvelopeV1;
-  const [firstProof, secondProof] = await Promise.all([
-    verifyControlEnvelopeIssuerSignatureV1(firstEnvelope, {
+    signature: `0x${(index + 1).toString(16).padStart(4, '0')}`,
+  } as SignedControlEnvelopeV1));
+  const proofs = await Promise.all(envelopes.map((envelope) =>
+    verifyControlEnvelopeIssuerSignatureV1(envelope, {
       callEvmAtCurrentFinalized: finalizedEip1271Call,
-    }),
-    verifyControlEnvelopeIssuerSignatureV1(secondEnvelope, {
-      callEvmAtCurrentFinalized: finalizedEip1271Call,
-    }),
-  ]);
-  return [{ envelope: firstEnvelope, issuerSignature: firstProof }, {
-    envelope: secondEnvelope,
-    issuerSignature: secondProof,
-  }];
+    })));
+  return Object.freeze(envelopes.map((envelope, index) => Object.freeze({
+    envelope,
+    issuerSignature: proofs[index],
+  })));
 }
 
 describe('RFC-64 durable control-object store v1', () => {
@@ -326,7 +326,107 @@ describe('RFC-64 durable control-object store v1', () => {
       signatureVariantDigest: secondPaths.signatureDigest,
       verifyIssuerSignature,
     })).resolves.toMatchObject({ envelope: second.envelope });
+    const deterministic = firstPaths.signatureDigest < secondPaths.signatureDigest
+      ? first.envelope
+      : second.envelope;
+    await expect(store.getVerifiedObjectByDigest({
+      objectDigest: first.envelope.objectDigest as Digest32V1,
+      verifyIssuerSignature,
+    })).resolves.toMatchObject({ envelope: deterministic });
   });
+
+  it('atomically refuses a 65th valid signature variant without poisoning digest lookup', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const variants = await contractSignatureVariantBatchFixture(
+      RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT + 1,
+      'variant-ceiling',
+    );
+    const initial = variants.slice(
+      0,
+      RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT - 1,
+    );
+    for (
+      let offset = 0;
+      offset < initial.length;
+      offset += RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS
+    ) {
+      await store.stageVerifiedObjects(initial.slice(
+        offset,
+        offset + RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
+      ));
+    }
+
+    const boundary = await Promise.allSettled([
+      store.stageVerifiedObjects([
+        variants[RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT - 1],
+      ]),
+      store.stageVerifiedObjects([
+        variants[RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT],
+      ]),
+    ]);
+    expect(boundary.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    const rejected = boundary.filter((outcome) => outcome.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: expect.objectContaining({ code: 'control-store-input' }),
+    });
+
+    const verifyIssuerSignature = (envelope: SignedControlEnvelopeV1) =>
+      verifyControlEnvelopeIssuerSignatureV1(envelope, {
+        callEvmAtCurrentFinalized: finalizedEip1271Call,
+      });
+    await expect(store.getVerifiedObjectByDigest({
+      objectDigest: variants[0].envelope.objectDigest as Digest32V1,
+      verifyIssuerSignature,
+    })).resolves.toMatchObject({
+      envelope: expect.objectContaining({ objectDigest: variants[0].envelope.objectDigest }),
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed when a signature shard is replaced by an owner-only symlink',
+    async () => {
+      const dataDir = await temporaryDataDirectory();
+      const store = await openRfc64ControlObjectStoreV1(dataDir);
+      const fixture = await signedFixture('unsafe-signature-shard');
+      await store.stageVerifiedObjects([fixture]);
+      const paths = pathsFor(dataDir, fixture.envelope);
+      const shardPath = dirname(dirname(paths.signature));
+      const outsidePath = join(dataDir, 'outside-signature-shard');
+      await mkdir(outsidePath, { mode: RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE });
+      applyRfc64OwnerOnlyPermissionsSyncV1(
+        outsidePath,
+        RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+        { entryKind: 'directory' },
+      );
+      await rm(shardPath, { recursive: true });
+      await symlink(outsidePath, shardPath, 'dir');
+
+      await expect(store.getVerifiedObjectByDigest({
+        objectDigest: fixture.envelope.objectDigest as Digest32V1,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a nonregular entry even when its name has the durable temp shape',
+    async () => {
+      const dataDir = await temporaryDataDirectory();
+      const store = await openRfc64ControlObjectStoreV1(dataDir);
+      const fixture = await signedFixture('unsafe-temp-entry');
+      await store.stageVerifiedObjects([fixture]);
+      const paths = pathsFor(dataDir, fixture.envelope);
+      const tempName = `.${basename(paths.signature)}.${'ab'.repeat(16)}.tmp`;
+      await symlink(paths.signature, join(dirname(paths.signature), tempName));
+
+      await expect(store.getVerifiedObjectByDigest({
+        objectDigest: fixture.envelope.objectDigest as Digest32V1,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+    },
+  );
 
   it('allows independent digest keys to stage concurrently without a store-wide queue', async () => {
     const dataDir = await temporaryDataDirectory();

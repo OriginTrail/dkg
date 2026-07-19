@@ -9,6 +9,11 @@ import {
   type Rfc64ControlObjectStoreV1,
 } from './control-object-store-v1.js';
 import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from './control-object-store-v1-internal.js';
+import {
+  type Rfc64KaBundleOperationsV1,
+  type Rfc64KaBundleStoreV1,
+} from './ka-bundle-store-v1.js';
+import { openRfc64KaBundleStoreForOwnedPersistenceRootV1 } from './ka-bundle-store-v1-internal.js';
 import { resolveRfc64PersistenceRootV1 } from './persistence-layout-v1.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from './persistence-root-ownership-v1-internal.js';
 
@@ -24,8 +29,10 @@ export interface Rfc64PersistenceV1 {
   readonly inventory: Rfc64InventoryV1OperationsV1;
   /** Non-owning cache operations; lifecycle methods remain private to this owner. */
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
+  /** Durable content-addressed opaque KA bundles served by the native catalog transport. */
+  readonly kaBundles: Rfc64KaBundleOperationsV1;
   readonly closed: boolean;
-  /** Drain the control store before releasing inventory ownership. */
+  /** Drain every durable content store before releasing inventory ownership. */
   close(): Promise<void>;
 }
 
@@ -34,21 +41,26 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   #closePromise: Promise<void> | null = null;
   readonly #ownedInventory: Rfc64InventoryV1Foundation;
   readonly #ownedControlObjectStore: Rfc64ControlObjectStoreV1;
+  readonly #ownedKaBundleStore: Rfc64KaBundleStoreV1;
   readonly inventory: Rfc64InventoryV1OperationsV1;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
+  readonly kaBundles: Rfc64KaBundleOperationsV1;
 
   constructor(
     readonly rootPath: string,
     ownedInventory: Rfc64InventoryV1Foundation,
     ownedControlObjectStore: Rfc64ControlObjectStoreV1,
+    ownedKaBundleStore: Rfc64KaBundleStoreV1,
   ) {
     this.#ownedInventory = ownedInventory;
     this.#ownedControlObjectStore = ownedControlObjectStore;
+    this.#ownedKaBundleStore = ownedKaBundleStore;
     this.inventory = createRfc64InventoryOperationsViewV1(
       ownedInventory,
       () => this.requireOpen(),
     );
     this.controlObjects = createControlObjectOperationsView(ownedControlObjectStore);
+    this.kaBundles = createKaBundleOperationsView(ownedKaBundleStore);
   }
 
   get closed(): boolean {
@@ -64,10 +76,12 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
 
   private async closeOwnedResources(): Promise<void> {
     const failures: unknown[] = [];
-    try {
-      await this.#ownedControlObjectStore.close();
-    } catch (cause) {
-      failures.push(cause);
+    const cacheClosures = await Promise.allSettled([
+      this.#ownedControlObjectStore.close(),
+      this.#ownedKaBundleStore.close(),
+    ]);
+    for (const outcome of cacheClosures) {
+      if (outcome.status === 'rejected') failures.push(outcome.reason);
     }
     try {
       this.#ownedInventory.close();
@@ -93,12 +107,24 @@ function createControlObjectOperationsView(
     stageVerifiedObjects:
       controlObjectStore.stageVerifiedObjects.bind(controlObjectStore),
     getVerifiedObject: controlObjectStore.getVerifiedObject.bind(controlObjectStore),
+    getVerifiedObjectByDigest:
+      controlObjectStore.getVerifiedObjectByDigest.bind(controlObjectStore),
+  });
+}
+
+function createKaBundleOperationsView(
+  kaBundleStore: Rfc64KaBundleStoreV1,
+): Rfc64KaBundleOperationsV1 {
+  return Object.freeze({
+    namespaceDurability: kaBundleStore.namespaceDurability,
+    putKaBundle: kaBundleStore.putKaBundle.bind(kaBundleStore),
+    readKaBundleByDigest: kaBundleStore.readKaBundleByDigest.bind(kaBundleStore),
   });
 }
 
 /**
  * Acquire the inventory lease, finish bounded stale-candidate cleanup, then
- * open the immutable control-object cache under that same ownership boundary.
+ * open the immutable control-object and KA-bundle caches under that ownership boundary.
  */
 export async function openRfc64PersistenceV1(
   dataDir: string,
@@ -111,25 +137,41 @@ export async function openRfc64PersistenceV1(
 
   const rootPath = resolveRfc64PersistenceRootV1(dataDir);
   const inventory = await openInventoryV1(dataDir);
+  let controlObjectStore: Rfc64ControlObjectStoreV1 | undefined;
+  let kaBundleStore: Rfc64KaBundleStoreV1 | undefined;
   try {
     for (;;) {
       const batch = inventory.purgeNextStartupStaleCandidateBatch();
       if (batch.done) break;
       await yieldAfterPurgeBatch();
     }
-    const controlObjectStore = await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
-      getRfc64PersistenceRootOwnershipForInventoryV1(inventory),
+    const ownership = getRfc64PersistenceRootOwnershipForInventoryV1(inventory);
+    controlObjectStore = await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(ownership);
+    kaBundleStore = await openRfc64KaBundleStoreForOwnedPersistenceRootV1(ownership);
+    return new OwnedRfc64PersistenceV1(
+      rootPath,
+      inventory,
+      controlObjectStore,
+      kaBundleStore,
     );
-    return new OwnedRfc64PersistenceV1(rootPath, inventory, controlObjectStore);
   } catch (cause) {
+    const failures: unknown[] = [cause];
+    const cacheClosures = await Promise.allSettled([
+      controlObjectStore?.close(),
+      kaBundleStore?.close(),
+    ].filter((operation): operation is Promise<void> => operation !== undefined));
+    for (const outcome of cacheClosures) {
+      if (outcome.status === 'rejected') failures.push(outcome.reason);
+    }
     try {
       inventory.close();
     } catch (closeCause) {
-      throw new AggregateError(
-        [cause, closeCause],
-        'RFC-64 persistence startup and inventory cleanup both failed',
-      );
+      failures.push(closeCause);
     }
-    throw cause;
+    if (failures.length === 1) throw cause;
+    throw new AggregateError(
+      failures,
+      'RFC-64 persistence startup and owned-resource cleanup failed',
+    );
   }
 }

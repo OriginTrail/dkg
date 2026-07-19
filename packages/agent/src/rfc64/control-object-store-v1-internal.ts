@@ -1,3 +1,4 @@
+import { lstat, opendir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
@@ -42,6 +43,7 @@ export { RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH };
 export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
 export const RFC64_CONTROL_OBJECT_STORE_FILE_MODE = RFC64_SECURE_FILE_MODE_V1;
 export const RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS = 16;
+export const RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT = 64;
 export const RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY =
   RFC64_POSIX_NAMESPACE_DURABILITY_V1;
 export const RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY =
@@ -115,6 +117,14 @@ export interface GetVerifiedControlObjectInputV1 {
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
 }
 
+export interface GetVerifiedControlObjectByDigestInputV1 {
+  readonly objectDigest: Digest32V1;
+  /** Re-establishes current generic envelope cryptography before any cache hit is returned. */
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
+}
+
 export interface StoredVerifiedControlObjectV1 {
   readonly envelope: SignedControlEnvelopeV1;
   readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
@@ -122,7 +132,10 @@ export interface StoredVerifiedControlObjectV1 {
 
 export type Rfc64ControlObjectOperationsV1 = Pick<
   Rfc64ControlObjectStoreV1,
-  'namespaceDurability' | 'stageVerifiedObjects' | 'getVerifiedObject'
+  | 'namespaceDurability'
+  | 'stageVerifiedObjects'
+  | 'getVerifiedObject'
+  | 'getVerifiedObjectByDigest'
 >;
 
 export interface Rfc64ControlObjectStoreV1 {
@@ -139,6 +152,13 @@ export interface Rfc64ControlObjectStoreV1 {
   /** Read exact cache keys and reverify the reconstructed signed envelope. */
   getVerifiedObject(
     input: GetVerifiedControlObjectInputV1,
+  ): Promise<StoredVerifiedControlObjectV1 | null>;
+  /**
+   * Resolve one deterministic stored signature variant by object digest, then
+   * reconstruct and reverify the exact envelope before returning it.
+   */
+  getVerifiedObjectByDigest(
+    input: GetVerifiedControlObjectByDigestInputV1,
   ): Promise<StoredVerifiedControlObjectV1 | null>;
   /** Reject new operations, then settle every admitted read/write. */
   close(): Promise<void>;
@@ -173,7 +193,9 @@ interface PreparedControlObjectFileV1 {
 }
 
 interface PreparedControlObjectGroupV1 {
+  readonly objectDigest: Digest32V1;
   readonly object: PreparedControlObjectFileV1;
+  readonly signatureVariantDigests: readonly Digest32V1[];
   readonly signatures: readonly PreparedControlObjectFileV1[];
 }
 
@@ -181,6 +203,11 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closed = false;
   #closePromise: Promise<void> | null = null;
   readonly #inFlightOperations = new Set<Promise<unknown>>();
+  readonly #objectOperationTails = new Map<Digest32V1, Promise<void>>();
+  readonly #reservedSignatureVariants = new Map<
+    Digest32V1,
+    Map<Digest32V1, number>
+  >();
   readonly #durableFiles: Rfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>;
   readonly namespaceDurability = rfc64NamespaceDurabilityV1();
 
@@ -203,14 +230,19 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     const groups = this.planStageGroups(prepared);
     const operation = (async () => {
       await settleAllOrThrowV1(groups.map(async (group) => {
-        await this.putExactFile(
-          group.object.relativePath,
-          group.object.bytes,
-          group.object.kind,
-        );
-        await settleAllOrThrowV1(group.signatures.map(async (signature) => {
-          await this.putExactFile(signature.relativePath, signature.bytes, signature.kind);
-        }), 'RFC-64 control-object signature staging failed');
+        const releaseAdmission = await this.reserveSignatureVariants(group);
+        try {
+          await this.putExactFile(
+            group.object.relativePath,
+            group.object.bytes,
+            group.object.kind,
+          );
+          await settleAllOrThrowV1(group.signatures.map(async (signature) => {
+            await this.putExactFile(signature.relativePath, signature.bytes, signature.kind);
+          }), 'RFC-64 control-object signature staging failed');
+        } finally {
+          await releaseAdmission();
+        }
       }), 'RFC-64 control-object batch staging failed');
       const result = prepared.map((item) =>
         Object.freeze({
@@ -239,7 +271,48 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     if (typeof verifyIssuerSignature !== 'function') {
       fail('control-store-input', 'verifyIssuerSignature must be a function');
     }
+    return this.trackOperation(this.readVerifiedObject(
+      objectDigest,
+      signatureVariantDigest,
+      verifyIssuerSignature,
+    ));
+  }
+
+  getVerifiedObjectByDigest(
+    input: GetVerifiedControlObjectByDigestInputV1,
+  ): Promise<StoredVerifiedControlObjectV1 | null> {
+    this.requireOpen();
+    const objectDigest = snapshotDigest(input.objectDigest, 'objectDigest');
+    const verifyIssuerSignature = input.verifyIssuerSignature;
+    if (typeof verifyIssuerSignature !== 'function') {
+      fail('control-store-input', 'verifyIssuerSignature must be a function');
+    }
     const operation = (async () => {
+      const signatureVariantDigests = await this.listSignatureVariantDigests(objectDigest);
+      if (signatureVariantDigests.length === 0) return null;
+      const loaded = await this.readVerifiedObject(
+        objectDigest,
+        signatureVariantDigests[0],
+        verifyIssuerSignature,
+      );
+      if (loaded === null) {
+        fail(
+          'control-store-corrupt',
+          'selected control signature variant disappeared during exact lookup',
+        );
+      }
+      return loaded;
+    })();
+    return this.trackOperation(operation);
+  }
+
+  private async readVerifiedObject(
+    objectDigest: Digest32V1,
+    signatureVariantDigest: Digest32V1,
+    verifyIssuerSignature: (
+      envelope: SignedControlEnvelopeV1,
+    ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>,
+  ): Promise<StoredVerifiedControlObjectV1 | null> {
       const objectPath = this.objectRelativePath(objectDigest);
       const signaturePath = this.signatureRelativePath(
         objectDigest,
@@ -284,8 +357,145 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         fail('control-store-verification', 'stored control object signature verification failed', cause);
       }
       return Object.freeze({ envelope, issuerSignature });
-    })();
-    return this.trackOperation(operation);
+  }
+
+  private async listSignatureVariantDigests(
+    objectDigest: Digest32V1,
+  ): Promise<readonly Digest32V1[]> {
+    const objectHex = objectDigest.slice(2);
+    const signaturesPath = join(this.rootPath, SIGNATURES_DIRECTORY);
+    const shardPath = join(signaturesPath, objectHex.slice(0, 2));
+    const directoryPath = join(shardPath, objectHex);
+    await this.requireSecureSignatureDirectory(
+      this.rootPath,
+      'control-object store root',
+      false,
+    );
+    await this.requireSecureSignatureDirectory(
+      signaturesPath,
+      'control signature store directory',
+      false,
+    );
+    if (!await this.requireSecureSignatureDirectory(
+      shardPath,
+      'control signature shard directory',
+      true,
+    )) {
+      await this.requireSecureSignatureDirectory(
+        this.rootPath,
+        'control-object store root',
+        false,
+      );
+      await this.requireSecureSignatureDirectory(
+        signaturesPath,
+        'control signature store directory',
+        false,
+      );
+      return Object.freeze([]);
+    }
+    if (!await this.requireSecureSignatureDirectory(
+      directoryPath,
+      'control signature variant directory',
+      true,
+    )) {
+      await this.requireSecureSignatureDirectory(
+        this.rootPath,
+        'control-object store root',
+        false,
+      );
+      await this.requireSecureSignatureDirectory(
+        signaturesPath,
+        'control signature store directory',
+        false,
+      );
+      await this.requireSecureSignatureDirectory(
+        shardPath,
+        'control signature shard directory',
+        false,
+      );
+      return Object.freeze([]);
+    }
+
+    let directory: Awaited<ReturnType<typeof opendir>>;
+    try {
+      directory = await opendir(directoryPath);
+    } catch (cause) {
+      fail('control-store-io', 'failed to enumerate control signature variants', cause);
+    }
+    const variants: Digest32V1[] = [];
+    let entryCount = 0;
+    try {
+      for await (const entry of directory) {
+        entryCount += 1;
+        if (entryCount > RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT * 4) {
+          fail(
+            'control-store-corrupt',
+            'control signature variant directory exceeds its entry ceiling',
+          );
+        }
+        if (!entry.isFile()) {
+          fail(
+            entry.isSymbolicLink() ? 'control-store-unsafe-path' : 'control-store-corrupt',
+            'control signature variant entry is not a regular file',
+          );
+        }
+        if (/^\.[0-9a-f]{64}\.jcs\.[0-9a-f]{32}\.tmp$/.test(entry.name)) continue;
+        const match = /^([0-9a-f]{64})\.jcs$/.exec(entry.name);
+        if (match === null) {
+          fail(
+            'control-store-corrupt',
+            'control signature variant directory contains an unknown entry',
+          );
+        }
+        variants.push(`0x${match[1]}` as Digest32V1);
+      }
+    } catch (cause) {
+      if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
+      fail('control-store-io', 'failed to iterate control signature variants', cause);
+    }
+    // Detect path replacement while the bounded directory handle was consumed.
+    await this.requireSecureSignatureDirectory(this.rootPath, 'control-object store root', false);
+    await this.requireSecureSignatureDirectory(
+      signaturesPath,
+      'control signature store directory',
+      false,
+    );
+    await this.requireSecureSignatureDirectory(
+      shardPath,
+      'control signature shard directory',
+      false,
+    );
+    await this.requireSecureSignatureDirectory(
+      directoryPath,
+      'control signature variant directory',
+      false,
+    );
+    if (variants.length > RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT) {
+      fail('control-store-corrupt', 'control object exceeds its signature-variant ceiling');
+    }
+    variants.sort();
+    return Object.freeze(variants);
+  }
+
+  private async requireSecureSignatureDirectory(
+    path: string,
+    label: string,
+    optional: boolean,
+  ): Promise<boolean> {
+    let entry: Awaited<ReturnType<typeof lstat>>;
+    try {
+      entry = await lstat(path);
+    } catch (cause) {
+      if (optional && isNodeError(cause, 'ENOENT')) return false;
+      fail('control-store-io', `failed to inspect ${label}`, cause);
+    }
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      fail('control-store-unsafe-path', `${label} must be a non-symlink directory`);
+    }
+    await mapDurableFileErrors(async () => {
+      await assertRfc64ExistingDirectoryV1(path, label, { access: 'owner-only' });
+    });
+    return true;
   }
 
   close(): Promise<void> {
@@ -303,7 +513,9 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     prepared: readonly PreparedStoredControlObjectV1[],
   ): readonly PreparedControlObjectGroupV1[] {
     const groups = new Map<string, {
+      readonly objectDigest: Digest32V1;
       readonly object: PreparedControlObjectFileV1;
+      readonly signatureVariantDigests: Set<Digest32V1>;
       readonly signatures: Map<string, PreparedControlObjectFileV1>;
     }>();
     const addUnique = (
@@ -332,7 +544,9 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       let group = groups.get(objectPath);
       if (group === undefined) {
         group = {
+          objectDigest: item.objectDigest,
           object: addUnique(objects, objectPath, item.unsignedBytes, 'object'),
+          signatureVariantDigests: new Set(),
           signatures: new Map(),
         };
         groups.set(objectPath, group);
@@ -342,6 +556,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
           'one immutable control-object key resolved to conflicting prepared bytes',
         );
       }
+      group.signatureVariantDigests.add(item.signatureVariantDigest);
       addUnique(
         group.signatures,
         this.signatureRelativePath(item.objectDigest, item.signatureVariantDigest),
@@ -350,7 +565,9 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       );
     }
     return Object.freeze([...groups.values()].map((group) => Object.freeze({
+      objectDigest: group.objectDigest,
       object: group.object,
+      signatureVariantDigests: Object.freeze([...group.signatureVariantDigests]),
       signatures: Object.freeze([...group.signatures.values()]),
     })));
   }
@@ -400,6 +617,73 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     if (this.#closed) fail('control-store-closed', 'control object store is closed');
   }
 
+  private reserveSignatureVariants(
+    group: PreparedControlObjectGroupV1,
+  ): Promise<() => Promise<void>> {
+    return this.withObjectCoordination(group.objectDigest, async () => {
+      const storedVariants = await this.listSignatureVariantDigests(group.objectDigest);
+      let reservations = this.#reservedSignatureVariants.get(group.objectDigest);
+      if (reservations === undefined) reservations = new Map();
+      const admittedVariants = new Set<Digest32V1>([
+        ...storedVariants,
+        ...reservations.keys(),
+        ...group.signatureVariantDigests,
+      ]);
+      if (admittedVariants.size
+        > RFC64_CONTROL_OBJECT_STORE_MAX_SIGNATURE_VARIANTS_PER_OBJECT) {
+        fail(
+          'control-store-input',
+          'control object would exceed its signature-variant ceiling',
+        );
+      }
+      for (const digest of group.signatureVariantDigests) {
+        reservations.set(digest, (reservations.get(digest) ?? 0) + 1);
+      }
+      this.#reservedSignatureVariants.set(group.objectDigest, reservations);
+
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        await this.withObjectCoordination(group.objectDigest, async () => {
+          const current = this.#reservedSignatureVariants.get(group.objectDigest);
+          if (current === undefined) {
+            fail('control-store-corrupt', 'signature-variant admission reservation was lost');
+          }
+          for (const digest of group.signatureVariantDigests) {
+            const count = current.get(digest);
+            if (count === undefined || count < 1) {
+              fail('control-store-corrupt', 'signature-variant admission count was lost');
+            }
+            if (count === 1) current.delete(digest);
+            else current.set(digest, count - 1);
+          }
+          if (current.size === 0) this.#reservedSignatureVariants.delete(group.objectDigest);
+        });
+      };
+    });
+  }
+
+  private async withObjectCoordination<T>(
+    objectDigest: Digest32V1,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#objectOperationTails.get(objectDigest) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.#objectOperationTails.set(objectDigest, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#objectOperationTails.get(objectDigest) === tail) {
+        this.#objectOperationTails.delete(objectDigest);
+      }
+    }
+  }
+
   private trackOperation<T>(operation: Promise<T>): Promise<T> {
     this.#inFlightOperations.add(operation);
     void operation.finally(() => {
@@ -415,6 +699,12 @@ function byteArraysEqual(left: Uint8Array, right: Uint8Array): boolean {
     if (left[index] !== right[index]) return false;
   }
   return true;
+}
+
+function isNodeError(cause: unknown, code: string): boolean {
+  return cause instanceof Error
+    && 'code' in cause
+    && (cause as NodeJS.ErrnoException).code === code;
 }
 
 async function settleAllOrThrowV1<T>(

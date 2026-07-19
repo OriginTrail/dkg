@@ -29,6 +29,8 @@ const blockedRfc64Modules = [
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
+  'ka-bundle-store-v1-internal.js',
+  'ka-bundle-store-v1.js',
   'open-catalog-policy-v1.js',
   'persistence-layout-v1.js',
   'persistence-root-ownership-v1-internal.js',
