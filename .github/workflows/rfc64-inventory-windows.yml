@@ -11,32 +11,14 @@ on:
       - 'devnet/_bootstrap/vitest.evidence.config.ts'
       - 'devnet/rfc64-persistence-lifecycle/**'
       - 'package.json'
-      - 'packages/agent/src/rfc64/inventory-v1/**'
-      - 'packages/agent/src/rfc64/author-catalog-producer.ts'
-      - 'packages/agent/src/rfc64/control-object-store-v1.ts'
-      - 'packages/agent/src/rfc64/control-object-store-v1-internal.ts'
-      - 'packages/agent/src/rfc64/durable-file-store-v1.ts'
-      - 'packages/agent/src/rfc64/persistence-layout-v1.ts'
-      - 'packages/agent/src/rfc64/persistence-v1.ts'
-      - 'packages/agent/src/rfc64/secure-filesystem-policy-v1.ts'
-      - 'packages/agent/src/dkg-agent-base.ts'
-      - 'packages/agent/src/index.ts'
-      - 'packages/agent/test/rfc64-inventory-v1-*.test.ts'
-      - 'packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts'
-      - 'packages/agent/test/rfc64-author-catalog-producer.test.ts'
-      - 'packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts'
-      - 'packages/agent/test/rfc64-control-object-store-v1.test.ts'
-      - 'packages/agent/test/rfc64-durable-file-store-v1.test.ts'
-      - 'packages/agent/test/rfc64-secure-filesystem-policy-v1.test.ts'
-      - 'packages/agent/test/support/rfc64-control-object-store-fixtures.ts'
-      - 'packages/agent/test/support/rfc64-control-object-store-test-support.ts'
-      - 'packages/agent/test/rfc64-control-store-public-api.typecheck.ts'
-      - 'packages/agent/test/rfc64-persistence-owner.typecheck.ts'
-      - 'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'
-      - 'packages/agent/test/fixtures/rfc64-agent-inventory-lifecycle-child.ts'
-      - 'packages/agent/vitest.unit.config.ts'
-      - 'packages/agent/package.json'
+      - 'packages/agent/**'
+      - 'packages/chain/**'
       - 'packages/core/**'
+      - 'packages/publisher/**'
+      - 'packages/query/**'
+      - 'packages/random-sampling/**'
+      - 'packages/rdf-utils/**'
+      - 'packages/storage/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
@@ -77,6 +59,9 @@ jobs:
 
       - name: Test RFC-64 evidence harness
         run: pnpm test:devnet:rfc64-evidence
+
+      - name: Strict-typecheck Gate 0 lifecycle harness
+        run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
 
       - name: Run Gate 0 production persistence lifecycle
         timeout-minutes: 10

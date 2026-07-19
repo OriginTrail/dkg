@@ -16,6 +16,13 @@ import {
   readCleanRepositoryHead,
   stableJson,
 } from './evidence.js';
+import {
+  ChildProcessRegistry,
+  cleanupPreservingPrimaryFailure,
+  terminateBeforeRejecting,
+  type ProcessExitEvidence,
+  type TrackedChildProcess,
+} from './process-lifecycle.js';
 
 const EVENT_PREFIX = 'RFC64_GATE0_EVENT ';
 const GRACEFUL_STOP_COMMAND = 'RFC64_GATE0_GRACEFUL_STOP_V1';
@@ -27,6 +34,7 @@ const CONTROL_ROOT_RELATIVE = 'rfc64-sync/control-objects-v1';
 const INVENTORY_RELATIVE = 'rfc64-sync/inventory-v1.sqlite3';
 const LEASE_RELATIVE = 'rfc64-sync/inventory-v1.lease.sqlite3';
 const PROCESS_TIMEOUT_MS = 60_000;
+const children = new ChildProcessRegistry();
 
 interface ProcessEvent {
   readonly event: string;
@@ -35,15 +43,11 @@ interface ProcessEvent {
 
 interface AgentHandle {
   readonly child: ChildProcessWithoutNullStreams;
+  readonly tracked: TrackedChildProcess;
   readonly ready: ProcessEvent;
   readonly events: () => readonly ProcessEvent[];
   readonly stdout: () => string;
   readonly stderr: () => string;
-}
-
-interface ProcessExitEvidence {
-  readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
 }
 
 interface GracefulStopEvidence {
@@ -80,6 +84,16 @@ function log(message: string): void {
   process.stdout.write(`[rfc64-gate0] ${message}\n`);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function reportSecondaryFailure(primaryFailure: unknown, secondaryFailure: unknown): void {
+  process.stderr.write(
+    `[rfc64-gate0] secondary cleanup failure while preserving primary failure "${errorMessage(primaryFailure)}": ${errorMessage(secondaryFailure)}\n`,
+  );
+}
+
 function parseEvent(line: string): ProcessEvent | null {
   if (!line.startsWith(EVENT_PREFIX)) return null;
   return JSON.parse(line.slice(EVENT_PREFIX.length)) as ProcessEvent;
@@ -100,6 +114,7 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const tracked = children.track(child);
     let stdout = '';
     let stderr = '';
     let lineBuffer = '';
@@ -108,8 +123,15 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill('SIGKILL');
-      rejectReady(new Error(`agent process timed out before ready\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+      const failure = new Error(
+        `agent process timed out before ready\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+      );
+      void terminateBeforeRejecting(
+        children,
+        tracked,
+        failure,
+        reportSecondaryFailure,
+      ).catch(rejectReady);
     }, PROCESS_TIMEOUT_MS);
 
     child.stdout.setEncoding('utf8');
@@ -128,6 +150,7 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
         clearTimeout(timeout);
         resolveReady({
           child,
+          tracked,
           ready: event,
           events: () => events,
           stdout: () => stdout,
@@ -140,15 +163,16 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      rejectReady(error);
+      void tracked.closed.then(() => rejectReady(error));
     });
     child.once('exit', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      rejectReady(new Error(
+      const failure = new Error(
         `agent exited before ready: code=${code} signal=${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-      ));
+      );
+      void tracked.closed.then(() => rejectReady(failure));
     });
   });
 }
@@ -159,15 +183,23 @@ function waitForAgentClose(
 ): Promise<ProcessExitEvidence> {
   return new Promise<ProcessExitEvidence>(
     (resolveExit, rejectExit) => {
+      let timedOut = false;
       const timeout = setTimeout(() => {
-        handle.child.kill('SIGKILL');
-        rejectExit(new Error(
+        timedOut = true;
+        const failure = new Error(
           `agent did not exit after ${action}\nstdout:\n${handle.stdout()}\nstderr:\n${handle.stderr()}`,
-        ));
+        );
+        void terminateBeforeRejecting(
+          children,
+          handle.tracked,
+          failure,
+          reportSecondaryFailure,
+        ).catch(rejectExit);
       }, PROCESS_TIMEOUT_MS);
-      handle.child.once('close', (code, exitSignal) => {
+      void handle.tracked.closed.then((exit) => {
+        if (timedOut) return;
         clearTimeout(timeout);
-        resolveExit({ code, signal: exitSignal });
+        resolveExit(exit);
       });
     },
   );
@@ -201,7 +233,11 @@ async function stopAgentGracefully(handle: AgentHandle): Promise<GracefulStopRes
 
 async function stopAgentForcibly(handle: AgentHandle): Promise<ProcessExitEvidence> {
   const close = waitForAgentClose(handle, 'SIGKILL');
-  handle.child.kill('SIGKILL');
+  const delivered = handle.child.kill('SIGKILL');
+  assert(
+    delivered || handle.child.exitCode !== null || handle.child.signalCode !== null,
+    'failed to deliver SIGKILL to agent process',
+  );
   const exit = await close;
   assert(exit.code === null && exit.signal === 'SIGKILL', 'unclean stop was not SIGKILL');
   assert(
@@ -221,25 +257,38 @@ async function probeLease(dataDir: string): Promise<ProcessEvent> {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const tracked = children.track(child);
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => { stdout += chunk; });
   child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+  let processError: Error | undefined;
+  child.once('error', (error) => { processError = error; });
+  const exit = await new Promise<ProcessExitEvidence>(
     (resolveExit, rejectExit) => {
+      let timedOut = false;
       const timeout = setTimeout(() => {
-        child.kill('SIGKILL');
-        rejectExit(new Error(`lease probe timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+        timedOut = true;
+        const failure = new Error(
+          `lease probe timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+        );
+        void terminateBeforeRejecting(
+          children,
+          tracked,
+          failure,
+          reportSecondaryFailure,
+        ).catch(rejectExit);
       }, PROCESS_TIMEOUT_MS);
-      child.once('error', rejectExit);
-      child.once('exit', (code, signal) => {
+      void tracked.closed.then((evidence) => {
+        if (timedOut) return;
         clearTimeout(timeout);
-        resolveExit({ code, signal });
+        resolveExit(evidence);
       });
     },
   );
+  if (processError !== undefined) throw processError;
   if (exit.code !== 0 || exit.signal !== null) {
     throw new Error(`lease probe failed: ${JSON.stringify(exit)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
@@ -351,13 +400,11 @@ const artifactPath = resolve(process.env.DKG_RFC64_GATE0_ARTIFACT ?? DEFAULT_ART
 const testedRepositoryHead = readCleanRepositoryHead(REPO_ROOT);
 log(`testing clean repository HEAD ${testedRepositoryHead}`);
 const dataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate0-'));
-const active = new Set<ChildProcessWithoutNullStreams>();
-
+let operationFailed = false;
+let primaryFailure: unknown;
 try {
   log('phase 1/3: start production DKGAgent and stage deterministic control object');
   const initial = await spawnAgent(dataDir, true);
-  active.add(initial.child);
-  initial.child.once('exit', () => active.delete(initial.child));
   assertReady(initial.ready, true);
   const initialProbe = await probeLease(dataDir);
   assertLeaseBusy(initialProbe);
@@ -367,8 +414,6 @@ try {
 
   log('phase 2/3: restart, re-read exact bytes, then simulate unclean process death');
   const gracefulRestart = await spawnAgent(dataDir, false);
-  active.add(gracefulRestart.child);
-  gracefulRestart.child.once('exit', () => active.delete(gracefulRestart.child));
   assertReady(gracefulRestart.ready, false);
   const gracefulProbe = await probeLease(dataDir);
   assertLeaseBusy(gracefulProbe);
@@ -382,8 +427,6 @@ try {
 
   log('phase 3/3: recover OS lease, re-read and re-verify exact durable bytes');
   const recovered = await spawnAgent(dataDir, false);
-  active.add(recovered.child);
-  recovered.child.once('exit', () => active.delete(recovered.child));
   assertReady(recovered.ready, false);
   const recoveredProbe = await probeLease(dataDir);
   assertLeaseBusy(recoveredProbe);
@@ -498,9 +541,16 @@ try {
   log(`artifact publication durability: ${publication.durability}`);
   log(`artifact SHA-256: ${publication.sha256}`);
   log('raw Gate 0 evidence remains not evaluated until the separate verifier accepts it');
-} finally {
-  for (const child of active) {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-  }
-  rmSync(dataDir, { recursive: true, force: true });
+} catch (error) {
+  operationFailed = true;
+  primaryFailure = error;
 }
+await cleanupPreservingPrimaryFailure({
+  operationFailed,
+  primaryFailure,
+  cleanup: async () => {
+    await children.terminateAllAndWait();
+    rmSync(dataDir, { recursive: true, force: true });
+  },
+  reportSecondaryFailure,
+});

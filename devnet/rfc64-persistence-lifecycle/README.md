@@ -41,10 +41,17 @@ pnpm test:gate0:rfc64-persistence-lifecycle:generate
 pnpm test:gate0:rfc64-persistence-lifecycle:verify
 ```
 
-Focused evidence-encoder, repository-state, and artifact-publication tests run with:
+Focused evidence-encoder, child-process cleanup, repository-state, and
+artifact-publication tests run with:
 
 ```sh
 pnpm test:gate0:rfc64-persistence-lifecycle:unit
+```
+
+Strictly typecheck the producer, runner, verifier, and focused tests with:
+
+```sh
+pnpm typecheck:gate0:rfc64-persistence-lifecycle
 ```
 
 The default artifact is:
