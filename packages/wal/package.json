@@ -26,8 +26,11 @@
     "test:stress": "NODE_OPTIONS=--max-old-space-size=8192 WAL_RECONCILIATION_STRESS=1 WAL_RECONCILIATION_FULL_SCALE=1 vitest run test/reconciliation/scale.test.ts",
     "test:stress:quick": "WAL_RECONCILIATION_STRESS=1 vitest run test/reconciliation/scale.test.ts",
     "benchmark:reconciliation": "node --import tsx scripts/benchmark.ts",
-    "benchmark:reconciliation:full": "NODE_OPTIONS=--max-old-space-size=8192 node --import tsx scripts/benchmark.ts --full",
-    "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --check",
+    "benchmark:reconciliation:matrix": "node --import tsx scripts/benchmark.ts --matrix",
+    "benchmark:reconciliation:rotated": "node --import tsx scripts/benchmark.ts --matrix --repetitions=3",
+    "benchmark:reconciliation:full": "node --import tsx scripts/benchmark.ts --matrix",
+    "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --matrix --check",
+    "benchmark:reconciliation:check:quick": "node --import tsx scripts/benchmark.ts --check",
     "vectors": "node --import tsx scripts/generate-vectors.ts",
     "test:conformance:go": "cd conformance/go && go test ./...",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo"

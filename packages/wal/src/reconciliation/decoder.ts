@@ -11,6 +11,7 @@ import type { ProtocolV1IbltReconciliationAlgorithm } from './configuration.js';
 import { ReconciliationError } from './errors.js';
 import { idChecksum, idMappingSeed } from './hash.js';
 import { walObjectId, type ReconciliationSeed, type WalObjectId } from './ids.js';
+import { prepareWalObjectIdInput, type WalObjectIdInput } from './input.js';
 import { createMappingCursor, nextMappingIndex, type MappingCursor } from './mapping.js';
 import {
   applyId,
@@ -54,8 +55,8 @@ export interface DecodeSnapshot {
   usage: ReconciliationUsage;
 }
 
-export interface RatelessIbltDecoderOptions {
-  receiverIds: readonly WalObjectId[];
+export interface RatelessIbltDecoderOptions extends Omit<WalObjectIdInput, 'ids'> {
+  receiverIds: Iterable<WalObjectId>;
   reconciliationSeed: ReconciliationSeed;
   algorithm: ProtocolV1IbltReconciliationAlgorithm;
   limits?: Readonly<ReconciliationLimits>;
@@ -124,10 +125,20 @@ export class RatelessIbltDecoder {
     this.#reconciliationSeed = options.reconciliationSeed;
     this.#mappingParameters = options.algorithm.mapping;
     this.#budget = new ReconciliationBudget(options.limits ?? DEFAULT_RECONCILIATION_LIMITS, options.clock);
-    this.#receiverWindow = new CodingWindow(options.reconciliationSeed, options.algorithm.mapping, this.#budget);
+    const input = prepareWalObjectIdInput({
+      ids: options.receiverIds,
+      idCount: options.idCount,
+      idsAreSorted: options.idsAreSorted
+    });
+    this.#receiverWindow = new CodingWindow(
+      options.reconciliationSeed,
+      options.algorithm.mapping,
+      this.#budget,
+      { expectedIds: input.idCount, trackDuplicateIds: false }
+    );
     this.#providerOnlyWindow = new CodingWindow(options.reconciliationSeed, options.algorithm.mapping, this.#budget);
     this.#receiverOnlyWindow = new CodingWindow(options.reconciliationSeed, options.algorithm.mapping, this.#budget);
-    for (const id of [...options.receiverIds].sort(compareBytes)) this.#receiverWindow.addId(id);
+    for (const id of input.ids) this.#receiverWindow.addId(id);
   }
 
   get complete(): boolean {

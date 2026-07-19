@@ -4,6 +4,7 @@ import {
   I64_MIN,
   PAPER_BASELINE_V0,
   CodingWindow,
+  ReconciliationBudget,
   RatelessIbltEncoder,
   applyId,
   cloneSymbol,
@@ -102,6 +103,36 @@ describe('rateless encoder', () => {
     expect(window.size).toBe(0);
     window.addId(id);
     expect(window.size).toBe(1);
+    expect(() => window.addId(id)).toThrow('duplicate');
     expect(() => window.applyNext(emptySymbol(1), 1n)).toThrow('expected symbol 0');
+  });
+
+  it('supports compact pre-sized windows and dynamically grows low-level windows', () => {
+    expect(() => new CodingWindow(seed, PAPER_BASELINE_V0.algorithm.mapping, undefined, {
+      expectedIds: -1
+    })).toThrow('unsigned 32-bit');
+    expect(() => new CodingWindow(seed, PAPER_BASELINE_V0.algorithm.mapping, undefined, {
+      expectedIds: 0x1_0000_0000
+    })).toThrow('unsigned 32-bit');
+    const tinyBudget = new ReconciliationBudget({
+      ...PAPER_BASELINE_V0.limits,
+      maximumMemoryBytes: 127
+    });
+    expect(() => new CodingWindow(seed, PAPER_BASELINE_V0.algorithm.mapping, tinyBudget, {
+      expectedIds: 1
+    })).toThrow('memory budget');
+
+    const compact = new CodingWindow(seed, PAPER_BASELINE_V0.algorithm.mapping, undefined, {
+      expectedIds: 2,
+      trackDuplicateIds: false
+    });
+    compact.addId(id);
+    compact.addId(id);
+    expect(compact.size).toBe(2);
+
+    const growing = new CodingWindow(seed, PAPER_BASELINE_V0.algorithm.mapping);
+    for (let index = 0; index < 6; index += 1) growing.addId(deterministicId(`grow-${index}`));
+    expect(growing.size).toBe(6);
+    expect(growing.produceNext().symbolIndex).toBe(0);
   });
 });

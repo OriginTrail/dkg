@@ -107,7 +107,9 @@ implementation gate:
 - head-bound backfill and whole-object E2E transfer;
 - TypeScript and independent Go vector consumers;
 - static semantic/network/object-payload boundary checks; and
-- reproducible encoded-byte benchmarks with a tracked regression threshold.
+- isolated sorted-stream benchmarks at N=10k, 100k, 1M, and 10M with raw phase
+  timings, rotated repetitions, summary distributions, memory telemetry, and a
+  tracked regression threshold.
 
 Broader RTT, loss, provider-switch, and real workload measurements can still
 select better window/fallback values before a network protocol version is

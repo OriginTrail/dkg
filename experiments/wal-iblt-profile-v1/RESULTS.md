@@ -46,9 +46,13 @@ amortization.
 - the production acceptance suite now passes 100,000 deterministic
   reconciliation seeds;
 - fixed `k=32` now passes at `N = 10^4`, `10^5`, and `10^6`;
-- the tracked encoded-byte baseline records symbol count, wire bytes, setup and
-  stream time, operation count, and accounted peak memory at all three sizes;
-- the N=1,000,000 baseline used 52 symbols and 3,882 canonical bytes for the
+- the tracked encoded-byte baseline runs each size in a fresh process and
+  records provider setup, receiver setup, stream and total timings, symbol
+  count, wire bytes, operation count, process memory, and accounted memory;
+- the matrix covers `N = 10^4`, `10^5`, `10^6`, and `10^7`, supports rotated
+  repetitions, and reports min/median/p95/max summaries;
+- on the recorded Apple M3 baseline, N=10,000,000 completed in 176.109 seconds
+  at 1,721.5 MiB peak RSS and used 56 symbols / 4,232 canonical bytes for the
   32-ID symmetric difference.
 
 The next empirical sweep should add:

@@ -8,6 +8,7 @@ import {
   u64be,
   walObjectId,
   type ReconciliationUsage,
+  type ReconciliationLimits,
   type WalObjectId
 } from '../src/reconciliation/index.js';
 
@@ -21,6 +22,10 @@ export interface FixedDifferenceScenario {
 export interface ReconciliationBenchmarkResult {
   setSize: number;
   differenceSize: number;
+  inputMode: 'sorted-stream';
+  scenarioBuildMs: number;
+  encoderSetupMs: number;
+  decoderSetupMs: number;
   setupMs: number;
   streamMs: number;
   totalMs: number;
@@ -29,6 +34,14 @@ export interface ReconciliationBenchmarkResult {
   canonicalWireBytes: number;
   symbolsPerDifference: number;
   bytesPerDifference: number;
+  limits: ReconciliationLimits;
+  memory: {
+    rssBytes: number;
+    heapUsedBytes: number;
+    externalBytes: number;
+    arrayBuffersBytes: number;
+    maxRssBytes: number;
+  };
   encoderUsage: ReconciliationUsage;
   decoderUsage: ReconciliationUsage;
 }
@@ -65,23 +78,85 @@ export function createFixedDifferenceScenario(setSize: number, eachSideDifferenc
   };
 }
 
+export interface FixedDifferenceStreamingInput {
+  providerIds: Iterable<WalObjectId>;
+  receiverIds: Iterable<WalObjectId>;
+  providerOnly: WalObjectId[];
+  receiverOnly: WalObjectId[];
+}
+
+function sequentialIds(count: number, domain: number): Iterable<WalObjectId> {
+  return {
+    *[Symbol.iterator](): Iterator<WalObjectId> {
+      for (let index = 0; index < count; index += 1) yield sequentialWalObjectId(index, domain);
+    }
+  };
+}
+
+function combinedIds(commonCount: number, uniqueCount: number, uniqueDomain: number): Iterable<WalObjectId> {
+  return {
+    *[Symbol.iterator](): Iterator<WalObjectId> {
+      yield* sequentialIds(commonCount, 1);
+      yield* sequentialIds(uniqueCount, uniqueDomain);
+    }
+  };
+}
+
+export function createFixedDifferenceStreamingInput(
+  setSize: number,
+  eachSideDifference: number
+): FixedDifferenceStreamingInput {
+  if (!Number.isSafeInteger(setSize) || setSize <= eachSideDifference) {
+    throw new RangeError('setSize must be an integer larger than the one-sided difference');
+  }
+  const commonCount = setSize - eachSideDifference;
+  return {
+    providerIds: combinedIds(commonCount, eachSideDifference, 2),
+    receiverIds: combinedIds(commonCount, eachSideDifference, 3),
+    providerOnly: Array.from(
+      { length: eachSideDifference },
+      (_, index) => sequentialWalObjectId(index, 2)
+    ),
+    receiverOnly: Array.from(
+      { length: eachSideDifference },
+      (_, index) => sequentialWalObjectId(index, 3)
+    )
+  };
+}
+
 export function runReconciliationBenchmark(
   setSize: number,
   eachSideDifference = 16,
   maximumSymbols = 4_096
 ): ReconciliationBenchmarkResult {
   const startedAt = performance.now();
-  const scenario = createFixedDifferenceScenario(setSize, eachSideDifference);
+  const scenario = createFixedDifferenceStreamingInput(setSize, eachSideDifference);
+  const scenarioBuiltAt = performance.now();
   const seed = reconciliationSeed(hashBytes(u64be(BigInt(setSize))));
+  const limits: ReconciliationLimits = {
+    ...PAPER_BASELINE_V0.limits,
+    maximumMemoryBytes: Math.max(
+      PAPER_BASELINE_V0.limits.maximumMemoryBytes,
+      setSize * 128 + maximumSymbols * 128 + eachSideDifference * 128
+    ),
+    maximumElapsedMs: 30 * 60 * 1_000
+  };
   const encoder = new RatelessIbltEncoder({
-    ids: scenario.provider,
+    ids: scenario.providerIds,
+    idCount: setSize,
+    idsAreSorted: true,
     reconciliationSeed: seed,
-    algorithm: PAPER_BASELINE_V0.algorithm
+    algorithm: PAPER_BASELINE_V0.algorithm,
+    limits
   });
+  const encoderBuiltAt = performance.now();
   const decoder = new RatelessIbltDecoder({
-    receiverIds: scenario.receiver,
+    receiverIds: scenario.receiverIds,
+    idCount: setSize,
+    idsAreSorted: true,
     reconciliationSeed: seed,
-    algorithm: PAPER_BASELINE_V0.algorithm
+    algorithm: PAPER_BASELINE_V0.algorithm,
+    limits
   });
   const streamingStartedAt = performance.now();
   let canonicalWireBytes = 0;
@@ -107,9 +182,15 @@ export function runReconciliationBenchmark(
   const streamMs = finishedAt - streamingStartedAt;
   const totalMs = finishedAt - startedAt;
   const differenceSize = eachSideDifference * 2;
+  const memory = process.memoryUsage();
+  const resourceUsage = process.resourceUsage();
   return {
     setSize,
     differenceSize,
+    inputMode: 'sorted-stream',
+    scenarioBuildMs: scenarioBuiltAt - startedAt,
+    encoderSetupMs: encoderBuiltAt - scenarioBuiltAt,
+    decoderSetupMs: streamingStartedAt - encoderBuiltAt,
     setupMs,
     streamMs,
     totalMs,
@@ -118,6 +199,14 @@ export function runReconciliationBenchmark(
     canonicalWireBytes,
     symbolsPerDifference: snapshot.receivedSymbols / differenceSize,
     bytesPerDifference: canonicalWireBytes / differenceSize,
+    limits,
+    memory: {
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+      externalBytes: memory.external,
+      arrayBuffersBytes: memory.arrayBuffers,
+      maxRssBytes: resourceUsage.maxRSS * 1024
+    },
     encoderUsage: encoder.usage,
     decoderUsage: decoder.usage
   };

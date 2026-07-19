@@ -1,4 +1,3 @@
-import { compareBytes } from './bytes.js';
 import {
   DEFAULT_RECONCILIATION_LIMITS,
   ReconciliationBudget,
@@ -9,12 +8,12 @@ import {
 import { CodingWindow } from './coding-window.js';
 import type { ProtocolV1IbltReconciliationAlgorithm } from './configuration.js';
 import { ReconciliationError } from './errors.js';
+import { prepareWalObjectIdInput, type WalObjectIdInput } from './input.js';
 import type { ReconciliationSeed, WalObjectId } from './ids.js';
 import type { ReconciliationSymbolV1 } from './symbol.js';
 import { encodeReconciliationSymbolV1 } from './wire.js';
 
-export interface RatelessIbltEncoderOptions {
-  ids: readonly WalObjectId[];
+export interface RatelessIbltEncoderOptions extends WalObjectIdInput {
   reconciliationSeed: ReconciliationSeed;
   algorithm: ProtocolV1IbltReconciliationAlgorithm;
   limits?: Readonly<ReconciliationLimits>;
@@ -27,13 +26,14 @@ export class RatelessIbltEncoder {
 
   constructor(options: RatelessIbltEncoderOptions) {
     this.#budget = new ReconciliationBudget(options.limits ?? DEFAULT_RECONCILIATION_LIMITS, options.clock);
+    const input = prepareWalObjectIdInput(options);
     this.#window = new CodingWindow(
       options.reconciliationSeed,
       options.algorithm.mapping,
-      this.#budget
+      this.#budget,
+      { expectedIds: input.idCount, trackDuplicateIds: false }
     );
-    const sorted = [...options.ids].sort(compareBytes);
-    for (const id of sorted) this.#window.addId(id);
+    for (const id of input.ids) this.#window.addId(id);
   }
 
   get nextSymbolIndex(): number {

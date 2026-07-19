@@ -15,16 +15,28 @@ export function createMappingCursor(seed: bigint): MappingCursor {
   return { prngState: seed, lastIndex: 0 };
 }
 
-export function nextMappingIndex(cursor: MappingCursor, parameters: RatelessMappingParameters): number {
-  cursor.prngState = (cursor.prngState * parameters.multiplier) & U64_MASK;
-  const inverseSqrt = parameters.inverseSqrtNumerator / Math.sqrt(Number(cursor.prngState) + 1);
-  const distance = Math.ceil((cursor.lastIndex + parameters.indexOffset) * (inverseSqrt - 1));
-  const nextIndex = cursor.lastIndex + Math.max(1, distance);
+export function advanceMappingPrngState(state: bigint, multiplier: bigint): bigint {
+  return (state * multiplier) & U64_MASK;
+}
+
+export function mappingIndexForState(
+  state: bigint,
+  lastIndex: number,
+  parameters: RatelessMappingParameters
+): number {
+  const inverseSqrt = parameters.inverseSqrtNumerator / Math.sqrt(Number(state) + 1);
+  const distance = Math.ceil((lastIndex + parameters.indexOffset) * (inverseSqrt - 1));
+  const nextIndex = lastIndex + Math.max(1, distance);
   if (!Number.isSafeInteger(nextIndex)) {
     throw new ReconciliationError('INTEGER_OUT_OF_RANGE', 'mapping index exceeds the safe integer range');
   }
-  cursor.lastIndex = nextIndex;
   return nextIndex;
+}
+
+export function nextMappingIndex(cursor: MappingCursor, parameters: RatelessMappingParameters): number {
+  cursor.prngState = advanceMappingPrngState(cursor.prngState, parameters.multiplier);
+  cursor.lastIndex = mappingIndexForState(cursor.prngState, cursor.lastIndex, parameters);
+  return cursor.lastIndex;
 }
 
 export function expectedMembershipProbability(symbolIndex: number): number {

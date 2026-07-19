@@ -130,7 +130,7 @@ pnpm --filter @origintrail-official/dkg-wal test:coverage
 pnpm --filter @origintrail-official/dkg-wal test:e2e
 pnpm --filter @origintrail-official/dkg-wal test:stress
 pnpm --filter @origintrail-official/dkg-wal test:conformance:go
-pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:check
+pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:matrix
 ```
 
 The executable source has 100% statement, branch, function, and line coverage.
@@ -142,18 +142,35 @@ consume `conformance/vectors/protocol-v1.json`.
 
 ## Tracked benchmark
 
-`benchmarks/reconciliation-baseline.json` records the reproducible encoded-byte
-benchmark and a maximum 1.5x total-time regression ratio. The initial arm64,
-Node 25 baseline for a symmetric difference of 32 is:
+`benchmarks/reconciliation-baseline.json` records raw phase timings, summary
+distributions, wire bytes, resource usage, host metadata, and a maximum 1.5x
+total-time regression ratio. Every size executes in a fresh process over a
+sorted streaming input so a smaller run cannot retain heap or JIT state into a
+larger run. The initial Apple M3, 16 GiB, arm64, Node 25 baseline for a
+symmetric difference of 32 is:
 
-| Set size | Symbols | Canonical bytes | Total time | Accounted decoder peak |
-|---:|---:|---:|---:|---:|
-| 10,000 | 47 | 3,454 | 0.294 s | 1,290,112 B |
-| 100,000 | 65 | 4,788 | 3.048 s | 12,812,416 B |
-| 1,000,000 | 52 | 3,882 | 32.303 s | 128,010,752 B |
+| Set size | Encoder setup | Decoder setup | Symbol stream | Total | Symbols | Canonical bytes | Peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 0.078 s | 0.065 s | 0.046 s | 0.189 s | 47 | 3,454 | 107.8 MiB |
+| 100,000 | 0.645 s | 0.625 s | 0.445 s | 1.714 s | 65 | 4,788 | 122.3 MiB |
+| 1,000,000 | 6.105 s | 6.048 s | 4.269 s | 16.422 s | 52 | 3,882 | 292.0 MiB |
+| 10,000,000 | 67.055 s | 61.316 s | 47.737 s | 176.109 s | 56 | 4,232 | 1,721.5 MiB |
 
-Use `benchmark:reconciliation` for the quick 10k/100k report,
-`benchmark:reconciliation:full` for all three sizes, and
-`benchmark:reconciliation:check` for the regression gate. Timing comparisons
-must use comparable hardware and runtime; symbol and byte counts are fully
-deterministic across machines.
+The setup figures cover constructing one provider and one receiver coding
+window; total time includes scenario setup and streaming. Use
+`benchmark:reconciliation` for a quick 10k/100k report,
+`benchmark:reconciliation:matrix` for 10k/100k/1M/10M, and
+`benchmark:reconciliation:rotated` for three repetitions whose starting size
+rotates on every repetition. Raw runs and min/median/p95/max summaries appear
+in the same JSON report. `benchmark:reconciliation:check` runs the full matrix
+against the tracked regression gate; `benchmark:reconciliation:check:quick`
+checks only 10k/100k. Arbitrary repetitions and sizes are also supported, for
+example:
+
+```sh
+pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:matrix -- --repetitions=5
+pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation -- --sizes=10000,1000000
+```
+
+Timing comparisons require comparable hardware, runtime, power, and thermal
+conditions. Symbol and byte counts are fully deterministic across machines.

@@ -9,6 +9,7 @@ export * from './fallback.js';
 export * from './hash.js';
 export * from './head.js';
 export * from './ids.js';
+export * from './input.js';
 export * from './mapping.js';
 export * from './reconcile.js';
 export * from './set-commitment.js';
