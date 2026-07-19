@@ -38,6 +38,36 @@ protocol. Chunking may be a transport optimization, but chunks are not durable
 atoms, do not enter the reconciled set, and are accepted only after the full
 object is reconstructed and its `WalObjectId` is verified.
 
+## Runtime isolation scaffold
+
+The daemon-facing runtime has three explicit modes. Omitting `sync.mode` is
+identical to `legacy`: no WAL runtime is registered and no WAL directory,
+worker, timer, port, or protocol is created. `parallel` registers an isolated
+shadow runtime while all production reads, writes, graph synchronization, and
+DKG semantic decisions remain legacy-authoritative. `wal` is the future
+cutover mode; it fails closed unless the caller injects a verifier that accepts
+a signed cutover artifact. A configured `cutoverId` by itself never enables
+WAL authority.
+
+Every non-legacy runtime is confined below `<DKG_HOME>/wal-v1/`:
+
+```text
+wal-v1/
+  objects/         content-addressed complete WalObjectV1 bytes
+  range-staging/   incomplete range-transfer state
+  quarantine/      rejected or unresolved objects
+  shadow-rdf/      non-authoritative adapter projection
+  control/         atomic runtime lifecycle marker
+```
+
+Configured component paths are resolved below that fixed root. Startup rejects
+absolute escapes, `..` escapes, overlapping components, symlink traversal,
+unsupported protocol or adapter versions, and malformed cutover identifiers
+with stable `WAL_*` error codes. WAL-002 deliberately starts no reconciliation
+or transfer worker and registers no network protocol; those are subsequent
+tasks. The scaffold only makes lifecycle, isolation, authority, and operator
+visibility enforceable before that work begins.
+
 ## IBLT sequence
 
 ```mermaid

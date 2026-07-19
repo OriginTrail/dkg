@@ -572,6 +572,9 @@ importers:
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
+      '@origintrail-official/dkg-wal':
+        specifier: workspace:*
+        version: link:../wal
       better-sqlite3:
         specifier: 12.11.1
         version: 12.11.1

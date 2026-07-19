@@ -12,6 +12,7 @@
 // would be read-only for every importer). Mutation goes through the
 // object reference, e.g. `daemonState.isUpdating = true`.
 
+import type { WalRuntime } from '@origintrail-official/dkg-wal';
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { DkgConfig } from '../config.js';
 import { isStandaloneInstall } from '../config.js';
@@ -41,6 +42,8 @@ export const DEBUG_SYNC_TRACE =
   process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
 
 export const daemonState: {
+  /** Registered only in explicit parallel/wal mode; null in legacy mode. */
+  walRuntime: WalRuntime | null;
   /** Populated in `runDaemonInner` once the DKGAgent is ready. */
   catchupRunner: CatchupRunner | null;
   /** Set to `true` while a package or git slot update is in flight. */
@@ -81,6 +84,7 @@ export const daemonState: {
    *  trip), so it lives here rather than inside openclaw.ts. */
   openClawBridgeHealth: { ok: boolean; ts: number } | null;
 } = {
+  walRuntime: null,
   catchupRunner: null,
   isUpdating: false,
   lastUpdateCheck: {

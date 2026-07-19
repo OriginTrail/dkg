@@ -263,17 +263,22 @@ package export maps.
 
 ### Acceptance area
 
-- [ ] A clean install builds and tests the new workspace package.
-- [ ] Omitted mode preserves byte-for-byte current startup behavior and registers
+- [x] A clean install builds and tests the new workspace package.
+- [x] Omitted mode preserves byte-for-byte current startup behavior and registers
       no WAL protocol or worker.
-- [ ] `parallel` creates isolated state, starts shadow components, and leaves all
+- [x] `parallel` creates isolated state, starts shadow components, and leaves all
       production reads/writes and legacy sync authoritative.
-- [ ] `wal` refuses to start without the future signed cutover prerequisites;
+- [x] `wal` refuses to start without the future signed cutover prerequisites;
       configuration alone cannot bypass that gate.
-- [ ] Start/stop/restart tests prove no leaked workers, open handles, ports, or
+- [x] Start/stop/restart tests prove no leaked workers, open handles, ports, or
       shared state between legacy and shadow paths.
-- [ ] Config validation rejects unknown modes, unsafe path overlap, and
+- [x] Config validation rejects unknown modes, unsafe path overlap, and
       incompatible adapter/protocol versions with stable reason codes.
+
+**Implementation evidence:** `WAL-002-EVIDENCE.md` records the exact authority
+boundary, isolated layout, CLI/API behavior, acceptance mapping, and validation
+receipts. Protocol registration, mutation capture, object storage, transfer,
+reconciliation workers, and RDF reduction remain owned by their later tasks.
 
 ---
 

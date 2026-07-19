@@ -97,6 +97,7 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import { applyWalSyncModeOverride, WAL_SYNC_MODE_ENV } from '../wal-runtime.js';
 
 export function registerLifecycleCommands(program: Command): void {
 // ─── dkg start ───────────────────────────────────────────────────────
@@ -126,6 +127,10 @@ program
   .command('start')
   .description('Start the DKG daemon')
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
+  .option(
+    '--sync-mode <mode>',
+    'Run with OT-RFC-65 sync mode legacy, parallel, or wal. Omitted uses config sync.mode; wal remains cutover-gated.',
+  )
   .option(
     '--relay-preferred <multiaddr>',
     'Operator-preferred relay multiaddr to prioritise over the network relay set (repeatable; rc.9 PR-7). Multiple uses prepend in CLI-declaration order. See docs/messenger-operator.md for the relay-setup playbook.',
@@ -174,6 +179,10 @@ program
     const relayPreferredOpt = Array.isArray(opts.relayPreferred) ? (opts.relayPreferred as string[]) : [];
     const cleanedRelayPreferred = relayPreferredOpt.map((s) => s.trim()).filter((s) => s.length > 0);
     const daemonEnv: NodeJS.ProcessEnv = withSelectedDkgHome(process.env);
+    const syncModeOverride = applyWalSyncModeOverride(daemonEnv, opts.syncMode);
+    if (syncModeOverride) {
+      console.log(`Using sync mode ${syncModeOverride} for this run (${WAL_SYNC_MODE_ENV} override).`);
+    }
     if (cleanedRelayPreferred.length > 0) {
       daemonEnv.DKG_RELAY_PREFERRED = cleanedRelayPreferred.join(',');
       console.log(
@@ -279,6 +288,10 @@ program
       console.log(`  Uptime:    ${uptime}`);
       console.log(`  Peers:     ${s.connectedPeers}`);
       console.log(`  Relay:     ${s.relayConnected ? 'connected' : 'not connected'}`);
+      if (s.wal) {
+        const authority = s.wal.productionAuthority === 'legacy' ? 'legacy authoritative' : 'WAL authoritative';
+        console.log(`  WAL:       ${s.wal.mode} (${s.wal.lifecycle}; ${authority})`);
+      }
       // Backend visibility: local backends print just the name (file
       // bytes are graphed via /api/dashboard); external backends print
       // backend + endpoint + quad count, falling back to a clear
