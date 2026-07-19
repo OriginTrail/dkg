@@ -112,6 +112,26 @@ describe('RFC 8785 canonical JSON', () => {
       /nesting exceeds 1/,
     );
     expect(() => parseJsonStrict('[[]]', { maxDepth: 1 })).toThrow(/nesting exceeds 1/);
+    expect(() => canonicalizeJson({ a: {} }, { maxDepth: 1 })).toThrow(
+      /nesting exceeds 1/,
+    );
+    expect(() => canonicalizeJson([[]], { maxDepth: 1 })).toThrow(/nesting exceeds 1/);
+    expect(canonicalizeJson({ a: 1 }, { maxDepth: 1 })).toBe('{"a":1}');
+    expect(canonicalizeJson([1], { maxDepth: 1 })).toBe('[1]');
+    expect(() => canonicalizeJson({}, { maxDepth: 0 })).toThrow(/nesting exceeds 0/);
+    expect(() => parseJsonStrict('{}', { maxDepth: 0 })).toThrow(/nesting exceeds 0/);
+  });
+
+  it('rejects decimal tokens that silently change when converted to IEEE-754', () => {
+    expect(() => parseJsonStrict('9007199254740993')).toThrow(/loses information/);
+    expect(() => parseJsonStrict('1e-324')).toThrow(/loses information/);
+    expect(() => parseJsonStrict('0.10000000000000001')).toThrow(/loses information/);
+
+    expect(parseJsonStrict('9007199254740992')).toBe(9_007_199_254_740_992);
+    expect(parseJsonStrict('5e-324')).toBe(5e-324);
+    expect(parseJsonStrict('1.0')).toBe(1);
+    expect(parseJsonStrict('1e0')).toBe(1);
+    expect(parseJsonStrict('100000000000000000000000')).toBe(1e23);
   });
 
   it('enforces exact UTF-8 byte and protocol depth boundaries in both directions', () => {
