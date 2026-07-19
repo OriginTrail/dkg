@@ -19,9 +19,11 @@ import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
+  RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
   Rfc64PublicCatalogNativeTransportV1,
+  assertRfc64PublicCatalogExactSetBundleBytesV1,
   type Rfc64PublicCatalogNativeFetchScopeV1,
   Rfc64PublicCatalogNativeTransportErrorV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
@@ -59,6 +61,18 @@ async function connect(from: DKGNode, to: DKGNode): Promise<void> {
 }
 
 describe('RFC-64 public catalog native content transport v1', () => {
+  it('accepts the exact-set bundle-byte ceiling and rejects one byte over it', () => {
+    const ceiling = BigInt(RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1);
+    expect(assertRfc64PublicCatalogExactSetBundleBytesV1([
+      (ceiling - 1n).toString() as never,
+      '1' as never,
+    ])).toBe(ceiling);
+    expect(() => assertRfc64PublicCatalogExactSetBundleBytesV1([
+      ceiling.toString() as never,
+      '1' as never,
+    ])).toThrow(/exceed.*ceiling/);
+  });
+
   it('fetches exact directory and bundle digests across two live libp2p nodes', async () => {
     const [authorNode, receiverNode] = await Promise.all([startNode(), startNode()]);
     await connect(receiverNode, authorNode);

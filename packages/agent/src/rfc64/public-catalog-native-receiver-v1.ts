@@ -86,6 +86,7 @@ import {
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+  assertRfc64PublicCatalogExactSetBundleBytesV1,
   type FetchedRfc64PublicCatalogObjectV1,
   type Rfc64PublicCatalogNativeFetchScopeV1,
   type Rfc64PublicCatalogNativeTransportV1,
@@ -600,6 +601,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       }
     } catch (cause) {
       fail('catalog-native-receiver-catalog', 'catalog bucket is not bound to its directory', cause);
+    }
+    try {
+      assertRfc64PublicCatalogExactSetBundleBytesV1(
+        bucket.payload.rows.map((row) => row.transfer.byteLength),
+      );
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-slice',
+        'signed catalog exact set exceeds the V1 aggregate bundle-byte ceiling',
+        cause,
+      );
     }
     const preparedRows: Array<{
       readonly row: AuthorCatalogRowV1;
