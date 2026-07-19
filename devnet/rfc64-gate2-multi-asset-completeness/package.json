@@ -1,0 +1,13 @@
+{
+  "name": "@devnet/rfc64-gate2-multi-asset-completeness",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Closed deterministic Gate 2 multi-asset completeness evidence contract. Fixture harness only: productBoundary is not-connected and gateEvaluation is not-evaluated until a real adapter is wired; output never asserts a real Gate 2 pass.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/completeness.test.ts",
+    "generate": "node --experimental-strip-types src/cli/generate.ts",
+    "verify": "node --experimental-strip-types src/cli/verify.ts"
+  }
+}
