@@ -233,7 +233,7 @@ export function buildCatalogAssertionSubjectV1(
   assertionCoordinate: AssertionCoordinateV1,
 ): CatalogAssertionSubjectV1 {
   assertCatalogLaneV1(lane);
-  assertCatalogScalar(() => assertCanonicalEvmAddress(authorAddress, 'authorAddress'));
+  assertCatalogEvmAddress(authorAddress, 'authorAddress');
   assertAssertionCoordinateV1(assertionCoordinate);
   return (
     `did:dkg:context-graph:${buildCatalogAssertionScopeV1(lane)}`
@@ -263,7 +263,7 @@ export function assertAuthorCatalogScopeV1(
   assertNetworkIdV1(scope.networkId);
   assertContextGraphIdV1(scope.contextGraphId);
   if (scope.subGraphName !== null) assertSubGraphNameV1(scope.subGraphName);
-  assertCatalogScalar(() => assertCanonicalEvmAddress(scope.authorAddress, 'authorAddress'));
+  assertCatalogEvmAddress(scope.authorAddress, 'authorAddress');
   assertCatalogU64(scope.era, 'era');
   assertAuthorCatalogBucketCountV1(scope.bucketCount);
 
@@ -276,17 +276,17 @@ export function assertAuthorCatalogScopeV1(
     );
   }
   if (!chainIsNull) {
-    assertCatalogScalar(() => assertCanonicalChainId(scope.governanceChainId, 'governanceChainId'));
-    assertCatalogScalar(() => assertCanonicalEvmAddress(
+    assertCatalogChainId(scope.governanceChainId, 'governanceChainId');
+    assertCatalogEvmAddress(
       scope.governanceContractAddress,
       'governanceContractAddress',
-    ));
+    );
   }
   if (scope.ownershipTransitionDigest !== null) {
-    assertCatalogScalar(() => assertCanonicalDigest(
+    assertCatalogDigest(
       scope.ownershipTransitionDigest,
       'ownershipTransitionDigest',
-    ));
+    );
   }
 }
 
@@ -325,7 +325,7 @@ export function computeAuthorCatalogScopeDigestV1(
 }
 
 export function computeAuthorCatalogKeyDigestV1(kaId: KaIdV1): Digest32V1 {
-  assertCatalogScalar(() => assertCanonicalKaId(kaId, 'kaId'));
+  assertCatalogKaId(kaId, 'kaId');
   const canonical = canonicalizeJson({ kaId } as CanonicalJsonValue, {
     maxBytes: 128,
     maxDepth: 1,
@@ -364,7 +364,7 @@ export function catalogKeyDigestToBucketIdV1(
   catalogKeyDigest: Digest32V1,
   bucketCount: CountV1,
 ): DecimalU64V1 {
-  assertCatalogScalar(() => assertCanonicalDigest(catalogKeyDigest, 'catalogKeyDigest'));
+  assertCatalogDigest(catalogKeyDigest, 'catalogKeyDigest');
   assertAuthorCatalogBucketCountV1(bucketCount);
   const count = BigInt(bucketCount);
   if (count === 1n) return '0' as DecimalU64V1;
@@ -404,14 +404,14 @@ export function assertAuthorCatalogRowV1(
     'transfer',
   ], 'author catalog row');
 
-  assertCatalogScalar(() => assertCanonicalKaId(row.kaId, 'kaId'));
+  assertCatalogKaId(row.kaId, 'kaId');
   assertAssertionCoordinateV1(row.assertionCoordinate);
   assertCatalogPositiveU64(row.assertionVersion, 'assertionVersion');
   if (row.projectionId !== KA_TRANSFER_PROJECTION_V1) {
     fail('catalog-schema', `projectionId must be ${KA_TRANSFER_PROJECTION_V1}`);
   }
-  assertCatalogScalar(() => assertCanonicalDigest(row.projectionDigest, 'projectionDigest'));
-  assertCatalogScalar(() => assertCanonicalDigest(row.sealDigest, 'sealDigest'));
+  assertCatalogDigest(row.projectionDigest, 'projectionDigest');
+  assertCatalogDigest(row.sealDigest, 'sealDigest');
 
   try {
     assertKaTransferDescriptorV1(row.transfer);
@@ -458,7 +458,7 @@ export function computeAuthorCatalogRowDigestV1(
   catalogScopeDigest: Digest32V1,
   row: AuthorCatalogRowV1,
 ): Digest32V1 {
-  assertCatalogScalar(() => assertCanonicalDigest(catalogScopeDigest, 'catalogScopeDigest'));
+  assertCatalogDigest(catalogScopeDigest, 'catalogScopeDigest');
   assertAuthorCatalogRowV1(row);
   const canonical = canonicalizeJson(
     { catalogScopeDigest, row } as unknown as CanonicalJsonValue,
@@ -476,7 +476,7 @@ export function assertPackedKaIdAuthorBindingV1(
   authorAddress: EvmAddressV1,
 ): void {
   const packedKaId = parseCatalogU256(kaId, 'kaId');
-  assertCatalogScalar(() => assertCanonicalEvmAddress(authorAddress, 'authorAddress'));
+  assertCatalogEvmAddress(authorAddress, 'authorAddress');
   const packedAuthor = packedKaId >> PACKED_KA_NUMBER_BITS_V1;
   if (packedAuthor !== BigInt(authorAddress)) {
     fail(
@@ -594,9 +594,30 @@ function assertClosedKeys(
   }
 }
 
-function assertCatalogScalar(operation: () => void): void {
+function assertCatalogEvmAddress(value: unknown, label: string): void {
   try {
-    operation();
+    assertCanonicalEvmAddress(value, label);
+  } catch (cause) {
+    fail('catalog-scalar', 'catalog scalar is not canonical', cause);
+  }
+}
+function assertCatalogChainId(value: unknown, label: string): void {
+  try {
+    assertCanonicalChainId(value, label);
+  } catch (cause) {
+    fail('catalog-scalar', 'catalog scalar is not canonical', cause);
+  }
+}
+function assertCatalogDigest(value: unknown, label: string): void {
+  try {
+    assertCanonicalDigest(value, label);
+  } catch (cause) {
+    fail('catalog-scalar', 'catalog scalar is not canonical', cause);
+  }
+}
+function assertCatalogKaId(value: unknown, label: string): void {
+  try {
+    assertCanonicalKaId(value, label);
   } catch (cause) {
     fail('catalog-scalar', 'catalog scalar is not canonical', cause);
   }
