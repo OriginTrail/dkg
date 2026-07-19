@@ -604,18 +604,34 @@ function requiredLabel(value: unknown, label: string): string {
   return value.trim();
 }
 
-function canonicalFailure(value: Rfc64FailureV1, label: string): Rfc64FailureV1 {
-  if (!value || typeof value !== 'object') {
+function captureFailureRecord(
+  value: Rfc64FailureV1,
+  label: string,
+): Record<string, unknown> {
+  const captured = stableJsonValue(value, label, new Set());
+  if (!captured || typeof captured !== 'object' || Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(`${label} must be an object`);
   }
-  if (typeof value.retryable !== 'boolean') {
+  return captured as Record<string, unknown>;
+}
+
+function canonicalFailureFromCaptured(
+  captured: Record<string, unknown>,
+  label: string,
+): Rfc64FailureV1 {
+  const retryable = captured.retryable;
+  if (typeof retryable !== 'boolean') {
     throw new Rfc64EvidenceValidationError(`${label}.retryable must be boolean`);
   }
   return Object.freeze({
-    code: requiredLabel(value.code, `${label}.code`),
-    message: requiredLabel(value.message, `${label}.message`),
-    retryable: value.retryable,
+    code: requiredLabel(captured.code, `${label}.code`),
+    message: requiredLabel(captured.message, `${label}.message`),
+    retryable,
   });
+}
+
+function canonicalFailure(value: Rfc64FailureV1, label: string): Rfc64FailureV1 {
+  return canonicalFailureFromCaptured(captureFailureRecord(value, label), label);
 }
 
 function isGregorianLeapYear(year: number): boolean {
@@ -644,6 +660,7 @@ function canonicalInstant(value: Date | string, label: string): {
     const hour = Number(match[4]);
     const minute = Number(match[5]);
     const second = Number(match[6]);
+    const fractionalSecondDigits = match[7]?.length ?? 0;
     const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
     const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
     const unknownLocalOffset = match[8] === '-00:00';
@@ -655,6 +672,7 @@ function canonicalInstant(value: Date | string, label: string): {
       || hour > 23
       || minute > 59
       || second > 59
+      || fractionalSecondDigits > 3
       || offsetHour > 23
       || offsetMinute > 59
       || unknownLocalOffset
@@ -703,9 +721,10 @@ export function createRfc64DevnetEvidence(
   const observed = input.observed === null
     ? null
     : validateRfc64SemanticSnapshot(input.observed);
-  const terminalFailure = input.terminalFailure == null
+  const terminalFailureInput = input.terminalFailure;
+  const terminalFailure = terminalFailureInput == null
     ? null
-    : canonicalFailure(input.terminalFailure, 'terminalFailure');
+    : canonicalFailure(terminalFailureInput, 'terminalFailure');
   if (input.observed === null && terminalFailure === null) {
     throw new Rfc64EvidenceValidationError(
       'a missing observed snapshot requires terminalFailure evidence',
@@ -713,10 +732,12 @@ export function createRfc64DevnetEvidence(
   }
 
   const failures = (input.retryFailures ?? []).map((failure, index) => {
-    const canonical = canonicalFailure(failure, `retryFailures[${index}]`);
+    const label = `retryFailures[${index}]`;
+    const captured = captureFailureRecord(failure, label);
+    const canonical = canonicalFailureFromCaptured(captured, label);
     const attempt = assertNonNegativeSafeInteger(
-      failure.attempt,
-      `retryFailures[${index}].attempt`,
+      captured.attempt,
+      `${label}.attempt`,
     );
     if (attempt < 1 || attempt >= attemptCount) {
       throw new Rfc64EvidenceValidationError(
@@ -925,20 +946,21 @@ function ensureArtifactDirectoryTopology(
   for (const component of components) {
     current = join(current, component);
     let stat = lstatOptional(current);
-    let created = false;
+    let observedMissing = false;
     if (stat === null) {
+      observedMissing = true;
       try {
         mkdirSync(current, { mode: 0o700 });
-        created = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       stat = lstatSync(current);
     }
     assertDirectory(current, stat);
-    if (created) {
+    if (observedMissing) {
       // Persist the new directory entry before relying on it as the parent of
-      // another directory or of the artifact itself.
+      // another directory or of the artifact itself. Also issue this barrier
+      // when a concurrent creator won the ENOENT-to-mkdir EEXIST race.
       fsyncArtifactDirectory(dirname(current), entries);
     }
     entries.push({ path: current, dev: stat.dev, ino: stat.ino });

@@ -35,7 +35,8 @@ Created and validated snapshots are defensively copied and deeply frozen. Run
 evidence closes over its own frozen expected/observed copies, so later caller
 mutation cannot change a previously derived `passed` result. String timestamps
 must carry `Z` or an explicit UTC offset, contain a real Gregorian calendar
-instant, and are emitted in canonical UTC form. Snapshot validation rejects
+instant, use at most millisecond fractional precision, and are emitted in
+canonical UTC form. Snapshot and failure-record validation reject
 accessors, proxies, sparse/custom arrays, and custom containers before capture.
 
 The run artifact adds the stable gate/observer label, selected source peer,

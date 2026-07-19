@@ -4,6 +4,12 @@ on:
   pull_request:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'devnet/_bootstrap/package.json'
+      - 'devnet/_bootstrap/rdf-canonize.d.ts'
+      - 'devnet/_bootstrap/rfc64-evidence*'
+      - 'devnet/_bootstrap/tsconfig.evidence.json'
+      - 'devnet/_bootstrap/vitest.evidence.config.ts'
+      - 'package.json'
       - 'packages/agent/src/rfc64/inventory-v1/**'
       - 'packages/agent/src/rfc64/author-catalog-producer.ts'
       - 'packages/agent/src/rfc64/control-object-store-v1.ts'
@@ -32,6 +38,7 @@ on:
       - 'packages/core/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
   workflow_dispatch:
 
 concurrency:
@@ -63,6 +70,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Typecheck RFC-64 evidence harness
+        run: pnpm typecheck:devnet:rfc64-evidence
+
+      - name: Test RFC-64 evidence harness
+        run: pnpm test:devnet:rfc64-evidence
 
       - name: Build agent dependency closure
         run: pnpm --filter @origintrail-official/dkg-agent... run build

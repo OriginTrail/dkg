@@ -391,6 +391,50 @@ describe('RFC-64 devnet run artifact', () => {
     })).toThrow(/one failure for each of the 1 retried attempts/);
   });
 
+  it('rejects accessor and proxy failure records before reading their fields', async () => {
+    const snapshot = await createRfc64SemanticSnapshot([]);
+    let retryableReads = 0;
+    const accessorFailure = {
+      attempt: 1,
+      code: 'TRANSIENT_FAILURE',
+      message: 'retry me',
+      get retryable(): boolean {
+        retryableReads += 1;
+        return (retryableReads === 1 ? true : 'not-boolean') as unknown as boolean;
+      },
+    };
+
+    expect(() => createRfc64DevnetEvidence({
+      gate: 'gate-1',
+      observer: 'receiver',
+      sourcePeerId: 'source',
+      startedAt: '2026-07-19T12:00:00Z',
+      completedAt: '2026-07-19T12:00:01Z',
+      attemptCount: 2,
+      retryFailures: [accessorFailure],
+      expected: snapshot,
+      observed: snapshot,
+    })).toThrow(/retryFailures\[0\]\.retryable must not be an accessor property/);
+    expect(retryableReads).toBe(0);
+
+    const proxyFailure = new Proxy({
+      code: 'TERMINAL_FAILURE',
+      message: 'stop',
+      retryable: false,
+    }, {});
+    expect(() => createRfc64DevnetEvidence({
+      gate: 'gate-1',
+      observer: 'receiver',
+      sourcePeerId: 'source',
+      startedAt: '2026-07-19T12:00:00Z',
+      completedAt: '2026-07-19T12:00:01Z',
+      attemptCount: 1,
+      terminalFailure: proxyFailure,
+      expected: snapshot,
+      observed: snapshot,
+    })).toThrow(/terminalFailure must not be a proxy/);
+  });
+
   it('rejects timezone-ambiguous strings and canonicalizes explicit offsets', async () => {
     const snapshot = await createRfc64SemanticSnapshot([]);
     expect(() => createRfc64DevnetEvidence({
@@ -419,6 +463,23 @@ describe('RFC-64 devnet run artifact', () => {
       completedAt: '2026-07-19T10:00:01.000Z',
       durationMs: 1_000,
     });
+
+    for (const excessivePrecision of [
+      '2026-01-01T12:00:00.0000Z',
+      '2026-01-01T12:00:00.1234Z',
+      '2026-01-01T12:00:00.123456789+02:00',
+    ]) {
+      expect(() => createRfc64DevnetEvidence({
+        gate: 'gate-1',
+        observer: 'receiver',
+        sourcePeerId: 'source',
+        startedAt: excessivePrecision,
+        completedAt: '2026-03-02T12:00:01Z',
+        attemptCount: 1,
+        expected: snapshot,
+        observed: snapshot,
+      })).toThrow(/must be a valid, representable RFC 3339 timestamp/);
+    }
 
     for (const impossible of [
       '2026-02-30T12:00:00Z',
@@ -561,6 +622,45 @@ describe('RFC-64 devnet run artifact', () => {
 
       expect(fileFsyncs).toBe(1);
       expect(directoryFsyncs).toBe(3);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'persists a parent after a concurrent creator wins the mkdir race',
+    () => {
+      const directory = createTemporaryDirectory();
+      const racedDirectory = join(directory, 'raced');
+      const target = join(racedDirectory, 'artifact.json');
+      mkdirSync(racedDirectory, { mode: 0o700 });
+      const originalLstat = fs.lstatSync;
+      const originalFsync = fs.fsyncSync;
+      let injectedMissing = false;
+      let fileFsyncs = 0;
+      let directoryFsyncs = 0;
+      const lstat = vi.spyOn(fs, 'lstatSync').mockImplementation(((path: fs.PathLike) => {
+        if (!injectedMissing && String(path) === racedDirectory) {
+          injectedMissing = true;
+          throw Object.assign(new Error('simulated missing directory'), { code: 'ENOENT' });
+        }
+        return originalLstat(path);
+      }) as typeof fs.lstatSync);
+      fs.fsyncSync = (descriptor) => {
+        if (fs.fstatSync(descriptor).isDirectory()) directoryFsyncs += 1;
+        else fileFsyncs += 1;
+        originalFsync(descriptor);
+      };
+      syncBuiltinESMExports();
+      try {
+        writeStableJsonArtifact(target, { durable: true });
+      } finally {
+        lstat.mockRestore();
+        fs.fsyncSync = originalFsync;
+        syncBuiltinESMExports();
+      }
+
+      expect(injectedMissing).toBe(true);
+      expect(fileFsyncs).toBe(1);
+      expect(directoryFsyncs).toBe(2);
     },
   );
 
