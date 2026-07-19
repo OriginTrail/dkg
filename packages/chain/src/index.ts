@@ -30,6 +30,11 @@ export {
   type VerifyControlEnvelopeIssuerSignatureOptionsV1,
 } from './control-object-signature-verifier.js';
 export {
+  createCurrentFinalizedEvmCallRouterV1,
+  type CurrentFinalizedEvmChainAdapterRegistrationV1,
+  type CurrentFinalizedEvmChainAdapterV1,
+} from './current-finalized-evm-call.js';
+export {
   resolveQuotedPublisherCandidatePricing,
   resolveLegacyPublisherCandidatePricing,
   type QuotedPublisherCandidatePricing,
