@@ -66,7 +66,7 @@ export function createCurrentFinalizedEvmCallRouterV1(
   for (const chainId of adapters.keys()) inFlightByChain.set(chainId, 0);
 
   const route: CurrentFinalizedEvmCallV1 = async (input) => {
-    const request = snapshotAndValidateRequest(input);
+    const request = snapshotCurrentFinalizedEvmCallRequestV1(input);
     const adapter = adapters.get(request.chainId);
     if (adapter === undefined) {
       throw new CurrentFinalizedEvmCallErrorV1(
@@ -196,7 +196,10 @@ function snapshotRegistration(input: unknown): Readonly<CurrentFinalizedEvmChain
   });
 }
 
-function snapshotAndValidateRequest(input: unknown): CurrentFinalizedEvmCallRequestV1 {
+/** Package-internal strict snapshot shared by the router and raw transport. */
+export function snapshotCurrentFinalizedEvmCallRequestV1(
+  input: unknown,
+): CurrentFinalizedEvmCallRequestV1 {
   try {
     const record = snapshotExactDataRecord(input, REQUEST_KEYS);
     assertCanonicalChainId(record.chainId, 'current-finalized request chainId');

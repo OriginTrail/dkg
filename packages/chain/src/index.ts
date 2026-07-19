@@ -35,6 +35,12 @@ export {
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
 export {
+  CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
+  createStrictCurrentFinalizedEvmChainAdapterV1,
+  type CurrentFinalizedEvmBlockReferenceProfileV1,
+  type StrictCurrentFinalizedEvmRpcConfigV1,
+} from './strict-current-finalized-evm-rpc.js';
+export {
   resolveQuotedPublisherCandidatePricing,
   resolveLegacyPublisherCandidatePricing,
   type QuotedPublisherCandidatePricing,
