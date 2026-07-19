@@ -8,6 +8,14 @@ export const GATE0_VERDICT_SCHEMA_VERSION = 'dkg-rfc64-gate0-persistence-verdict
 const SHA256_PATTERN = /^0x[0-9a-f]{64}$/u;
 const COMMIT_PATTERN = /^[0-9a-f]{40,64}$/u;
 const OBJECT_ROOT = 'rfc64-sync/control-objects-v1';
+const EXPECTED_FIXTURE = Object.freeze({
+  objectDigest: '0xeec5dff9739afed395f8723e22c2a269e90f094422d42dc4c83b7cbb78c4a320',
+  signatureVariantDigest: '0x446e5876feb11ef43d611fa634bb0d1960896cff889c06bcbcab98790246f1d9',
+  objectFileSha256: '0x37ca991c9bc1757d7b4e0839f6308aa3970a7020a940c5d885879e2c0db9d67f',
+  signatureFileSha256: '0x04f0668c46bd319cfd7353ec7831f01e2e1fb04dc7b3920a496b0ec4d2fe1947',
+  objectFileByteLength: 292,
+  signatureFileByteLength: 326,
+});
 
 interface VerifiedSnapshot {
   readonly filesCanonical: string;
@@ -158,9 +166,22 @@ function verifyClosedArtifact(
     fixture.signatureFileSha256,
     '$.fixture.signatureFileSha256',
   );
-  if (objectDigest === signatureVariantDigest || objectFileSha256 === signatureFileSha256) {
-    fail('$.fixture', 'object and signature identities must be distinct');
-  }
+  exact(objectDigest, EXPECTED_FIXTURE.objectDigest, '$.fixture.objectDigest');
+  exact(
+    signatureVariantDigest,
+    EXPECTED_FIXTURE.signatureVariantDigest,
+    '$.fixture.signatureVariantDigest',
+  );
+  exact(
+    objectFileSha256,
+    EXPECTED_FIXTURE.objectFileSha256,
+    '$.fixture.objectFileSha256',
+  );
+  exact(
+    signatureFileSha256,
+    EXPECTED_FIXTURE.signatureFileSha256,
+    '$.fixture.signatureFileSha256',
+  );
 
   const phases = closedRecord(artifact.phases, '$.phases', [
     'gracefulRestart',
@@ -434,9 +455,11 @@ function verifySnapshot(
       `${path}.files[${index}].relativePath`,
     );
     exact(actual.sha256, expected.sha256, `${path}.files[${index}].sha256`);
-    if (!Number.isSafeInteger(actual.byteLength) || (actual.byteLength as number) <= 0) {
-      fail(`${path}.files[${index}].byteLength`, 'must be a positive safe integer');
-    }
+    exact(
+      actual.byteLength,
+      expected.byteLength,
+      `${path}.files[${index}].byteLength`,
+    );
     exact(
       actual.mode,
       platform === 'win32' ? null : '0600',
@@ -497,11 +520,13 @@ function expectedFileEvidence(
       kind: 'object',
       relativePath: `${OBJECT_ROOT}/objects/${prefix}/${objectHex}.jcs`,
       sha256: objectFileSha256,
+      byteLength: EXPECTED_FIXTURE.objectFileByteLength,
     },
     {
       kind: 'signature',
       relativePath: `${OBJECT_ROOT}/signatures/${prefix}/${objectHex}/${signatureHex}.jcs`,
       sha256: signatureFileSha256,
+      byteLength: EXPECTED_FIXTURE.signatureFileByteLength,
     },
   ];
 }

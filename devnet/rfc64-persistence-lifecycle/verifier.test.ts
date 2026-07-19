@@ -8,10 +8,10 @@ import {
 } from './verifier.js';
 
 const HEAD = 'a'.repeat(40);
-const OBJECT_DIGEST = `0x${'11'.repeat(32)}`;
-const SIGNATURE_DIGEST = `0x${'22'.repeat(32)}`;
-const OBJECT_SHA256 = `0x${'33'.repeat(32)}`;
-const SIGNATURE_SHA256 = `0x${'44'.repeat(32)}`;
+const OBJECT_DIGEST = '0xeec5dff9739afed395f8723e22c2a269e90f094422d42dc4c83b7cbb78c4a320';
+const SIGNATURE_DIGEST = '0x446e5876feb11ef43d611fa634bb0d1960896cff889c06bcbcab98790246f1d9';
+const OBJECT_SHA256 = '0x37ca991c9bc1757d7b4e0839f6308aa3970a7020a940c5d885879e2c0db9d67f';
+const SIGNATURE_SHA256 = '0x04f0668c46bd319cfd7353ec7831f01e2e1fb04dc7b3920a496b0ec4d2fe1947';
 
 type JsonPath = readonly (string | number)[];
 
@@ -96,6 +96,30 @@ test('verifier rejects reordered or phase-divergent exact file evidence', () => 
   const changedLength = validArtifact('linux');
   changedLength.phases.operatingSystemLeaseRecovery.snapshot.files[0].byteLength += 1;
   assertRejected(changedLength, 'linux', 'phase-divergent byte length');
+});
+
+test('verifier rejects a different but internally self-consistent fixture', () => {
+  const mutation = validArtifact('linux');
+  const alternateObjectDigest = `0x${'11'.repeat(32)}`;
+  const alternateSignatureDigest = `0x${'22'.repeat(32)}`;
+  const alternateObjectSha256 = `0x${'33'.repeat(32)}`;
+  const alternateSignatureSha256 = `0x${'44'.repeat(32)}`;
+  mutation.fixture.objectDigest = alternateObjectDigest;
+  mutation.fixture.signatureVariantDigest = alternateSignatureDigest;
+  mutation.fixture.objectFileSha256 = alternateObjectSha256;
+  mutation.fixture.signatureFileSha256 = alternateSignatureSha256;
+  const alternatePaths = filePaths(alternateObjectDigest, alternateSignatureDigest);
+  const alternateDirectories = directoryPathsFor(alternateObjectDigest);
+  for (const phase of Object.values(mutation.phases)) {
+    phase.snapshot.files[0].relativePath = alternatePaths.object;
+    phase.snapshot.files[0].sha256 = alternateObjectSha256;
+    phase.snapshot.files[1].relativePath = alternatePaths.signature;
+    phase.snapshot.files[1].sha256 = alternateSignatureSha256;
+    phase.snapshot.namespaceDirectoryModes.forEach((entry, index) => {
+      entry.relativePath = alternateDirectories[index]!;
+    });
+  }
+  assertRejected(mutation, 'linux', 'self-consistent alternate fixture');
 });
 
 function assertRejected(
@@ -237,17 +261,31 @@ function validArtifact(platform: 'linux' | 'win32') {
 }
 
 function objectPath(): string {
-  const objectHex = OBJECT_DIGEST.slice(2);
-  return `rfc64-sync/control-objects-v1/objects/${objectHex.slice(0, 2)}/${objectHex}.jcs`;
+  return filePaths(OBJECT_DIGEST, SIGNATURE_DIGEST).object;
 }
 
 function signaturePath(): string {
-  const objectHex = OBJECT_DIGEST.slice(2);
-  return `rfc64-sync/control-objects-v1/signatures/${objectHex.slice(0, 2)}/${objectHex}/${SIGNATURE_DIGEST.slice(2)}.jcs`;
+  return filePaths(OBJECT_DIGEST, SIGNATURE_DIGEST).signature;
 }
 
 function directoryPaths(): string[] {
-  const objectHex = OBJECT_DIGEST.slice(2);
+  return directoryPathsFor(OBJECT_DIGEST);
+}
+
+function filePaths(
+  objectDigest: string,
+  signatureDigest: string,
+): { readonly object: string; readonly signature: string } {
+  const objectHex = objectDigest.slice(2);
+  const prefix = objectHex.slice(0, 2);
+  return {
+    object: `rfc64-sync/control-objects-v1/objects/${prefix}/${objectHex}.jcs`,
+    signature: `rfc64-sync/control-objects-v1/signatures/${prefix}/${objectHex}/${signatureDigest.slice(2)}.jcs`,
+  };
+}
+
+function directoryPathsFor(objectDigest: string): string[] {
+  const objectHex = objectDigest.slice(2);
   const prefix = objectHex.slice(0, 2);
   return [
     'rfc64-sync',
