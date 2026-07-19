@@ -9,9 +9,13 @@
     "types": ["node"]
   },
   "include": [
+    "agent-child.test.ts",
+    "agent-child.ts",
     "adapter-process.ts",
     "model.test.ts",
     "model.ts",
+    "product-capabilities.test.ts",
+    "product-capabilities.ts",
     "run.ts",
     "verifier.test.ts",
     "verifier.ts",

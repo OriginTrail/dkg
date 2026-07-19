@@ -60,7 +60,7 @@
     "test:gate1:rfc64-public-open-harness": "pnpm run test:gate1:rfc64-public-open-harness:generate && pnpm run test:gate1:rfc64-public-open-harness:verify",
     "test:gate1:rfc64-public-open-harness:generate": "node --import tsx devnet/rfc64-gate1-public-open/run.ts",
     "test:gate1:rfc64-public-open-harness:verify": "node --import tsx devnet/rfc64-gate1-public-open/verify.ts",
-    "test:gate1:rfc64-public-open-harness:unit": "node --import tsx --test devnet/rfc64-gate1-public-open/model.test.ts devnet/rfc64-gate1-public-open/verifier.test.ts",
+    "test:gate1:rfc64-public-open-harness:unit": "node --import tsx --test devnet/rfc64-gate1-public-open/agent-child.test.ts devnet/rfc64-gate1-public-open/model.test.ts devnet/rfc64-gate1-public-open/product-capabilities.test.ts devnet/rfc64-gate1-public-open/verifier.test.ts",
     "typecheck:gate1:rfc64-public-open-harness": "tsc --project devnet/rfc64-gate1-public-open/tsconfig.json",
     "test:devnet:v10-core-flows": "vitest run --config devnet/v10-core-flows/vitest.config.ts",
     "test:devnet:v10-e2e": "vitest run --config devnet/v10-end-to-end/vitest.config.ts",

@@ -4,30 +4,42 @@ import test from 'node:test';
 import { stableJson } from '../rfc64-persistence-lifecycle/evidence.js';
 import {
   GATE1_ADAPTER_PROTOCOL_VERSION,
-  GATE1_FIXTURE,
-  GATE1_FIXTURE_ADAPTER_ID,
   GATE1_RAW_SCHEMA_VERSION,
-  INSPECTED_PRODUCT_COMMITS,
+  GATE1_REAL_DKG_AGENT_ADAPTER_ID,
   REQUIRED_PRODUCTION_ADAPTER_OPERATIONS,
-  expectedAppliedReadBack,
-  type Gate1TransferFixture,
+  appliedReadBackFromTransfer,
+  semanticReadBackFromTransfer,
+  type Gate1TransferEvidence,
 } from './model.js';
 import { verifyGate1ArtifactBytes } from './verifier.js';
 
 const HEAD = 'a'.repeat(40);
+const AUTHOR = `0x${'11'.repeat(20)}`;
+const ATTACKER = `0x${'aa'.repeat(20)}`;
+const POSITIVE = transfer({ head: '6', previous: '7', version: '1' });
+const REPAIR = transfer({ head: '8', previous: '6', version: '2' });
 
-test('accepts the complete canonical deterministic harness evidence', () => {
+test('accepts canonical production-shaped evidence with exact runtime continuity', () => {
   const result = verifyGate1ArtifactBytes(bytes(goldenArtifact()), HEAD);
   assert.equal(result.sourceCommit, HEAD);
   assert.match(result.rawArtifactSha256, /^0x[0-9a-f]{64}$/u);
 });
 
 test('rejects non-canonical JSON before interpreting evidence', () => {
-  const text = JSON.stringify(goldenArtifact());
   assert.throws(
-    () => verifyGate1ArtifactBytes(Buffer.from(text), HEAD),
+    () => verifyGate1ArtifactBytes(Buffer.from(JSON.stringify(goldenArtifact())), HEAD),
     /not exact canonical stable JSON/,
   );
+});
+
+test('rejects fixture-era not-connected and not-evaluated false passes', () => {
+  const disconnected = goldenArtifact();
+  disconnected.adapter.productBoundary = 'not-connected';
+  reject(disconnected, /adapter\.productBoundary/);
+
+  const unevaluated = goldenArtifact();
+  unevaluated.gateEvaluation.status = 'not-evaluated';
+  reject(unevaluated, /gateEvaluation\.status/);
 });
 
 test('rejects an extra top-level field', () => {
@@ -36,156 +48,169 @@ test('rejects an extra top-level field', () => {
   reject(artifact, /failed at \$: must contain exactly keys/);
 });
 
-test('pins the artifact to the independently observed repository commit', () => {
-  const artifact = goldenArtifact();
-  artifact.repository.testedHeadCommit = 'b'.repeat(40);
-  reject(artifact, /repository\.testedHeadCommit/);
+test('pins the artifact and inspected product commit to the repository HEAD', () => {
+  const repository = goldenArtifact();
+  repository.repository.testedHeadCommit = 'b'.repeat(40);
+  reject(repository, /repository\.testedHeadCommit/);
+
+  const inspected = goldenArtifact();
+  inspected.adapter.inspectedProductCommits[0] = 'c'.repeat(40);
+  reject(inspected, /adapter\.inspectedProductCommits/);
 });
 
-test('pins both inspected product commits at the adapter boundary', () => {
-  const artifact = goldenArtifact();
-  artifact.adapter.inspectedProductCommits[0] = 'c'.repeat(40);
-  reject(artifact, /adapter\.inspectedProductCommits/);
-});
-
-test('pins the six production adapter operations without interim service internals', () => {
+test('pins the six production adapter operations', () => {
   const artifact = goldenArtifact();
   artifact.adapter.requiredProductionOperations[0] = 'interimServiceMethod';
   reject(artifact, /adapter\.requiredProductionOperations/);
 });
 
-test('does not allow the fixture adapter to claim a formal production gate', () => {
-  const artifact = goldenArtifact();
-  artifact.adapter.productBoundary = 'production';
-  reject(artifact, /adapter\.productBoundary/);
-  const evaluated = goldenArtifact();
-  evaluated.gateEvaluation.status = 'PASS';
-  reject(evaluated, /gateEvaluation\.status/);
-});
-
-test('requires exact distinct author and receiver peer identities', () => {
+test('requires exact distinct real DKGAgent peer identities', () => {
   const artifact = goldenArtifact();
   artifact.ready.receiver.peerId = artifact.ready.author.peerId;
-  reject(artifact, /ready\.receiver\.peerId/);
+  reject(artifact, /author and receiver peer IDs must be distinct/);
 });
 
-const exactPositiveMutations: ReadonlyArray<readonly [string, (artifact: GoldenArtifact) => void]> = [
-  ['catalog head digest', (artifact) => {
-    artifact.phases.positiveSync.exact.head.catalogHeadDigest = digest('1');
-  }],
-  ['catalog row digest', (artifact) => {
-    artifact.phases.positiveSync.exact.catalogRowDigest = digest('2');
-  }],
-  ['bundle digest', (artifact) => {
-    artifact.phases.positiveSync.exact.bundleDigest = digest('3');
-  }],
-  ['content digest', (artifact) => {
-    artifact.phases.positiveSync.exact.contentDigest = digest('4');
-  }],
-  ['UAL', (artifact) => { artifact.phases.positiveSync.exact.kaUal += '/wrong'; }],
-  ['inventory row count', (artifact) => {
-    artifact.phases.positiveSync.exact.inventoryRowCount = 2;
-  }],
-  ['activated quad count', (artifact) => {
-    artifact.phases.positiveSync.exact.activatedQuadCount = 3;
-  }],
-];
+test('rejects malformed product digests, UALs, addresses, and counts', () => {
+  const digestMutation = goldenArtifact();
+  digestMutation.fixture.positive.bundleDigest = 'fixture-bundle';
+  reject(digestMutation, /fixture\.positive\.bundleDigest/);
 
-for (const [label, mutate] of exactPositiveMutations) {
-  test(`rejects changed exact positive ${label}`, () => {
+  const ualMutation = goldenArtifact();
+  ualMutation.fixture.positive.kaUal = 'did:dkg:wrong';
+  reject(ualMutation, /fixture\.positive\.kaUal/);
+
+  const addressMutation = goldenArtifact();
+  addressMutation.fixture.positive.authorAddress = AUTHOR.toUpperCase();
+  reject(addressMutation, /fixture\.positive\.authorAddress/);
+
+  const countMutation = goldenArtifact();
+  countMutation.fixture.positive.inventoryRowCount = 2;
+  reject(countMutation, /fixture\.positive\.inventoryRowCount/);
+});
+
+test('requires replay to retain exact row, content, bundle, UAL, and counts', () => {
+  const fields: ReadonlyArray<keyof Gate1TransferEvidence> = [
+    'bundleDigest',
+    'catalogRowDigest',
+    'contentDigest',
+    'kaUal',
+    'activatedQuadCount',
+  ];
+  for (const [index, field] of fields.entries()) {
     const artifact = goldenArtifact();
-    mutate(artifact);
-    reject(artifact, /phases\.positiveSync\.exact/);
-  });
-}
-
-test('requires exact durable applied-head readback after positive activation', () => {
-  const artifact = goldenArtifact();
-  artifact.phases.positiveSync.appliedReadBack.currentCatalogHeadDigest = digest('5');
-  reject(artifact, /phases\.positiveSync\.appliedReadBack/);
+    (artifact.fixture.repairSuccessor as unknown as Record<string, unknown>)[field] =
+      typeof artifact.fixture.repairSuccessor[field] === 'number'
+        ? 3
+        : digest(String(index + 1));
+    reject(artifact, new RegExp(`repairSuccessor\\.${field}`));
+  }
 });
 
-test('requires the exact semantic quad/count/digest post-read', () => {
+test('requires the product inventory digest to remain equal for the exact replayed row', () => {
   const artifact = goldenArtifact();
-  artifact.phases.positiveSync.semanticPostRead.activatedQuadCount = 1;
-  reject(artifact, /phases\.positiveSync\.semanticPostRead/);
+  artifact.fixture.repairSuccessor.head.appliedInventoryDigest = digest('9');
+  reject(artifact, /repairSuccessor\.head\.appliedInventoryDigest/);
 });
 
-test('requires forged-author failure to leave zero activation and no applied head', () => {
+test('requires the repair head to advance one version from the positive head', () => {
+  const wrongPrevious = goldenArtifact();
+  wrongPrevious.fixture.repairSuccessor.head.previousCatalogHeadDigest = digest('9');
+  reject(wrongPrevious, /repairSuccessor\.head\.previousCatalogHeadDigest/);
+
+  const skippedVersion = goldenArtifact();
+  skippedVersion.fixture.repairSuccessor.head.catalogVersion = '3';
+  reject(skippedVersion, /repairSuccessor\.head\.catalogVersion/);
+});
+
+test('requires the four receiver-verified control objects from product evidence', () => {
+  const artifact = goldenArtifact();
+  artifact.phases.positiveSync.controlObjectsVerified = 3;
+  reject(artifact, /positiveSync\.controlObjectsVerified/);
+});
+
+test('requires exact durable and semantic readback after positive synchronization', () => {
+  const applied = goldenArtifact();
+  applied.phases.positiveSync.appliedReadBack.currentCatalogHeadDigest = digest('9');
+  reject(applied, /positiveSync\.appliedReadBack/);
+
+  const semantic = goldenArtifact();
+  semantic.phases.positiveSync.semanticPostRead.activatedQuadCount = 1;
+  reject(semantic, /positiveSync\.semanticPostRead/);
+});
+
+test('requires forged transfer rejection to leave zero activation and no applied head', () => {
   const activated = goldenArtifact();
   activated.phases.forgedAuthor.activationAfter = 1;
   reject(activated, /forgedAuthor\.activationAfter/);
 
   const applied = goldenArtifact();
-  applied.phases.forgedAuthor.appliedHeadAfter = expectedAppliedReadBack(GATE1_FIXTURE.positive);
+  applied.phases.forgedAuthor.appliedHeadAfter = appliedReadBackFromTransfer(POSITIVE);
   reject(applied, /forgedAuthor\.appliedHeadAfter/);
+
+  const wrongFailure = goldenArtifact();
+  wrongFailure.fixture.forged.expectedFailureCode = 'catalog-successor-producer-binding';
+  reject(wrongFailure, /fixture\.forged\.expectedFailureCode/);
 });
 
-test('requires the forged author to fail at cryptographic transfer admission', () => {
-  const artifact = goldenArtifact();
-  artifact.phases.forgedAuthor.failureCode = 'catalog-native-receiver-activation';
-  reject(artifact, /forgedAuthor\.failureCode/);
-});
-
-test('requires an unclean receiver crash after a durable repair intent', () => {
+test('requires real SIGKILL followed by explicit replay, not fictional startup repair', () => {
   const cleanExit = goldenArtifact();
   cleanExit.phases.restartRepair.crashExit = { code: 0, signal: null };
   reject(cleanExit, /restartRepair\.crashExit\.code/);
 
-  const noIntent = goldenArtifact();
-  noIntent.phases.restartRepair.gap.repairIntentDurable = false;
-  reject(noIntent, /restartRepair\.gap\.repairIntentDurable/);
+  const inventedIntent = goldenArtifact();
+  inventedIntent.phases.restartRepair.gap.repairIntentDurable = true;
+  reject(inventedIntent, /restartRepair\.gap\.repairIntentDurable/);
+
+  const inventedStartupRepair = goldenArtifact();
+  inventedStartupRepair.phases.restartRepair.restartedReady.startupRepair = {
+    repaired: true,
+  };
+  reject(inventedStartupRepair, /restartRepair\.restartedReady\.startupRepair/);
 });
 
-test('requires restart to advance the durable predecessor to the exact successor', () => {
-  const artifact = goldenArtifact();
-  artifact.phases.restartRepair.restartedReady.startupRepair.after.currentCatalogHeadDigest =
-    GATE1_FIXTURE.positive.head.catalogHeadDigest;
-  reject(artifact, /restartRepair\.restartedReady\.startupRepair/);
-});
+test('requires pre-crash continuity and exact post-reannounce replay readback', () => {
+  const prematureSuccessor = goldenArtifact();
+  prematureSuccessor.phases.restartRepair.gap.semanticBeforeCrash =
+    semanticReadBackFromTransfer(REPAIR);
+  reject(prematureSuccessor, /restartRepair\.gap\.semanticBeforeCrash/);
 
-test('requires exact semantic and applied readback after restart repair', () => {
-  const applied = goldenArtifact();
-  applied.phases.restartRepair.readBack.appliedReadBack.appliedInventoryDigest = digest('6');
-  reject(applied, /restartRepair\.readBack\.appliedReadBack/);
+  const wrongApplied = goldenArtifact();
+  wrongApplied.phases.restartRepair.readBack.appliedReadBack.currentCatalogHeadDigest =
+    POSITIVE.head.catalogHeadDigest;
+  reject(wrongApplied, /restartRepair\.readBack\.appliedReadBack/);
 
-  const semantic = goldenArtifact();
-  semantic.phases.restartRepair.readBack.semanticPostRead.contentDigest = digest('7');
-  reject(semantic, /restartRepair\.readBack\.semanticPostRead/);
+  const duplicate = goldenArtifact();
+  duplicate.phases.restartRepair.readBack.semanticPostRead.activatedQuadCount = 4;
+  reject(duplicate, /restartRepair\.readBack\.semanticPostRead/);
 });
 
 function buildGoldenArtifact() {
-  const positiveApplied = mutable(expectedAppliedReadBack(GATE1_FIXTURE.positive));
-  const repairApplied = mutable(expectedAppliedReadBack(GATE1_FIXTURE.repairSuccessor));
-  const positiveSemantic = semantic(GATE1_FIXTURE.positive);
-  const repairSemantic = semantic(GATE1_FIXTURE.repairSuccessor);
-  const startupRepair = {
-    action: 'advanced-applied-head-from-durable-intent',
-    after: mutable(repairApplied),
-    before: mutable(positiveApplied),
-    repaired: true,
-    semanticPostRead: mutable(repairSemantic),
+  const forged = {
+    attemptedCatalogHeadDigest: digest('9'),
+    catalogAuthorAddress: AUTHOR,
+    expectedFailureCode: 'catalog-native-receiver-transfer',
+    recoveredAuthorAddress: ATTACKER,
   };
   return {
     adapter: {
-      id: GATE1_FIXTURE_ADAPTER_ID,
-      inspectedProductCommits: [...INSPECTED_PRODUCT_COMMITS],
-      productBoundary: 'not-connected',
+      id: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+      inspectedProductCommits: [HEAD],
+      productBoundary: 'connected',
       protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
       requiredProductionOperations: [...REQUIRED_PRODUCTION_ADAPTER_OPERATIONS],
       replacementContract:
-        'replace adapter-process commands with production DKGAgent operations without changing evidence schema',
+        'real DKGAgent production APIs only; no fixture adapter or synthesized product evidence',
     },
     fixture: {
-      forged: mutable(GATE1_FIXTURE.forged),
-      positive: mutable(GATE1_FIXTURE.positive),
-      repairSuccessor: mutable(GATE1_FIXTURE.repairSuccessor),
+      forged: structuredClone(forged),
+      positive: structuredClone(POSITIVE),
+      repairSuccessor: structuredClone(REPAIR),
     },
     gate: 'OT-RFC-64 Gate 1 harness contract',
     gateEvaluation: {
       reason:
-        'deterministic adapter proves orchestration and fail-closed evidence verification, not production Gate 1',
-      status: 'not-evaluated',
+        'two real DKGAgent processes completed production publish, announce, synchronize, authorization-negative, SIGKILL, restart, reannounce, and exact readback',
+      status: 'PASS',
     },
     harnessChecksPassed: true,
     invocation: 'pnpm test:gate1:rfc64-public-open-harness',
@@ -195,45 +220,45 @@ function buildGoldenArtifact() {
         activationBefore: 0,
         appliedHeadAfter: null as unknown,
         appliedHeadBefore: null as unknown,
-        attemptedCatalogHeadDigest: GATE1_FIXTURE.forged.attemptedCatalogHeadDigest,
-        failureCode: GATE1_FIXTURE.forged.expectedFailureCode,
-        recoveredAuthorAddress: GATE1_FIXTURE.forged.recoveredAuthorAddress,
-        servedByPeerId: GATE1_FIXTURE.authorPeerId,
-        testedByPeerId: GATE1_FIXTURE.receiverPeerId,
+        attemptedCatalogHeadDigest: forged.attemptedCatalogHeadDigest,
+        failureCode: forged.expectedFailureCode,
+        recoveredAuthorAddress: forged.recoveredAuthorAddress,
+        servedByPeerId: 'peer-author-real',
+        testedByPeerId: 'peer-receiver-real',
       },
       positiveSync: {
-        appliedReadBack: mutable(positiveApplied),
-        controlObjectsVerified: 3,
-        exact: mutable(GATE1_FIXTURE.positive),
-        receivedByPeerId: GATE1_FIXTURE.receiverPeerId,
-        semanticPostRead: mutable(positiveSemantic),
-        servedByPeerId: GATE1_FIXTURE.authorPeerId,
+        appliedReadBack: structuredClone(appliedReadBackFromTransfer(POSITIVE)),
+        controlObjectsVerified: 4,
+        exact: structuredClone(POSITIVE),
+        receivedByPeerId: 'peer-receiver-real',
+        semanticPostRead: structuredClone(semanticReadBackFromTransfer(POSITIVE)),
+        servedByPeerId: 'peer-author-real',
       },
       restartRepair: {
         crashExit: { code: null as number | null, signal: 'SIGKILL' as string | null },
         gap: {
-          appliedBeforeCrash: mutable(positiveApplied),
-          repairIntentDurable: true,
-          semanticBeforeCrash: mutable(repairSemantic),
-          target: mutable(repairApplied),
+          appliedBeforeCrash: structuredClone(appliedReadBackFromTransfer(POSITIVE)),
+          repairIntentDurable: false,
+          semanticBeforeCrash: structuredClone(semanticReadBackFromTransfer(POSITIVE)),
+          target: structuredClone(appliedReadBackFromTransfer(REPAIR)),
         },
         readBack: {
-          appliedReadBack: mutable(repairApplied),
-          semanticPostRead: mutable(repairSemantic),
+          appliedReadBack: structuredClone(appliedReadBackFromTransfer(REPAIR)),
+          semanticPostRead: structuredClone(semanticReadBackFromTransfer(REPAIR)),
         },
         restartedReady: {
-          adapterId: GATE1_FIXTURE_ADAPTER_ID,
-          peerId: GATE1_FIXTURE.receiverPeerId,
+          adapterId: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+          peerId: 'peer-receiver-real',
           protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
           role: 'receiver',
-          startupRepair,
+          startupRepair: null as unknown,
         },
-        successorServedByPeerId: GATE1_FIXTURE.authorPeerId,
+        successorServedByPeerId: 'peer-author-real',
       },
     },
     processBoundary: {
       authorInstances: 1,
-      model: 'two concurrent adapter peer processes plus one receiver restart',
+      model: 'two real DKGAgent peer processes plus one receiver restart',
       receiverInstances: 2,
       stoppedExits: {
         author: { code: 0, signal: null },
@@ -242,15 +267,15 @@ function buildGoldenArtifact() {
     },
     ready: {
       author: {
-        adapterId: GATE1_FIXTURE_ADAPTER_ID,
-        peerId: GATE1_FIXTURE.authorPeerId,
+        adapterId: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+        peerId: 'peer-author-real',
         protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
         role: 'author',
         startupRepair: null as unknown,
       },
       receiver: {
-        adapterId: GATE1_FIXTURE_ADAPTER_ID,
-        peerId: GATE1_FIXTURE.receiverPeerId,
+        adapterId: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+        peerId: 'peer-receiver-real',
         protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
         role: 'receiver',
         startupRepair: null as unknown,
@@ -283,19 +308,25 @@ function goldenArtifact(): GoldenArtifact {
   return structuredClone(buildGoldenArtifact()) as GoldenArtifact;
 }
 
-function semantic(fixture: Gate1TransferFixture) {
+function transfer(input: { head: string; previous: string; version: string }): Gate1TransferEvidence {
   return {
-    activatedQuadCount: fixture.activatedQuadCount,
-    catalogHeadDigest: fixture.head.catalogHeadDigest,
-    catalogRowDigest: fixture.catalogRowDigest,
-    contentDigest: fixture.contentDigest,
-    kaUal: fixture.kaUal,
-    swmGraph: fixture.swmGraph,
+    activatedQuadCount: 2,
+    authorAddress: AUTHOR,
+    bundleByteLength: 300,
+    bundleDigest: digest('2'),
+    catalogRowDigest: digest('3'),
+    contentByteLength: 168,
+    contentDigest: digest('4'),
+    head: {
+      appliedInventoryDigest: digest('5'),
+      catalogHeadDigest: digest(input.head),
+      catalogVersion: input.version,
+      previousCatalogHeadDigest: digest(input.previous),
+    },
+    inventoryRowCount: 1,
+    kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
+    swmGraph: `did:dkg:swm:0x${'bb'.repeat(20)}/gate-1/${AUTHOR}/7`,
   };
-}
-
-function mutable<T>(value: T): T {
-  return structuredClone(value);
 }
 
 function bytes(value: unknown): Buffer {

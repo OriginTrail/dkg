@@ -1,55 +1,78 @@
-# OT-RFC-64 Gate 1 public/open harness contract
+# OT-RFC-64 Gate 1 public/open production harness
 
-This bounded harness freezes the deterministic evidence contract and process
-orchestration needed for the first RFC-64 public/open one-row synchronization.
-It runs an author adapter process and a receiver adapter process concurrently,
-then kills and restarts the receiver against the same durable directory.
+This harness has a closed evidence schema and a real process boundary. It boots
+an author and receiver as separate `DKGAgent` OS processes, connects them over
+libp2p, derives the same open policy independently on both nodes, exercises the
+production RFC-64 catalog APIs, kills the receiver with `SIGKILL`, restarts it
+against the same durable directory, and requires explicit reannouncement plus
+idempotent replay.
 
-The artifact proves that the harness and verifier require:
+There is no fixture adapter and no fallback product result. Missing methods,
+unexpected return shapes, failed process cleanup, stale artifacts, and any
+attempt to verify the old `not-connected` evidence fail closed.
 
-- distinct author and receiver peer identities;
-- exact successor head, catalog-row, bundle, and public-content digests;
-- exact KA UAL, inventory row count, SWM graph, and activated quad count;
-- an exact durable applied-head readback after positive activation;
-- a forged author attestation failure with zero activation and no applied head;
-- a durable repair intent followed by `SIGKILL`, receiver restart, repair of the
-  applied-head gap, and exact semantic plus applied-state post-read.
+The frozen adapter operations remain:
 
-The current adapter is deliberately identified as
-`deterministic-fixture-adapter-v1` and the raw artifact has
-`gateEvaluation.status = "not-evaluated"`. It does **not** claim a production
-Gate 1 pass. Combined commit `1f9119ac8` does not yet contain the successor
-producer from `6c14bd4ad15b79cc889d0308dd1d1cac60467747` or the serialized
-durable applied-head behavior from
-`ebbfb34f9bd0a0833ee5adb925cba67c527c91a8`. Once those APIs are assembled,
-replace the adapter commands with production `DKGAgent` calls while preserving
-the closed evidence schema and verifier.
+- `publishGenesis`
+- `publishSuccessor`
+- `announce`
+- `appliedHeadReadback`
+- `exactInventoryReadback`
+- `killRestart`
 
-The closed adapter boundary requires exactly six production operations, without
-depending on current service internals: `publishGenesis`, `publishSuccessor`,
-`announce`, `appliedHeadReadback`, `exactInventoryReadback`, and `killRestart`.
+The adapter currently maps those operations to:
 
-Run the deterministic process exercise and separate fail-closed verifier:
+- `DKGAgent.publishOpenAuthorCatalogGenesisV1`
+- `DKGAgent.publishOpenAuthorCatalogSuccessorV1`
+- `DKGAgent.announceRfc64PublicCatalogHeadV1`
+- `DKGAgent.readRfc64AppliedCatalogHeadV1`
+- `DKGAgent.readRfc64PublicCatalogSynchronizationEvidenceV1`
+- harness-owned `SIGKILL` and process replacement
+
+At combined base `591ff321e9cd88f91206d15a87c882873f005c37`, only
+genesis publication exists on `DKGAgent`; the other product methods are being
+assembled in the native-wiring lane. The harness therefore boots and connects
+real agents, then exits non-zero with the exact missing method list. It does not
+write a raw or verdict artifact on that base. A follow-up composition against
+the native-wiring commit completes the six-operation scenario and result
+mapping.
+
+The preserved raw schema requires production-returned evidence for:
+
+- distinct real peer identities;
+- exact successor head, catalog-row, bundle, public-content, UAL, and SWM graph;
+- one inventory row and exact activated triple count;
+- durable applied-head and exact semantic post-read;
+- forged author-transfer rejection with no activation or applied head;
+- a real `SIGKILL`, restart with the same peer identity and durable directory,
+  explicit reannouncement, and exact replay without duplicate activation.
+
+The replay successor deliberately reuses the same row/content/bundle. Its head
+and version advance, while the product inventory digest remains equal because
+the digest commits to catalog scope plus row/content/seal/UAL/count—not head.
+No durable repair intent or automatic startup repair is claimed.
+
+Build the agent and dependencies, then run the complete generator and verifier:
 
 ```sh
+pnpm turbo run build --filter=@origintrail-official/dkg-agent...
 pnpm test:gate1:rfc64-public-open-harness
 ```
 
-Run only the schema/model mutation tests or strict typecheck:
+Run only the model, verifier, product-capability, and process-lifecycle tests or
+the strict harness typecheck:
 
 ```sh
 pnpm test:gate1:rfc64-public-open-harness:unit
 pnpm typecheck:gate1:rfc64-public-open-harness
 ```
 
-The raw and verdict artifacts are written atomically as owner-only stable JSON:
+Successful production runs atomically write owner-only canonical JSON:
 
 ```text
 devnet/rfc64-gate1-public-open/artifacts/gate1-result.json
 devnet/rfc64-gate1-public-open/artifacts/gate1-verdict.json
 ```
 
-They contain no timestamp, PID, duration, temporary path, or random identifier.
-The generator pins a clean tracked repository `HEAD` before spawning and after
-all processes exit; the verifier independently pins the same commit. Artifact
-bytes therefore remain identical across runs on the same tested commit.
+The verdict scope is `production-gate1-public-open`; fixture-era
+`harness-contract-only` PASS verdicts are no longer accepted.

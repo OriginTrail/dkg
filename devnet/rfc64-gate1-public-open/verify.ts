@@ -19,7 +19,7 @@ const verified = verifyGate1ArtifactBytes(readFileSync(artifactPath), expectedHe
 const publication = atomicWriteStableJson(verdictPath, {
   rawArtifactSha256: verified.rawArtifactSha256,
   schemaVersion: GATE1_VERDICT_SCHEMA_VERSION,
-  scope: 'harness-contract-only',
+  scope: 'production-gate1-public-open',
   sourceCommit: verified.sourceCommit,
   status: 'PASS',
 });

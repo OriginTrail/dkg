@@ -1,229 +1,294 @@
-import { readFileSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, open, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { createInterface } from 'node:readline';
 
-import {
-  atomicWriteStableJson,
-  stableJson,
-} from '../rfc64-persistence-lifecycle/evidence.js';
+import { multiaddr } from '@multiformats/multiaddr';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
+
 import {
   GATE1_ADAPTER_PROTOCOL_VERSION,
-  GATE1_FIXTURE,
-  GATE1_FIXTURE_ADAPTER_ID,
-  assertFixtureDerivations,
-  expectedAppliedReadBack,
-  type Gate1TransferFixture,
+  GATE1_AGENT_EVENT_PREFIX,
+  GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+  type Gate1ProductionAdapterOperation,
 } from './model.js';
+import {
+  inspectGate1ProductCapabilities,
+  requireGate1ProductMethod,
+} from './product-capabilities.js';
 
-const EVENT_PREFIX = 'RFC64_GATE1_ADAPTER_EVENT ';
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE1_ADAPTER_DATA_DIR;
+const masterKeyHex = process.env.DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE1_ADAPTER_DATA_DIR is required');
+if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
+  throw new Error('DKG_RFC64_GATE1_AGENT_MASTER_KEY_HEX must be 32 lowercase hex bytes');
+}
+
 const dataDir = resolve(dataDirInput);
-const semanticPath = join(dataDir, 'semantic-state.json');
-const appliedPath = join(dataDir, 'applied-head.json');
-const repairIntentPath = join(dataDir, 'repair-intent.json');
+const pinnedMasterKeyHex = masterKeyHex;
+let agent: DKGAgent | undefined;
+let stopping = false;
+let commandTail = Promise.resolve();
 
 interface Command {
   readonly command: string;
+  readonly input?: unknown;
   readonly requestId: string;
-  readonly fixture?: unknown;
 }
 
 function emit(event: Record<string, unknown>): void {
-  process.stdout.write(`${EVENT_PREFIX}${JSON.stringify({ role, ...event })}\n`);
+  const line = JSON.stringify({ role, ...event });
+  if (Buffer.byteLength(line) > 1_000_000) {
+    throw new Error('Gate 1 adapter event exceeds the 1 MiB process-protocol bound');
+  }
+  process.stdout.write(`${GATE1_AGENT_EVENT_PREFIX}${line}\n`);
 }
 
 async function emitAndFlush(event: Record<string, unknown>): Promise<void> {
+  const line = JSON.stringify({ role, ...event });
+  if (Buffer.byteLength(line) > 1_000_000) {
+    throw new Error('Gate 1 adapter event exceeds the 1 MiB process-protocol bound');
+  }
   await new Promise<void>((resolveWrite, rejectWrite) => {
-    process.stdout.write(
-      `${EVENT_PREFIX}${JSON.stringify({ role, ...event })}\n`,
-      (error) => error === null || error === undefined ? resolveWrite() : rejectWrite(error),
-    );
+    process.stdout.write(`${GATE1_AGENT_EVENT_PREFIX}${line}\n`, (error) => {
+      if (error === null || error === undefined) resolveWrite();
+      else rejectWrite(error);
+    });
   });
 }
 
-function exactFixture(input: unknown, expected: Gate1TransferFixture, label: string): void {
-  if (stableJson(input) !== stableJson(expected)) {
-    throw new Error(`${label} differs from the adapter-pinned exact fixture`);
-  }
-}
-
-function readJson(path: string): unknown {
-  return JSON.parse(readFileSync(path, 'utf8')) as unknown;
-}
-
-function writeState(path: string, value: unknown): void {
-  atomicWriteStableJson(path, value);
-}
-
-async function repairAtStartup(): Promise<Record<string, unknown> | null> {
-  if (role !== 'receiver') return null;
-  let intent: unknown;
+async function ensureDeterministicAgentKey(): Promise<void> {
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  const keyPath = join(dataDir, 'agent-key.bin');
+  const expected = Buffer.from(pinnedMasterKeyHex, 'hex');
   try {
-    intent = readJson(repairIntentPath);
+    const handle = await open(keyPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(expected);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return null;
-    throw error;
+    if (!isNodeError(error) || error.code !== 'EEXIST') throw error;
+    const existing = await readFile(keyPath);
+    if (!existing.equals(expected)) {
+      throw new Error('existing DKGAgent master key differs from the role-pinned harness key');
+    }
   }
-  const expectedIntent = {
-    durable: true,
-    target: expectedAppliedReadBack(GATE1_FIXTURE.repairSuccessor),
-  };
-  if (stableJson(intent) !== stableJson(expectedIntent)) {
-    throw new Error('restart repair intent differs from the pinned successor');
-  }
-  const semantic = readJson(semanticPath);
-  const expectedSemantic = semanticState(GATE1_FIXTURE.repairSuccessor);
-  if (stableJson(semantic) !== stableJson(expectedSemantic)) {
-    throw new Error('restart repair semantic state differs from the durable intent');
-  }
-  const before = readJson(appliedPath);
-  const expectedBefore = expectedAppliedReadBack(GATE1_FIXTURE.positive);
-  if (stableJson(before) !== stableJson(expectedBefore)) {
-    throw new Error('restart repair predecessor applied head is not exact');
-  }
-  const after = expectedAppliedReadBack(GATE1_FIXTURE.repairSuccessor);
-  writeState(appliedPath, after);
-  await rm(repairIntentPath, { force: true });
-  return {
-    action: 'advanced-applied-head-from-durable-intent',
-    after: readJson(appliedPath),
-    before,
-    repaired: true,
-    semanticPostRead: semantic,
-  };
 }
 
-function semanticState(fixture: Gate1TransferFixture): Readonly<Record<string, unknown>> {
-  return Object.freeze({
-    activatedQuadCount: fixture.activatedQuadCount,
-    catalogHeadDigest: fixture.head.catalogHeadDigest,
-    catalogRowDigest: fixture.catalogRowDigest,
-    contentDigest: fixture.contentDigest,
-    kaUal: fixture.kaUal,
-    swmGraph: fixture.swmGraph,
+async function boot(): Promise<void> {
+  await ensureDeterministicAgentKey();
+  const created = await DKGAgent.create({
+    name: `RFC64Gate1${role}`,
+    dataDir,
+    listenHost: '127.0.0.1',
+    listenPort: 0,
+    bootstrapPeers: [],
+    nodeRole: 'edge',
+    store: new OxigraphStore(join(dataDir, 'store.nq')),
+    syncSharedMemoryOnConnect: false,
+    syncReconcilerEnabled: false,
+    syncOnConnectEnabled: false,
+    durableSyncEnabled: false,
+    agentProfileHeartbeatMs: 0,
+  });
+  agent = created;
+  await created.start();
+  const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
+  if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
+  emit({
+    adapterId: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
+    agentClass: created.constructor.name,
+    capabilities: inspectGate1ProductCapabilities(created),
+    catalogServiceStarted: created.rfc64PublicCatalogStatsV1()?.started === true,
+    event: 'ready',
+    multiaddr: tcp,
+    peerId: created.peerId,
+    protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
+    startupRepair: null,
   });
 }
 
 async function handle(command: Command): Promise<void> {
-  const { requestId } = command;
-  if (typeof requestId !== 'string' || requestId.length === 0) {
+  if (typeof command.requestId !== 'string' || command.requestId.length === 0) {
     throw new Error('requestId is required');
   }
+  const currentAgent = requireAgent();
   switch (command.command) {
-    case 'serve-positive':
-      requireRole('author');
-      emit({ event: 'positive-served', fixture: GATE1_FIXTURE.positive, requestId });
-      return;
-    case 'serve-repair-successor':
-      requireRole('author');
-      emit({ event: 'repair-successor-served', fixture: GATE1_FIXTURE.repairSuccessor, requestId });
-      return;
-    case 'serve-forged':
-      requireRole('author');
-      emit({ event: 'forged-served', fixture: GATE1_FIXTURE.forged, requestId });
-      return;
-    case 'attempt-forged': {
-      requireRole('receiver');
-      if (stableJson(command.fixture) !== stableJson(GATE1_FIXTURE.forged)) {
-        throw new Error('forged attempt differs from the adapter-pinned fixture');
+    case 'dial': {
+      const input = plainRecord(command.input, 'dial input');
+      const address = requiredString(input.multiaddr, 'dial.multiaddr');
+      const expectedPeerId = requiredString(input.peerId, 'dial.peerId');
+      const connection = await currentAgent.node.libp2p.dial(multiaddr(address));
+      const connectedPeerId = connection.remotePeer.toString();
+      if (connectedPeerId !== expectedPeerId) {
+        throw new Error(`dial connected to ${connectedPeerId}, expected ${expectedPeerId}`);
       }
+      emit({ event: 'dialed', peerId: connectedPeerId, requestId: command.requestId });
+      return;
+    }
+    case 'acceptOpenPolicy': {
+      const accepted = currentAgent.acceptOpenContextGraphPolicyV1(
+        plainRecord(command.input, 'acceptOpenPolicy input') as never,
+      );
       emit({
-        activationAfter: 0,
-        activationBefore: 0,
-        appliedHeadAfter: null,
-        appliedHeadBefore: null,
-        attemptedCatalogHeadDigest: GATE1_FIXTURE.forged.attemptedCatalogHeadDigest,
-        event: 'forged-author-rejected',
-        failureCode: GATE1_FIXTURE.forged.expectedFailureCode,
-        recoveredAuthorAddress: GATE1_FIXTURE.forged.recoveredAuthorAddress,
-        requestId,
+        event: 'operation-completed',
+        operation: command.command,
+        output: accepted,
+        requestId: command.requestId,
       });
       return;
     }
-    case 'activate-positive': {
-      requireRole('receiver');
-      exactFixture(command.fixture, GATE1_FIXTURE.positive, 'positive transfer');
-      const semantic = semanticState(GATE1_FIXTURE.positive);
-      const applied = expectedAppliedReadBack(GATE1_FIXTURE.positive);
-      writeState(semanticPath, semantic);
-      writeState(appliedPath, applied);
-      emit({
-        appliedReadBack: readJson(appliedPath),
-        controlObjectsVerified: 3,
-        event: 'positive-activated',
-        exact: GATE1_FIXTURE.positive,
-        requestId,
-        semanticPostRead: readJson(semanticPath),
-      });
-      return;
-    }
-    case 'prepare-repair-crash': {
-      requireRole('receiver');
-      exactFixture(command.fixture, GATE1_FIXTURE.repairSuccessor, 'repair successor');
-      const before = readJson(appliedPath);
-      const expectedBefore = expectedAppliedReadBack(GATE1_FIXTURE.positive);
-      if (stableJson(before) !== stableJson(expectedBefore)) {
-        throw new Error('repair predecessor does not equal the positive durable applied head');
+    case 'publishGenesis':
+    case 'publishSuccessor': {
+      requireRole('author');
+      const input = plainRecord(command.input, `${command.command} input`);
+      const authorPrivateKey = requiredString(
+        input.authorPrivateKey,
+        `${command.command}.authorPrivateKey`,
+      );
+      const author = new ethers.Wallet(authorPrivateKey);
+      const forwarded: Record<string, unknown> = { ...input, author };
+      delete forwarded.authorPrivateKey;
+      // Publication and announcement are separate frozen operations. Genesis's
+      // legacy combined API is driven with an empty peer set to preserve that boundary.
+      if (command.command === 'publishGenesis') forwarded.peers = [];
+      if (typeof forwarded.projectionNQuads === 'string') {
+        forwarded.projectionBytes = new TextEncoder().encode(forwarded.projectionNQuads);
+        delete forwarded.projectionNQuads;
       }
-      writeState(semanticPath, semanticState(GATE1_FIXTURE.repairSuccessor));
-      writeState(repairIntentPath, {
-        durable: true,
-        target: expectedAppliedReadBack(GATE1_FIXTURE.repairSuccessor),
-      });
-      emit({
-        appliedBeforeCrash: before,
-        event: 'repair-gap-durable',
-        repairIntentDurable: true,
-        requestId,
-        semanticBeforeCrash: readJson(semanticPath),
-        target: expectedAppliedReadBack(GATE1_FIXTURE.repairSuccessor),
-      });
+      const method = requireGate1ProductMethod(currentAgent, command.command);
+      const output = await method(forwarded);
+      emitOperationResult(command, output);
       return;
     }
-    case 'read-repaired': {
+    case 'announce':
+    case 'appliedHeadReadback':
+    case 'exactInventoryReadback': {
+      const requiredRole = command.command === 'announce' ? 'author' : 'receiver';
+      requireRole(requiredRole);
+      const method = requireGate1ProductMethod(
+        currentAgent,
+        command.command as Exclude<Gate1ProductionAdapterOperation, 'killRestart'>,
+      );
+      const output = await method(plainRecord(command.input, `${command.command} input`));
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'awaitReceiverIdle':
       requireRole('receiver');
-      emit({
-        appliedReadBack: readJson(appliedPath),
-        event: 'repair-read-back',
-        requestId,
-        semanticPostRead: readJson(semanticPath),
-      });
+      await currentAgent.whenRfc64PublicCatalogReceiverIdleV1();
+      emit({ event: 'receiver-idle', requestId: command.requestId });
       return;
-    }
+    case 'killRestart':
+      requireRole('receiver');
+      // The parent process owns SIGKILL and replacement. This command only
+      // establishes an explicit process-protocol boundary; it creates no fake
+      // repair record and intentionally does not stop the DKGAgent.
+      emit({ event: 'kill-restart-ready', requestId: command.requestId });
+      return;
     case 'stop':
-      await emitAndFlush({ event: 'stopped', requestId });
-      process.exit(0);
+      await stop(0, command.requestId);
+      return;
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
 }
 
+function emitOperationResult(command: Command, output: unknown): void {
+  assertJsonWireValue(output, `${command.command} output`);
+  emit({
+    event: 'operation-completed',
+    operation: command.command,
+    output,
+    requestId: command.requestId,
+  });
+}
+
+function assertJsonWireValue(value: unknown, path: string, depth = 0): void {
+  if (depth > 32) throw new Error(`${path} exceeds the adapter JSON depth bound`);
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return;
+  if (Array.isArray(value)) {
+    if (value.length > 10_000) throw new Error(`${path} exceeds the adapter array bound`);
+    value.forEach((entry, index) => assertJsonWireValue(entry, `${path}[${index}]`, depth + 1));
+    return;
+  }
+  if (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      assertJsonWireValue(entry, `${path}.${key}`, depth + 1);
+    }
+    return;
+  }
+  throw new Error(`${path} is not a bounded plain JSON value`);
+}
+
+async function stop(exitCode: number, requestId?: string): Promise<never> {
+  if (stopping) return await new Promise<never>(() => undefined);
+  stopping = true;
+  try {
+    await agent?.stop();
+    if (requestId !== undefined) {
+      await emitAndFlush({ event: 'stopped', requestId });
+    }
+    process.exit(exitCode);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exit(1);
+  }
+}
+
+function requireAgent(): DKGAgent {
+  if (agent === undefined) throw new Error('real DKGAgent is not ready');
+  return agent;
+}
+
 function requireRole(expected: 'author' | 'receiver'): void {
-  if (role !== expected) throw new Error(`${role} cannot handle ${expected} command`);
+  if (role !== expected) throw new Error(`${role} cannot handle ${expected} operation`);
+}
+
+function plainRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${label} must be a plain object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
+    throw new TypeError(`${label} must be a bounded non-empty string`);
+  }
+  return value;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
 
-assertFixtureDerivations();
-await mkdir(dataDir, { recursive: true, mode: 0o700 });
-const startupRepair = await repairAtStartup();
-emit({
-  adapterId: GATE1_FIXTURE_ADAPTER_ID,
-  event: 'ready',
-  peerId: role === 'author' ? GATE1_FIXTURE.authorPeerId : GATE1_FIXTURE.receiverPeerId,
-  protocolVersion: GATE1_ADAPTER_PROTOCOL_VERSION,
-  startupRepair,
+process.once('SIGTERM', () => { void stop(0); });
+process.once('SIGINT', () => { void stop(130); });
+
+await boot().catch(async (error) => {
+  emit({ event: 'boot-failed', message: error instanceof Error ? error.message : String(error) });
+  await stop(1);
 });
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', (line) => {
+  if (Buffer.byteLength(line) > 1_000_000) {
+    emit({ event: 'error', message: 'command exceeds the 1 MiB process-protocol bound' });
+    return;
+  }
   let command: Command;
   try {
     command = JSON.parse(line) as Command;
@@ -231,7 +296,7 @@ lines.on('line', (line) => {
     emit({ event: 'error', message: `invalid command JSON: ${String(error)}` });
     return;
   }
-  void handle(command).catch((error) => {
+  commandTail = commandTail.then(() => handle(command)).catch((error) => {
     emit({
       event: 'error',
       message: error instanceof Error ? error.message : String(error),
@@ -239,3 +304,4 @@ lines.on('line', (line) => {
     });
   });
 });
+lines.once('close', () => { void stop(0); });

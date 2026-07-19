@@ -298,7 +298,20 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
 
-  devnet/rfc64-gate1-public-open: {}
+  devnet/rfc64-gate1-public-open:
+    dependencies:
+      '@multiformats/multiaddr':
+        specifier: ^13.0.3
+        version: 13.0.3
+      '@origintrail-official/dkg-agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
   devnet/rfc64-persistence-lifecycle:
     dependencies:
