@@ -83,6 +83,14 @@ interface ReceiverProviderV1 {
   readonly key: string;
   readonly peerId: string;
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /**
+   * Identity of the newest availability observation for this exact provider
+   * context. A repeated hint replaces the token so a prior `not-found`
+   * observation cannot suppress newly advertised availability while another
+   * provider is still being tried. The existing per-provider attempt budget
+   * remains the hard bound against duplicate-hint retry amplification.
+   */
+  observationToken: object;
 }
 
 const DEFAULTS = Object.freeze({
@@ -157,13 +165,21 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (existing !== undefined) {
       this.#dedupedInFlight += 1;
       const providerKey = providerContextKey(remotePeerId, announcement);
-      if (!existing.providerKeys.has(providerKey)) {
+      if (existing.providerKeys.has(providerKey)) {
+        const provider = existing.providers.find((candidate) => candidate.key === providerKey);
+        if (provider !== undefined) provider.observationToken = Object.freeze({});
+      } else {
         if (existing.providers.length >= this.#maxProvidersPerHead) {
           this.#droppedProviders += 1;
           return;
         }
         existing.providerKeys.add(providerKey);
-        existing.providers.push({ key: providerKey, peerId: remotePeerId, announcement });
+        existing.providers.push({
+          key: providerKey,
+          peerId: remotePeerId,
+          announcement,
+          observationToken: Object.freeze({}),
+        });
       }
       return;
     }
@@ -175,7 +191,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     const task: ReceiverTaskV1 = {
       key,
       scopeKey: catalogScopeKey(announcement),
-      providers: [{ key: providerKey, peerId: remotePeerId, announcement }],
+      providers: [{
+        key: providerKey,
+        peerId: remotePeerId,
+        announcement,
+        observationToken: Object.freeze({}),
+      }],
       providerKeys: new Set([providerKey]),
     };
     this.#pendingByKey.set(key, task);
@@ -244,14 +265,14 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   async #runTask(task: ReceiverTaskV1): Promise<void> {
     let lastError: unknown;
-    const notFoundProviders = new Set<string>();
+    const notFoundProviderObservations = new Map<string, object>();
     const attemptsByProvider = new Map<string, number>();
     let providerCursor = 0;
     while (true) {
       if (this.#closing.signal.aborted) return;
       const selection = nextEligibleProvider(
         task.providers,
-        notFoundProviders,
+        notFoundProviderObservations,
         attemptsByProvider,
         this.#maxAttempts,
         providerCursor,
@@ -259,7 +280,10 @@ export class Rfc64PublicCatalogReceiverV1 {
       if (selection === null) {
         if (
           task.providers.length > 0
-          && task.providers.every((provider) => notFoundProviders.has(provider.key))
+          && task.providers.every(
+            (provider) => notFoundProviderObservations.get(provider.key)
+              === provider.observationToken,
+          )
         ) {
           this.#notFound += 1;
           return;
@@ -270,6 +294,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
+      const observationToken = provider.observationToken;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
       try {
@@ -283,7 +308,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           this.#closing.signal,
         );
         if (result === 'not-found') {
-          notFoundProviders.add(provider.key);
+          notFoundProviderObservations.set(provider.key, observationToken);
           continue;
         }
         if (result === 'staged-only') {
@@ -377,7 +402,7 @@ function providerContextKey(
 
 function nextEligibleProvider(
   providers: readonly ReceiverProviderV1[],
-  notFoundProviders: ReadonlySet<string>,
+  notFoundProviderObservations: ReadonlyMap<string, object>,
   attemptsByProvider: ReadonlyMap<string, number>,
   maxAttempts: number,
   cursor: number,
@@ -387,7 +412,7 @@ function nextEligibleProvider(
     const provider = providers[index];
     if (
       provider !== undefined
-      && !notFoundProviders.has(provider.key)
+      && notFoundProviderObservations.get(provider.key) !== provider.observationToken
       && (attemptsByProvider.get(provider.key) ?? 0) < maxAttempts
     ) {
       // Keep this monotonic. A modulo cursor would select the first provider

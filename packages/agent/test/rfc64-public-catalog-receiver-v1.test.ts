@@ -132,6 +132,237 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ applied: 1, notFound: 0, failed: 0 });
   });
 
+  it('retries a provider when a new hint supersedes its in-flight not-found observation', async () => {
+    const firstProviderResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const alternateProviderStarted = deferred<void>();
+    const alternateProviderResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const peers: string[] = [];
+    let peerAAttempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        peerAAttempts += 1;
+        if (peerAAttempts === 1) return firstProviderResult.promise;
+        return 'applied';
+      }
+      alternateProviderStarted.resolve();
+      return alternateProviderResult.promise;
+    }), { maxAttempts: 3, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerA');
+    receiver.schedule(announcement(), 'peerB');
+    firstProviderResult.resolve('not-found');
+    await alternateProviderStarted.promise;
+
+    // peerA has made the content available since its first fetch. The exact
+    // repeated hint must revive it without creating duplicate semantic work.
+    receiver.schedule(announcement(), 'peerA');
+    alternateProviderResult.resolve('not-found');
+    await receiver.whenIdle();
+
+    expect(peers).toEqual(['peerA', 'peerB', 'peerA']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 3,
+      dedupedInFlight: 2,
+      applied: 1,
+      notFound: 0,
+      failed: 0,
+    });
+  });
+
+  it('coalesces repeated refreshed hints into one bounded retry per provider observation', async () => {
+    const firstAResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const firstBResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const firstAStarted = deferred<void>();
+    const firstBStarted = deferred<void>();
+    const peers: string[] = [];
+    let peerAAttempts = 0;
+    let peerBAttempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        peerAAttempts += 1;
+        if (peerAAttempts === 1) {
+          firstAStarted.resolve();
+          return firstAResult.promise;
+        }
+        return 'not-found';
+      }
+      peerBAttempts += 1;
+      if (peerBAttempts === 1) {
+        firstBStarted.resolve();
+        return firstBResult.promise;
+      }
+      return 'not-found';
+    }), { maxAttempts: 32, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerA');
+    await firstAStarted.promise;
+    for (let index = 0; index < 50; index += 1) {
+      receiver.schedule(announcement(), 'peerA');
+    }
+    receiver.schedule(announcement(), 'peerB');
+    firstAResult.resolve('not-found');
+
+    await firstBStarted.promise;
+    for (let index = 0; index < 50; index += 1) {
+      receiver.schedule(announcement(), 'peerB');
+    }
+    firstBResult.resolve('not-found');
+    await receiver.whenIdle();
+
+    // Fifty duplicates for each peer collapse to the newest observation. With
+    // no later observation, both providers settle after exactly one refresh.
+    expect(peers).toEqual(['peerA', 'peerB', 'peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 102,
+      dedupedInFlight: 101,
+      applied: 0,
+      notFound: 1,
+      failed: 0,
+      inFlight: 0,
+      queued: 0,
+    });
+  });
+
+  it('fairly alternates two providers when each advertises a fresher in-flight observation', async () => {
+    const firstAResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const secondAResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const firstBResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const secondBResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const firstAStarted = deferred<void>();
+    const secondAStarted = deferred<void>();
+    const firstBStarted = deferred<void>();
+    const secondBStarted = deferred<void>();
+    const peers: string[] = [];
+    let peerAAttempts = 0;
+    let peerBAttempts = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        peerAAttempts += 1;
+        if (peerAAttempts === 1) {
+          firstAStarted.resolve();
+          return firstAResult.promise;
+        }
+        secondAStarted.resolve();
+        return secondAResult.promise;
+      }
+      peerBAttempts += 1;
+      if (peerBAttempts === 1) {
+        firstBStarted.resolve();
+        return firstBResult.promise;
+      }
+      secondBStarted.resolve();
+      return secondBResult.promise;
+    }), { maxAttempts: 2, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerA');
+    await firstAStarted.promise;
+    receiver.schedule(announcement(), 'peerB');
+    firstAResult.resolve('not-found');
+
+    await firstBStarted.promise;
+    receiver.schedule(announcement(), 'peerA');
+    firstBResult.resolve('not-found');
+
+    await secondAStarted.promise;
+    receiver.schedule(announcement(), 'peerB');
+    secondAResult.resolve('not-found');
+
+    await secondBStarted.promise;
+    secondBResult.resolve('applied');
+    await receiver.whenIdle();
+
+    expect(peers).toEqual(['peerA', 'peerB', 'peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 4,
+      dedupedInFlight: 3,
+      applied: 1,
+      notFound: 0,
+      failed: 0,
+    });
+  });
+
+  it('does not reset an exhausted provider budget when refreshed during an alternate fetch', async () => {
+    const firstAResult = deferred<void>();
+    const peerBResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const firstAStarted = deferred<void>();
+    const peerBStarted = deferred<void>();
+    const peers: string[] = [];
+    const onError = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (peerId) => {
+      peers.push(peerId);
+      if (peerId === 'peerA') {
+        firstAStarted.resolve();
+        await firstAResult.promise;
+        throw new Error('peerA exhausted');
+      }
+      peerBStarted.resolve();
+      return peerBResult.promise;
+    }), { maxAttempts: 1, retryBackoffMs: 0, onError });
+
+    receiver.schedule(announcement(), 'peerA');
+    await firstAStarted.promise;
+    receiver.schedule(announcement(), 'peerB');
+    firstAResult.resolve();
+
+    await peerBStarted.promise;
+    for (let index = 0; index < 50; index += 1) {
+      receiver.schedule(announcement(), 'peerA');
+    }
+    peerBResult.resolve('not-found');
+    await receiver.whenIdle();
+
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(receiver.stats()).toMatchObject({
+      scheduled: 52,
+      dedupedInFlight: 51,
+      applied: 0,
+      notFound: 0,
+      failed: 1,
+      inFlight: 0,
+      queued: 0,
+    });
+  });
+
+  it('close aborts an alternate fetch without starting a freshly revived provider', async () => {
+    const peerAResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const peerBResult = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const peerAStarted = deferred<void>();
+    const peerBStarted = deferred<void>();
+    const peers: string[] = [];
+    let peerBSignal: AbortSignal | undefined;
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
+      async (peerId, _head, signal) => {
+        peers.push(peerId);
+        if (peerId === 'peerA') {
+          peerAStarted.resolve();
+          return peerAResult.promise;
+        }
+        peerBSignal = signal;
+        peerBStarted.resolve();
+        return peerBResult.promise;
+      },
+    ), { maxAttempts: 3, retryBackoffMs: 0 });
+
+    receiver.schedule(announcement(), 'peerA');
+    await peerAStarted.promise;
+    receiver.schedule(announcement(), 'peerB');
+    peerAResult.resolve('not-found');
+
+    await peerBStarted.promise;
+    receiver.schedule(announcement(), 'peerA');
+    const closing = receiver.close();
+    expect(peerBSignal?.aborted).toBe(true);
+    peerBResult.resolve('not-found');
+    await closing;
+
+    expect(peers).toEqual(['peerA', 'peerB']);
+    expect(receiver.stats()).toMatchObject({ scheduled: 3, applied: 0, inFlight: 0, queued: 0 });
+  });
+
   it('round-robins transient failures with a bounded per-provider budget', async () => {
     const peers: string[] = [];
     const firstAttempt = deferred<void>();
