@@ -4,6 +4,7 @@ import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   CATALOG_HEAD_TIMELINESS_RECEIPT_OBJECT_TYPE_V1,
   MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
+  MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
   assertAuthorCatalogIssuerDelegationV1,
   assertCatalogHeadTimelinessReceiptV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
@@ -31,6 +32,7 @@ import type {
   SignedControlEnvelopeV1,
   UnsignedControlEnvelopeV1,
 } from '../src/sync-control-object.js';
+import { computeControlObjectDigestHex } from '../src/sync-control-object.js';
 
 const AUTHOR = '0x3333333333333333333333333333333333333333';
 const ISSUER = '0x5555555555555555555555555555555555555555';
@@ -177,6 +179,16 @@ describe('AuthorCatalogIssuerDelegationV1 codec', () => {
       DELEGATION,
     ))).toThrow(/catalog-authority-authority/);
 
+    const redigestedWrongIssuer = unsigned(
+      AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+      ISSUER,
+      DELEGATION,
+    );
+    expect(() => assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(signed(
+      redigestedWrongIssuer,
+      computeControlObjectDigestHex(redigestedWrongIssuer),
+    ))).toThrow(/catalog-authority-authority/);
+
     // Conversely, the author cannot attach spurious delegated-authority evidence.
     expect(() => assertUnsignedAuthorCatalogIssuerDelegationEnvelopeV1(unsigned(
       AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
@@ -220,6 +232,41 @@ describe('AuthorCatalogIssuerDelegationV1 codec', () => {
     expect(() => assertAuthorCatalogIssuerDelegationV1(hostile))
       .toThrow(/catalog-authority-schema/);
     expect(getterCalls).toBe(0);
+  });
+
+  it('freezes the depth/byte caps and accepts structurally legal zero digests', () => {
+    expect(MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1).toBe(1);
+    expect(() => assertAuthorCatalogIssuerDelegationV1({
+      ...DELEGATION,
+      ownershipTransitionDigest: `0x${'00'.repeat(32)}`,
+      authorAuthorityEvidenceDigest: `0x${'00'.repeat(32)}`,
+    })).not.toThrow();
+
+    const exactCapUnknownPayload = `{"x":"${'a'.repeat(
+      MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1 - 8,
+    )}"}`;
+    expect(new TextEncoder().encode(exactCapUnknownPayload)).toHaveLength(
+      MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
+    );
+    expect(() => parseCanonicalAuthorCatalogIssuerDelegationPayloadV1(exactCapUnknownPayload))
+      .toThrow(/catalog-authority-schema/);
+
+    const capPlusOne = `{"x":"${'a'.repeat(
+      MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1 - 7,
+    )}"}`;
+    expect(() => parseCanonicalAuthorCatalogIssuerDelegationPayloadV1(capPlusOne))
+      .toThrow(/payload-too-large/);
+    const multibyteOverCap = `{"x":"${'é'.repeat(
+      Math.ceil(MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1 / 2),
+    )}"}`;
+    expect(multibyteOverCap.length).toBeLessThan(MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1);
+    expect(() => parseCanonicalAuthorCatalogIssuerDelegationPayloadV1(multibyteOverCap))
+      .toThrow(/payload-too-large/);
+    expect(() => parseCanonicalAuthorCatalogIssuerDelegationPayloadV1(
+      new Uint8Array(MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1 + 1),
+    )).toThrow(/payload-too-large/);
+    expect(() => parseCanonicalAuthorCatalogIssuerDelegationPayloadV1('{"x":{"y":{}}}'))
+      .toThrow(/nesting/i);
   });
 
   it('rejects wrong object types and signed digest substitution', () => {
@@ -278,6 +325,43 @@ describe('CatalogHeadTimelinessReceiptV1 codec', () => {
     expect(() => assertCatalogHeadTimelinessReceiptV1({ ...RECEIPT, catalogHeadDigest: '0x00' }))
       .toThrow(/catalog-authority-scalar/);
     expect(() => assertCatalogHeadTimelinessReceiptV1({ ...RECEIPT, retryAfter: null }))
+      .toThrow(/catalog-authority-schema/);
+    expect(() => assertCatalogHeadTimelinessReceiptV1({
+      ...RECEIPT,
+      ownershipTransitionDigest: `0x${'00'.repeat(32)}`,
+      checkpointAuthorityDelegationDigest: `0x${'00'.repeat(32)}`,
+      catalogIssuerDelegationDigest: `0x${'00'.repeat(32)}`,
+      catalogHeadDigest: `0x${'00'.repeat(32)}`,
+    })).not.toThrow();
+  });
+
+  it('rejects stateful receipt payloads and whole envelopes before reading accessors', () => {
+    let payloadGetterCalls = 0;
+    const hostileReceipt = { ...RECEIPT } as Record<string, unknown>;
+    Object.defineProperty(hostileReceipt, 'observedAt', {
+      enumerable: true,
+      get() {
+        payloadGetterCalls += 1;
+        return RECEIPT.observedAt;
+      },
+    });
+    expect(() => assertCatalogHeadTimelinessReceiptV1(hostileReceipt))
+      .toThrow(/catalog-authority-schema/);
+    expect(payloadGetterCalls).toBe(0);
+
+    let envelopeGetterCalls = 0;
+    const hostileEnvelope = { ...RECEIPT_UNSIGNED } as Record<string, unknown>;
+    Object.defineProperty(hostileEnvelope, 'issuer', {
+      enumerable: true,
+      get() {
+        envelopeGetterCalls += 1;
+        return CHECKPOINT;
+      },
+    });
+    expect(() => assertUnsignedCatalogHeadTimelinessReceiptEnvelopeV1(hostileEnvelope))
+      .toThrow();
+    expect(envelopeGetterCalls).toBe(0);
+    expect(() => assertCatalogHeadTimelinessReceiptV1(new Proxy({ ...RECEIPT }, {})))
       .toThrow(/catalog-authority-schema/);
   });
 

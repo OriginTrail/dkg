@@ -42,6 +42,7 @@ export const AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1 =
 export const CATALOG_HEAD_TIMELINESS_RECEIPT_OBJECT_TYPE_V1 =
   'CatalogHeadTimelinessReceiptV1' as const;
 export const MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1 = 16 * 1024;
+export const MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1 = 1;
 
 const UTF8 = new TextEncoder();
 
@@ -160,7 +161,10 @@ export function parseCanonicalAuthorCatalogIssuerDelegationPayloadV1(
       options.maxBytes ?? MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
       MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
     ),
-    maxDepth: Math.min(options.maxDepth ?? 1, 1),
+    maxDepth: Math.min(
+      options.maxDepth ?? MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
+      MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
+    ),
   })).snapshot;
 }
 
@@ -175,7 +179,10 @@ export function parseCanonicalCatalogHeadTimelinessReceiptPayloadV1(
       options.maxBytes ?? MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
       MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
     ),
-    maxDepth: Math.min(options.maxDepth ?? 1, 1),
+    maxDepth: Math.min(
+      options.maxDepth ?? MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
+      MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
+    ),
   })).snapshot;
 }
 
@@ -487,7 +494,7 @@ function canonicalizeBounded(
   try {
     return canonicalizeJson(value as unknown as CanonicalJsonValue, {
       maxBytes: MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_BYTES_V1,
-      maxDepth: 1,
+      maxDepth: MAX_AUTHOR_CATALOG_AUTHORITY_PAYLOAD_DEPTH_V1,
     });
   } catch (cause) {
     fail('catalog-authority-payload-too-large', `${label} exceeds its canonical cap`, cause);
