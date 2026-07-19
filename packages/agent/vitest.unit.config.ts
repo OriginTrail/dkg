@@ -103,6 +103,8 @@ export default defineConfig({
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
+      "test/rfc64-inventory-v1-scalars.test.ts",
+      "test/rfc64-inventory-v1-lifecycle.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
