@@ -35,6 +35,10 @@ type PackageRootStoreType = packageRoot.Rfc64ControlObjectStoreV1;
 
 // @ts-expect-error The package exports map blocks emitted internal subpaths.
 type PublishedInternalControlStoreModule = typeof import('@origintrail-official/dkg-agent/dist/rfc64/control-object-store-v1-internal.js');
+// @ts-expect-error The package exports map blocks the complete emitted RFC-64 implementation tree.
+type PublishedDurableFileStoreModule = typeof import('@origintrail-official/dkg-agent/dist/rfc64/durable-file-store-v1.js');
+// @ts-expect-error The package exports map blocks the complete emitted RFC-64 implementation tree.
+type PublishedSecureFilesystemPolicyModule = typeof import('@origintrail-official/dkg-agent/dist/rfc64/secure-filesystem-policy-v1.js');
 
 void packageRootHasRawControlStoreOpener;
 void packageRootHasControlStoreLayout;
@@ -44,3 +48,5 @@ void publishedPackageRootHasDkgAgent;
 void legacySubpathHasDkgAgent;
 void (undefined as PackageRootStoreType | undefined);
 void (undefined as PublishedInternalControlStoreModule | undefined);
+void (undefined as PublishedDurableFileStoreModule | undefined);
+void (undefined as PublishedSecureFilesystemPolicyModule | undefined);

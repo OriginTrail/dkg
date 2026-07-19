@@ -110,11 +110,12 @@ export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
   target: string,
   containmentRoot: string,
   lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  containmentRootAccess: Rfc64ExistingAccessV1 = 'owner',
 ): Promise<void> {
   await walkRfc64ContainedDirectoryTreeV1(
     target,
     containmentRoot,
-    'owner',
+    containmentRootAccess,
     async (current) => {
       let created = false;
       try {
@@ -162,6 +163,7 @@ async function putRfc64ExactBytesV1<TKind extends string>(
     dirname(targetPath),
     containmentRoot,
     lifecycle,
+    'owner-only',
   );
   const resolvedInput = { ...input, targetPath };
   if (await reconcileRfc64ExistingImmutableV1(resolvedInput)) return;

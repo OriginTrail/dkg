@@ -858,6 +858,24 @@ describe('RFC-64 durable control-object store v1', () => {
     },
   );
 
+  it('rejects a permissive control-store root before publishing a new immutable key', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const fixture = await signedFixture('permissive-root-after-open');
+    const paths = pathsFor(dataDir, fixture.envelope);
+    if (process.platform === 'win32') {
+      grantWindowsEveryoneRead(paths.root, 'directory');
+    } else {
+      await chmod(paths.root, 0o777);
+    }
+
+    await expect(store.stageVerifiedObjects([fixture]))
+      .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+    await expect(stat(paths.object)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(paths.signature)).rejects.toMatchObject({ code: 'ENOENT' });
+    await store.close();
+  });
+
   it.runIf(process.platform === 'win32')(
     'rejects permissive existing Windows file and directory ACLs',
     async () => {

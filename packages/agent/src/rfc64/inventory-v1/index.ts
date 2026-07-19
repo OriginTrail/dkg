@@ -2,6 +2,7 @@
 // receive only the foundation API from openInventoryV1 and cannot supply an
 // unverified low-level reopen callback.
 export {
+  createRfc64InventoryOperationsViewV1,
   InventoryV1CandidateError,
   type CandidateCatalogPrecommitResultV1,
   type CandidateBucketDiffTraversalV1,
