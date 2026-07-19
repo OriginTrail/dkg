@@ -500,6 +500,49 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
       );
     }
   });
+
+  it('reads each caller-controlled limit exactly once (stateful-getter safe)', () => {
+    const fixture = publicFixture();
+    const hard = DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1;
+    const reads = { maxProjectionBytes: 0, maxPublicTriples: 0, maxLineBytes: 0 };
+    const limits: CgSharedProjectionVerificationLimitsV1 = {
+      get maxProjectionBytes() {
+        reads.maxProjectionBytes += 1;
+        return hard.maxProjectionBytes;
+      },
+      get maxPublicTriples() {
+        reads.maxPublicTriples += 1;
+        return hard.maxPublicTriples;
+      },
+      get maxLineBytes() {
+        reads.maxLineBytes += 1;
+        return hard.maxLineBytes;
+      },
+    };
+    const verified = verifyProjection(fixture, limits);
+    // A stateful getter must be consulted exactly once per property so a later
+    // read cannot diverge from the validated value.
+    expect(reads).toEqual({ maxProjectionBytes: 1, maxPublicTriples: 1, maxLineBytes: 1 });
+    expect(readProjection(verified, fixture).verificationLimits).toEqual(hard);
+  });
+
+  it('cannot be tricked by a getter that turns oversized after validation', () => {
+    const fixture = publicFixture();
+    const safeBelowProjection = UTF8.encode(PUBLIC).byteLength - 1;
+    let projectionByteReads = 0;
+    // First read returns a safe value that passes validation; every later read
+    // returns an oversized value. A second read leaking into the effective
+    // ceiling would accept this over-limit projection instead of refusing it.
+    const limits: CgSharedProjectionVerificationLimitsV1 = {
+      get maxProjectionBytes() {
+        projectionByteReads += 1;
+        return projectionByteReads === 1 ? safeBelowProjection : Number.MAX_SAFE_INTEGER;
+      },
+      maxPublicTriples: 2,
+      maxLineBytes: safeBelowProjection,
+    };
+    expectFailure(() => verifyProjection(fixture, limits), 'projection-resource-refused');
+  });
 });
 
 interface Fixture {
