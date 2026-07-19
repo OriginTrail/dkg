@@ -17,6 +17,8 @@
 
 import {
   assertCanonicalDigest,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
   canonicalizeContextGraphPolicyPayloadV1,
   canonicalizeMemberRosterPayloadV1,
   parseCanonicalContextGraphPolicyPayloadV1,
@@ -171,22 +173,33 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly authorize = async (
     input: Rfc64CatalogAccessAuthorizationInputV1,
   ): Promise<Rfc64CatalogAccessAuthorizationV1 | null> => {
-    const held = this.#byKey.get(policyKey(input.networkId, input.contextGraphId));
-    if (held === undefined || held.policyDigest !== input.policyDigest) return null;
+    let boundary: Readonly<Rfc64CatalogAccessAuthorizationInputV1>;
+    try {
+      boundary = snapshotAuthorizationInput(input);
+    } catch {
+      return null;
+    }
+
+    const key = policyKey(boundary.networkId, boundary.contextGraphId);
+    const held = this.#byKey.get(key);
+    if (held === undefined || held.policyDigest !== boundary.policyDigest) return null;
     const descriptor = classifyRfc64PolicyCellV1(held.policy);
     if (descriptor.catalogDisclosure === 'open-authenticated') {
       return authorization(held);
     }
     if (held.members === null) return null;
 
-    const remotePeerId = snapshotPeerId(input.remotePeerId);
-    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(remotePeerId);
+    const remoteAgentAddress = await this.#resolveRemoteMemberAddress(boundary.remotePeerId);
     if (remoteAgentAddress === null) return null;
+    // A future verified transition path may replace the held snapshot while the
+    // authenticated peer binding is being resolved. Never authorize against a
+    // snapshot that stopped being current during that await.
+    if (this.#byKey.get(key) !== held) return null;
     const localMember = held.members.get(this.#localAgentAddress);
     const remoteMember = held.members.get(remoteAgentAddress);
     if (localMember === undefined || remoteMember === undefined) return null;
 
-    const servingMember = servingSide(input.operation) === 'local'
+    const servingMember = servingSide(boundary.operation) === 'local'
       ? localMember
       : remoteMember;
     if (!servingMember.roles.includes('provider')) return null;
@@ -200,16 +213,20 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     readonly policyDigest: Digest32V1;
     readonly authorAddress: EvmAddressV1;
   }): boolean {
-    const held = this.#byKey.get(policyKey(input.networkId, input.contextGraphId));
-    if (held === undefined || held.policyDigest !== input.policyDigest) return false;
-    let authorAddress: EvmAddressV1;
     try {
-      authorAddress = snapshotAgentAddress(input.authorAddress, 'authorAddress');
+      const networkId = input.networkId;
+      const contextGraphId = input.contextGraphId;
+      const policyDigest = snapshotDigest(input.policyDigest, 'policyDigest');
+      const authorAddress = snapshotAgentAddress(input.authorAddress, 'authorAddress');
+      assertNetworkIdV1(networkId);
+      assertContextGraphIdV1(contextGraphId);
+      const held = this.#byKey.get(policyKey(networkId, contextGraphId));
+      if (held === undefined || held.policyDigest !== policyDigest) return false;
+      return held.policy.accessPolicy === 0
+        || held.members?.has(authorAddress) === true;
     } catch {
       return false;
     }
-    return held.policy.accessPolicy === 0
-      || held.members?.has(authorAddress) === true;
   }
 
   async #resolveRemoteMemberAddress(remotePeerId: string): Promise<EvmAddressV1 | null> {
@@ -245,6 +262,44 @@ function servingSide(operation: Rfc64CatalogAccessOperationV1): 'local' | 'remot
     case 'catalog-object-fetch-outbound':
     case 'ka-bundle-fetch-outbound':
       return 'remote';
+  }
+}
+
+function snapshotAuthorizationInput(
+  input: Rfc64CatalogAccessAuthorizationInputV1,
+): Readonly<Rfc64CatalogAccessAuthorizationInputV1> {
+  if (input === null || typeof input !== 'object') {
+    throw new TypeError('catalog access authorization input must be an object');
+  }
+  const operation = snapshotOperation(input.operation);
+  const remotePeerId = snapshotPeerId(input.remotePeerId);
+  const networkId = input.networkId;
+  const contextGraphId = input.contextGraphId;
+  assertNetworkIdV1(networkId);
+  assertContextGraphIdV1(contextGraphId);
+  const policyDigest = snapshotDigest(input.policyDigest, 'policyDigest');
+  return Object.freeze({
+    operation,
+    remotePeerId,
+    networkId,
+    contextGraphId,
+    policyDigest,
+  });
+}
+
+function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
+  switch (input) {
+    case 'announce-outbound':
+    case 'announce-inbound':
+    case 'fetch-outbound':
+    case 'fetch-inbound':
+    case 'catalog-object-fetch-outbound':
+    case 'catalog-object-fetch-inbound':
+    case 'ka-bundle-fetch-outbound':
+    case 'ka-bundle-fetch-inbound':
+      return input;
+    default:
+      throw new TypeError('operation must be a supported RFC-64 catalog access operation');
   }
 }
 

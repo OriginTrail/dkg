@@ -229,6 +229,54 @@ describe('RFC-64 D26 catalog access authorization', () => {
       .resolves.toBeNull();
   });
 
+  it('fails closed for malformed runtime operations and peer identifiers', async () => {
+    for (const accessPolicy of [0, 1] as const) {
+      const acceptedPolicy = policy(accessPolicy, 1);
+      const policyDigest = digestFor(acceptedPolicy);
+      const subject = registry();
+      subject.accept({
+        policy: acceptedPolicy,
+        policyDigest,
+        roster: accessPolicy === 1 ? roster(policyDigest) : null,
+      });
+
+      await expect(subject.authorize({
+        ...authInput('fetch-inbound', policyDigest),
+        operation: 'not-a-catalog-operation',
+      } as never)).resolves.toBeNull();
+      await expect(subject.authorize({
+        ...authInput('fetch-inbound', policyDigest),
+        remotePeerId: '',
+      })).resolves.toBeNull();
+      await expect(subject.authorize(null as never)).resolves.toBeNull();
+      expect(subject.isSwmAuthorAuthorized(null as never)).toBe(false);
+    }
+  });
+
+  it('snapshots the operation before awaiting peer-to-agent resolution', async () => {
+    let finishResolution: ((address: EvmAddressV1) => void) | undefined;
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      localAgentAddress: LOCAL,
+      resolveRemoteAgentAddress: async () => new Promise<EvmAddressV1>((resolve) => {
+        finishResolution = resolve;
+      }),
+    });
+    subject.accept({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: roster(policyDigest, { remoteProvider: false }),
+    });
+
+    const input = { ...authInput('fetch-outbound', policyDigest) };
+    const authorization = subject.authorize(input);
+    input.operation = 'fetch-inbound';
+    expect(finishResolution).toBeTypeOf('function');
+    finishResolution!(REMOTE);
+    await expect(authorization).resolves.toBeNull();
+  });
+
   it('binds the conditional roster exactly and snapshots mutable caller input', async () => {
     const acceptedPolicy = policy(1, 1);
     const policyDigest = digestFor(acceptedPolicy);
