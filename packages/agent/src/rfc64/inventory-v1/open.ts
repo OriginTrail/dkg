@@ -45,11 +45,13 @@ import {
   type CandidateBucketLoadKeyV1,
   type CandidateBucketPageV1,
   type CandidateBucketPutResultV1,
+  type CandidateBucketRowSnapshotV1,
   type CandidateBucketRowsTraversalV1,
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type Rfc64InventoryV1CandidateApi,
   type VerifiedCandidateBucketLoadV1,
+  type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
 import type { KaIdV1 } from '@origintrail-official/dkg-core';
 import {
@@ -378,6 +380,13 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): CandidateBucketPageV1 {
     this.requireOpen();
     return this.#candidate.pageCandidateBucketRemoved(traversal, cursor, limit);
+  }
+
+  readVerifiedCandidateCatalogRow(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+  ): CandidateBucketRowSnapshotV1 {
+    this.requireOpen();
+    return this.#candidate.readVerifiedCandidateCatalogRow(verifiedRow);
   }
 
   closeCandidateTraversal(
