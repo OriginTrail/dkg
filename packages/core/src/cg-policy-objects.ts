@@ -51,6 +51,11 @@ export const MEMBER_ROSTER_ROLES_V1 = Object.freeze([
 
 export type ContextGraphAccessPolicyV1 = 0 | 1;
 export type ContextGraphPublishPolicyV1 = 0 | 1;
+
+// Numeric publish-policy wire states: 0 = curated, 1 = open. Named here so the
+// cross-field validator does not branch on a bare `=== 1`. The JSON wire value
+// stays the raw number.
+const CONTEXT_GRAPH_PUBLISH_POLICY_OPEN_V1 = 1;
 export type MemberRosterRoleV1 = (typeof MEMBER_ROSTER_ROLES_V1)[number];
 
 export interface FinalizedChainPolicySourceV1 {
@@ -420,7 +425,7 @@ function assertContextGraphPolicyStructureV1(
     value.publishAuthorityAccountId,
     'publishAuthorityAccountId',
   ));
-  if (value.publishPolicy === 1) {
+  if (value.publishPolicy === CONTEXT_GRAPH_PUBLISH_POLICY_OPEN_V1) {
     if (value.publishAuthority !== null || value.publishAuthorityAccountId !== '0') {
       fail(
         'cg-policy-publish-domain',
@@ -428,6 +433,7 @@ function assertContextGraphPolicyStructureV1(
       );
     }
   } else if (value.publishAuthority === null) {
+    // else: publishPolicy is 0 (curated) — a curated CG requires a publish authority.
     fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
   }
   if (value.projectionId !== CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1) {
