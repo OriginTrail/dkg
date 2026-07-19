@@ -16,6 +16,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 const EVENT_PREFIX = 'RFC64_GATE0_EVENT ';
+const GRACEFUL_STOP_COMMAND = 'RFC64_GATE0_GRACEFUL_STOP_V1';
 const FIXTURE_WALLET = new ethers.Wallet(`0x${'52'.repeat(32)}`);
 
 interface CandidateSessionV1 {}
@@ -53,6 +54,15 @@ interface HarnessAgentInternals {
 
 function emit(event: Record<string, unknown>): void {
   process.stdout.write(`${EVENT_PREFIX}${JSON.stringify(event)}\n`);
+}
+
+async function emitAndFlush(event: Record<string, unknown>): Promise<void> {
+  await new Promise<void>((resolveWrite, rejectWrite) => {
+    process.stdout.write(
+      `${EVENT_PREFIX}${JSON.stringify(event)}\n`,
+      (error) => error === null || error === undefined ? resolveWrite() : rejectWrite(error),
+    );
+  });
 }
 
 async function fixture(): Promise<{
@@ -108,12 +118,20 @@ const agent = await DKGAgent.create({
 });
 
 let stopping = false;
+let ownedPersistence: HarnessPersistenceV1 | null = null;
 async function stop(exitCode: number): Promise<never> {
   if (stopping) return await new Promise<never>(() => undefined);
   stopping = true;
   try {
     await agent.stop();
-    emit({ event: 'stopped', graceful: true });
+    if (ownedPersistence?.closed !== true) {
+      throw new Error('DKGAgent.stop() returned without closing RFC-64 persistence');
+    }
+    await emitAndFlush({
+      event: 'stopped',
+      graceful: true,
+      persistenceClosed: true,
+    });
     process.exit(exitCode);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
@@ -121,8 +139,21 @@ async function stop(exitCode: number): Promise<never> {
   }
 }
 
-process.once('SIGTERM', () => { void stop(0); });
-process.once('SIGINT', () => { void stop(130); });
+let commandBuffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk: string) => {
+  commandBuffer += chunk;
+  const commands = commandBuffer.split('\n');
+  commandBuffer = commands.pop() ?? '';
+  for (const command of commands) {
+    if (command !== GRACEFUL_STOP_COMMAND) {
+      process.stderr.write(`Unexpected Gate 0 lifecycle command: ${JSON.stringify(command)}\n`);
+      void stop(1);
+      continue;
+    }
+    void stop(0);
+  }
+});
 
 try {
   await agent.start();
@@ -131,6 +162,7 @@ try {
   if (!internals.started || persistence === undefined || persistence.closed) {
     throw new Error('production DKGAgent did not own an open RFC-64 persistence boundary');
   }
+  ownedPersistence = persistence;
 
   // A production inventory operation through the DKGAgent-owned, non-lifecycle
   // view. The opaque empty session is process-local and intentionally needs no

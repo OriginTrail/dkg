@@ -9,6 +9,7 @@ on:
       - 'devnet/_bootstrap/rfc64-evidence*'
       - 'devnet/_bootstrap/tsconfig.evidence.json'
       - 'devnet/_bootstrap/vitest.evidence.config.ts'
+      - 'devnet/rfc64-persistence-lifecycle/**'
       - 'package.json'
       - 'packages/agent/src/rfc64/inventory-v1/**'
       - 'packages/agent/src/rfc64/author-catalog-producer.ts'
@@ -76,6 +77,10 @@ jobs:
 
       - name: Test RFC-64 evidence harness
         run: pnpm test:devnet:rfc64-evidence
+
+      - name: Run Gate 0 production persistence lifecycle
+        timeout-minutes: 10
+        run: pnpm test:gate0:rfc64-persistence-lifecycle
 
       - name: Build agent dependency closure
         run: pnpm --filter @origintrail-official/dkg-agent... run build

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { stableJson } from './evidence.js';
 
-export const GATE0_RAW_SCHEMA_VERSION = 'dkg-rfc64-gate0-persistence-evidence-v3';
+export const GATE0_RAW_SCHEMA_VERSION = 'dkg-rfc64-gate0-persistence-evidence-v4';
 export const GATE0_VERDICT_SCHEMA_VERSION = 'dkg-rfc64-gate0-persistence-verdict-v1';
 
 const SHA256_PATTERN = /^0x[0-9a-f]{64}$/u;
@@ -124,7 +124,7 @@ function verifyClosedArtifact(
   );
   exact(
     runtime.controlChannel,
-    'stdio and POSIX process signals only',
+    'stdio graceful-stop command and forced process termination only',
     '$.runtimeBoundary.controlChannel',
   );
   exact(
@@ -237,6 +237,7 @@ function verifyClosedArtifact(
     'inventoryOperational',
     'persistenceClosed',
     'priorExit',
+    'priorStop',
     'snapshot',
     'staged',
     'verifiedRead',
@@ -257,6 +258,7 @@ function verifyClosedArtifact(
   );
   verifyLeaseBusy(graceful.contender, '$.phases.gracefulRestart.contender');
   verifyExit(graceful.priorExit, '$.phases.gracefulRestart.priorExit', 0, null);
+  verifyGracefulStop(graceful.priorStop, '$.phases.gracefulRestart.priorStop');
   const gracefulSnapshot = verifySnapshot(
     graceful.snapshot,
     '$.phases.gracefulRestart.snapshot',
@@ -273,6 +275,7 @@ function verifyClosedArtifact(
       'contender',
       'exactContentFilesEqual',
       'finalGracefulExit',
+      'finalGracefulStop',
       'inventoryOperational',
       'persistenceClosed',
       'snapshot',
@@ -314,6 +317,10 @@ function verifyClosedArtifact(
     '$.phases.operatingSystemLeaseRecovery.finalGracefulExit',
     0,
     null,
+  );
+  verifyGracefulStop(
+    recovery.finalGracefulStop,
+    '$.phases.operatingSystemLeaseRecovery.finalGracefulStop',
   );
   const recoverySnapshot = verifySnapshot(
     recovery.snapshot,
@@ -386,6 +393,7 @@ function verifyChecks(value: unknown, platform: NodeJS.Platform): void {
     'exactObjectCount',
     'exactSignatureCount',
     'gracefulRestartSucceeded',
+    'gracefulStopsClosedPersistence',
     'inventoryOperationalWhileRunning',
     'operatingSystemLeaseRecoveredAfterSigkill',
     'ownerOnlyFileModes',
@@ -397,6 +405,7 @@ function verifyChecks(value: unknown, platform: NodeJS.Platform): void {
     'competingLeaseRejectedWhileRunning',
     'durableControlObjectBytesPreserved',
     'gracefulRestartSucceeded',
+    'gracefulStopsClosedPersistence',
     'inventoryOperationalWhileRunning',
     'operatingSystemLeaseRecoveredAfterSigkill',
     'productionAgentStarted',
@@ -547,6 +556,13 @@ function verifyExit(
   const exit = closedRecord(value, path, ['code', 'signal']);
   exact(exit.code, expectedCode, `${path}.code`);
   exact(exit.signal, expectedSignal, `${path}.signal`);
+}
+
+function verifyGracefulStop(value: unknown, path: string): void {
+  const stop = closedRecord(value, path, ['event', 'graceful', 'persistenceClosed']);
+  exact(stop.event, 'stopped', `${path}.event`);
+  exact(stop.graceful, true, `${path}.graceful`);
+  exact(stop.persistenceClosed, true, `${path}.persistenceClosed`);
 }
 
 function closedRecord(

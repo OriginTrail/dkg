@@ -18,6 +18,7 @@ import {
 } from './evidence.js';
 
 const EVENT_PREFIX = 'RFC64_GATE0_EVENT ';
+const GRACEFUL_STOP_COMMAND = 'RFC64_GATE0_GRACEFUL_STOP_V1';
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const AGENT_PROCESS = join(import.meta.dirname, 'agent-process.ts');
 const LEASE_PROBE = join(import.meta.dirname, 'lease-probe.ts');
@@ -35,8 +36,25 @@ interface ProcessEvent {
 interface AgentHandle {
   readonly child: ChildProcessWithoutNullStreams;
   readonly ready: ProcessEvent;
+  readonly events: () => readonly ProcessEvent[];
   readonly stdout: () => string;
   readonly stderr: () => string;
+}
+
+interface ProcessExitEvidence {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
+interface GracefulStopEvidence {
+  readonly event: 'stopped';
+  readonly graceful: true;
+  readonly persistenceClosed: true;
+}
+
+interface GracefulStopResult {
+  readonly exit: ProcessExitEvidence;
+  readonly stop: GracefulStopEvidence;
 }
 
 interface ContentFileEvidence {
@@ -85,6 +103,7 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
     let stdout = '';
     let stderr = '';
     let lineBuffer = '';
+    const events: ProcessEvent[] = [];
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) return;
@@ -103,10 +122,17 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
       for (const line of lines) {
         let event: ProcessEvent | null = null;
         try { event = parseEvent(line); } catch { /* parent reports complete output on timeout/exit */ }
+        if (event !== null) events.push(event);
         if (event?.event !== 'ready' || settled) continue;
         settled = true;
         clearTimeout(timeout);
-        resolveReady({ child, ready: event, stdout: () => stdout, stderr: () => stderr });
+        resolveReady({
+          child,
+          ready: event,
+          events: () => events,
+          stdout: () => stdout,
+          stderr: () => stderr,
+        });
       }
     });
     child.stderr.on('data', (chunk: string) => { stderr += chunk; });
@@ -127,26 +153,62 @@ function spawnAgent(dataDir: string, stage: boolean): Promise<AgentHandle> {
   });
 }
 
-async function stopAgent(
+function waitForAgentClose(
   handle: AgentHandle,
-  signal: 'SIGTERM' | 'SIGKILL',
-): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }> {
-  const exit = new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>(
+  action: string,
+): Promise<ProcessExitEvidence> {
+  return new Promise<ProcessExitEvidence>(
     (resolveExit, rejectExit) => {
       const timeout = setTimeout(() => {
         handle.child.kill('SIGKILL');
         rejectExit(new Error(
-          `agent did not exit after ${signal}\nstdout:\n${handle.stdout()}\nstderr:\n${handle.stderr()}`,
+          `agent did not exit after ${action}\nstdout:\n${handle.stdout()}\nstderr:\n${handle.stderr()}`,
         ));
       }, PROCESS_TIMEOUT_MS);
-      handle.child.once('exit', (code, exitSignal) => {
+      handle.child.once('close', (code, exitSignal) => {
         clearTimeout(timeout);
         resolveExit({ code, signal: exitSignal });
       });
     },
   );
-  handle.child.kill(signal);
-  return await exit;
+}
+
+async function stopAgentGracefully(handle: AgentHandle): Promise<GracefulStopResult> {
+  const close = waitForAgentClose(handle, 'the graceful stdin command');
+  const write = new Promise<void>((resolveWrite, rejectWrite) => {
+    const onError = (error: Error): void => rejectWrite(error);
+    handle.child.stdin.once('error', onError);
+    handle.child.stdin.end(`${GRACEFUL_STOP_COMMAND}\n`, () => {
+      handle.child.stdin.off('error', onError);
+      resolveWrite();
+    });
+  });
+  const [, exit] = await Promise.all([write, close]);
+  assert(exit.code === 0 && exit.signal === null, 'graceful stop did not exit cleanly');
+  const stoppedEvents = handle.events().filter((event) => event.event === 'stopped');
+  assert(stoppedEvents.length === 1, `expected one graceful stop event, got ${stoppedEvents.length}`);
+  const expected = {
+    event: 'stopped',
+    graceful: true,
+    persistenceClosed: true,
+  } satisfies GracefulStopEvidence;
+  assert(
+    stableJson(stoppedEvents[0]) === stableJson(expected),
+    `graceful stop event was not exact: ${JSON.stringify(stoppedEvents[0])}`,
+  );
+  return { exit, stop: expected };
+}
+
+async function stopAgentForcibly(handle: AgentHandle): Promise<ProcessExitEvidence> {
+  const close = waitForAgentClose(handle, 'SIGKILL');
+  handle.child.kill('SIGKILL');
+  const exit = await close;
+  assert(exit.code === null && exit.signal === 'SIGKILL', 'unclean stop was not SIGKILL');
+  assert(
+    handle.events().every((event) => event.event !== 'stopped'),
+    'SIGKILL process emitted unexpected graceful stop evidence',
+  );
+  return exit;
 }
 
 async function probeLease(dataDir: string): Promise<ProcessEvent> {
@@ -182,7 +244,7 @@ async function probeLease(dataDir: string): Promise<ProcessEvent> {
     throw new Error(`lease probe failed: ${JSON.stringify(exit)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
   const event = stdout.split('\n').map(parseEvent).find((value) => value?.event === 'lease-probe');
-  if (event === undefined) {
+  if (event === undefined || event === null) {
     throw new Error(`lease probe emitted no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
   return event;
@@ -301,8 +363,7 @@ try {
   assertLeaseBusy(initialProbe);
   const initialSnapshot = snapshotContent(dataDir);
   assertExactSnapshot(initialSnapshot);
-  const initialExit = await stopAgent(initial, 'SIGTERM');
-  assert(initialExit.code === 0 && initialExit.signal === null, 'graceful stop did not exit cleanly');
+  const initialStop = await stopAgentGracefully(initial);
 
   log('phase 2/3: restart, re-read exact bytes, then simulate unclean process death');
   const gracefulRestart = await spawnAgent(dataDir, false);
@@ -317,8 +378,7 @@ try {
     stableJson(gracefulSnapshot.files) === stableJson(initialSnapshot.files),
     'durable control-object bytes changed across graceful restart',
   );
-  const crashExit = await stopAgent(gracefulRestart, 'SIGKILL');
-  assert(crashExit.code === null && crashExit.signal === 'SIGKILL', 'unclean stop was not SIGKILL');
+  const crashExit = await stopAgentForcibly(gracefulRestart);
 
   log('phase 3/3: recover OS lease, re-read and re-verify exact durable bytes');
   const recovered = await spawnAgent(dataDir, false);
@@ -333,8 +393,7 @@ try {
     stableJson(recoveredSnapshot.files) === stableJson(initialSnapshot.files),
     'durable control-object bytes changed after OS-lease recovery',
   );
-  const recoveredExit = await stopAgent(recovered, 'SIGTERM');
-  assert(recoveredExit.code === 0 && recoveredExit.signal === null, 'recovered agent did not stop cleanly');
+  const recoveredStop = await stopAgentGracefully(recovered);
 
   const finalRepositoryHead = readCleanRepositoryHead(REPO_ROOT);
   assert(
@@ -342,7 +401,7 @@ try {
     `repository HEAD changed during harness execution: ${testedRepositoryHead} -> ${finalRepositoryHead}`,
   );
   const artifact = {
-    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v3',
+    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v4',
     gate: 'OT-RFC-64 Gate 0',
     productionBaselineCommit: testedRepositoryHead,
     invocation: 'pnpm test:gate0:rfc64-persistence-lifecycle',
@@ -368,7 +427,7 @@ try {
     runtimeBoundary: {
       agentClass: 'DKGAgent',
       processModel: 'three independent production agent processes',
-      controlChannel: 'stdio and POSIX process signals only',
+      controlChannel: 'stdio graceful-stop command and forced process termination only',
       publicDebugEndpointAdded: false,
     },
     fixture: {
@@ -393,7 +452,8 @@ try {
         inventoryOperational: gracefulRestart.ready.inventoryOperational,
         persistenceClosed: gracefulRestart.ready.persistenceClosed,
         staged: gracefulRestart.ready.staged,
-        priorExit: initialExit,
+        priorExit: initialStop.exit,
+        priorStop: initialStop.stop,
         verifiedRead: gracefulRestart.ready.verifiedRead,
         contender: gracefulProbe,
         exactContentFilesEqual: true,
@@ -408,7 +468,8 @@ try {
         verifiedRead: recovered.ready.verifiedRead,
         contender: recoveredProbe,
         exactContentFilesEqual: true,
-        finalGracefulExit: recoveredExit,
+        finalGracefulExit: recoveredStop.exit,
+        finalGracefulStop: recoveredStop.stop,
         snapshot: recoveredSnapshot,
       },
     },
@@ -417,6 +478,7 @@ try {
       inventoryOperationalWhileRunning: true,
       competingLeaseRejectedWhileRunning: true,
       gracefulRestartSucceeded: true,
+      gracefulStopsClosedPersistence: true,
       operatingSystemLeaseRecoveredAfterSigkill: true,
       durableControlObjectBytesPreserved: true,
       storedEnvelopeSignatureReverifiedOnEveryStart: true,

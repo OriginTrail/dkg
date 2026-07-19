@@ -27,6 +27,20 @@ test('verifier accepts the exact closed POSIX and Windows evidence schemas', () 
   }
 });
 
+test('Windows evidence requires the cross-platform stop boundary and closed stop events', () => {
+  const valid = validArtifact('win32');
+  const verified = verifyGate0ArtifactBytes(
+    Buffer.from(stableJson(valid)),
+    HEAD,
+    'win32',
+  );
+  assert.equal(verified.sourceCommit, HEAD);
+
+  const oldSignalBoundary = validArtifact('win32');
+  oldSignalBoundary.runtimeBoundary.controlChannel = 'stdio and POSIX process signals only';
+  assertRejected(oldSignalBoundary, 'win32', 'Windows POSIX signal boundary');
+});
+
 test('every required field, leaf value, object closure, and array bound fails closed', () => {
   for (const platform of ['linux', 'win32'] as const) {
     const valid = validArtifact(platform);
@@ -122,6 +136,31 @@ test('verifier rejects a different but internally self-consistent fixture', () =
   assertRejected(mutation, 'linux', 'self-consistent alternate fixture');
 });
 
+test('verifier rejects missing, false, or extended graceful-stop evidence', () => {
+  const stopPaths: readonly JsonPath[] = [
+    ['phases', 'gracefulRestart', 'priorStop'],
+    ['phases', 'operatingSystemLeaseRecovery', 'finalGracefulStop'],
+  ];
+  for (const platform of ['linux', 'win32'] as const) {
+    for (const path of stopPaths) {
+      const missing = validArtifact(platform);
+      const missingParent = valueAt(missing, path.slice(0, -1)) as Record<string, unknown>;
+      delete missingParent[path.at(-1) as string];
+      assertRejected(missing, platform, `missing ${formatPath(path)}`);
+
+      const falseClosed = validArtifact(platform);
+      const falseStop = valueAt(falseClosed, path) as Record<string, unknown>;
+      falseStop.persistenceClosed = false;
+      assertRejected(falseClosed, platform, `false ${formatPath(path)}.persistenceClosed`);
+
+      const extended = validArtifact(platform);
+      const extendedStop = valueAt(extended, path) as Record<string, unknown>;
+      extendedStop.unexpected = true;
+      assertRejected(extended, platform, `extended ${formatPath(path)}`);
+    }
+  }
+});
+
 function assertRejected(
   artifact: ReturnType<typeof validArtifact>,
   platform: NodeJS.Platform,
@@ -129,7 +168,6 @@ function assertRejected(
 ): void {
   assert.throws(
     () => verifyGate0ArtifactBytes(Buffer.from(stableJson(artifact)), HEAD, platform),
-    undefined,
     `verifier accepted mutation: ${label}`,
   );
 }
@@ -193,7 +231,7 @@ function validArtifact(platform: 'linux' | 'win32') {
     runtimeBoundary: {
       agentClass: 'DKGAgent',
       processModel: 'three independent production agent processes',
-      controlChannel: 'stdio and POSIX process signals only',
+      controlChannel: 'stdio graceful-stop command and forced process termination only',
       publicDebugEndpointAdded: false,
     },
     fixture: {
@@ -221,6 +259,7 @@ function validArtifact(platform: 'linux' | 'win32') {
         persistenceClosed: false,
         staged: false,
         priorExit: { code: 0, signal: null },
+        priorStop: { event: 'stopped', graceful: true, persistenceClosed: true },
         verifiedRead: true,
         contender: contender(),
         exactContentFilesEqual: true,
@@ -236,6 +275,7 @@ function validArtifact(platform: 'linux' | 'win32') {
         contender: contender(),
         exactContentFilesEqual: true,
         finalGracefulExit: { code: 0, signal: null },
+        finalGracefulStop: { event: 'stopped', graceful: true, persistenceClosed: true },
         snapshot: snapshot(),
       },
     },
@@ -244,6 +284,7 @@ function validArtifact(platform: 'linux' | 'win32') {
       inventoryOperationalWhileRunning: true,
       competingLeaseRejectedWhileRunning: true,
       gracefulRestartSucceeded: true,
+      gracefulStopsClosedPersistence: true,
       operatingSystemLeaseRecoveredAfterSigkill: true,
       durableControlObjectBytesPreserved: true,
       storedEnvelopeSignatureReverifiedOnEveryStart: true,

@@ -5,8 +5,10 @@ child process. It stages one deterministic, signature-verified control object
 through the agent-owned RFC-64 persistence boundary, proves that another
 process cannot acquire the inventory lease, then exercises both shutdown paths:
 
-1. graceful `SIGTERM` -> `DKGAgent.stop()` -> successful restart;
-2. `SIGKILL` (no JavaScript cleanup) -> operating-system lease recovery.
+1. cross-platform stdin command -> `DKGAgent.stop()` -> closed persistence ->
+   successful restart;
+2. forced process termination (`SIGKILL` in the Node child-process API, with no
+   JavaScript cleanup) -> operating-system lease recovery.
 
 Each restarted agent re-reads and cryptographically verifies the exact durable
 object before the harness compares byte hashes, object/signature counts, and
@@ -59,10 +61,12 @@ devnet/rfc64-persistence-lifecycle/artifacts/gate0-verdict.json
 
 Set `DKG_RFC64_GATE0_ARTIFACT` or `DKG_RFC64_GATE0_VERDICT_ARTIFACT` to override
 those paths. The gate deliberately does not add an HTTP/API route. Its only
-control channel is the parent/child stdio and process-signal boundary. A shared
-`scripts/devnet.sh` cluster is not required: RFC-64 persistence is acquired
-before networking, and isolating this gate avoids mutating a developer's existing
-devnet.
+control channel is the parent/child stdio graceful-stop command plus the forced
+process-termination boundary used for crash recovery. Each graceful child must
+emit an exact closed-state event after `DKGAgent.stop()` and before a clean exit.
+A shared `scripts/devnet.sh` cluster is not required: RFC-64 persistence is
+acquired before networking, and isolating this gate avoids mutating a developer's
+existing devnet.
 
 Artifact publication uses an exclusive `0600` sibling temporary file, file
 `fsync`, atomic rename, parent-directory topology revalidation, and a parent
@@ -75,7 +79,14 @@ The verifier rejects missing or extra fields, non-canonical/lossy JSON, a dirty 
 mismatched source commit, malformed lifecycle evidence, changed file lists or
 digests, unsuccessful exits, non-busy lease probes, and incomplete POSIX mode or
 Windows protected-owner ACL-policy evidence. Mutation tests delete, alter, and
-extend every required schema location.
+extend every required schema location, including both graceful closed-state
+events.
+
+The `RFC-64 inventory Windows gate` hosted workflow runs the exact
+generator-plus-verifier command on `windows-latest`. It is expected to reach the
+same final `PASS` while proving that the stdin graceful-stop path closes
+persistence and the forced-termination path still recovers the operating-system
+lease on Windows.
 
 A PASS on this standalone harness branch covers only the bounded evidence verifier.
 It is not a formal OT-RFC-64 Gate 0 result. Formal evaluation requires running this
