@@ -17,6 +17,7 @@ export default defineConfig({
       "test/request-authorize.test.ts",
       "test/wal-authority-adapter.test.ts",
       "test/wal-private-payload-adapter.test.ts",
+      "test/wal-wire-protocol.test.ts",
       "test/swm-sender-key-parallel-fanout.test.ts",
       "test/swm-sender-key-pending-by-agent.test.ts",
       "test/swm-sender-key-stale-target.test.ts",

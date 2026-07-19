@@ -377,6 +377,51 @@ describe('ProtocolRouter', () => {
       }
     });
 
+    it('enforces an opt-in per-registration inbound read deadline for slowloris streams', async () => {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      let handlerCalls = 0;
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node);
+      router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array();
+      }, { readTimeoutMs: 5 });
+
+      class SlowlorisStream extends FakeInboundStream {
+        constructor() { super([]); }
+        override [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
+          return {
+            next: async () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+            [Symbol.asyncIterator]() { return this; },
+          };
+        }
+      }
+      const stream = new SlowlorisStream();
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+      expect(handlerCalls).toBe(0);
+      expect(stream.aborted?.name).toBe('AbortError');
+    });
+
+    it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid inbound read deadline %s', readTimeoutMs => {
+      const node = {
+        libp2p: { handle: () => undefined, unhandle: () => undefined },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node);
+      expect(() => router.register(PROTOCOL, async () => new Uint8Array(), { readTimeoutMs })).toThrow(/positive safe integer/);
+    });
+
     it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
       let seenSignal: AbortSignal | undefined;
       const fixture = makeInboundFixture();

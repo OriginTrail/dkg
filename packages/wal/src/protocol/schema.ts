@@ -225,6 +225,8 @@ export const PROTOCOL_TUPLES = Object.freeze({
     ['literal-1', 'u16', 'bytes16', 'tuple'],
   ),
   AuthenticatedRequestV1: tuple(['context', 'request'], ['RequestContextV1', 'tuple']),
+  GetCapabilitiesV1: tuple([], []),
+  AckV1: tuple([], []),
   CapabilitiesV1: tuple(
     ['protocolVersions', 'adapterVersions', 'maximumControlFrameBytes', 'maximumSymbolsPerResponse', 'maximumFallbackIdsPerPage', 'maximumObjectRangeBytes', 'maximumWalObjectBytes', 'maximumConcurrentRanges'],
     ['sorted-unique<u16>', 'sorted-unique<u16>', 'u64', 'u64', 'u64', 'u64', 'u64', 'u64'],

@@ -135,6 +135,13 @@
     "concurrentObjectStreamsPerNamespacePeer": 2,
     "outstandingRequestsPerPeer": 128,
     "outstandingRequestsGlobal": 1024,
+    "replayEntriesPerPeer": 16384,
+    "replayEntriesGlobal": 131072,
+    "queuedRequestsPerSchedulerKey": 16,
+    "inboundReadTimeoutMs": 20000,
+    "requestHandlerTimeoutMs": 20000,
+    "decodedCborArrayEntries": 65536,
+    "decodedCborNestingDepth": 16,
     "walObjectPolicyDefaultBytes": 1073741824,
     "walObjectHardBytes": 8589934592,
     "temporaryStagingBytesPerPeer": 17179869184,
@@ -732,6 +739,14 @@
         "RequestContextV1",
         "tuple"
       ]
+    },
+    "GetCapabilitiesV1": {
+      "fields": [],
+      "fieldTypes": []
+    },
+    "AckV1": {
+      "fields": [],
+      "fieldTypes": []
     },
     "CapabilitiesV1": {
       "fields": [

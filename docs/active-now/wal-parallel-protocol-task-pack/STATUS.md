@@ -11,8 +11,9 @@
 | `WAL-006` | Implemented and verified | The same branch contains versioned SQLite/FULL control state, atomic local finalization and remote admission, guarded independent rollback high-water, durable bounded queues/cache/quarantine/GC metadata, restart and integrity blocking, 25 focused tests, and 100% package coverage. See `WAL-006-EVIDENCE.md`. |
 | `WAL-007` | Implemented and verified | The same branch contains threshold authority rotation/revocation, signed membership/checkpoint/vector lifecycles, exact completeness/freshness, persistent fork evidence, guarded cohort recovery, a current-DKG adapter, 47 focused WAL tests, 37 unchanged/adapter DKG authorization tests, and 100% WAL package coverage. See `WAL-007-EVIDENCE.md`. |
 | `WAL-008` | Implemented and verified | The same branch contains the private inline DKG envelope, complete HKDF/AES-GCM conformance vector, durable restart-safe nonce claims, authorization-before-lookup disclosure, stable existing Sender Key epoch projection/rotation, public tier-transition leak tests, a clean 1,192-test complete agent unit sweep, and 100% WAL package coverage. See `WAL-008-EVIDENCE.md`. |
+| `WAL-009` | Implemented and verified | The same branch contains all three authenticated raw protocol families, byte-exact varint/canonical-CBOR framing and independent vectors, the complete method/error catalog, proof/response binding, replay/freshness/cancellation/deadline/resource bounds, 69 unchanged-router regressions, 397 WAL tests at 100% coverage, and 49 conformance tests. See `WAL-009-EVIDENCE.md`. |
 
-WAL-001 through WAL-008 now share one linear implementation history, one worktree,
+WAL-001 through WAL-009 now share one linear implementation history, one worktree,
 and one authoritative branch. No Go/Rust/Python conformance implementation is
 required. The exact-integer mapping is retained only as named A/B experiment
 evidence; protocol version 1 uses the benchmarked exact binary64 evaluation

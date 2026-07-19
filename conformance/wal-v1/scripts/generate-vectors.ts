@@ -30,6 +30,7 @@ import {
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot } from '../src/set-commitment.js';
 import { DOMAINS, ENUMS, IBLT_ALGORITHM, LIMITS, SCHEMA } from '../src/schema.js';
+import { decodeUnsignedVarint, encodeUnsignedVarint, encodeWireFrame } from '../src/wire.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const vectorsPath = resolve(here, '../vectors/protocol-v1.json');
@@ -486,6 +487,90 @@ async function buildVectors() {
     done: index === pages.length - 1
   }));
 
+  const wireRequesterPeerId = utf8('12D3KooWProtocolV1Requester');
+  const wireProviderPeerId = utf8('12D3KooWProtocolV1Provider');
+  const wireIssuedAtMs = 1_750_000_010_000n;
+  const wireContext = [wireIssuedAtMs, wireRequesterPeerId, wireProviderPeerId, namespace, null, null, null] as const;
+  const wireRequestId = (index: number) => byteRange(0x40 + index, 16);
+  const wireRequest = (messageType: number, requestId: Uint8Array, body: readonly any[]) =>
+    encodeWireFrame({ protocolVersion: 1n, messageType: BigInt(messageType), requestId, body: [wireContext, body] });
+  const wireResponse = (messageType: number, requestId: Uint8Array, body: readonly any[]) =>
+    encodeWireFrame({ protocolVersion: 1n, messageType: BigInt(messageType), requestId, body });
+  const rawWireFrame = (version: bigint, messageType: bigint, requestId: Uint8Array, body: readonly any[]) => {
+    const cbor = encodeCanonical([version, messageType, requestId, body]);
+    return concat(encodeUnsignedVarint(cbor.length), cbor);
+  };
+  const capabilities = [[1n], [1n], 1_048_576n, 4_096n, 4_096n, 1_048_576n, 1_073_741_824n, 16n] as const;
+  const wireMethods = [
+    ['control', 'GET_CAPABILITIES', 0, 1, [], capabilities],
+    ['control', 'GET_HEAD', 2, 3, [firstObject.writerId, 3n], [...checkpointUnsigned, checkpointSignature]],
+    ['control', 'GET_VECTOR', 4, 5, [collection], [...vectorUnsigned, [signatureEntryBytes(vectorSignature)]]],
+    ['control', 'GET_CHECKPOINT', 6, 7, [checkpointId], [...checkpointUnsigned, checkpointSignature]],
+    ['control', 'ANNOUNCE_HEAD', 8, 9, [checkpointId], []],
+    ['control', 'CANCEL', 10, 9, [wireRequestId(31)], []],
+    ['reconcile', 'GET_RECONCILIATION_SYMBOLS', 0, 1,
+      [providerHeadId, reconciliationSeed, 0n, 2n],
+      [providerHeadId, reconciliationSeed, 0n, providerSymbols.slice(0, 2).map((symbol) => [BigInt(symbol.index), symbol.count, symbol.idXor, symbol.checksumXor])]],
+    ['reconcile', 'GET_OBJECT_IDS', 2, 3,
+      [providerHeadId, null, 2n],
+      [providerHeadId, null, sortedProviderIds.slice(0, 2), sortedProviderIds[1], false]],
+    ['reconcile', 'CANCEL', 10, 9, [wireRequestId(32)], []],
+    ['object', 'GET_OBJECT_RANGE', 0, 1,
+      [firstObject.id, 0n, BigInt(cutA)],
+      [firstObject.id, BigInt(objectLength), 0n, firstObject.canonicalBytes.slice(0, cutA)]],
+    ['object', 'CANCEL', 10, 9, [wireRequestId(33)], []],
+  ] as const;
+  const wireMethodFrames = wireMethods.map(([family, name, requestType, responseType, requestBody, responseBody], index) => {
+    const id = wireRequestId(index);
+    return {
+      family,
+      name,
+      requestType,
+      responseType,
+      requestId: hex(id),
+      requestBodyCbor: hex(encodeCanonical(requestBody)),
+      responseBodyCbor: hex(encodeCanonical(responseBody)),
+      requestFrame: hex(wireRequest(requestType, id, requestBody)),
+      responseFrame: hex(wireResponse(responseType, id, responseBody)),
+      invalidRequestFrame: hex(rawWireFrame(1n, BigInt(requestType), id, [wireContext, [...requestBody, null]])),
+    };
+  });
+  const wireErrors = Object.entries(ENUMS.errorCode).map(([name, code], index) => {
+    const id = wireRequestId(40 + index);
+    const body = [BigInt(code), code === ENUMS.errorCode.RESOURCE_LIMIT ? 250n : null, code === ENUMS.errorCode.NON_CANONICAL ? 0n : null] as const;
+    return {
+      name,
+      code,
+      requestId: hex(id),
+      bodyCbor: hex(encodeCanonical(body)),
+      frame: hex(wireResponse(255, id, body)),
+      invalidFrame: hex(rawWireFrame(1n, 255n, id, [...body, null])),
+    };
+  });
+  const wireBoundaries = [
+    { name: 'one-byte-length-prefix', requestId: wireRequestId(60), paddingBytes: 0 },
+    { name: 'two-byte-length-prefix', requestId: wireRequestId(61), paddingBytes: 128 },
+    { name: 'three-byte-length-prefix', requestId: wireRequestId(62), paddingBytes: 16_384 },
+  ].map(({ name, requestId, paddingBytes }) => {
+    const frame = wireResponse(9, requestId, [new Uint8Array(paddingBytes)]);
+    const prefix = decodeUnsignedVarint(frame);
+    return { name, requestId: hex(requestId), cborLength: prefix.value, prefixLength: prefix.byteLength, frame: hex(frame) };
+  });
+  const canonicalRequest = wireRequest(0, wireRequestId(70), []);
+  const canonicalPrefix = decodeUnsignedVarint(canonicalRequest);
+  const canonicalPrefixBytes = canonicalRequest.slice(0, canonicalPrefix.byteLength);
+  canonicalPrefixBytes[canonicalPrefixBytes.length - 1] |= 0x80;
+  const nonShortestPrefix = concat(canonicalPrefixBytes, Uint8Array.of(0));
+  const invalidNonCanonicalCbor = Uint8Array.of(0x84, 0x18, 0x01, 0, 0x50, ...wireRequestId(71), 0x80);
+  const invalidWireFrames = [
+    { name: 'non-shortest-varint', expected: 'NON_CANONICAL', frame: hex(concat(nonShortestPrefix, canonicalRequest.subarray(canonicalPrefix.byteLength))) },
+    { name: 'truncated-frame', expected: 'NON_CANONICAL', frame: hex(canonicalRequest.slice(0, -1)) },
+    { name: 'trailing-byte', expected: 'NON_CANONICAL', frame: hex(concat(canonicalRequest, Uint8Array.of(0))) },
+    { name: 'declared-over-hard-cap', expected: 'RESOURCE_LIMIT', frame: hex(encodeUnsignedVarint(LIMITS.controlFrameBytes + 1)) },
+    { name: 'non-canonical-cbor', expected: 'NON_CANONICAL', frame: hex(concat(encodeUnsignedVarint(invalidNonCanonicalCbor.length), invalidNonCanonicalCbor)) },
+    { name: 'unsupported-version', expected: 'UNSUPPORTED_VERSION', frame: hex(rawWireFrame(2n, 0n, wireRequestId(72), [wireContext, []])) },
+  ];
+
   const vectors = {
     schema: 'dkg-wal-protocol-v1-conformance-v1',
     protocolVersion: 1,
@@ -493,6 +578,15 @@ async function buildVectors() {
     reconciledSetElement: 'WalObjectId',
     forbiddenIndependentIdentities: SCHEMA.atom.forbiddenIndependentIdentities,
     fixturePrivateKey: FIXTURE_PRIVATE_KEY,
+    wire: {
+      framing: 'unsigned-varint(length(canonical-cbor(FrameV1))) || canonical-cbor(FrameV1)',
+      protocolIds: SCHEMA.protocolIds,
+      messageTypes: SCHEMA.messageTypes,
+      methods: wireMethodFrames,
+      errors: wireErrors,
+      boundaries: wireBoundaries,
+      invalid: invalidWireFrames,
+    },
     collection: {
       keyCbor: hex(encodeCanonical(collectionKey)),
       collectionId: hex(collection)

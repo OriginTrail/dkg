@@ -66,10 +66,24 @@ export function encodeCanonicalCbor(value: CborProtocolValue): Uint8Array {
   );
 }
 
+export interface CanonicalCborDecodeOptions {
+  /** Reject an array before allocating it when its declared arity is larger. */
+  maxArrayLength?: number;
+  /** Reject a byte string before copying it when its declared length is larger. */
+  maxByteStringLength?: number;
+  /** Reject a text string before decoding it when its declared byte length is larger. */
+  maxTextStringBytes?: number;
+  /** Reject recursively nested arrays before descending past this depth. */
+  maxDepth?: number;
+}
+
 class CanonicalCborReader {
   private offset = 0;
 
-  constructor(private readonly bytes: Uint8Array) {}
+  constructor(
+    private readonly bytes: Uint8Array,
+    private readonly options: CanonicalCborDecodeOptions,
+  ) {}
 
   get remaining(): number {
     return this.bytes.length - this.offset;
@@ -116,7 +130,10 @@ class CanonicalCborReader {
     return argument;
   }
 
-  readValue(): CborProtocolValue {
+  readValue(depth = 0): CborProtocolValue {
+    if (depth > (this.options.maxDepth ?? Number.MAX_SAFE_INTEGER)) {
+      return protocolError('WAL_CBOR_LENGTH_RANGE', 'CBOR nesting exceeds the configured decoder depth');
+    }
     const initial = this.readByte();
     const majorType = initial >>> 5;
     const additional = initial & 31;
@@ -130,10 +147,19 @@ class CanonicalCborReader {
         return protocolError('WAL_CBOR_LENGTH_RANGE', 'CBOR collection length exceeds the safe decoder range');
       }
       if (majorType === 4) {
+        if (length > BigInt(this.options.maxArrayLength ?? Number.MAX_SAFE_INTEGER)) {
+          return protocolError('WAL_CBOR_LENGTH_RANGE', 'CBOR array length exceeds the configured decoder limit');
+        }
         if (length > BigInt(this.remaining)) {
           return protocolError('WAL_CBOR_TRUNCATED', 'CBOR array length exceeds the remaining input');
         }
-        return Array.from({ length: Number(length) }, () => this.readValue());
+        return Array.from({ length: Number(length) }, () => this.readValue(depth + 1));
+      }
+      const configuredLength = majorType === 2
+        ? this.options.maxByteStringLength
+        : this.options.maxTextStringBytes;
+      if (configuredLength !== undefined && length > BigInt(configuredLength)) {
+        return protocolError('WAL_CBOR_LENGTH_RANGE', 'CBOR string length exceeds the configured decoder limit');
       }
       const encoded = this.readExact(Number(length));
       if (majorType === 2) return encoded;
@@ -157,11 +183,14 @@ class CanonicalCborReader {
   }
 }
 
-export function decodeCanonicalCbor(bytes: Uint8Array): CborProtocolValue {
+export function decodeCanonicalCbor(
+  bytes: Uint8Array,
+  options: CanonicalCborDecodeOptions = {},
+): CborProtocolValue {
   if (!(bytes instanceof Uint8Array)) {
     return protocolError('WAL_CBOR_UNSUPPORTED_VALUE', 'canonical CBOR input must be a Uint8Array');
   }
-  const reader = new CanonicalCborReader(bytes);
+  const reader = new CanonicalCborReader(bytes, options);
   const value = reader.readValue();
   if (reader.remaining !== 0) {
     return protocolError('WAL_CBOR_TRAILING_BYTES', 'trailing bytes after canonical CBOR value');

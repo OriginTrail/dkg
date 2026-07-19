@@ -686,22 +686,22 @@ hard resource bounds.
 
 ### Acceptance area
 
-- [ ] All protocol conformance frames round-trip byte-exactly and reject
+- [x] All protocol conformance frames round-trip byte-exactly and reject
       non-canonical, truncated, trailing, oversized, replayed, stale, or
       misbound requests.
-- [ ] Every catalogued method and stable error code has valid, boundary, and
+- [x] Every catalogued method and stable error code has valid, boundary, and
       invalid golden frames plus requester/provider transition tests; no
       undocumented message can affect reconciliation or object admission.
-- [ ] Authorization runs before private metadata lookup/serialization and before
+- [x] Authorization runs before private metadata lookup/serialization and before
       any private response byte is written.
-- [ ] Existing `/dkg/10.0.x/*` handlers and legacy sync behavior are unchanged in
+- [x] Existing `/dkg/10.0.x/*` handlers and legacy sync behavior are unchanged in
       `legacy` and remain authoritative in `parallel`.
-- [ ] Slowloris, count/length mismatch, symbol bomb, fallback-page abuse,
+- [x] Slowloris, count/length mismatch, symbol bomb, fallback-page abuse,
       dishonest object length, range overflow, cancellation, timeout, queue
       saturation, and concurrent-stream tests stay within configured bounds.
-- [ ] Protocol negotiation cannot downgrade a private WAL request to legacy or
+- [x] Protocol negotiation cannot downgrade a private WAL request to legacy or
       another disclosure view.
-- [ ] Provider responses remain independently verifiable; session state is never
+- [x] Provider responses remain independently verifiable; session state is never
       used as proof of correctness.
 
 ---

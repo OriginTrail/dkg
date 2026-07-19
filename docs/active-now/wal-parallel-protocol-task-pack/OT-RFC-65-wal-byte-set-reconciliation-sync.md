@@ -1163,6 +1163,228 @@ Stable error values are `UNSUPPORTED_VERSION=0`, `UNAUTHORIZED=1`,
 `STALE_HEAD=2`, `INVALID_RANGE=3`, `RESOURCE_LIMIT=4`, `CANCELLED=5`,
 `INTERNAL_UNAVAILABLE=6`, `NON_CANONICAL=7`, and `INVALID_PROOF=8`.
 
+#### Exact framing and exchange rule
+
+Each raw libp2p stream carries exactly one request frame and exactly one
+response frame. The byte representation is:
+
+```text
+wireFrame = unsignedVarint(canonicalCbor.length) || canonicalCbor
+canonicalCbor = deterministicCbor(FrameV1)
+```
+
+The unsigned varint is little-endian base-128, shortest-form, and limited to
+eight bytes. The declared length excludes the prefix. The receiver rejects a
+non-shortest or unterminated prefix, a declared length above 1 MiB, a truncated
+body, trailing bytes, non-canonical CBOR, an inexact tuple arity, or an unknown
+message before dispatch. CBOR arrays, byte/text strings, and nesting depth are
+bounded before allocation. The inbound stream also has a 20-second read
+deadline; a peer cannot keep a handler alive by sending only a prefix or a
+partial body.
+
+Every decodable response echoes the 16-byte request ID. If a frame is too
+malformed to expose a valid request ID, the bounded error response uses the
+all-zero request ID. A caller MUST NOT correlate such a response to an
+operation. One request ID is single-use for the full freshness window; every
+retry, including provider failover, mints a new ID.
+
+#### Exact method bodies
+
+The request `FrameV1.body` is always
+`AuthenticatedRequestV1 = [RequestContextV1, requestBody]`. A successful
+response `FrameV1.body` is exactly the response tuple below. `ERROR=255` may
+replace any successful response and has `ErrorV1` as its body.
+
+| Family | Request code and body | Success code and body |
+|---|---|---|
+| `wal-control` | `GET_CAPABILITIES=0`, `GetCapabilitiesV1=[]` | `CAPABILITIES=1`, `CapabilitiesV1` |
+| `wal-control` | `GET_HEAD=2`, `GetHeadV1=[writerId, writerEpochOrNull]` | `HEAD=3`, `AuthorCheckpointV1` |
+| `wal-control` | `GET_VECTOR=4`, `GetVectorV1=[collectionId]` | `VECTOR=5`, `CollectionHeadVectorV1` |
+| `wal-control` | `GET_CHECKPOINT=6`, `GetCheckpointV1=[checkpointId]` | `CHECKPOINT=7`, `AuthorCheckpointV1` |
+| `wal-control` | `ANNOUNCE_HEAD=8`, `AnnounceHeadV1=[checkpointId]` | `ACK=9`, `AckV1=[]` |
+| `wal-control` | `CANCEL=10`, `CancelV1=[cancelledRequestId]` | `ACK=9`, `AckV1=[]` |
+| `wal-reconcile` | `GET_RECONCILIATION_SYMBOLS=0`, `GetReconciliationSymbolsV1=[headId, reconciliationSeed, firstSymbolIndex, symbolCount]` | `RECONCILIATION_SYMBOLS=1`, `ReconciliationSymbolsV1=[headId, reconciliationSeed, firstSymbolIndex, symbols]` |
+| `wal-reconcile` | `GET_OBJECT_IDS=2`, `GetObjectIdsV1=[headId, startAfterOrNull, limit]` | `OBJECT_IDS_PAGE=3`, `ObjectIdsPageV1=[headId, startAfterOrNull, ids, nextStartAfterOrNull, done]` |
+| `wal-reconcile` | `CANCEL=10`, `CancelV1=[cancelledRequestId]` | `ACK=9`, `AckV1=[]` |
+| `wal-object` | `GET_OBJECT_RANGE=0`, `GetWalObjectRangeV1=[walObjectId, offset, maximumLength]` | `OBJECT_RANGE=1`, `WalObjectRangeV1=[walObjectId, totalObjectLength, offset, bytes]` |
+| `wal-object` | `CANCEL=10`, `CancelV1=[cancelledRequestId]` | `ACK=9`, `AckV1=[]` |
+
+```text
+CapabilitiesV1 = [
+  protocolVersions,
+  adapterVersions,
+  maximumControlFrameBytes,
+  maximumSymbolsPerResponse,
+  maximumFallbackIdsPerPage,
+  maximumObjectRangeBytes,
+  maximumWalObjectBytes,
+  maximumConcurrentRanges
+]
+```
+
+Both version arrays are strictly sorted and unique. Protocol v1 is usable only
+when both sides advertise protocol version `1`; the RDF adapter version is the
+highest common advertised adapter version. Every negotiated numeric limit is
+the lower of the two advertised values and can only tighten the version-1 hard
+limit. A higher remote advertisement never raises a local or version hard cap.
+No private request may fall back to a legacy protocol, a public namespace, or a
+different disclosure view. `GET_CAPABILITIES` is itself identity-bound,
+freshness-checked, replay-protected, and authorized.
+
+The stable optional detail codes are `MALFORMED_FRAME=0`, `REPLAY=1`,
+`STALE_REQUEST=2`, `PEER_BINDING=3`, `UNKNOWN_METHOD=4`, `BODY_SCHEMA=5`,
+`RESPONSE_BINDING=6`, `TIMEOUT=7`, `QUEUE_SATURATED=8`, and
+`LENGTH_MISMATCH=9`. Authorization failures deliberately return only
+`ErrorV1=[UNAUTHORIZED,null,null]`; they do not reveal which peer, proof,
+membership, namespace, head, or policy check failed. Unexpected internal
+exceptions become `INTERNAL_UNAVAILABLE` without exception text.
+
+The wire runtime checks proof shapes, time windows, requester/target transport
+bindings, private-view bindings, and delegation bindings before calling the
+service. The DKG integration authorizer remains responsible for cryptographic
+signature verification and current agent, delegation, membership, authority,
+and private-view policy. Authorization completes before a service lookup or
+serialization can reveal a private head, vector, checkpoint, root, count,
+symbol, ID, object length, or byte.
+
+#### Requester and provider state machines
+
+Requester states are `idle`, `head-known`, `reconciling`, `enumerating`,
+`fetching`, `complete`, `cancelled`, and `failed`. The only success paths are:
+
+```text
+idle --HEAD_RECEIVED--> head-known --ROOTS_EQUAL--> complete
+head-known --START_IBLT--> reconciling --IBLT_DECODED--> fetching
+head-known|reconciling --FALLBACK_ENUMERATION--> enumerating
+enumerating --ENUMERATION_VERIFIED--> fetching
+fetching --OBJECTS_VERIFIED--> complete
+```
+
+`NEED_MORE_SYMBOLS` stays in `reconciling`. `PROVIDER_SWITCH` preserves
+`head-known`, `reconciling`, `enumerating`, or `fetching`, but the new provider
+must answer a fresh request bound to the same immutable signed head. `CANCEL`
+and `FAIL` enter terminal states from every nonterminal state. Any transition
+not listed is rejected.
+
+Provider request states are `received`, `authorized`, `queued`, `running`,
+`responded`, `cancelled`, and `failed`. The normal path is
+`received -> authorized -> queued? -> running -> responded`. Authorization is
+the first transition. Cancellation and failure are terminal. Per-peer and
+global outstanding limits are enforced before service dispatch; reconciliation
+and per-namespace object schedulers then enforce active and bounded queued
+work. Cancellation and the 20-second handler deadline abort both queued and
+running work.
+
+#### Required protocol sequences
+
+Equal sets and incremental IBLT reconciliation use no session state as proof:
+
+```mermaid
+sequenceDiagram
+    participant R as Requester
+    participant P as Authorized provider
+    participant V as Local verifier
+    R->>P: GET_HEAD (fresh ID and bound context)
+    P-->>R: HEAD (signed count and root)
+    alt Count and root equal
+        R->>V: Verify signed head and local root
+        V-->>R: complete, zero symbols and zero objects
+    else Delta path
+        R->>P: GET_RECONCILIATION_SYMBOLS (head, seed, 0, window)
+        P-->>R: Symbols bound to head, seed, offset
+        R->>V: Subtract, peel, and check budgets
+        loop Residual core and budget remains
+            R->>P: Next contiguous symbol window with fresh ID
+            P-->>R: Symbols bound to same head and next offset
+            R->>V: Continue the existing decode
+        end
+        V-->>R: IDs only after exact count and root reproduction
+    end
+```
+
+Fallback enumeration and empty-node backfill are exact-set paths:
+
+```mermaid
+sequenceDiagram
+    participant R as Requester
+    participant P as Authorized provider
+    participant V as Local verifier
+    alt IBLT budget exceeded or verification fails
+        R->>P: GET_OBJECT_IDS (signed head, null cursor, bounded limit)
+    else Empty-node backfill
+        R->>P: GET_OBJECT_IDS (signed head, null cursor, bounded limit)
+    end
+    loop Until done=true
+        P-->>R: Sorted page bound to head and input cursor
+        R->>V: Reject duplicate, gap, reorder, extra ID, or stale head
+        R->>P: Next page from exact returned cursor with fresh ID
+    end
+    R->>V: Recompute exact count and signed set root
+    alt Exact match
+        V-->>R: Provider-only WalObjectIds
+    else Any mismatch
+        V-->>R: Failed attempt; admit no inferred completeness
+    end
+```
+
+Range resume and provider switching preserve whole-object identity:
+
+```mermaid
+sequenceDiagram
+    participant R as Requester
+    participant A as Provider A
+    participant B as Provider B
+    participant S as Durable staging
+    R->>A: GET_OBJECT_RANGE (WalObjectId, offset 0, max length)
+    A-->>R: OBJECT_RANGE (same ID, total, offset 0, bytes)
+    R->>S: Persist verified range metadata and bytes
+    Note over R,A: Path fails after a request boundary
+    R->>B: GET_OBJECT_RANGE (same ID, persisted offset, fresh ID)
+    B-->>R: OBJECT_RANGE (same ID, same total, exact offset, bytes)
+    R->>S: Persist; continue across either provider
+    R->>S: Verify complete canonical WalObjectV1, ID, signature, lane, policy
+    S-->>R: Atomic promotion only after complete-object verification
+```
+
+Cancellation, denial, stale-head recovery, and malformed peers fail boundedly:
+
+```mermaid
+sequenceDiagram
+    participant R as Requester
+    participant P as Provider wire runtime
+    participant A as DKG authorizer
+    participant S as WAL service
+    alt Cancellation
+        R->>P: Long bounded request
+        R->>P: CANCEL (cancelled request ID, fresh request ID)
+        P-->>R: ACK for CANCEL
+        P-->>R: CANCELLED for original request
+    else Authorization denial
+        R->>P: AuthenticatedRequestV1
+        P->>P: Check framing, freshness, replay, and peer bindings
+        P->>A: Verify identity, delegation, membership, and view
+        A-->>P: deny
+        P-->>R: ErrorV1=[UNAUTHORIZED,null,null]
+        Note over P,S: No private service lookup or serialization
+    else Stale signed head during reconciliation
+        R->>P: Request symbols or ID page for old head
+        P-->>R: STALE_HEAD
+        R->>P: GET_HEAD with a fresh request ID
+        P-->>R: Current signed head; restart bound attempt
+    else Malformed or slow peer
+        R->>P: Noncanonical, oversized, partial, or over-budget frame
+        P-->>R: Bounded stable error when an ID is recoverable
+        Note over P: Read deadline closes partial streams; no service call
+    end
+```
+
+Provider discovery does not appear in these state machines. Discovery produces
+an untrusted candidate `(peerId, endpoints)` from the signed bootstrap manifest,
+current membership, routing, rendezvous, or gossip. Only after transport peer
+authentication, capability negotiation, context binding, replay/freshness
+checks, and authorization does that candidate become an authorized protocol
+provider. Discovery success is never head, set, object, or completeness proof.
+
 ```text
 ProviderBootstrapManifestV1 = [
   version, networkId, collectionId, authorityEpoch, providers,
@@ -1188,8 +1410,8 @@ ticket or manifest discovers candidates and does not prove content correctness.
 | Protocol | Request | Response |
 |---|---|---|
 | `wal-control` | `GET_CAPABILITIES`, `GET_HEAD`, `GET_VECTOR`, `GET_CHECKPOINT`, `ANNOUNCE_HEAD`, `CANCEL` | Version/limit negotiation, signed completeness statements, optional nudge, cancellation, or uniform denial. |
-| `wal-reconcile` | `GET_RECONCILIATION_SYMBOLS`, `GET_OBJECT_IDS` | Deterministic symbol window or bounded sorted fallback page, each bound to one signed head. |
-| `wal-object` | `GET_OBJECT_RANGE` | One ephemeral byte range of the complete canonical `WalObjectV1`. |
+| `wal-reconcile` | `GET_RECONCILIATION_SYMBOLS`, `GET_OBJECT_IDS`, `CANCEL` | Deterministic symbol window or bounded sorted fallback page, each bound to one signed head, or cancellation. |
+| `wal-object` | `GET_OBJECT_RANGE`, `CANCEL` | One ephemeral byte range of the complete canonical `WalObjectV1`, or cancellation. |
 
 Responses echo `requestId`. A provider may be switched at any request boundary
 because correctness is verified by signed roots and WAL-object IDs, not by
@@ -1971,6 +2193,10 @@ packages/cli/src/daemon/routes/
 | Concurrent reconciliation streams per peer | 4 |
 | Concurrent object streams per namespace/peer | 2 |
 | Outstanding requests per peer / global | 128 / 1,024 |
+| Replay IDs retained per peer / global | 16,384 / 131,072 |
+| Queued requests per scheduler key | 16 |
+| Inbound read / request-handler deadline | 20 seconds / 20 seconds |
+| Decoded CBOR array entries / nesting depth | 65,536 / 16 |
 | WAL-object size | 1 GiB policy default, 8 GiB implementation default hard cap |
 | Temporary object staging per peer | 16 GiB |
 | Parents / base heads per mutation | 64 / 64 |
