@@ -42,7 +42,7 @@ export const MAX_DECIMAL_U256 =
 const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
 const CANONICAL_DIGEST_32 = /^0x[0-9a-f]{64}$/;
-const LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})+$/;
+const LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
 const ZERO_EVM_ADDRESS = `0x${'00'.repeat(20)}`;
 
 export function parseCanonicalDecimalU64(

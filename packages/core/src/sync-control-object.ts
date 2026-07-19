@@ -318,10 +318,7 @@ function assertUnsignedControlEnvelopeFields(
   if (/[ -]/u.test(envelope.objectType)) {
     throw new Error('Control-object type is outside the canonical string bounds');
   }
-  if (
-    envelope.signatureSuite !== 'eip191-personal-sign-digest-v1'
-    && envelope.signatureSuite !== 'eip1271-current-finalized-v1'
-  ) {
+  if (!isControlObjectSignatureSuite(envelope.signatureSuite)) {
     throw new Error('Unsupported control-object signature suite');
   }
   assertCanonicalEvmAddress(envelope.issuer, 'issuer');
@@ -357,6 +354,13 @@ function assertUnsignedControlEnvelopeFields(
       throw new Error('EIP-1271 evidence contract must equal the envelope issuer');
     }
   }
+}
+
+function isControlObjectSignatureSuite(
+  value: unknown,
+): value is ControlObjectSignatureSuite {
+  return typeof value === 'string'
+    && CONTROL_OBJECT_SIGNATURE_SUITES.includes(value as ControlObjectSignatureSuite);
 }
 
 function assertSignatureForSuite(
