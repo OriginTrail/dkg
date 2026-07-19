@@ -12,11 +12,29 @@ if (
   typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
+  || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
+}
+
+const digestAuthor = '0x1111111111111111111111111111111111111111';
+const digestRows = [10, 2].map((number) => ({
+  kaId: ((BigInt(digestAuthor) << 96n) | BigInt(number)).toString(),
+  catalogRowDigest: `0x${(number * 4).toString(16).padStart(64, '0')}`,
+  contentDigest: `0x${((number * 4) + 1).toString(16).padStart(64, '0')}`,
+  sealDigest: `0x${((number * 4) + 2).toString(16).padStart(64, '0')}`,
+  kaUal: `did:dkg:otp:20430/${digestAuthor}/${number}`,
+  activatedTripleCount: number + 1,
+}));
+const publicDigest = root.computeRfc64AppliedInventoryDigestV1({
+  catalogScopeDigest: '0x6287b105b87dbacce48f7702a54e9410ba4a5d52475b986288042eb75464bbe2',
+  rows: digestRows,
+});
+if (publicDigest !== '0x6d273d5f5fc1acbfe6836168c7159b747fe3df549d2d5bddcd8bf409ff58ea01') {
+  throw new Error('package-root applied-inventory digest did not use numeric KA-ID order');
 }
 const publicRfc64Modules = [
   'author-catalog-producer.js',

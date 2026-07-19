@@ -45,10 +45,10 @@ import {
   produceSparseAuthorCatalogSuccessorV1,
 } from '../src/rfc64/author-catalog-producer.js';
 import {
-  computeRfc64AppliedInventoryDigestV1,
   Rfc64PublicCatalogNativeReceiverV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
+  computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
 import {
@@ -171,6 +171,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
           deriveAuthorCatalogScopeFromHeadV1(fixture.successor.head.payload),
         ),
         rows: [{
+          kaId: fixture.rowBundle.row.kaId,
           catalogRowDigest: expectedRowDigest,
           contentDigest: fixture.rowBundle.row.projectionDigest,
           sealDigest: fixture.rowBundle.row.sealDigest,
@@ -279,14 +280,19 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       expectedRows,
       observedRows: expectedRows,
     });
+    const independentlyRecomputedDigest = computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest: fixture.scopeDigest,
+      rows: [...evidence.rows].reverse(),
+    });
 
     expect(evidence).toMatchObject({
-      inventoryDigest: expected.inventoryDigest,
+      inventoryDigest: independentlyRecomputedDigest,
       catalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
       inventoryRowCount: 2,
       activatedTripleCount: 4,
       appliedHeadStatus: 'applied',
     });
+    expect(independentlyRecomputedDigest).toBe(expected.inventoryDigest);
     expect(evidence.rows.map((row) => ({
       kaId: row.kaId,
       kaUal: row.kaUal,

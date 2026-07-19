@@ -43,6 +43,11 @@ export * from './rfc64/public-catalog-service-v1.js';
 export * from './rfc64/public-catalog-issuer-delegation-v1.js';
 export * from './rfc64/public-catalog-native-transport-v1.js';
 export * from './rfc64/public-catalog-native-receiver-v1.js';
+export {
+  computeRfc64AppliedInventoryDigestV1,
+  type ComputeRfc64AppliedInventoryDigestInputV1,
+  type Rfc64AppliedInventoryDigestRowV1,
+} from './rfc64/public-catalog-inventory-completeness-v1.js';
 export * from './rfc64/public-catalog-successor-producer-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';

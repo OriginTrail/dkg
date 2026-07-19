@@ -65,6 +65,29 @@ export interface Rfc64PublicCatalogInventoryEvidenceRowV1 {
   readonly activatedTripleCount: number;
 }
 
+/**
+ * Exact row fields committed by the durable applied-inventory digest.
+ *
+ * `kaId` is an ordering key and is not itself hashed. It is nevertheless
+ * required so every caller uses the signed catalog's mathematical KA-ID order;
+ * deriving order from lexical UAL text is not equivalent for IDs such as 2 and
+ * 10. `bundleDigest` remains operator evidence outside this legacy commitment,
+ * so callers may pass richer receiver evidence rows without affecting the hash.
+ */
+export interface Rfc64AppliedInventoryDigestRowV1 {
+  readonly kaId: KaIdV1;
+  readonly catalogRowDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
+  readonly sealDigest: Digest32V1;
+  readonly kaUal: string;
+  readonly activatedTripleCount: number;
+}
+
+export interface ComputeRfc64AppliedInventoryDigestInputV1 {
+  readonly catalogScopeDigest: Digest32V1;
+  readonly rows: readonly Rfc64AppliedInventoryDigestRowV1[];
+}
+
 /** Deterministic evidence for one complete bounded catalog live set. */
 export interface Rfc64PublicCatalogInventoryCompletenessEvidenceV1 {
   readonly catalogScopeDigest: Digest32V1;
@@ -82,6 +105,47 @@ export interface VerifyRfc64PublicCatalogInventoryCompletenessInputV1 {
   readonly expectedRows: readonly Rfc64PublicCatalogInventoryEvidenceRowV1[];
   /** Independently observed exact semantic post-reads; input order is irrelevant. */
   readonly observedRows: readonly Rfc64PublicCatalogInventoryEvidenceRowV1[];
+}
+
+/**
+ * Compute the one canonical applied-inventory commitment for empty, one-row,
+ * and bounded multi-row catalogs.
+ *
+ * Input rows are snapshotted and validated, then sorted by mathematical
+ * `kaId`. Caller order is irrelevant. This preserves the Gate-1 empty/one-row
+ * framing while making the previously unobservable multi-row order explicit.
+ */
+export function computeRfc64AppliedInventoryDigestV1(
+  input: ComputeRfc64AppliedInventoryDigestInputV1,
+): Digest32V1 {
+  const boundary = snapshotExactDataRecord(input, [
+    'catalogScopeDigest',
+    'rows',
+  ], 'applied inventory digest input');
+  try {
+    assertCanonicalDigest(boundary.catalogScopeDigest, 'catalogScopeDigest');
+  } catch (cause) {
+    fail(
+      'catalog-inventory-completeness-input',
+      'catalogScopeDigest is not a canonical digest',
+      cause,
+    );
+  }
+  const rows = snapshotAppliedInventoryDigestRows(boundary.rows);
+  const hasher = sha256.create();
+  hasher.update(UTF8.encode(APPLIED_INVENTORY_DIGEST_DOMAIN_V1));
+  hasher.update(ethers.getBytes(boundary.catalogScopeDigest as Digest32V1));
+  hasher.update(encodeU64(BigInt(rows.length), 'inventory row count'));
+  for (const row of rows) {
+    hasher.update(ethers.getBytes(row.catalogRowDigest));
+    hasher.update(ethers.getBytes(row.contentDigest));
+    hasher.update(ethers.getBytes(row.sealDigest));
+    const ual = UTF8.encode(row.kaUal);
+    hasher.update(encodeU64(BigInt(ual.byteLength), 'KA UAL byte length'));
+    hasher.update(ual);
+    hasher.update(encodeU64(BigInt(row.activatedTripleCount), 'activated triple count'));
+  }
+  return ethers.hexlify(hasher.digest()) as Digest32V1;
 }
 
 /**
@@ -165,7 +229,10 @@ export function verifyRfc64PublicCatalogInventoryCompletenessV1(
   return Object.freeze({
     catalogScopeDigest,
     inventoryRowCount: boundary.expectedTotalRows,
-    inventoryDigest: computeInventoryDigest(catalogScopeDigest, expected),
+    inventoryDigest: computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest,
+      rows: expected,
+    }),
     rows: expected,
   });
 }
@@ -326,24 +393,60 @@ function snapshotRow(
   return snapshot;
 }
 
-function computeInventoryDigest(
-  catalogScopeDigest: Digest32V1,
-  rows: readonly Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1>[],
-): Digest32V1 {
-  const hasher = sha256.create();
-  hasher.update(UTF8.encode(APPLIED_INVENTORY_DIGEST_DOMAIN_V1));
-  hasher.update(ethers.getBytes(catalogScopeDigest));
-  hasher.update(encodeU64(BigInt(rows.length), 'inventory row count'));
-  for (const row of rows) {
-    hasher.update(ethers.getBytes(row.catalogRowDigest));
-    hasher.update(ethers.getBytes(row.contentDigest));
-    hasher.update(ethers.getBytes(row.sealDigest));
-    const ual = UTF8.encode(row.kaUal);
-    hasher.update(encodeU64(BigInt(ual.byteLength), 'KA UAL byte length'));
-    hasher.update(ual);
-    hasher.update(encodeU64(BigInt(row.activatedTripleCount), 'activated triple count'));
+function snapshotAppliedInventoryDigestRows(
+  input: unknown,
+): readonly Readonly<Rfc64AppliedInventoryDigestRowV1>[] {
+  const values = snapshotDenseBoundedOrdinaryArray(input, 'applied inventory digest rows');
+  const rows = values.map((value, index) => {
+    const label = `applied inventory digest rows[${index}]`;
+    const fields = snapshotRequiredDataRecord(value, [
+      'activatedTripleCount',
+      'catalogRowDigest',
+      'contentDigest',
+      'kaId',
+      'kaUal',
+      'sealDigest',
+    ], label);
+    const row = Object.freeze({
+      kaId: fields.kaId,
+      catalogRowDigest: fields.catalogRowDigest,
+      contentDigest: fields.contentDigest,
+      sealDigest: fields.sealDigest,
+      kaUal: fields.kaUal,
+      activatedTripleCount: fields.activatedTripleCount,
+    }) as unknown as Rfc64AppliedInventoryDigestRowV1;
+    try {
+      assertCanonicalKaId(row.kaId, `${label}.kaId`);
+      assertCanonicalDigest(row.catalogRowDigest, `${label}.catalogRowDigest`);
+      assertCanonicalDigest(row.contentDigest, `${label}.contentDigest`);
+      assertCanonicalDigest(row.sealDigest, `${label}.sealDigest`);
+      if (!Number.isSafeInteger(row.activatedTripleCount) || row.activatedTripleCount < 1) {
+        throw new Error(`${label}.activatedTripleCount must be a positive safe integer`);
+      }
+      const parsedUal = parseDeterministicKnowledgeAssetUal(row.kaUal);
+      const packedKaId = (BigInt(parsedUal.agentAddress) << 96n) | BigInt(parsedUal.kaNumber);
+      if (parsedUal.ual !== row.kaUal || packedKaId !== BigInt(row.kaId)) {
+        throw new Error(`${label}.kaUal does not canonically encode kaId`);
+      }
+    } catch (cause) {
+      fail(
+        'catalog-inventory-completeness-input',
+        `${label} is not exact canonical digest evidence`,
+        cause,
+      );
+    }
+    return row;
+  });
+  rows.sort((left, right) => compareAuthorCatalogKaIdsV1(left.kaId, right.kaId));
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index - 1]!.kaId === rows[index]!.kaId) {
+      fail(
+        'catalog-inventory-completeness-duplicate',
+        `applied inventory digest rows contain duplicate kaId ${rows[index]!.kaId}`,
+      );
+    }
   }
-  return ethers.hexlify(hasher.digest()) as Digest32V1;
+  return Object.freeze(rows);
 }
 
 function encodeU64(value: bigint, label: string): Uint8Array {
@@ -374,7 +477,7 @@ function sameRow(
 
 function snapshotDenseBoundedOrdinaryArray(
   value: unknown,
-  label: 'expectedRows' | 'observedRows',
+  label: string,
 ): readonly unknown[] {
   try {
     if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
@@ -453,6 +556,45 @@ function snapshotExactDataRecord(
     }
     const snapshot: Record<string, unknown> = Object.create(null);
     for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined
+        || !descriptor.enumerable
+        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      ) {
+        fail(
+          'catalog-inventory-completeness-input',
+          `${label}.${key} must be an enumerable data property`,
+        );
+      }
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogInventoryCompletenessErrorV1) throw cause;
+    fail(
+      'catalog-inventory-completeness-input',
+      `${label} could not be snapshotted exactly`,
+      cause,
+    );
+  }
+}
+
+/**
+ * Snapshot only the fields committed by a projection. Richer product evidence
+ * may carry additional data, but it is neither enumerated nor read here.
+ */
+function snapshotRequiredDataRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  label: string,
+): Readonly<Record<string, unknown>> {
+  try {
+    if (!isPlainRecord(value)) {
+      fail('catalog-inventory-completeness-input', `${label} must be a plain object`);
+    }
+    const snapshot: Record<string, unknown> = Object.create(null);
+    for (const key of requiredKeys) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (
         descriptor === undefined
