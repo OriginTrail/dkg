@@ -222,27 +222,40 @@ async function execute(): Promise<void> {
         publication.headObjectDigest,
         `exact-set-${index + 1}.headObjectDigest`,
       );
-      const synchronization = await readSynchronization(
-        receiver,
-        headDigest,
-        `exact-set-${index + 1}`,
-      );
-      exact(
-        requiredSafeInteger(
-          synchronization.inventoryRowCount,
-          `exact-set-${index + 1}.sync.inventoryRowCount`,
-        ),
-        index + 1,
-        `exact-set-${index + 1} synchronized row count`,
-      );
-      exact(
-        requiredString(
-          synchronization.appliedHeadStatus,
-          `exact-set-${index + 1}.sync.appliedHeadStatus`,
-        ),
-        'applied',
-        `exact-set-${index + 1} applied status`,
-      );
+      let synchronization: Record<string, unknown> | undefined;
+      if (index === 0) {
+        const applied = await readApplied(
+          receiver,
+          catalogScopeDigest,
+          AUTHOR_ADDRESS,
+          'exact-set-1',
+        );
+        exact(applied.currentCatalogHeadDigest, headDigest, 'exact-set-1 durable head');
+        exact(applied.catalogVersion, '1', 'exact-set-1 durable version');
+        exact(applied.inventoryRowCount, 1, 'exact-set-1 durable row count');
+      } else {
+        synchronization = await readSynchronization(
+          receiver,
+          headDigest,
+          `exact-set-${index + 1}`,
+        );
+        exact(
+          requiredSafeInteger(
+            synchronization.inventoryRowCount,
+            `exact-set-${index + 1}.sync.inventoryRowCount`,
+          ),
+          index + 1,
+          `exact-set-${index + 1} synchronized row count`,
+        );
+        exact(
+          requiredString(
+            synchronization.appliedHeadStatus,
+            `exact-set-${index + 1}.sync.appliedHeadStatus`,
+          ),
+          'applied',
+          `exact-set-${index + 1} applied status`,
+        );
+      }
       transitions.push(Object.freeze({
         catalogHeadDigest: headDigest,
         catalogVersion: requiredString(
@@ -259,7 +272,7 @@ async function execute(): Promise<void> {
       previousHead = stagedHeadRef(publication, `exact-set-${index + 1}`);
       previousHeadDigest = headDigest;
       finalPublication = publication;
-      finalSynchronization = synchronization;
+      if (synchronization !== undefined) finalSynchronization = synchronization;
     }
     if (finalPublication === undefined || finalSynchronization === undefined) {
       throw new Error('Gate 2 produced no final three-row successor evidence');
