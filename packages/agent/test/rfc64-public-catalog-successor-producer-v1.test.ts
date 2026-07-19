@@ -34,6 +34,9 @@ const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const KA_NUMBER = 7n;
 const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
 const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
+const SECOND_KA_NUMBER = 8n;
+const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
+const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
 const PROJECTION = new TextEncoder().encode(
@@ -126,6 +129,120 @@ describe('RFC-64 public/open one-row successor producer', () => {
       catalogRowDigest: result.sealBinding.catalogRowDigest,
       row: result.row,
     });
+  });
+
+  it('canonicalizes an unordered two-row exact set and produces the same signed head', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+      durable: true as const,
+      namespaceDurability: 'test-exact-durable' as never,
+      objects: Object.freeze([]),
+    }));
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    const firstSeal = await authorSeal(AUTHOR_WALLET);
+    const secondSeal = await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER);
+    const first = await producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: firstSeal,
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+    const common = {
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    };
+    const firstAsset = {
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: firstSeal,
+    };
+    const secondAsset = {
+      assertionCoordinate: 'gate-2-object' as never,
+      projectionBytes: PROJECTION,
+      seal: secondSeal,
+    };
+
+    const unordered = await producer.produceAndStageExactSet({
+      ...common,
+      assets: [secondAsset, firstAsset],
+    });
+    const ordered = await producer.produceAndStageExactSet({
+      ...common,
+      assets: [firstAsset, secondAsset],
+    });
+
+    expect(unordered.publication.head.payload).toMatchObject({
+      totalRows: '2',
+      version: '2',
+      previousHeadDigest: first.publication.head.objectDigest,
+    });
+    expect(unordered.assets.map(({ row }) => row.kaId)).toEqual([KA_ID, SECOND_KA_ID]);
+    expect(unordered.assets.map(({ projection }) => projection.kaUal)).toEqual([UAL, SECOND_UAL]);
+    expect(unordered.publication.bucket?.payload.rows).toEqual(
+      unordered.assets.map(({ row }) => row),
+    );
+    expect(ordered.publication.head).toEqual(unordered.publication.head);
+    expect(ordered.publication.directoryPath).toEqual(unordered.publication.directoryPath);
+    expect(ordered.publication.bucket).toEqual(unordered.publication.bucket);
+    expect(stageKaBundle).toHaveBeenCalledTimes(5);
+    expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects empty, oversized, and duplicate exact sets before signing or staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    const asset = {
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+    };
+    const common = {
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: { issuer: AUTHOR, signDigest },
+      catalogIssuerAuthorization: authorization,
+    };
+
+    await expect(producer.produceAndStageExactSet({
+      ...common,
+      assets: [],
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
+    await expect(producer.produceAndStageExactSet({
+      ...common,
+      assets: Array.from({ length: 1025 }, () => asset),
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
+    await expect(producer.produceAndStageExactSet({
+      ...common,
+      assets: [asset, asset],
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-input' });
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
   it('rejects a non-author attestation before either durable staging callback', async () => {
@@ -391,13 +508,18 @@ function catalogSigner() {
   };
 }
 
-async function authorSeal(signingWallet: ethers.Wallet): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(
+  signingWallet: ethers.Wallet,
+  kaNumber = KA_NUMBER,
+): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
     authorAddress: AUTHOR,
-    reservedKaId: BigInt(KA_ID),
+    reservedKaId: BigInt(kaId),
   });
   const signature = ethers.Signature.from(await signingWallet.signTypedData(
     typedData.domain,
@@ -412,10 +534,10 @@ async function authorSeal(signingWallet: ethers.Wallet): Promise<CanonicalGraphS
     authorSchemeVersion: '1',
     assertedAtChainId: DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address: KAV10,
-    reservedKaId: KA_ID,
+    reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: UAL,
+    kaUal,
     assertionVersion: '1',
     publicTripleCount: '2',
     privateTripleCount: '0',
