@@ -22,6 +22,8 @@ const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/native-wiring' as ContextGraphIdV1;
 const FIXED_HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
+const DELEGATION_EFFECTIVE_AT = '1773899999999' as TimestampMsV1;
+const DELEGATION_EXPIRES_AT = '1773900000001' as TimestampMsV1;
 const NATIVE_DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
@@ -128,6 +130,8 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       author: AUTHOR_WALLET,
       peers: [],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
     expect(published.announcement.policyDigest).toBe(receiverPolicy.policyDigest);
     expect(published.announcedPeers).toEqual([]);
@@ -155,7 +159,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       catalogHeadDigest: published.headObjectDigest,
       inventoryRowCount: 0,
       activatedTripleCount: 0,
-      stagedObjectCount: 2,
+      stagedObjectCount: 3,
       appliedHeadStatus: 'applied',
     });
     expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
@@ -196,6 +200,8 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       author: AUTHOR_WALLET,
       peers: [receiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
     expect(published.announcedPeers).toEqual([receiver.peerId]);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
@@ -231,6 +237,8 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       author: AUTHOR_WALLET,
       peers: [firstReceiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
     await firstReceiver.whenRfc64PublicCatalogReceiverIdleV1();
     expect(firstReceiver.readRfc64AppliedCatalogHeadV1({
