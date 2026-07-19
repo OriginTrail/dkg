@@ -66,16 +66,17 @@ const DEPLOYMENT = Object.freeze({
 const KA_NUMBERS = Object.freeze([7n, 8n, 9n]);
 const ASSERTION_ROOTS = Object.freeze([
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
-  '0x9d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609e',
-  '0xad7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609d',
+  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
+  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
 ]);
+const CANONICAL_TWO_TRIPLE_PROJECTION =
+  '<https://example.org/alice> <https://schema.org/age> '
+    + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
 const PROJECTION_NQUADS = Object.freeze([
-  '<https://example.org/asset-1> <https://schema.org/name> "One" .\n',
-  '<https://example.org/asset-2> <https://schema.org/name> "Two" .\n'
-    + '<https://example.org/asset-2> <https://schema.org/value> "2" .\n',
-  '<https://example.org/asset-3> <https://schema.org/name> "Three" .\n'
-    + '<https://example.org/asset-3> <https://schema.org/value> "3" .\n'
-    + '<https://example.org/asset-3> <https://schema.org/version> "v1" .\n',
+  CANONICAL_TWO_TRIPLE_PROJECTION,
+  CANONICAL_TWO_TRIPLE_PROJECTION,
+  CANONICAL_TWO_TRIPLE_PROJECTION,
 ]);
 const GENESIS_ISSUED_AT = '1773900000000';
 const SUCCESSOR_ISSUED_AT = Object.freeze([
@@ -181,7 +182,7 @@ async function execute(): Promise<void> {
     const allAssets = await Promise.all(KA_NUMBERS.map(async (kaNumber, index) => ({
       assertionCoordinate: `gate-2-object-${index + 1}`,
       projectionNQuads: PROJECTION_NQUADS[index]!,
-      seal: await authorSeal(kaNumber, index + 1, ASSERTION_ROOTS[index]!),
+      seal: await authorSeal(kaNumber, 2, ASSERTION_ROOTS[index]!),
     })));
     let previousHead = stagedHeadRef(genesis, 'genesis');
     let previousHeadDigest = requiredString(genesis.headObjectDigest, 'genesis.headObjectDigest');
