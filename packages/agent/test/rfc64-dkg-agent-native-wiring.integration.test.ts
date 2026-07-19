@@ -4,9 +4,14 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
+  assertCanonicalGraphScopedAuthorSealV1,
+  buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
+  type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
+  type Digest32V1,
+  type EvmAddressV1,
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -24,10 +29,21 @@ const CONTEXT_GRAPH_ID =
 const FIXED_HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
 const DELEGATION_EFFECTIVE_AT = '1773899999999' as TimestampMsV1;
 const DELEGATION_EXPIRES_AT = '1773900000001' as TimestampMsV1;
+const MULTI_DELEGATION_EXPIRES_AT = '1774000000000' as TimestampMsV1;
+const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
+const SECOND_SUCCESSOR_ISSUED_AT = '1773900002000' as TimestampMsV1;
+const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const ASSERTION_ROOT =
+  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
+const PROJECTION = new TextEncoder().encode(
+  '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
+);
 const NATIVE_DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+  assertedAtKav10Address: KAV10,
 }) as CatalogSealDeploymentProfileV1;
 
 const agents: DKGAgent[] = [];
@@ -186,6 +202,99 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     )).toBeNull();
   }, 60_000);
 
+  it('reads the exact staged head variant to dedupe a durably applied multi-row set', async () => {
+    const [author, receiver] = await Promise.all([
+      startNativeAgent('multi-author'),
+      startNativeAgent('multi-receiver'),
+    ]);
+    receiver.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, receiver);
+
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const firstAsset = {
+      assertionCoordinate: 'gate-2-object-1' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(7n),
+    };
+    const firstSuccessor = await author.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      ...firstAsset,
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const successor = await author.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: firstSuccessor.headObjectDigest,
+        signatureVariantDigest: firstSuccessor.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [
+        {
+          assertionCoordinate: 'gate-2-object-2' as never,
+          projectionBytes: PROJECTION,
+          seal: await authorSeal(8n),
+        },
+        firstAsset,
+      ],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SECOND_SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    expect(successor.inventoryRowCount).toBe('2');
+    expect(successor.announcedPeers).toEqual([receiver.peerId]);
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const evidence = receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    );
+    expect(evidence).toMatchObject({
+      catalogHeadDigest: successor.headObjectDigest,
+      inventoryRowCount: 2,
+      appliedHeadStatus: 'applied',
+    });
+    expect(evidence?.rows.map(({ kaId, bundleDigest }) => ({ kaId, bundleDigest }))).toEqual(
+      successor.assets.map(({ kaId, bundleDigest }) => ({ kaId, bundleDigest })),
+    );
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      applied: 3,
+      dedupedAlreadyApplied: 0,
+    });
+
+    const replay = await author.announceRfc64PublicCatalogHeadV1({
+      announcement: successor.announcement,
+      peers: [receiver.peerId],
+    });
+    expect(replay.announcedPeers).toEqual([receiver.peerId]);
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      applied: 3,
+      dedupedAlreadyApplied: 1,
+    });
+  }, 60_000);
+
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
     const [author, receiver] = await Promise.all([
       startNativeAgent('mismatch-author'),
@@ -302,3 +411,39 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 });
+
+async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+  const typedData = buildAuthorAttestationTypedData({
+    chainId: BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
+    kav10Address: NATIVE_DEPLOYMENT.assertedAtKav10Address,
+    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
+    authorAddress: AUTHOR,
+    reservedKaId: BigInt(kaId),
+  });
+  const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
+    typedData.domain,
+    typedData.types,
+    typedData.message,
+  ));
+  const seal = {
+    assertionMerkleRoot: ASSERTION_ROOT,
+    authorAddress: AUTHOR,
+    authorAttestationR: signature.r,
+    authorAttestationVS: signature.yParityAndS,
+    authorSchemeVersion: '1',
+    assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+    assertedAtKav10Address: KAV10,
+    reservedKaId: kaId,
+    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+    contentScopeVersion: '2',
+    kaUal,
+    assertionVersion: '1',
+    publicTripleCount: '2',
+    privateTripleCount: '0',
+    privateMerkleRoot: null,
+  } as unknown as CanonicalGraphScopedAuthorSealV1;
+  assertCanonicalGraphScopedAuthorSealV1(seal);
+  return seal;
+}

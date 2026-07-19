@@ -669,6 +669,31 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
           resolveDeployment,
+          readStagedCatalogHead: async (announcement) => {
+            const stored = await persistence.controlObjects.getVerifiedObject({
+              objectDigest: announcement.catalogHeadObjectDigest,
+              signatureVariantDigest: announcement.signatureVariantDigest,
+              verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+            });
+            if (stored === null) return null;
+            assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+            const signatureVariantDigest = computeControlSignatureVariantDigestHex(
+              stored.envelope.objectDigest,
+              stored.envelope.signature,
+            ) as Digest32V1;
+            if (
+              stored.envelope.objectDigest !== announcement.catalogHeadObjectDigest
+              || signatureVariantDigest !== announcement.signatureVariantDigest
+            ) {
+              throw new Error(
+                'RFC-64 control-object store returned a different staged head identity',
+              );
+            }
+            return Object.freeze({
+              envelope: stored.envelope,
+              signatureVariantDigest,
+            });
+          },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
           isHeadApplied: (announcement) => {
