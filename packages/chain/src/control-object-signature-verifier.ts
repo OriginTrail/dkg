@@ -19,6 +19,7 @@ export const EIP1271_CANONICAL_ABI_RETURN_V1 =
   `0x${EIP1271_MAGIC_VALUE_V1.slice(2)}${'00'.repeat(28)}` as const;
 export const CONTROL_EIP1271_GAS_LIMIT_V1 = 1_000_000n;
 export const CONTROL_EIP1271_MAX_RETURN_BYTES_V1 = 32;
+export const CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 = 64 * 1024;
 export const CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 = 4_000;
 export const CONTROL_EIP1271_MAX_ATTEMPTS_V1 = 2;
 export const CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 = 10_000;
@@ -37,6 +38,7 @@ const SECP256K1_HALF_N = BigInt(
 const EIP1271_INTERFACE = new ethers.Interface([
   'function isValidSignature(bytes32,bytes) view returns (bytes4)',
 ]);
+declare const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1: unique symbol;
 
 export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
   'unsupported-chain',
@@ -44,6 +46,7 @@ export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
   'finalized-state-unavailable',
   'rpc-unavailable',
   'rpc-timeout',
+  'concurrency-saturated',
   'resource-limit',
   'revert',
   'no-code',
@@ -79,6 +82,7 @@ export interface CurrentFinalizedEvmCallRequestV1 {
   readonly data: string;
   readonly gasLimit: bigint;
   readonly maxReturnBytes: number;
+  readonly maxRpcResponseBytes: number;
   readonly attemptTimeoutMs: number;
   readonly maxAttempts: number;
   readonly endpointAttemptPolicy: typeof CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1;
@@ -116,6 +120,7 @@ export const CONTROL_SIGNATURE_VERIFICATION_ERROR_CODES_V1 = Object.freeze([
   'CONTROL_SIGNATURE_FINALIZED_STATE_UNAVAILABLE',
   'CONTROL_SIGNATURE_RPC_UNAVAILABLE',
   'CONTROL_SIGNATURE_RPC_TIMEOUT',
+  'CONTROL_SIGNATURE_CONCURRENCY_SATURATED',
   'CONTROL_SIGNATURE_ABORTED',
 ] as const);
 
@@ -160,6 +165,11 @@ export interface VerifyControlEnvelopeIssuerSignatureOptionsV1 {
 }
 
 export interface VerifiedControlEnvelopeIssuerSignatureV1 {
+  readonly [VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1]: true;
+}
+
+/** Immutable evidence retained behind the process-local verification token. */
+export interface VerifiedControlEnvelopeIssuerSignatureSnapshotV1 {
   readonly objectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
   readonly issuer: EvmAddressV1;
@@ -174,6 +184,11 @@ export interface VerifiedControlEnvelopeIssuerSignatureV1 {
         readonly blockHash: Digest32V1;
       };
 }
+
+const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1 = new WeakMap<
+  object,
+  VerifiedControlEnvelopeIssuerSignatureSnapshotV1
+>();
 
 /**
  * Verify only generic envelope cryptography. A successful result does not prove
@@ -192,7 +207,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
 
   if (envelope.signatureSuite === 'eip191-personal-sign-digest-v1') {
     verifyCanonicalEip191(envelope);
-    return Object.freeze({
+    return mintVerifiedControlEnvelopeIssuerSignatureV1({
       objectDigest,
       signatureVariantDigest,
       issuer,
@@ -241,6 +256,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
       ]).toLowerCase(),
       gasLimit: CONTROL_EIP1271_GAS_LIMIT_V1,
       maxReturnBytes: CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+      maxRpcResponseBytes: CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
       attemptTimeoutMs: CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
       maxAttempts: CONTROL_EIP1271_MAX_ATTEMPTS_V1,
       endpointAttemptPolicy: CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
@@ -288,7 +304,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
       );
     }
 
-    return Object.freeze({
+    return mintVerifiedControlEnvelopeIssuerSignatureV1({
       objectDigest,
       signatureVariantDigest,
       issuer,
@@ -305,6 +321,42 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
     if (timeout !== undefined) clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abortFromCaller);
   }
+}
+
+/** Reject lookalikes, casts, clones, and serialized copies of verification tokens. */
+export function assertVerifiedControlEnvelopeIssuerSignatureV1(
+  value: unknown,
+): asserts value is VerifiedControlEnvelopeIssuerSignatureV1 {
+  if (
+    (typeof value !== 'object' && typeof value !== 'function')
+    || value === null
+    || !VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.has(value as object)
+  ) {
+    throw new TypeError(
+      'control-envelope issuer signature token was not minted by this verifier',
+    );
+  }
+}
+
+export function readVerifiedControlEnvelopeIssuerSignatureV1(
+  value: unknown,
+): VerifiedControlEnvelopeIssuerSignatureSnapshotV1 {
+  assertVerifiedControlEnvelopeIssuerSignatureV1(value);
+  return VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.get(value as object)!;
+}
+
+function mintVerifiedControlEnvelopeIssuerSignatureV1(
+  snapshot: VerifiedControlEnvelopeIssuerSignatureSnapshotV1,
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  const immutable = Object.freeze({
+    ...snapshot,
+    verificationEvidence: Object.freeze({ ...snapshot.verificationEvidence }),
+  }) as VerifiedControlEnvelopeIssuerSignatureSnapshotV1;
+  const capability = Object.freeze(
+    Object.create(null),
+  ) as VerifiedControlEnvelopeIssuerSignatureV1;
+  VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.set(capability as object, immutable);
+  return capability;
 }
 
 function snapshotEnvelope(input: SignedControlEnvelopeV1): SignedControlEnvelopeV1 {
@@ -375,7 +427,12 @@ function validateFinalizedCallResult(
   input: unknown,
   expectedChainId: ChainIdV1,
 ): CurrentFinalizedEvmCallResultV1 {
-  let evidence: CurrentFinalizedEvmCallResultV1;
+  let anchor: Readonly<{
+    chainId: ChainIdV1;
+    blockNumber: BlockNumberV1;
+    blockHash: Digest32V1;
+    returnData: unknown;
+  }>;
   try {
     if (!isPlainRecord(input)) throw new Error('result is not a plain record');
     assertExactDataKeys(input, ['blockHash', 'blockNumber', 'chainId', 'returnData']);
@@ -388,31 +445,39 @@ function validateFinalizedCallResult(
     assertCanonicalChainId(snapshot.chainId, 'current-finalized result chainId');
     assertCanonicalDecimalU64(snapshot.blockNumber, 'current-finalized blockNumber');
     assertCanonicalDigest(snapshot.blockHash, 'current-finalized blockHash');
-    if (
-      typeof snapshot.returnData !== 'string'
-      || !/^0x[0-9a-f]{64}$/.test(snapshot.returnData)
-    ) {
-      throw new Error('returnData is not exactly 32 canonical bytes');
-    }
-    evidence = Object.freeze(snapshot) as CurrentFinalizedEvmCallResultV1;
+    anchor = Object.freeze(snapshot) as typeof anchor;
   } catch (cause) {
     fail(
-      'CONTROL_SIGNATURE_EIP1271_INVALID',
-      'invalid',
-      'EIP-1271 current-finalized call returned malformed evidence or ABI data',
-      { cause, reason: 'malformed-return' },
+      'CONTROL_SIGNATURE_RPC_UNAVAILABLE',
+      'retryable-unavailable',
+      'Current-finalized gateway returned malformed anchor evidence',
+      { cause },
     );
   }
-  // This verifier-owned semantic check intentionally occurs after the hostile
-  // gateway result has been fully snapshotted and structurally classified.
-  if (evidence.chainId !== expectedChainId) {
+  if (anchor.chainId !== expectedChainId) {
     fail(
       'CONTROL_SIGNATURE_CHAIN_MISMATCH',
-      'invalid',
+      'retryable-unavailable',
       'Current-finalized gateway returned a different chain than the signed evidence',
     );
   }
-  return evidence;
+  if (
+    typeof anchor.returnData !== 'string'
+    || !/^0x[0-9a-f]{64}$/.test(anchor.returnData)
+  ) {
+    fail(
+      'CONTROL_SIGNATURE_EIP1271_INVALID',
+      'invalid',
+      'EIP-1271 current-finalized call returned malformed raw ABI data',
+      { reason: 'malformed-return' },
+    );
+  }
+  return Object.freeze({
+    chainId: anchor.chainId,
+    blockNumber: anchor.blockNumber,
+    blockHash: anchor.blockHash,
+    returnData: anchor.returnData,
+  });
 }
 
 function mapFinalizedCallFailure(cause: unknown, signal: AbortSignal | undefined): never {
@@ -433,7 +498,12 @@ function mapFinalizedCallFailure(cause: unknown, signal: AbortSignal | undefined
     case 'unsupported-chain':
       fail('CONTROL_SIGNATURE_CHAIN_UNSUPPORTED', 'unsupported', gatewayFailure.message, { cause });
     case 'chain-mismatch':
-      fail('CONTROL_SIGNATURE_CHAIN_MISMATCH', 'invalid', gatewayFailure.message, { cause });
+      fail(
+        'CONTROL_SIGNATURE_CHAIN_MISMATCH',
+        'retryable-unavailable',
+        gatewayFailure.message,
+        { cause },
+      );
     case 'finalized-state-unavailable':
       fail(
         'CONTROL_SIGNATURE_FINALIZED_STATE_UNAVAILABLE',
@@ -447,6 +517,13 @@ function mapFinalizedCallFailure(cause: unknown, signal: AbortSignal | undefined
       });
     case 'rpc-timeout':
       fail('CONTROL_SIGNATURE_RPC_TIMEOUT', 'retryable-unavailable', gatewayFailure.message, { cause });
+    case 'concurrency-saturated':
+      fail(
+        'CONTROL_SIGNATURE_CONCURRENCY_SATURATED',
+        'retryable-unavailable',
+        gatewayFailure.message,
+        { cause },
+      );
     case 'resource-limit':
       fail('CONTROL_SIGNATURE_EIP1271_RESOURCE_LIMIT', 'unsupported', gatewayFailure.message, {
         cause,
