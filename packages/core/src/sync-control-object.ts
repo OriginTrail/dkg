@@ -13,9 +13,8 @@ import {
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
-  assertExactKeys,
-  isPlainRecord,
 } from './sync-wire-scalars.js';
+import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
 
 export const CONTROL_OBJECT_DIGEST_DOMAIN = 'dkg-control-object-v1\n' as const;
 export const CONTROL_SIGNATURE_VARIANT_DIGEST_DOMAIN =
