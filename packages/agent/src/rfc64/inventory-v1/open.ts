@@ -31,13 +31,13 @@ import {
   fsyncRfc64DirectorySyncV1,
   rfc64RegularFileFsyncOpenFlagsV1,
 } from '../secure-filesystem-policy-v1.js';
+import { resolveRfc64InventoryDatabasePathV1 } from '../persistence-layout-v1.js';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
   INVENTORY_V1_DDL,
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
-  INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
   normalizeInventoryV1SchemaSql,
@@ -227,7 +227,7 @@ async function openInventoryV1WithLifecycleAdapter(
   }
   const sqlite = await loadSqliteModule();
   const resolvedDataDir = resolve(dataDir);
-  const databasePath = resolve(resolvedDataDir, INVENTORY_V1_RELATIVE_PATH);
+  const databasePath = resolveRfc64InventoryDatabasePathV1(resolvedDataDir);
   let lease: InventoryV1Lease | null = null;
   try {
     if (pathEntryExists(recoveryMarkerPath(databasePath))) {

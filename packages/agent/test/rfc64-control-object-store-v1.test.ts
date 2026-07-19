@@ -33,7 +33,7 @@ import {
   Rfc64ControlObjectStoreErrorV1,
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
-import { putRfc64ExactBytesV1 } from '../src/rfc64/durable-file-store-v1.js';
+import { createRfc64DurableFileStoreV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
 import {
@@ -281,7 +281,6 @@ describe('RFC-64 durable control-object store v1', () => {
     const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
       boundary: (boundary) => boundaries.push(boundary),
-      randomSuffix: () => '01'.repeat(16),
     })(dataDir);
     const fixture = await signedFixture('2');
     boundaries.length = 0;
@@ -602,6 +601,36 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(store.close()).resolves.toBeUndefined();
   });
 
+  it('drains an admitted verified read before close can release ownership', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const fixture = await signedFixture('close-read-drain');
+    await store.stageVerifiedObjects([fixture]);
+    const entered = deferred();
+    const release = deferred();
+    const read = store.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: pathsFor(dataDir, fixture.envelope).signatureDigest,
+      verifyIssuerSignature: async (envelope) => {
+        entered.resolve();
+        await release.promise;
+        return verifyControlEnvelopeIssuerSignatureV1(envelope);
+      },
+    });
+    await entered.promise;
+
+    let closeSettled = false;
+    const close = store.close().then(() => { closeSettled = true; });
+    expect(store.closed).toBe(true);
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+
+    release.resolve();
+    await expect(read).resolves.toMatchObject({ envelope: fixture.envelope });
+    await expect(close).resolves.toBeUndefined();
+    expect(closeSettled).toBe(true);
+  });
+
   it('cleans an unpublished temp after a pre-visibility fault and converges on retry', async () => {
     const dataDir = await temporaryDataDirectory();
     const fixture = await signedFixture('7');
@@ -791,17 +820,16 @@ describe('RFC-64 durable control-object store v1', () => {
 
   it('rejects an escaping durable-file relative key inside the write operation', async () => {
     const containmentRoot = await temporaryDataDirectory();
-    await expect(putRfc64ExactBytesV1({
+    const durableFiles = createRfc64DurableFileStoreV1(
       containmentRoot,
+      Object.freeze({ boundary: () => {} }),
+    );
+    await expect(durableFiles.putExactBytes({
       relativePath: join('..', 'escaped.jcs'),
       bytes: new TextEncoder().encode('{}'),
       maxBytes: 16,
       label: 'test control object',
       kind: 'object',
-      io: Object.freeze({
-        boundary: () => {},
-        randomSuffix: () => '00'.repeat(16),
-      }),
     })).rejects.toMatchObject({ code: 'unsafe-path' });
   });
 
@@ -815,22 +843,21 @@ describe('RFC-64 durable control-object store v1', () => {
     const relativePath = join('race', 'immutable.jcs');
     const firstBytes = new TextEncoder().encode('{"writer":"first"}');
     const secondBytes = new TextEncoder().encode('{"writer":"second"}');
-    const write = (bytes: Uint8Array, suffixByte: string) => putRfc64ExactBytesV1({
+    const durableFiles = createRfc64DurableFileStoreV1(
       containmentRoot,
+      Object.freeze({ boundary: () => {} }),
+    );
+    const write = (bytes: Uint8Array) => durableFiles.putExactBytes({
       relativePath,
       bytes,
       maxBytes: 1024,
       label: 'racing immutable fixture',
       kind: 'object' as const,
-      io: Object.freeze({
-        boundary: () => {},
-        randomSuffix: () => suffixByte.repeat(32),
-      }),
     });
 
     const outcomes = await Promise.allSettled([
-      write(firstBytes, 'a'),
-      write(secondBytes, 'b'),
+      write(firstBytes),
+      write(secondBytes),
     ]);
     expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
     const rejected = outcomes.find((outcome) => outcome.status === 'rejected');

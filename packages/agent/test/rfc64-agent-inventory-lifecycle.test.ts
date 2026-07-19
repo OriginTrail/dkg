@@ -4,6 +4,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  computeControlObjectDigestHex,
+  type Digest32V1,
+  type SignedControlEnvelopeV1,
+  type UnsignedControlEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -13,8 +21,12 @@ import {
 } from '../src/rfc64/inventory-v1/index.js';
 import {
   RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+  type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+import {
+  RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
+} from '../src/rfc64/persistence-layout-v1.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -22,6 +34,7 @@ const CHILD_FIXTURE = resolve(
   import.meta.dirname,
   'fixtures/rfc64-agent-inventory-lifecycle-child.ts',
 );
+const CONTROL_STORE_WALLET = new ethers.Wallet(`0x${'52'.repeat(32)}`);
 
 function temporaryDataDirectory(): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-agent-')));
@@ -44,6 +57,28 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
     resolvePromise = resolvePromiseInput;
   });
   return { promise, resolve: () => resolvePromise?.() };
+}
+
+async function signedControlObjectFixture(
+  sequence: string,
+): Promise<StageVerifiedControlObjectV1> {
+  const unsigned = {
+    issuer: CONTROL_STORE_WALLET.address.toLowerCase(),
+    objectType: 'dkg-rfc64-persistence-lifecycle-test-v1',
+    payload: { sequence },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } satisfies UnsignedControlEnvelopeV1;
+  const objectDigest = computeControlObjectDigestHex(unsigned);
+  const envelope = {
+    ...unsigned,
+    objectDigest,
+    signature: await CONTROL_STORE_WALLET.signMessage(ethers.getBytes(objectDigest)),
+  } as SignedControlEnvelopeV1;
+  return {
+    envelope,
+    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+  };
 }
 
 function u64be(value: bigint): Buffer {
@@ -225,24 +260,30 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     await agent.prepareRfc64PersistenceV1();
     const ownedPersistence = agent.rfc64PersistenceV1;
-    const ownedFoundation = ownedPersistence.inventory;
-    const ownedControlObjectStore = ownedPersistence.controlObjectStore;
+    const inventory = ownedPersistence.inventory;
+    const controlObjects = ownedPersistence.controlObjects;
     await agent.prepareRfc64PersistenceV1();
 
     expect(agent.rfc64PersistenceV1).toBe(ownedPersistence);
-    expect(ownedFoundation.databasePath).toBe(
-      join(dataDirectory, INVENTORY_V1_RELATIVE_PATH),
+    expect(ownedPersistence.rootPath).toBe(
+      join(dataDirectory, RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1),
     );
+    expect(realpathSync(join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH)))
+      .toBe(join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH));
     expect(yieldBatch).toHaveBeenCalledTimes(3);
-    expect(() => ownedFoundation.createCandidateSession()).not.toThrow();
-    expect(ownedControlObjectStore.rootPath).toBe(
-      join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH),
-    );
+    expect(() => inventory.createCandidateSession()).not.toThrow();
+    expect(Object.isFrozen(controlObjects)).toBe(true);
+    expect(controlObjects).not.toHaveProperty('rootPath');
+    expect(controlObjects).not.toHaveProperty('closed');
+    expect(controlObjects).not.toHaveProperty('close');
+    expect(Object.isFrozen(inventory)).toBe(true);
+    expect(inventory).not.toHaveProperty('databasePath');
+    expect(inventory).not.toHaveProperty('closed');
+    expect(inventory).not.toHaveProperty('close');
 
     await agent.closeRfc64PersistenceV1();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(ownedPersistence.closed).toBe(true);
-    expect(ownedControlObjectStore.closed).toBe(true);
     expect(candidateLoadCount(dataDirectory)).toBe(0);
     await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
   });
@@ -252,26 +293,32 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     const agent = syntheticAgent(dataDirectory);
     await agent.prepareRfc64PersistenceV1();
     const persistence = agent.rfc64PersistenceV1;
-    const inventory = persistence.inventory;
-    const controlStore = persistence.controlObjectStore;
+    const fixture = await signedControlObjectFixture('lease-read-drain');
+    const staged = await persistence.controlObjects.stageVerifiedObjects([fixture]);
     const entered = deferred();
     const release = deferred();
-    const actualClose = controlStore.close.bind(controlStore);
-    vi.spyOn(controlStore, 'close').mockImplementation(async () => {
-      entered.resolve();
-      await release.promise;
-      await actualClose();
+    const read = persistence.controlObjects.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: staged.objects[0].signatureVariantDigest,
+      verifyIssuerSignature: async (envelope) => {
+        entered.resolve();
+        await release.promise;
+        return verifyControlEnvelopeIssuerSignatureV1(envelope);
+      },
     });
+    await entered.promise;
 
     const close = agent.closeRfc64PersistenceV1();
-    await entered.promise;
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(persistence.closed).toBe(true);
-    expect(inventory.closed).toBe(false);
+    await expect(openInventoryV1(dataDirectory))
+      .rejects.toMatchObject({ code: 'database-busy' });
 
     release.resolve();
+    await expect(read).resolves.toMatchObject({ envelope: fixture.envelope });
     await expect(close).resolves.toBeUndefined();
-    expect(inventory.closed).toBe(true);
+    const replacement = await openInventoryV1(dataDirectory);
+    replacement.close();
   });
 
   it('fails startup before node.start when inventory acquisition or recovery fails', async () => {

@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
 import {
@@ -18,11 +17,11 @@ import {
 import {
   Rfc64DurableFileErrorV1,
   assertRfc64ExistingDirectoryV1,
+  createRfc64DurableFileStoreV1,
   ensureRfc64SecureDirectoryTreeV1,
-  putRfc64ExactBytesV1,
-  readRfc64OptionalBoundedBytesV1,
   type Rfc64DurableFileBoundaryV1,
-  type Rfc64DurableFileIoV1,
+  type Rfc64DurableFileLifecycleV1,
+  type Rfc64DurableFileStoreV1,
 } from './durable-file-store-v1.js';
 import {
   RFC64_POSIX_NAMESPACE_DURABILITY_V1,
@@ -82,13 +81,12 @@ type Rfc64ControlObjectStoreFileKindV1 = 'object' | 'signature';
 export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
   Rfc64DurableFileBoundaryV1<Rfc64ControlObjectStoreFileKindV1>;
 
-interface Rfc64ControlObjectStoreIoV1
-  extends Rfc64DurableFileIoV1<Rfc64ControlObjectStoreFileKindV1> {}
+interface Rfc64ControlObjectStoreLifecycleV1
+  extends Rfc64DurableFileLifecycleV1<Rfc64ControlObjectStoreFileKindV1> {}
 
-const PRODUCTION_IO = Object.freeze({
+const PRODUCTION_LIFECYCLE = Object.freeze({
   boundary: (_boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1): void => {},
-  randomSuffix: (): string => randomBytes(16).toString('hex'),
-}) satisfies Rfc64ControlObjectStoreIoV1;
+}) satisfies Rfc64ControlObjectStoreLifecycleV1;
 
 export interface StageVerifiedControlObjectV1 {
   readonly envelope: SignedControlEnvelopeV1;
@@ -148,7 +146,7 @@ export interface Rfc64ControlObjectStoreV1 {
 export async function openRfc64ControlObjectStoreAtOwnedRootV1(
   rfc64RootPath: string,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, PRODUCTION_IO);
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, PRODUCTION_LIFECYCLE);
 }
 
 interface PreparedStoredControlObjectV1 {
@@ -163,12 +161,15 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closePromise: Promise<void> | null = null;
   readonly #inFlightOperations = new Set<Promise<unknown>>();
   readonly #fileWriteTails = new Map<string, Promise<void>>();
+  readonly #durableFiles: Rfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>;
   readonly namespaceDurability = rfc64NamespaceDurabilityV1();
 
   constructor(
     readonly rootPath: string,
-    private readonly io: Rfc64ControlObjectStoreIoV1,
-  ) {}
+    lifecycle: Rfc64ControlObjectStoreLifecycleV1,
+  ) {
+    this.#durableFiles = createRfc64DurableFileStoreV1(rootPath, lifecycle);
+  }
 
   get closed(): boolean {
     return this.#closed;
@@ -217,14 +218,12 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       );
       const [unsignedBytes, variantBytes] = await mapDurableFileErrors(async () =>
         Promise.all([
-          readRfc64OptionalBoundedBytesV1({
-            containmentRoot: this.rootPath,
+          this.#durableFiles.readOptionalBoundedBytes({
             relativePath: objectPath,
             maxBytes: MAX_CONTROL_OBJECT_BYTES,
             label: 'control object',
           }),
-          readRfc64OptionalBoundedBytesV1({
-            containmentRoot: this.rootPath,
+          this.#durableFiles.readOptionalBoundedBytes({
             relativePath: signaturePath,
             maxBytes: MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
             label: 'control signature variant',
@@ -331,8 +330,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     kind: Rfc64ControlObjectStoreFileKindV1,
   ): Promise<void> {
     await mapDurableFileErrors(async () => {
-      await putRfc64ExactBytesV1({
-        containmentRoot: this.rootPath,
+      await this.#durableFiles.putExactBytes({
         relativePath,
         bytes,
         maxBytes: kind === 'object'
@@ -340,7 +338,6 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
           : MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
         label: kind === 'object' ? 'control object' : 'control signature variant',
         kind,
-        io: this.io,
       });
     });
   }
@@ -361,10 +358,10 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
 /** @internal Used only by the package-local test support module. */
 export async function openRfc64ControlObjectStoreForTestV1(
   dataDirInput: string,
-  io: Rfc64ControlObjectStoreIoV1,
+  lifecycle: Rfc64ControlObjectStoreLifecycleV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  if (!Object.isFrozen(io)) {
-    fail('control-store-input', 'control object store I/O adapter must be immutable');
+  if (!Object.isFrozen(lifecycle)) {
+    fail('control-store-input', 'control object store lifecycle adapter must be immutable');
   }
   if (typeof dataDirInput !== 'string' || dataDirInput.length === 0) {
     fail('control-store-input', 'dataDir must be a non-empty path');
@@ -373,17 +370,17 @@ export async function openRfc64ControlObjectStoreForTestV1(
   const rfc64RootPath = resolve(dataDir, 'rfc64-sync');
   await mapDurableFileErrors(async () => {
     await assertRfc64ExistingDirectoryV1(dataDir, 'DKG data directory', false);
-    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, io);
+    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, lifecycle);
   });
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, io);
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, lifecycle);
 }
 
 async function openRfc64ControlObjectStoreAtRootV1(
   rfc64RootPathInput: string,
-  io: Rfc64ControlObjectStoreIoV1,
+  lifecycle: Rfc64ControlObjectStoreLifecycleV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  if (!Object.isFrozen(io)) {
-    fail('control-store-input', 'control object store I/O adapter must be immutable');
+  if (!Object.isFrozen(lifecycle)) {
+    fail('control-store-input', 'control object store lifecycle adapter must be immutable');
   }
   const rfc64RootPath = resolve(rfc64RootPathInput);
   const rootPath = resolve(rfc64RootPath, CONTROL_OBJECT_STORE_DIRECTORY);
@@ -393,19 +390,19 @@ async function openRfc64ControlObjectStoreAtRootV1(
       'RFC-64 persistence root',
       true,
     );
-    await ensureRfc64SecureDirectoryTreeV1(rootPath, rfc64RootPath, io);
+    await ensureRfc64SecureDirectoryTreeV1(rootPath, rfc64RootPath, lifecycle);
     await ensureRfc64SecureDirectoryTreeV1(
       join(rootPath, OBJECTS_DIRECTORY),
       rootPath,
-      io,
+      lifecycle,
     );
     await ensureRfc64SecureDirectoryTreeV1(
       join(rootPath, SIGNATURES_DIRECTORY),
       rootPath,
-      io,
+      lifecycle,
     );
   });
-  return new FileRfc64ControlObjectStoreV1(rootPath, io);
+  return new FileRfc64ControlObjectStoreV1(rootPath, lifecycle);
 }
 
 function prepareStageBatch(
