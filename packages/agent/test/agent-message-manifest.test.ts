@@ -118,6 +118,32 @@ describe('agent-message-manifest', () => {
     if (!result.ok) expect(result.reason).toContain('does not match sender');
   });
 
+  it('accepts a signature from the custodial keystore path (direct Wallet.signMessage)', async () => {
+    // Custodial agents sign with their own keystore wallet, which returns an
+    // already-serialized 65-byte signature — no compact {r,vs} reassembly.
+    // This is the DEFAULT production path (see DKGAgent.sendChat), so it must
+    // verify identically to the adapter's compact path exercised above.
+    const digest = agentManifestDigestBytes(base);
+    const sig = await SENDER.signMessage(digest);
+    const result = verifyAgentMessageManifest({ ...base, sig, nowMs: base.ts });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.manifest.from).toBe(ethers.getAddress(SENDER.address));
+  });
+
+  it('accepts a delayed outbox retry whose ts is hours old', async () => {
+    // The durable outbox retries with the ORIGINAL signed `ts` on a ladder that
+    // reaches 2h and keeps entries for 24h. Rejecting these would make the
+    // outbox faithfully redeliver messages that can never verify — defeating
+    // at-least-once delivery. Guards the regression a short window would cause.
+    const sig = await signManifest(SENDER, base);
+    const result = verifyAgentMessageManifest({
+      ...base,
+      sig,
+      nowMs: base.ts + 6 * 60 * 60_000, // 6h later, still inside the bound
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it('rejects a stale timestamp outside the skew window', async () => {
     const sig = await signManifest(SENDER, base);
     const result = verifyAgentMessageManifest({

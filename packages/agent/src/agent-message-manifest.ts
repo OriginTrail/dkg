@@ -36,14 +36,28 @@ import { ethers } from 'ethers';
 export const AGENT_MESSAGE_MANIFEST_VERSION = 'dkg-agent-msg:v1';
 
 /**
- * Max clock skew tolerated between the signed `ts` and the receiver's clock.
- * Combined with the persistent per-node `messageId` dedup, this bounds replay:
- * a re-presented manifest is either a `messageId` the receiver has already
- * stored (dropped) or one whose `ts` has aged out of the window (rejected).
- * 5 minutes is generous for NTP-synced nodes without making the replay window
- * meaningfully large.
+ * Age bound on the signed `ts`, deliberately set to **24h** so it composes
+ * exactly with the two existing substrate windows:
+ *
+ *   * the durable outbox drops undelivered entries at `maxAgeMs` (24h), so a
+ *     legitimately retried message is ALWAYS delivered less than 24h after it
+ *     was signed; and
+ *   * `message_idempotency` retains dedup rows for 24h
+ *     (`DashboardDB` prune, `Date.now() - 24h`).
+ *
+ * The persistent `messageId` dedup — not this timestamp — is the primary
+ * anti-replay guard. Within 24h a re-presented manifest is dropped as a
+ * duplicate `messageId`; beyond 24h the dedup row has been pruned, and that is
+ * exactly where this bound takes over and rejects it. No gap, and no false
+ * rejection of a legitimate delayed retry.
+ *
+ * Do NOT tighten this to "a few minutes": the outbox backoff ladder runs
+ * 5s → 15s → 30s → 60s → 5m → 30m → 2h, so a recipient that was briefly
+ * offline routinely receives a message whose `ts` is hours old. A short window
+ * would make the durable outbox faithfully redeliver messages that can never
+ * verify — defeating at-least-once delivery.
  */
-export const AGENT_MESSAGE_MAX_SKEW_MS = 5 * 60_000;
+export const AGENT_MESSAGE_MAX_SKEW_MS = 24 * 60 * 60_000;
 
 export interface AgentMessageManifest {
   /** Checksummed sender agent EVM address. */

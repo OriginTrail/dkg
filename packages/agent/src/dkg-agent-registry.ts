@@ -1776,25 +1776,41 @@ export class AgentRegistryMethods extends DKGAgentBase {
             'address (defaultAgentAddress).',
         );
       }
-      const signAs = this.chain.signMessageAs?.bind(this.chain);
-      if (!signAs) {
-        throw new Error(
-          'Cannot send agent-addressed message: chain adapter does not support ' +
-            'signMessageAs (no agent signing key available).',
-        );
-      }
       // `ethers.getAddress` validates + checksum-normalizes both ends (throws
       // on a malformed recipient address — a clean 4xx-able error for callers).
       const fromAddr = ethers.getAddress(from);
       const toAddr = ethers.getAddress(options.recipientAgentAddress);
       const ts = Date.now();
       const digest = agentManifestDigestBytes({ from: fromAddr, to: toAddr, messageId, ts, text });
-      // Sign as the agent's OWN identity address (not the node operational
-      // key) — mirrors the publisher author-seal path (dkg-publisher.ts). Throws
-      // if `fromAddr` is absent from the adapter's signer pool, which correctly
-      // fails the send instead of shipping an unauthenticated message.
-      const sig = await signAs(fromAddr, digest);
-      agentManifest = { from: fromAddr, to: toAddr, ts, sig: serializeCompactSignature(sig) };
+
+      // Sign the digest AS the sender's agent identity — never the node's
+      // operational key. Custodial agents (the common case: the daemon
+      // generated and persisted their keypair at registration) hold a random
+      // keystore wallet that is NOT in the EVM adapter's signer pool, so
+      // `signMessageAs` would throw for them and hard-fail every send. Sign
+      // with the keystore key directly, mirroring the SWM-host / gossip
+      // author-signing paths. Self-sovereign or pool-backed identities fall
+      // through to the adapter. Both `ethers.Wallet.signMessage` and
+      // `ChainAdapter.signMessageAs` apply the EIP-191 framing that
+      // `verifyAgentMessageManifest` recovers.
+      let sig: string;
+      const custodialKey = this.getCustodialAgentPrivateKey(
+        this.resolveLocalAgentAddress(fromAddr),
+      );
+      if (custodialKey) {
+        sig = await new ethers.Wallet(custodialKey).signMessage(digest);
+      } else {
+        const signAs = this.chain.signMessageAs?.bind(this.chain);
+        if (!signAs) {
+          throw new Error(
+            `Cannot send agent-addressed message: no signing key for agent ${fromAddr} ` +
+              '(not a local custodial agent, and the chain adapter does not ' +
+              'support signMessageAs).',
+          );
+        }
+        sig = serializeCompactSignature(await signAs(fromAddr, digest));
+      }
+      agentManifest = { from: fromAddr, to: toAddr, ts, sig };
     }
 
     const result = await this.messageHandler.sendChat(recipientPeerId, text, {
