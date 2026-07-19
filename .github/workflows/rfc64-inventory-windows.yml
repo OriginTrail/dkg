@@ -58,7 +58,7 @@ jobs:
   inventory-lifecycle:
     name: SQLite lifecycle (Windows)
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -87,7 +87,9 @@ jobs:
         run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
 
       - name: Run Gate 0 production persistence lifecycle
-        timeout-minutes: 10
+        # Nine sequential 60s process bounds plus bounded forced-close cleanup
+        # fit below 10m; reserve additional time for the build and verifier.
+        timeout-minutes: 20
         run: pnpm test:gate0:rfc64-persistence-lifecycle
 
       - name: Build agent dependency closure

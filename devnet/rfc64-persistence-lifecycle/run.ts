@@ -34,7 +34,8 @@ const CONTROL_ROOT_RELATIVE = 'rfc64-sync/control-objects-v1';
 const INVENTORY_RELATIVE = 'rfc64-sync/inventory-v1.sqlite3';
 const LEASE_RELATIVE = 'rfc64-sync/inventory-v1.lease.sqlite3';
 const PROCESS_TIMEOUT_MS = 60_000;
-const children = new ChildProcessRegistry();
+const POST_SIGKILL_CLOSE_DEADLINE_MS = 15_000;
+const children = new ChildProcessRegistry(POST_SIGKILL_CLOSE_DEADLINE_MS);
 
 interface ProcessEvent {
   readonly event: string;
@@ -232,13 +233,7 @@ async function stopAgentGracefully(handle: AgentHandle): Promise<GracefulStopRes
 }
 
 async function stopAgentForcibly(handle: AgentHandle): Promise<ProcessExitEvidence> {
-  const close = waitForAgentClose(handle, 'SIGKILL');
-  const delivered = handle.child.kill('SIGKILL');
-  assert(
-    delivered || handle.child.exitCode !== null || handle.child.signalCode !== null,
-    'failed to deliver SIGKILL to agent process',
-  );
-  const exit = await close;
+  const exit = await children.terminateAndWait(handle.tracked, 'SIGKILL');
   assert(exit.code === null && exit.signal === 'SIGKILL', 'unclean stop was not SIGKILL');
   assert(
     handle.events().every((event) => event.event !== 'stopped'),
@@ -549,8 +544,9 @@ await cleanupPreservingPrimaryFailure({
   operationFailed,
   primaryFailure,
   cleanup: async () => {
-    await children.terminateAllAndWait();
-    rmSync(dataDir, { recursive: true, force: true });
+    await children.terminateAllThenCleanup(() => {
+      rmSync(dataDir, { recursive: true, force: true });
+    });
   },
   reportSecondaryFailure,
 });
