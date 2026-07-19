@@ -6,6 +6,7 @@ import {
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorBytesV1,
   canonicalizeKaTransferDescriptorV1,
+  computeKaTransferIdentityDigestV1,
   parseCanonicalKaTransferDescriptorV1,
   type KaTransferDescriptorV1,
 } from '../src/ka-transfer-descriptor.js';
@@ -30,6 +31,8 @@ const VALID_MIN_CANONICAL =
   '{"blobDigest":"0x1111111111111111111111111111111111111111111111111111111111111111","byteLength":"16","chunkCount":"1","chunkSize":"262144","chunkTreeRoot":"0x2222222222222222222222222222222222222222222222222222222222222222","codec":"dkg-ka-bundle-v1","projectionDigest":"0x0000000000000000000000000000000000000000000000000000000000000000","projectionId":"cg-shared-v1"}';
 const VALID_MIN_FIXTURE_SHA256 =
   'd3f1088dd50f7077865e8cf49e4e22d0aedba63720faa025ec8c89537cb7c80a';
+const VALID_MIN_TRANSFER_IDENTITY_DIGEST =
+  '0x007c995fd7d001736d39af9f2d3c79177c99b55682a1ff4d002fbc3e0345db25';
 
 describe('KaTransferDescriptorV1', () => {
   it('pins the exact canonical valid-min fixture and independent fixture digest', () => {
@@ -37,6 +40,9 @@ describe('KaTransferDescriptorV1', () => {
     const bytes = canonicalizeKaTransferDescriptorBytesV1(VALID_MIN);
     expect(bytes.byteLength).toBe(369);
     expect(lowerHex(sha256(bytes))).toBe(VALID_MIN_FIXTURE_SHA256);
+    expect(computeKaTransferIdentityDigestV1(VALID_MIN)).toBe(
+      VALID_MIN_TRANSFER_IDENTITY_DIGEST,
+    );
     expect(parseCanonicalKaTransferDescriptorV1(bytes)).toEqual(VALID_MIN);
   });
 
