@@ -555,23 +555,26 @@ function assertMemberRosterStructureV1(value: unknown): asserts value is MemberR
     }
     previousAddress = agentAddress;
     assertDenseArray(member.roles, `members[${index}].roles`, MEMBER_ROSTER_ROLES_V1.length);
-    let previousRole: string | undefined;
+    let previousRole: MemberRosterRoleV1 | undefined;
+    let previousRoleIndex = -1;
     for (let roleIndex = 0; roleIndex < member.roles.length; roleIndex += 1) {
       const roleValue = member.roles[roleIndex];
       if (typeof roleValue !== 'string') {
         fail('cg-policy-role', 'member role must be a string');
       }
-      if (!isMemberRosterRoleV1(roleValue)) {
+      const canonicalRoleIndex = memberRosterRoleIndexV1(roleValue);
+      if (canonicalRoleIndex < 0) {
         fail('cg-policy-role', `unknown member role ${roleValue}`);
       }
       const role = roleValue as MemberRosterRoleV1;
-      if (previousRole !== undefined && previousRole >= role) {
+      if (previousRole !== undefined && previousRoleIndex >= canonicalRoleIndex) {
         fail(
           previousRole === role ? 'cg-policy-duplicate' : 'cg-policy-order',
           'member roles must be strictly sorted',
         );
       }
       previousRole = role;
+      previousRoleIndex = canonicalRoleIndex;
     }
   }
   scalar(() => assertCanonicalTimestampMs(value.issuedAt, 'issuedAt'));
@@ -673,8 +676,11 @@ function assertStablePlainDataShape(
   }
 }
 
-function isMemberRosterRoleV1(value: string): value is MemberRosterRoleV1 {
-  return value === 'holder' || value === 'ingress-host' || value === 'provider';
+function memberRosterRoleIndexV1(value: string): number {
+  for (let index = 0; index < MEMBER_ROSTER_ROLES_V1.length; index += 1) {
+    if (MEMBER_ROSTER_ROLES_V1[index] === value) return index;
+  }
+  return -1;
 }
 
 function assertGovernancePair(chainId: unknown, contractAddress: unknown): void {
@@ -770,7 +776,12 @@ function asDigest(value: string): Digest32V1 {
 }
 
 function rejectOversizedInput(input: string | Uint8Array, maxBytes: number, label: string): void {
-  const bytes = typeof input === 'string' ? new TextEncoder().encode(input).byteLength : input.byteLength;
+  if (typeof input === 'string' && input.length > maxBytes) {
+    fail('cg-policy-payload-too-large', `${label} exceeds ${maxBytes} bytes`);
+  }
+  const bytes = typeof input === 'string'
+    ? new TextEncoder().encode(input).byteLength
+    : input.byteLength;
   if (bytes > maxBytes) fail('cg-policy-payload-too-large', `${label} exceeds ${maxBytes} bytes`);
 }
 
