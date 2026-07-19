@@ -13,7 +13,15 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
@@ -66,9 +74,10 @@ export interface Rfc64InventoryV1Foundation {
 
 export async function openInventoryV1(dataDir: string): Promise<Rfc64InventoryV1Foundation> {
   const sqlite = await loadSqliteModule();
-  const databasePath = resolve(dataDir, INVENTORY_V1_RELATIVE_PATH);
+  const resolvedDataDir = resolve(dataDir);
+  const databasePath = resolve(resolvedDataDir, INVENTORY_V1_RELATIVE_PATH);
   try {
-    prepareSecureDirectory(dirname(databasePath));
+    prepareSecureDirectory(resolvedDataDir, dirname(databasePath));
     finishPendingQuarantine(databasePath);
     const database = openOrRebuildOwnedDatabase(sqlite, databasePath);
     return new InventoryV1Foundation(sqlite, databasePath, database);
@@ -192,6 +201,14 @@ function openOrRebuildOwnedDatabase(
         'database application_id does not identify RFC-64 SQL-1 and will not be modified',
       );
     }
+    if (identity.userVersion < INVENTORY_V1_USER_VERSION) {
+      database.close();
+      database = null;
+      throw new InventoryV1OpenError(
+        'ambiguous-database',
+        `inventory application_id is DK64 but user_version ${identity.userVersion} is not a committed v1 database`,
+      );
+    }
     if (identity.userVersion > INVENTORY_V1_USER_VERSION) {
       database.close();
       database = null;
@@ -226,23 +243,81 @@ function openOrRebuildOwnedDatabase(
     tightenOwnedFileMode(databasePath);
     return database;
   } catch (error) {
-    if (database !== null) {
+    const closeProbe = (): void => {
+      if (database === null) return;
       try { database.close(); } catch { /* retain the original failure */ }
+      database = null;
+    };
+    if (error instanceof InventoryV1OpenError) {
+      closeProbe();
+      throw error;
     }
-    if (error instanceof InventoryV1OpenError) throw error;
     if (isCorruptSqliteError(error)) {
-      const ownership = classifyCorruptDatabaseOwnership(databasePath);
-      if (ownership === 'owned') {
-        beginQuarantine(databasePath);
-        finishPendingQuarantine(databasePath);
-        return openOrRebuildOwnedDatabase(sqlite, databasePath);
+      let ownership: CorruptDatabaseOwnershipV1;
+      try {
+        ownership = classifyCorruptDatabaseOwnership(databasePath);
+      } catch (cause) {
+        closeProbe();
+        throw cause;
       }
-      throw new InventoryV1OpenError(
-        'foreign-database',
-        'corrupt SQLite database has a foreign application_id and will not be modified',
-        { cause: error },
-      );
+      if (ownership === 'ambiguous') {
+        closeProbe();
+        throw new InventoryV1OpenError(
+          'ambiguous-database',
+          'corrupt database does not have a readable DK64 ownership identity and will not be modified',
+          { cause: error },
+        );
+      }
+      if (ownership === 'newer') {
+        closeProbe();
+        throw new InventoryV1OpenError(
+          'newer-schema',
+          'corrupt DK64 database has a newer user_version and will not be modified',
+          { cause: error },
+        );
+      }
+      if (ownership === 'foreign') {
+        closeProbe();
+        throw new InventoryV1OpenError(
+          'foreign-database',
+          'corrupt SQLite database has a foreign application_id and will not be modified',
+          { cause: error },
+        );
+      }
+      if (database === null) {
+        throw new InventoryV1OpenError(
+          'database-io',
+          'cannot prove exclusive access to the corrupt DK64 database; it will not be quarantined',
+          { cause: error },
+        );
+      }
+      try {
+        assertCorruptDatabaseQuiescent(database);
+      } catch (cause) {
+        closeProbe();
+        if (cause instanceof InventoryV1OpenError) throw cause;
+        throw new InventoryV1OpenError(
+          'database-io',
+          'cannot prove exclusive access to the corrupt DK64 database; it will not be quarantined',
+          { cause },
+        );
+      }
+      try {
+        database.close();
+      } catch (cause) {
+        database = null;
+        throw new InventoryV1OpenError(
+          'database-io',
+          'failed to close the corrupt DK64 database after proving quiescence; it will not be quarantined',
+          { cause },
+        );
+      }
+      database = null;
+      beginQuarantine(databasePath);
+      finishPendingQuarantine(databasePath);
+      return openOrRebuildOwnedDatabase(sqlite, databasePath);
     }
+    closeProbe();
     if (isBusySqliteError(error)) {
       throw new InventoryV1OpenError(
         'database-busy',
@@ -366,6 +441,39 @@ function assertDatabaseQuiescent(database: DatabaseSyncV1): void {
   }
 }
 
+function assertCorruptDatabaseQuiescent(database: DatabaseSyncV1): void {
+  let transactionOpen = false;
+  try {
+    // Probe the writer lock before corruption-sensitive schema/checkpoint work
+    // so a live WAL writer is reported as busy and is never split from the
+    // database file during quarantine.
+    database.exec('PRAGMA busy_timeout = 0');
+    database.exec('BEGIN EXCLUSIVE');
+    transactionOpen = true;
+    database.exec('ROLLBACK');
+    transactionOpen = false;
+  } catch (cause) {
+    if (transactionOpen) {
+      try { database.exec('ROLLBACK'); } catch { /* retain the probe failure */ }
+    }
+    if (isBusySqliteError(cause)) {
+      throw new InventoryV1OpenError(
+        'database-busy',
+        'corrupt inventory database has an active writer and will not be quarantined',
+        { cause },
+      );
+    }
+    throw new InventoryV1OpenError(
+      'database-io',
+      'cannot prove exclusive access to the corrupt inventory database; it will not be quarantined',
+      { cause },
+    );
+  } finally {
+    try { database.exec('PRAGMA busy_timeout = 5000'); } catch { /* best-effort connection restore */ }
+  }
+  assertDatabaseQuiescent(database);
+}
+
 function applyAndVerifyPragmas(database: DatabaseSyncV1): void {
   database.exec(`
     PRAGMA foreign_keys = ON;
@@ -402,10 +510,44 @@ function readPragmaInteger(database: DatabaseSyncV1, pragma: string): number {
   return value;
 }
 
-function prepareSecureDirectory(directoryPath: string): void {
-  if (pathEntryExists(directoryPath)) rejectSymlink(directoryPath, 'inventory directory');
-  mkdirSync(directoryPath, { recursive: true, mode: INVENTORY_V1_DIRECTORY_MODE });
-  rejectSymlink(directoryPath, 'inventory directory');
+function prepareSecureDirectory(dataDirectory: string, directoryPath: string): void {
+  const relativeDirectory = relative(dataDirectory, directoryPath);
+  if (
+    relativeDirectory === '..'
+    || relativeDirectory.startsWith(`..${sep}`)
+    || isAbsolute(relativeDirectory)
+  ) {
+    throw new InventoryV1OpenError(
+      'unsafe-path',
+      'inventory database directory must remain within the declared DKG data directory',
+    );
+  }
+
+  if (pathEntryExists(dataDirectory)) {
+    rejectSymlink(dataDirectory, 'DKG data directory');
+    assertFilesystemOwner(dataDirectory);
+  } else {
+    // The declared data-directory boundary may itself be new. Components above
+    // that caller-selected boundary are intentionally outside adapter policy.
+    mkdirSync(dataDirectory, { recursive: true, mode: INVENTORY_V1_DIRECTORY_MODE });
+    rejectSymlink(dataDirectory, 'DKG data directory');
+    assertFilesystemOwner(dataDirectory);
+  }
+
+  let currentDirectory = dataDirectory;
+  for (const component of relativeDirectory.split(sep).filter((value) => value.length !== 0)) {
+    // The current parent was owner-checked before this content mutation.
+    const nextDirectory = join(currentDirectory, component);
+    if (pathEntryExists(nextDirectory)) {
+      rejectSymlink(nextDirectory, 'inventory directory path component');
+      assertFilesystemOwner(nextDirectory);
+    } else {
+      mkdirSync(nextDirectory, { mode: INVENTORY_V1_DIRECTORY_MODE });
+      rejectSymlink(nextDirectory, 'inventory directory path component');
+      assertFilesystemOwner(nextDirectory);
+    }
+    currentDirectory = nextDirectory;
+  }
   applySecurePermissions(directoryPath, INVENTORY_V1_DIRECTORY_MODE, true);
 }
 
@@ -467,6 +609,10 @@ function assertOwnedUnitOwners(databasePath: string): void {
 }
 
 function applySecurePermissions(path: string, mode: number, directory: boolean): void {
+  // Never let chmod or Set-Acl turn a foreign existing entry into an owned one.
+  // Newly created entries are also checked because they must already be owned
+  // by this process before their permissions are tightened.
+  assertFilesystemOwner(path);
   if (process.platform === 'win32') {
     applyWindowsOwnerOnlyAcl(path, directory);
     return;
@@ -586,22 +732,25 @@ function beginQuarantine(databasePath: string): void {
     rejectSymlink(markerPath, 'inventory recovery marker');
     return;
   }
-  const quarantineRoot = join(dirname(databasePath), QUARANTINE_DIRECTORY);
+  const inventoryDirectory = dirname(databasePath);
+  const quarantineRoot = join(inventoryDirectory, QUARANTINE_DIRECTORY);
   if (pathEntryExists(quarantineRoot)) rejectSymlink(quarantineRoot, 'inventory quarantine directory');
   mkdirSync(quarantineRoot, { recursive: true, mode: INVENTORY_V1_DIRECTORY_MODE });
   rejectSymlink(quarantineRoot, 'inventory quarantine directory');
   applySecurePermissions(quarantineRoot, INVENTORY_V1_DIRECTORY_MODE, true);
+  fsyncDirectory(inventoryDirectory);
   const suffix = `${Date.now()}-${randomBytes(8).toString('hex')}`;
   const quarantineDirectory = join(quarantineRoot, `inventory-v1-${suffix}`);
   mkdirSync(quarantineDirectory, { mode: INVENTORY_V1_DIRECTORY_MODE });
   rejectSymlink(quarantineDirectory, 'inventory quarantine generation');
   applySecurePermissions(quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, true);
+  fsyncDirectory(quarantineRoot);
   const marker: RecoveryMarkerV1 = { version: 1, quarantineDirectory };
   writeFileSync(markerPath, JSON.stringify(marker), { encoding: 'utf8', flag: 'wx', mode: INVENTORY_V1_FILE_MODE });
   applySecurePermissions(markerPath, INVENTORY_V1_FILE_MODE, false);
   const descriptor = openSync(markerPath, 'r');
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-  fsyncDirectory(dirname(databasePath));
+  fsyncDirectory(inventoryDirectory);
 }
 
 function finishPendingQuarantine(databasePath: string): void {
@@ -622,6 +771,10 @@ function finishPendingQuarantine(databasePath: string): void {
   rejectSymlink(marker.quarantineDirectory, 'inventory quarantine generation');
   assertFilesystemOwner(marker.quarantineDirectory);
   applySecurePermissions(marker.quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, true);
+  // Make both levels of the quarantine destination durable before evidence is
+  // moved under the recovery marker.
+  fsyncDirectory(inventoryDirectory);
+  fsyncDirectory(quarantineRoot);
   for (const suffix of OWNED_FILE_SUFFIXES) {
     const source = `${databasePath}${suffix}`;
     if (!pathEntryExists(source)) continue;
@@ -633,9 +786,12 @@ function finishPendingQuarantine(databasePath: string): void {
     }
     renameSync(source, target);
   }
+  // Persist destination names and source removals before deleting the marker.
+  // A crash before either fsync leaves the durable marker to resume safely.
   fsyncDirectory(marker.quarantineDirectory);
+  fsyncDirectory(inventoryDirectory);
   unlinkSync(markerPath);
-  fsyncDirectory(dirname(databasePath));
+  fsyncDirectory(inventoryDirectory);
 }
 
 function parseRecoveryMarker(value: string, inventoryDirectory: string): RecoveryMarkerV1 {
@@ -682,22 +838,27 @@ function isBusySqliteError(error: unknown): boolean {
   return errcode === 5 || errcode === 6;
 }
 
-type CorruptDatabaseOwnershipV1 = 'owned' | 'foreign';
+type CorruptDatabaseOwnershipV1 = 'owned' | 'ambiguous' | 'foreign' | 'newer';
+
+interface SqliteHeaderIdentityV1 {
+  applicationId: number;
+  userVersion: number;
+}
 
 function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabaseOwnershipV1 {
-  const applicationId = readValidSqliteHeaderApplicationId(databasePath);
-  if (applicationId === null || applicationId === INVENTORY_V1_APPLICATION_ID || applicationId === 0) {
-    return 'owned';
-  }
-  return 'foreign';
+  const identity = readValidSqliteHeaderIdentity(databasePath);
+  if (identity === null || identity.applicationId === 0) return 'ambiguous';
+  if (identity.applicationId !== INVENTORY_V1_APPLICATION_ID) return 'foreign';
+  if (identity.userVersion > INVENTORY_V1_USER_VERSION) return 'newer';
+  return identity.userVersion === INVENTORY_V1_USER_VERSION ? 'owned' : 'ambiguous';
 }
 
 function refuseValidForeignSqliteHeader(databasePath: string): void {
-  const applicationId = readValidSqliteHeaderApplicationId(databasePath);
+  const identity = readValidSqliteHeaderIdentity(databasePath);
   if (
-    applicationId !== null
-    && applicationId !== 0
-    && applicationId !== INVENTORY_V1_APPLICATION_ID
+    identity !== null
+    && identity.applicationId !== 0
+    && identity.applicationId !== INVENTORY_V1_APPLICATION_ID
   ) {
     throw new InventoryV1OpenError(
       'foreign-database',
@@ -706,7 +867,7 @@ function refuseValidForeignSqliteHeader(databasePath: string): void {
   }
 }
 
-function readValidSqliteHeaderApplicationId(databasePath: string): number | null {
+function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(databasePath, 'r');
@@ -715,7 +876,10 @@ function readValidSqliteHeaderApplicationId(databasePath: string): number | null
     if (bytesRead < header.byteLength || header.subarray(0, 16).toString('binary') !== 'SQLite format 3\u0000') {
       return null;
     }
-    return header.readUInt32BE(68);
+    return {
+      applicationId: header.readUInt32BE(68),
+      userVersion: header.readUInt32BE(60),
+    };
   } catch (cause) {
     throw new InventoryV1OpenError(
       'database-io',

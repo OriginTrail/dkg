@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
@@ -31,7 +32,10 @@ import {
 const temporaryDirectories: string[] = [];
 
 function temporaryDataDirectory(): string {
-  const directory = mkdtempSync(join(tmpdir(), 'dkg-rfc64-sql1-'));
+  // macOS exposes /var as a symlink to /private/var. Use the canonical test
+  // root so the production component-wise no-symlink rule is exercised only
+  // by symlinks intentionally created by each test.
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-sql1-')));
   temporaryDirectories.push(directory);
   return directory;
 }
@@ -124,6 +128,17 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     }
   });
 
+  it('initializes beneath a previously nonexistent declared dataDir suffix', async () => {
+    const container = temporaryDataDirectory();
+    const dataDirectory = join(container, 'new-data', 'nested');
+    const foundation = await openInventoryV1(dataDirectory);
+    try {
+      assertInitializedInventory(databasePath(dataDirectory));
+    } finally {
+      foundation.close();
+    }
+  });
+
   it('executes the frozen DDL as STRICT tables with the named bucket index', () => {
     const database = new DatabaseSync(':memory:');
     try {
@@ -189,6 +204,24 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     expectNoQuarantine(path);
   });
 
+  it('refuses an uncommitted DK64 user_version=0 database as ambiguous', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true });
+    const partial = new DatabaseSync(path);
+    partial.exec(`
+      CREATE TABLE partial_data (value TEXT);
+      PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+    `);
+    partial.close();
+    const before = readFileSync(path);
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'ambiguous-database'));
+    expect(readFileSync(path)).toEqual(before);
+    expectNoQuarantine(path);
+  });
+
   it('refuses a newer owned user_version without quarantine', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
@@ -235,22 +268,72 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     }
   });
 
-  it('quarantines NOTADB bytes at the dedicated path and preserves them as evidence', async () => {
+  it('refuses NOTADB bytes without manufacturing DK64 ownership or quarantine', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
     mkdirSync(dirname(path), { recursive: true });
     const corruptBytes = Buffer.from('not-a-sqlite-database\n');
     writeFileSync(path, corruptBytes);
 
-    const foundation = await openInventoryV1(dataDirectory);
-    try {
-      assertInitializedInventory(path);
-      const generations = quarantineGenerations(path);
-      expect(generations).toHaveLength(1);
-      expect(readFileSync(join(generations[0]!, 'inventory-v1.sqlite3'))).toEqual(corruptBytes);
-    } finally {
-      foundation.close();
-    }
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'ambiguous-database'));
+    expect(readFileSync(path)).toEqual(corruptBytes);
+    expectNoQuarantine(path);
+  });
+
+  it('refuses a corrupt application_id=0 database with user data as ambiguous', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true });
+    const ambiguous = new DatabaseSync(path);
+    ambiguous.exec('CREATE TABLE existing_data (value TEXT)');
+    ambiguous.close();
+    truncateSync(path, 100);
+    const before = readFileSync(path);
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'ambiguous-database'));
+    expect(readFileSync(path)).toEqual(before);
+    expectNoQuarantine(path);
+  });
+
+  it('refuses a corrupt owned database with a newer header user_version', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true });
+    const newer = new DatabaseSync(path);
+    newer.exec(`
+      CREATE TABLE future_schema (value TEXT);
+      PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+      PRAGMA user_version = 2;
+    `);
+    newer.close();
+    truncateSync(path, 100);
+    const before = readFileSync(path);
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'newer-schema'));
+    expect(readFileSync(path)).toEqual(before);
+    expectNoQuarantine(path);
+  });
+
+  it('refuses a corrupt uncommitted DK64 user_version=0 database as ambiguous', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true });
+    const partial = new DatabaseSync(path);
+    partial.exec(`
+      CREATE TABLE partial_data (value TEXT);
+      PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+    `);
+    partial.close();
+    truncateSync(path, 100);
+    const before = readFileSync(path);
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'ambiguous-database'));
+    expect(readFileSync(path)).toEqual(before);
+    expectNoQuarantine(path);
   });
 
   it('does not quarantine a corrupt SQLite file whose readable header has a foreign app id', async () => {
@@ -319,6 +402,42 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     },
   );
 
+  it.runIf(process.platform !== 'win32')(
+    'refuses a symlinked dataDir before creating anything through it',
+    async () => {
+      const realDataDirectory = temporaryDataDirectory();
+      const linkContainer = temporaryDataDirectory();
+      const linkedDataDirectory = join(linkContainer, 'data-dir-link');
+      symlinkSync(realDataDirectory, linkedDataDirectory);
+
+      await expect(openInventoryV1(linkedDataDirectory)).rejects.toSatisfy((error: unknown) =>
+        expectOpenErrorCode(error, 'unsafe-path'));
+      expect(readdirSync(realDataDirectory)).toEqual([]);
+      expect(existsSync(databasePath(realDataDirectory))).toBe(false);
+      expectNoQuarantine(databasePath(linkedDataDirectory));
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a foreign-owned dataDir before creating its inventory child',
+    async () => {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      const originalMode = statSync(dataDirectory).mode & 0o777;
+      const actualUid = process.getuid();
+      const uid = vi.spyOn(process, 'getuid').mockReturnValue(actualUid + 1);
+      try {
+        await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+          expectOpenErrorCode(error, 'database-io'));
+      } finally {
+        uid.mockRestore();
+      }
+      expect(existsSync(dirname(path))).toBe(false);
+      expect(statSync(dataDirectory).mode & 0o777).toBe(originalMode);
+      expectNoQuarantine(path);
+    },
+  );
+
   it('refuses orphaned sidecars without deleting them', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
@@ -372,6 +491,38 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     }
   });
 
+  it('does not split a corrupt owned database from a live WAL writer', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    mkdirSync(dirname(path), { recursive: true });
+    const seed = new DatabaseSync(path);
+    seed.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE owned_data (value TEXT);
+      PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+      PRAGMA user_version = 1;
+    `);
+    seed.close();
+    const holder = new DatabaseSync(path);
+    holder.exec(`
+      PRAGMA journal_mode = WAL;
+      BEGIN IMMEDIATE;
+      INSERT INTO owned_data VALUES ('live-writer');
+    `);
+    truncateSync(path, 100);
+    const before = readFileSync(path);
+    try {
+      await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+        expectOpenErrorCode(error, 'database-io'));
+      expect(readFileSync(path)).toEqual(before);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      expectNoQuarantine(path);
+    } finally {
+      try { holder.exec('ROLLBACK'); } catch { /* the main file is intentionally corrupt */ }
+      try { holder.close(); } catch { /* the main file is intentionally corrupt */ }
+    }
+  });
+
   it('resumes a partial recovery-marker move before rebuilding', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
@@ -397,6 +548,42 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
       expect(readFileSync(join(generation, 'inventory-v1.sqlite3-wal'), 'utf8')).toBe('wal-before-crash');
       expect(readFileSync(join(generation, 'inventory-v1.sqlite3-shm'), 'utf8')).toBe('shm-before-crash');
       expect(existsSync(`${path}.rebuild-required`)).toBe(false);
+    } finally {
+      foundation.close();
+    }
+  });
+
+  it('retains the recovery marker across an interrupted evidence move and resumes', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    const inventoryDirectory = dirname(path);
+    const generation = join(
+      inventoryDirectory,
+      'quarantine',
+      'inventory-v1-1234567890-bbbbbbbbbbbbbbbb',
+    );
+    mkdirSync(generation, { recursive: true });
+    writeFileSync(path, 'main-before-crash');
+    writeFileSync(`${path}-wal`, 'wal-before-crash');
+    writeFileSync(join(generation, 'inventory-v1.sqlite3-wal'), 'conflicting-target');
+    writeFileSync(
+      `${path}.rebuild-required`,
+      JSON.stringify({ version: 1, quarantineDirectory: generation }),
+    );
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
+      expectOpenErrorCode(error, 'database-io'));
+    expect(existsSync(`${path}.rebuild-required`)).toBe(true);
+    expect(readFileSync(join(generation, 'inventory-v1.sqlite3'), 'utf8')).toBe('main-before-crash');
+    expect(readFileSync(`${path}-wal`, 'utf8')).toBe('wal-before-crash');
+
+    rmSync(join(generation, 'inventory-v1.sqlite3-wal'));
+    const foundation = await openInventoryV1(dataDirectory);
+    try {
+      assertInitializedInventory(path);
+      expect(existsSync(`${path}.rebuild-required`)).toBe(false);
+      expect(readFileSync(join(generation, 'inventory-v1.sqlite3'), 'utf8')).toBe('main-before-crash');
+      expect(readFileSync(join(generation, 'inventory-v1.sqlite3-wal'), 'utf8')).toBe('wal-before-crash');
     } finally {
       foundation.close();
     }
