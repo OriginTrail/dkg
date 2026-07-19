@@ -172,6 +172,22 @@ describe('ContextGraphPolicyV1 codec', () => {
       .toThrow(/cg-policy-scalar/);
   });
 
+  it('independently enforces the second half of each paired cross-field invariant', () => {
+    // Governance tuple: the source.chainId half is covered above; prove the
+    // source.contractAddress half by diverging only the finalized contract.
+    expect(() => assertContextGraphPolicyV1({
+      ...POLICY,
+      source: { ...POLICY.source, contractAddress: ISSUER },
+    })).toThrow(/cg-policy-governance/);
+    // Publish domain: the publishAuthority half is covered above; prove the
+    // publishAuthorityAccountId half with a nonzero id on an open (publishPolicy 1)
+    // policy, where authority must be null and the account id must be zero.
+    expect(() => assertContextGraphPolicyV1({
+      ...POLICY,
+      publishAuthorityAccountId: '7',
+    })).toThrow(/cg-policy-publish-domain/);
+  });
+
   it('rejects unknown fields, wrong projection, malformed scalars, and noncanonical wire', () => {
     expect(() => assertContextGraphPolicyV1({ ...POLICY, subGraphName: null }))
       .toThrow(/cg-policy-schema/);
