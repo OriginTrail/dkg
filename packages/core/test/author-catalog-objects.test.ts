@@ -136,13 +136,25 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
   });
 
   it('requires strictly numeric row order and rejects duplicate KA/key/coordinate', () => {
-    const second = rowForNumber(2n, 'fixture-2');
-    const ordered = { ...VALID_BUCKET, rows: [VALID_ROW, second] };
-    expect(() => assertAuthorCatalogBucketV1(ordered)).not.toThrow();
+    const numericTwo = validatedRow({
+      ...VALID_ROW,
+      kaId: '2',
+      assertionCoordinate: 'numeric-2',
+    });
+    const numericTen = validatedRow({
+      ...VALID_ROW,
+      kaId: '10',
+      assertionCoordinate: 'numeric-10',
+    });
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
-      rows: [second, VALID_ROW],
+      rows: [numericTwo, numericTen],
+    })).not.toThrow();
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      rows: [numericTen, numericTwo],
     })).toThrow(/catalog-object-row-order/);
+    const second = rowForNumber(2n, 'fixture-2');
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
       rows: [VALID_ROW, VALID_ROW],
@@ -154,6 +166,26 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
   });
 
   it('requires every row to map to the signed bucket and bucketId to be in range', () => {
+    const bucketZeroRows = [
+      validatedRow({ ...VALID_ROW, kaId: '2', assertionCoordinate: 'bucket-0-2' }),
+      validatedRow({ ...VALID_ROW, kaId: '10', assertionCoordinate: 'bucket-0-10' }),
+    ];
+    const bucketOneRows = [
+      validatedRow({ ...VALID_ROW, kaId: '4', assertionCoordinate: 'bucket-1-4' }),
+      validatedRow({ ...VALID_ROW, kaId: '6', assertionCoordinate: 'bucket-1-6' }),
+    ];
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      bucketCount: '2',
+      bucketId: '0',
+      rows: bucketZeroRows,
+    })).not.toThrow();
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      bucketCount: '2',
+      bucketId: '1',
+      rows: bucketOneRows,
+    })).not.toThrow();
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
       bucketCount: '2',
