@@ -158,6 +158,11 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     const serializedClone = JSON.parse(
       JSON.stringify(candidate.verifiedRow),
     ) as typeof candidate.verifiedRow;
+    for (const primitive of [null, undefined, false, 0, 'proof']) {
+      expect(() => inventory.readVerifiedCandidateCatalogRow(
+        primitive as unknown as typeof candidate.verifiedRow,
+      )).toThrowError(expect.objectContaining({ code: 'candidate-invalid-row-proof' }));
+    }
     expect(() => inventory.readVerifiedCandidateCatalogRow(forged)).toThrowError(
       expect.objectContaining({ code: 'candidate-invalid-row-proof' }),
     );
@@ -169,6 +174,15 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     )).toThrowError(expect.objectContaining({ code: 'candidate-invalid-row-proof' }));
     expect(() => otherInventory.readVerifiedCandidateCatalogRow(candidate.verifiedRow))
       .toThrowError(expect.objectContaining({ code: 'candidate-invalid-row-proof' }));
+
+    const tamperedWrapper = {
+      ...candidate,
+      disposition: 'removed',
+      catalogKeyDigest: ZERO_DIGEST32_V1,
+    } as const;
+    expect(inventory.readVerifiedCandidateCatalogRow(tamperedWrapper.verifiedRow)).toEqual(
+      snapshot,
+    );
 
     expect(inventory.pageCandidateBucketRows(traversal, page.resumeAfter, 1)).toEqual({
       rows: [],
