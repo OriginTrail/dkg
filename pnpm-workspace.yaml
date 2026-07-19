@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "conformance/*"
   - "packages/cli/test-fixtures/sample-kafka-plugin"
   - "packages/cli/test-fixtures/sample-kafka-extension"
   - "demo"

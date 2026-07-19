@@ -1,0 +1,22 @@
+{
+  "name": "@origintrail-official/dkg-wal-v1-conformance",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node --import tsx scripts/generate-vectors.ts",
+    "test": "vitest run",
+    "test:types": "tsc --noEmit",
+    "verify": "pnpm run generate -- --check && pnpm run test && pnpm run test:types"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "ethers": "^6"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7",
+    "vitest": "^4.0.18"
+  }
+}
