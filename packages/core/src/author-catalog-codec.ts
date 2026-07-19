@@ -319,25 +319,20 @@ export function parseCanonicalAuthorCatalogScopeV1(
   input: string | Uint8Array,
   options: StrictJsonParseOptions = {},
 ): AuthorCatalogScopeV1 {
-  rejectOversizedWireInput(input, MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1, 'author catalog scope');
-  const parsed = parseCanonicalJson(input, {
-    ...options,
-    maxBytes: Math.min(
-      options.maxBytes ?? MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1,
-      MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1,
-    ),
-    maxDepth: Math.min(options.maxDepth ?? 1, 1),
-  });
-  assertAuthorCatalogScopeV1(parsed);
-  return parsed;
+  return parseBoundedCatalogCanonicalV1<AuthorCatalogScopeV1>(
+    input,
+    options,
+    { maxBytes: MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1, maxDepth: 1, label: 'author catalog scope' },
+    (value) => assertAuthorCatalogScopeV1(value),
+  );
 }
 
 export function computeAuthorCatalogScopeDigestV1(
   scope: AuthorCatalogScopeV1,
 ): Digest32V1 {
-  return digestWithDomain(
+  return digestCatalogCanonicalV1(
     SCOPE_DOMAIN_BYTES,
-    UTF8.encode(canonicalizeAuthorCatalogScopeV1(scope)),
+    canonicalizeAuthorCatalogScopeV1(scope),
   );
 }
 
@@ -347,7 +342,7 @@ export function computeAuthorCatalogKeyDigestV1(kaId: KaIdV1): Digest32V1 {
     maxBytes: 128,
     maxDepth: 1,
   });
-  return digestWithDomain(KEY_DOMAIN_BYTES, UTF8.encode(canonical));
+  return digestCatalogCanonicalV1(KEY_DOMAIN_BYTES, canonical);
 }
 
 /** Compare canonical u256 KA identifiers by mathematical value, never lexically. */
@@ -458,17 +453,12 @@ export function parseCanonicalAuthorCatalogRowV1(
   input: string | Uint8Array,
   options: StrictJsonParseOptions = {},
 ): AuthorCatalogRowV1 {
-  rejectOversizedWireInput(input, MAX_AUTHOR_CATALOG_ROW_BYTES_V1, 'author catalog row');
-  const parsed = parseCanonicalJson(input, {
-    ...options,
-    maxBytes: Math.min(
-      options.maxBytes ?? MAX_AUTHOR_CATALOG_ROW_BYTES_V1,
-      MAX_AUTHOR_CATALOG_ROW_BYTES_V1,
-    ),
-    maxDepth: Math.min(options.maxDepth ?? 2, 2),
-  });
-  assertAuthorCatalogRowV1(parsed);
-  return parsed;
+  return parseBoundedCatalogCanonicalV1<AuthorCatalogRowV1>(
+    input,
+    options,
+    { maxBytes: MAX_AUTHOR_CATALOG_ROW_BYTES_V1, maxDepth: 2, label: 'author catalog row' },
+    (value) => assertAuthorCatalogRowV1(value),
+  );
 }
 
 export function computeAuthorCatalogRowDigestV1(
@@ -481,7 +471,7 @@ export function computeAuthorCatalogRowDigestV1(
     { catalogScopeDigest, row } as unknown as CanonicalJsonValue,
     { maxBytes: MAX_AUTHOR_CATALOG_ROW_DIGEST_INPUT_BYTES_V1, maxDepth: 3 },
   );
-  return digestWithDomain(ROW_DOMAIN_BYTES, UTF8.encode(canonical));
+  return digestCatalogCanonicalV1(ROW_DOMAIN_BYTES, canonical);
 }
 
 /**
@@ -672,6 +662,41 @@ function digestWithDomain(domain: Uint8Array, canonicalBytes: Uint8Array): Diges
   for (const byte of hasher.digest()) result += byte.toString(16).padStart(2, '0');
   assertCanonicalDigest(result, 'computed catalog digest');
   return result;
+}
+
+/**
+ * Domain-separated digest of an ALREADY-canonicalized catalog payload string.
+ * A pure tail wrapper over digestWithDomain — canonicalization (with each
+ * object's own byte/depth limits) stays at the call site, so this changes no
+ * digest input.
+ */
+function digestCatalogCanonicalV1(domain: Uint8Array, canonicalString: string): Digest32V1 {
+  return digestWithDomain(domain, UTF8.encode(canonicalString));
+}
+
+/**
+ * Shared bounded-canonical parse choreography for catalog wire objects: reject
+ * oversized wire input, clamp caller parse options to the object's limits, parse
+ * canonical JSON, then run the schema assertion. Limits, error codes, and
+ * canonical behavior are identical to the previous per-object copies; callers
+ * supply their own {maxBytes, maxDepth, label} and validator. Kept local to this
+ * module — a package-wide extraction into canonical-json.ts belongs to that
+ * codec's own PR.
+ */
+function parseBoundedCatalogCanonicalV1<T>(
+  input: string | Uint8Array,
+  options: StrictJsonParseOptions,
+  limits: { maxBytes: number; maxDepth: number; label: string },
+  assert: (value: unknown) => void,
+): T {
+  rejectOversizedWireInput(input, limits.maxBytes, limits.label);
+  const parsed = parseCanonicalJson(input, {
+    ...options,
+    maxBytes: Math.min(options.maxBytes ?? limits.maxBytes, limits.maxBytes),
+    maxDepth: Math.min(options.maxDepth ?? limits.maxDepth, limits.maxDepth),
+  });
+  assert(parsed);
+  return parsed as T;
 }
 
 function rejectOversizedWireInput(
