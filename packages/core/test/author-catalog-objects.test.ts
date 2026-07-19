@@ -4,6 +4,8 @@ import {
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   MAX_AUTHOR_CATALOG_BUCKET_PAYLOAD_BYTES_V1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  MAX_AUTHOR_CATALOG_HEAD_PAYLOAD_BYTES_V1,
   assertAuthorCatalogBucketScopeBindingV1,
   assertAuthorCatalogBucketV1,
   assertAuthorCatalogHeadScopeBindingV1,
@@ -34,11 +36,16 @@ import {
 import {
   assertAuthorCatalogRowV1,
   assertAuthorCatalogScopeV1,
+  canonicalizeAuthorCatalogRowV1,
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
 } from '../src/author-catalog-codec.js';
+import {
+  MAX_DECIMAL_U64,
+  MAX_DECIMAL_U256,
+} from '../src/sync-wire-scalars.js';
 import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
@@ -129,13 +136,25 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
   });
 
   it('requires strictly numeric row order and rejects duplicate KA/key/coordinate', () => {
-    const second = rowForNumber(2n, 'fixture-2');
-    const ordered = { ...VALID_BUCKET, rows: [VALID_ROW, second] };
-    expect(() => assertAuthorCatalogBucketV1(ordered)).not.toThrow();
+    const numericTwo = validatedRow({
+      ...VALID_ROW,
+      kaId: '2',
+      assertionCoordinate: 'numeric-2',
+    });
+    const numericTen = validatedRow({
+      ...VALID_ROW,
+      kaId: '10',
+      assertionCoordinate: 'numeric-10',
+    });
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
-      rows: [second, VALID_ROW],
+      rows: [numericTwo, numericTen],
+    })).not.toThrow();
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      rows: [numericTen, numericTwo],
     })).toThrow(/catalog-object-row-order/);
+    const second = rowForNumber(2n, 'fixture-2');
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
       rows: [VALID_ROW, VALID_ROW],
@@ -147,6 +166,26 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
   });
 
   it('requires every row to map to the signed bucket and bucketId to be in range', () => {
+    const bucketZeroRows = [
+      validatedRow({ ...VALID_ROW, kaId: '2', assertionCoordinate: 'bucket-0-2' }),
+      validatedRow({ ...VALID_ROW, kaId: '10', assertionCoordinate: 'bucket-0-10' }),
+    ];
+    const bucketOneRows = [
+      validatedRow({ ...VALID_ROW, kaId: '4', assertionCoordinate: 'bucket-1-4' }),
+      validatedRow({ ...VALID_ROW, kaId: '6', assertionCoordinate: 'bucket-1-6' }),
+    ];
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      bucketCount: '2',
+      bucketId: '0',
+      rows: bucketZeroRows,
+    })).not.toThrow();
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      bucketCount: '2',
+      bucketId: '1',
+      rows: bucketOneRows,
+    })).not.toThrow();
     expect(() => assertAuthorCatalogBucketV1({
       ...VALID_BUCKET,
       bucketCount: '2',
@@ -233,6 +272,51 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
       ...BUCKET_UNSIGNED,
       objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
     })).toThrow(/catalog-object-type/);
+  });
+
+  it('keeps the structurally maximal 1024-row payload below the 1 MiB cap', () => {
+    const maximalRows = Array.from(
+      { length: MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 },
+      (_, index) => ({
+        ...VALID_ROW,
+        kaId: (
+          MAX_DECIMAL_U256
+          - BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 - 1 - index)
+        ).toString(),
+        assertionCoordinate: `${'x'.repeat(252)}${index.toString(16).padStart(4, '0')}`,
+        assertionVersion: MAX_DECIMAL_U64.toString(),
+        transfer: {
+          ...VALID_ROW.transfer,
+          byteLength: '1073741824',
+          chunkCount: '4096',
+        },
+      }),
+    );
+    const maximalCountOneBucket = {
+      ...VALID_BUCKET,
+      era: MAX_DECIMAL_U64.toString(),
+      rows: maximalRows,
+    };
+
+    expect(() => assertAuthorCatalogBucketV1(maximalCountOneBucket)).not.toThrow();
+    expect(new TextEncoder().encode(
+      canonicalizeAuthorCatalogRowV1(maximalRows[0]),
+    ).byteLength).toBe(1_004);
+    const canonical = canonicalizeAuthorCatalogBucketPayloadV1(maximalCountOneBucket);
+    expect(new TextEncoder().encode(canonical).byteLength).toBe(1_029_282);
+
+    // Each row is at its exact field-width maximum (1,004 bytes). Replacing
+    // the one-digit bucketCount/bucketId with their widest permitted 19-digit
+    // forms adds at most 36 bytes, so no structurally valid v1 bucket can reach
+    // the 1 MiB cap even before the bucket-mapping invariant is considered.
+    const absolutePayloadUpperBound = canonical.length + (2 * (19 - 1));
+    expect(absolutePayloadUpperBound).toBe(1_029_318);
+    expect(absolutePayloadUpperBound).toBeLessThan(
+      MAX_AUTHOR_CATALOG_BUCKET_PAYLOAD_BYTES_V1,
+    );
+    expect(parseCanonicalAuthorCatalogBucketPayloadV1(canonical).rows).toHaveLength(
+      MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+    );
   });
 
   it('rejects assertion version zero through bucket and envelope admission', () => {
@@ -340,6 +424,37 @@ describe('AuthorCatalogHeadV1 structural codec', () => {
       ...HEAD_UNSIGNED,
       objectType: AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
     })).toThrow(/catalog-object-type/);
+  });
+
+  it('pins the maximum valid head below 4 KiB and rejects over-cap wire input', () => {
+    const maximalHead = {
+      ...VALID_HEAD,
+      networkId: 'n'.repeat(128),
+      contextGraphId: 'c'.repeat(256),
+      governanceChainId: MAX_DECIMAL_U256.toString(),
+      governanceContractAddress: `0x${'f'.repeat(40)}`,
+      ownershipTransitionDigest: `0x${'f'.repeat(64)}`,
+      subGraphName: 's'.repeat(256),
+      authorAddress: `0x${'f'.repeat(40)}`,
+      catalogIssuerDelegationDigest: `0x${'f'.repeat(64)}`,
+      era: MAX_DECIMAL_U64.toString(),
+      version: MAX_DECIMAL_U64.toString(),
+      previousHeadDigest: `0x${'f'.repeat(64)}`,
+      bucketCount: '9223372036854775808',
+      totalRows: MAX_DECIMAL_U64.toString(),
+      directoryHeight: '7',
+      directoryRootDigest: `0x${'f'.repeat(64)}`,
+      issuedAt: MAX_DECIMAL_U64.toString(),
+    };
+
+    expect(() => assertAuthorCatalogHeadV1(maximalHead)).not.toThrow();
+    const canonical = canonicalizeAuthorCatalogHeadPayloadV1(maximalHead);
+    expect(new TextEncoder().encode(canonical).byteLength).toBe(1_497);
+    expect(canonical.length).toBeLessThan(MAX_AUTHOR_CATALOG_HEAD_PAYLOAD_BYTES_V1);
+    expect(parseCanonicalAuthorCatalogHeadPayloadV1(canonical)).toEqual(maximalHead);
+    expect(() => parseCanonicalAuthorCatalogHeadPayloadV1(
+      '{'.padEnd(MAX_AUTHOR_CATALOG_HEAD_PAYLOAD_BYTES_V1 + 1, 'x'),
+    )).toThrow(/catalog-object-payload-too-large/);
   });
 
   it('wraps and strictly parses the generic signed envelope without authority checks', () => {

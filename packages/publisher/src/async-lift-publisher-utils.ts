@@ -245,6 +245,10 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     contextGraphId: expectString(record, 'contextGraphId', path),
     name: expectString(record, 'name', path),
     ...optionalStringField(record, 'agentAddress', path),
+    // GH#1778 — the enqueuing caller must survive the persisted-job round-trip so
+    // the async worker stamps the CG curator with the operator who requested the
+    // publish (consistent with the sync lane), not the resolved KA author.
+    ...optionalStringField(record, 'callerAgentAddress', path),
     ...optionalStringField(record, 'subGraphName', path),
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
