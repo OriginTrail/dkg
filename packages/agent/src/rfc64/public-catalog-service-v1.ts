@@ -558,6 +558,12 @@ export class Rfc64PublicCatalogServiceV1 {
     if (discovery === undefined) {
       throw new Error('RFC-64 current-head discovery is not configured');
     }
+    // Detach caller-owned fields before the first await. In particular, the
+    // same immutable peer-id primitive must drive both the hint query and its
+    // exact-head fetch; a mutable object or switching accessor must not rebind
+    // those two halves to different providers.
+    const remotePeerId = input.remotePeerId;
+    const signal = input.signal;
     const trustedScope = this.#resolveTrustedCurrentHeadScope(input.scope);
     const held = this.#policies.lookup(trustedScope.networkId, trustedScope.contextGraphId)!;
     const query: Rfc64PublicCatalogCurrentHeadQueryV1 = Object.freeze({
@@ -570,17 +576,17 @@ export class Rfc64PublicCatalogServiceV1 {
       policyDigest: held.policyDigest,
     });
     const announcement = await discovery.discoverCurrentCatalogHead(
-      input.remotePeerId,
+      remotePeerId,
       query,
-      this.#sendOptions(input.signal),
+      this.#sendOptions(signal),
     );
     if (announcement === null) return null;
     this.#assertAcceptedOpenAnnouncement(announcement);
     const currentTrustedScope = this.#resolveTrustedCatalogScope(announcement);
     const head = await this.#transport.fetchCatalogHead(
-      input.remotePeerId,
+      remotePeerId,
       announcement,
-      this.#sendOptions(input.signal),
+      this.#sendOptions(signal),
     );
     if (head === null) {
       throw new Error('RFC-64 discovered current head is no longer available by exact digest');

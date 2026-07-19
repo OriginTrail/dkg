@@ -196,7 +196,8 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     try {
       this.router.register(
         RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
-        async (data, peerId) => this.handleQuery(data, peerId.toString()),
+        async (data, peerId, handlerOptions) =>
+          this.handleQuery(data, peerId.toString(), handlerOptions?.signal),
         { maxReadBytes: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_MAX_BYTES_V1 },
       );
     } catch (cause) {
@@ -237,7 +238,9 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
   private async handleQuery(
     data: Uint8Array,
     remotePeerIdInput: string,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
+    throwIfAborted(signal);
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const query = parseQuery(data);
@@ -245,22 +248,27 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
       if (!await this.isOpenPolicy('current-head-discovery-inbound', remotePeerId, query)) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
       }
+      throwIfAborted(signal);
 
       const currentDigest = await this.readCurrentAppliedCatalogHeadDigest(query);
+      throwIfAborted(signal);
       const announcement = currentDigest === null
         ? null
         : await this.readCurrentAnnouncement(currentDigest, query);
+      throwIfAborted(signal);
 
       // A semantic ref can advance while its immutable object is read. Confirm
       // the pointer immediately before responding so discovery never knowingly
       // advertises a superseded or transient snapshot. One retry admits the
       // common single-writer CAS race while keeping work per request bounded.
       const confirmedDigest = await this.readCurrentAppliedCatalogHeadDigest(query);
+      throwIfAborted(signal);
       if (confirmedDigest !== currentDigest) continue;
 
       if (!await this.isOpenPolicy('current-head-discovery-inbound', remotePeerId, query)) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
       }
+      throwIfAborted(signal);
       return announcement === null
         ? Uint8Array.of(CURRENT_HEAD_NOT_FOUND)
         : foundResponse(announcement);
@@ -414,28 +422,32 @@ function validateQuery(value: unknown): Rfc64PublicCatalogCurrentHeadQueryV1 {
   if (!isPlainRecord(value)) {
     fail('catalog-discovery-wire', 'RFC-64 current-head query must be a plain object');
   }
-  assertExactWireKeys(value, QUERY_KEYS);
-  if (value.kind !== RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1) {
+  // Consume caller-owned JavaScript values exactly once through own data
+  // descriptors. Reading fields once for validation and again for assembly
+  // would let a switching Proxy emit bytes that were never validated. It also
+  // avoids invoking accessors that can re-enter policy or lifecycle code.
+  const snapshot = snapshotExactWireRecord(value, QUERY_KEYS);
+  if (snapshot.kind !== RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1) {
     fail(
       'catalog-discovery-wire',
       `RFC-64 current-head query kind must be ${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1}`,
     );
   }
   try {
-    assertNetworkIdV1(value.networkId);
-    assertContextGraphIdV1(value.contextGraphId);
-    if (value.subGraphName !== null) assertSubGraphNameV1(value.subGraphName);
-    assertCanonicalEvmAddressV1(value.authorAddress, 'authorAddress');
-    assertCanonicalDecimalU64(value.catalogEra, 'catalogEra');
-    assertCanonicalDigest(value.policyDigest, 'policyDigest');
+    assertNetworkIdV1(snapshot.networkId);
+    assertContextGraphIdV1(snapshot.contextGraphId);
+    if (snapshot.subGraphName !== null) assertSubGraphNameV1(snapshot.subGraphName);
+    assertCanonicalEvmAddressV1(snapshot.authorAddress, 'authorAddress');
+    assertCanonicalDecimalU64(snapshot.catalogEra, 'catalogEra');
+    assertCanonicalDigest(snapshot.policyDigest, 'policyDigest');
     return Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
-      networkId: value.networkId,
-      contextGraphId: value.contextGraphId,
-      subGraphName: value.subGraphName,
-      authorAddress: value.authorAddress,
-      catalogEra: value.catalogEra,
-      policyDigest: value.policyDigest,
+      networkId: snapshot.networkId,
+      contextGraphId: snapshot.contextGraphId,
+      subGraphName: snapshot.subGraphName,
+      authorAddress: snapshot.authorAddress,
+      catalogEra: snapshot.catalogEra,
+      policyDigest: snapshot.policyDigest,
     });
   } catch (cause) {
     if (cause instanceof Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1) throw cause;
@@ -616,13 +628,54 @@ function assertExactWireKeys(
   value: Record<string, unknown>,
   expectedKeys: readonly string[],
 ): void {
-  const actual = Object.keys(value).sort();
+  void snapshotExactWireRecord(value, expectedKeys);
+}
+
+function snapshotExactWireRecord(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> {
+  let ownKeys: readonly PropertyKey[];
+  try {
+    ownKeys = Reflect.ownKeys(value);
+  } catch (cause) {
+    fail('catalog-discovery-wire', 'RFC-64 current-head query fields could not be inspected', cause);
+  }
+  if (ownKeys.some((key) => typeof key !== 'string')) {
+    fail('catalog-discovery-wire', 'RFC-64 current-head query has symbol fields');
+  }
+  const actual = [...ownKeys as readonly string[]].sort();
   if (
     actual.length !== expectedKeys.length
     || actual.some((key, index) => key !== expectedKeys[index])
   ) {
     fail('catalog-discovery-wire', 'RFC-64 current-head query has missing or unknown fields');
   }
+  const snapshot: Record<string, unknown> = Object.create(null);
+  for (const key of expectedKeys) {
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key);
+    } catch (cause) {
+      fail(
+        'catalog-discovery-wire',
+        'RFC-64 current-head query field descriptor could not be inspected',
+        cause,
+      );
+    }
+    if (
+      descriptor === undefined
+      || !descriptor.enumerable
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ) {
+      fail(
+        'catalog-discovery-wire',
+        'RFC-64 current-head query fields must be enumerable data properties',
+      );
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
@@ -658,6 +711,14 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
     if (left[index] !== right[index]) return false;
   }
   return true;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new Error('RFC-64 current-head discovery request was aborted', {
+    cause: signal.reason,
+  });
 }
 
 function fail(
