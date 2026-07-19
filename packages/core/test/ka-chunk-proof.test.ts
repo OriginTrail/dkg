@@ -21,6 +21,17 @@ const THREE_CHUNK_PROOF =
   '{"chunkIndex":"2","steps":[{"kind":"odd"},{"digest":"0x12b230a0573621cb375b62f8f3f46cc6e8c05d3d0a84a50cd5d097132f86f58e","kind":"left"}]}';
 
 describe('RFC-64 dormant KA chunk proof codec', () => {
+  it('builds and verifies the canonical single-chunk empty proof', () => {
+    const bundle = new Uint8Array(16);
+    const root = computeKaChunkTreeRootV1(bundle);
+    const proof = buildKaChunkProofV1(bundle, 0n);
+    expect(canonicalizeKaChunkProofV1(proof, 1n))
+      .toBe('{"chunkIndex":"0","steps":[]}');
+    expect(proof).toEqual({ chunkIndex: '0', steps: [] });
+    const parsed = parseCanonicalKaChunkProofV1('{"chunkIndex":"0","steps":[]}', 1n);
+    expect(() => assertValidKaChunkProofV1(parsed, bundle, 16n, root)).not.toThrow();
+  });
+
   it('builds, canonicalizes, parses, and verifies the exact three-chunk vector', () => {
     const bundle = fixtureBundle(3);
     const proof = buildKaChunkProofV1(bundle, 2n);
