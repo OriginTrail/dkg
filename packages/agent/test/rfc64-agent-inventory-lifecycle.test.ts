@@ -312,6 +312,10 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     const close = agent.closeRfc64PersistenceV1();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(persistence.closed).toBe(true);
+    for (const operation of Object.values(persistence.inventory)) {
+      expect(() => (operation as (...arguments_: unknown[]) => unknown)())
+        .toThrow('RFC-64 persistence owner is closed');
+    }
     await expect(openInventoryV1(dataDirectory))
       .rejects.toMatchObject({ code: 'database-busy' });
 

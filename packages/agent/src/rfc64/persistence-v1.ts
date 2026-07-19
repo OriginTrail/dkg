@@ -43,7 +43,10 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   ) {
     this.#ownedInventory = ownedInventory;
     this.#ownedControlObjectStore = ownedControlObjectStore;
-    this.inventory = createInventoryOperationsView(ownedInventory);
+    this.inventory = createInventoryOperationsView(
+      ownedInventory,
+      () => this.requireOpen(),
+    );
     this.controlObjects = createControlObjectOperationsView(ownedControlObjectStore);
   }
 
@@ -75,29 +78,48 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
       throw new AggregateError(failures, 'RFC-64 persistence resources failed to close');
     }
   }
+
+  private requireOpen(): void {
+    if (this.#closed) throw new Error('RFC-64 persistence owner is closed');
+  }
 }
 
 /** The aggregate owner is the sole boundary that strips child lifecycle authority. */
 function createInventoryOperationsView(
   inventory: Rfc64InventoryV1CandidateApi,
+  requireOwnerOpen: () => void,
 ): Rfc64InventoryV1OperationsV1 {
+  const fence = <TArguments extends unknown[], TResult>(
+    operation: (...arguments_: TArguments) => TResult,
+  ): ((...arguments_: TArguments) => TResult) =>
+    (...arguments_: TArguments): TResult => {
+      requireOwnerOpen();
+      return operation(...arguments_);
+    };
   return Object.freeze({
-    createCandidateSession: inventory.createCandidateSession.bind(inventory),
-    putVerifiedCandidateBucket: inventory.putVerifiedCandidateBucket.bind(inventory),
-    getCandidateBucket: inventory.getCandidateBucket.bind(inventory),
-    beginCandidateBucketRows: inventory.beginCandidateBucketRows.bind(inventory),
-    beginCandidateBucketDiff: inventory.beginCandidateBucketDiff.bind(inventory),
-    pageCandidateBucketRows: inventory.pageCandidateBucketRows.bind(inventory),
-    pageCandidateBucketAddedOrChanged:
+    createCandidateSession: fence(inventory.createCandidateSession.bind(inventory)),
+    putVerifiedCandidateBucket: fence(inventory.putVerifiedCandidateBucket.bind(inventory)),
+    getCandidateBucket: fence(inventory.getCandidateBucket.bind(inventory)),
+    beginCandidateBucketRows: fence(inventory.beginCandidateBucketRows.bind(inventory)),
+    beginCandidateBucketDiff: fence(inventory.beginCandidateBucketDiff.bind(inventory)),
+    pageCandidateBucketRows: fence(inventory.pageCandidateBucketRows.bind(inventory)),
+    pageCandidateBucketAddedOrChanged: fence(
       inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
-    pageCandidateBucketRemoved: inventory.pageCandidateBucketRemoved.bind(inventory),
-    readVerifiedCandidateCatalogRow:
+    ),
+    pageCandidateBucketRemoved: fence(
+      inventory.pageCandidateBucketRemoved.bind(inventory),
+    ),
+    readVerifiedCandidateCatalogRow: fence(
       inventory.readVerifiedCandidateCatalogRow.bind(inventory),
-    verifyCandidateCatalogPrecommitV1:
+    ),
+    verifyCandidateCatalogPrecommitV1: fence(
       inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
-    closeCandidateTraversal: inventory.closeCandidateTraversal.bind(inventory),
-    discardCandidateSessionBatch: inventory.discardCandidateSessionBatch.bind(inventory),
-    deleteCandidateBucket: inventory.deleteCandidateBucket.bind(inventory),
+    ),
+    closeCandidateTraversal: fence(inventory.closeCandidateTraversal.bind(inventory)),
+    discardCandidateSessionBatch: fence(
+      inventory.discardCandidateSessionBatch.bind(inventory),
+    ),
+    deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
   });
 }
 
