@@ -1,4 +1,4 @@
-import { stat, writeFile } from 'node:fs/promises';
+import { lstat, symlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -58,6 +58,60 @@ function bundlePath(dataDir: string, blobDigest: Digest32V1): string {
 }
 
 describe('RFC-64 persistent native catalog providers v1', () => {
+  it('does not create the KA-bundle namespace until the first valid write', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const namespacePath = join(dataDir, RFC64_KA_BUNDLE_STORE_RELATIVE_PATH);
+    const persistence = await openPersistence(dataDir);
+
+    await expect(lstat(namespacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(persistence.kaBundles.readKaBundleByDigest(MISSING_DIGEST))
+      .resolves.toBeNull();
+    await expect(lstat(namespacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await persistence.close();
+    await expect(lstat(namespacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('safely joins concurrent first writes and reopens their exact immutable bytes', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const bundle = encodeOpaqueKaBundleV1(
+      UTF8.encode('concurrent-first-projection'),
+      UTF8.encode('concurrent-first-seal'),
+    );
+    const first = await openPersistence(dataDir);
+
+    const puts = await Promise.all(Array.from({ length: 8 }, () =>
+      first.kaBundles.putKaBundle({
+        blobDigest: bundle.blobDigest,
+        bundleBytes: bundle.bundleBytes,
+      })));
+    expect(puts).toHaveLength(8);
+    expect(puts.every((put) => put.durable && put.blobDigest === bundle.blobDigest))
+      .toBe(true);
+    await expect(first.kaBundles.readKaBundleByDigest(bundle.blobDigest))
+      .resolves.toEqual(bundle.bundleBytes);
+
+    await first.close();
+    const reopened = await openPersistence(dataDir);
+    await expect(reopened.kaBundles.readKaBundleByDigest(bundle.blobDigest))
+      .resolves.toEqual(bundle.bundleBytes);
+  });
+
+  it('rejects a preexisting symlink in the lazy KA-bundle namespace', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const outside = await temporaryDataDirectory();
+    const first = await openPersistence(dataDir);
+    await first.close();
+    await symlink(
+      outside,
+      join(dataDir, RFC64_KA_BUNDLE_STORE_RELATIVE_PATH),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    await expect(openPersistence(dataDir))
+      .rejects.toMatchObject({ code: 'ka-bundle-store-unsafe-path' });
+  });
+
   it('reopens exact verified control objects and content-addressed opaque bundles', async () => {
     const dataDir = await temporaryDataDirectory();
     const fixture = await signedFixture('persistent-provider-reopen');

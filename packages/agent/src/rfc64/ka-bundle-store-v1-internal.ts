@@ -1,3 +1,4 @@
+import { lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
@@ -93,14 +94,18 @@ type Rfc64KaBundleStoreFileKindV1 = 'ka-bundle';
 class FileRfc64KaBundleStoreV1 implements Rfc64KaBundleStoreV1 {
   #closed = false;
   #closePromise: Promise<void> | null = null;
+  #namespacePreparation: Promise<void> | null = null;
   readonly #inFlightOperations = new Set<Promise<unknown>>();
+  readonly #rfc64RootPath: string;
   readonly #durableFiles: Rfc64DurableFileStoreV1<Rfc64KaBundleStoreFileKindV1>;
   readonly namespaceDurability = rfc64NamespaceDurabilityV1();
 
   constructor(
     readonly rootPath: string,
+    rfc64RootPath: string,
     durableFiles: Rfc64DurableFileStoreV1<Rfc64KaBundleStoreFileKindV1>,
   ) {
+    this.#rfc64RootPath = rfc64RootPath;
     this.#durableFiles = durableFiles;
   }
 
@@ -112,6 +117,7 @@ class FileRfc64KaBundleStoreV1 implements Rfc64KaBundleStoreV1 {
     this.requireOpen();
     const prepared = prepareBundle(input);
     const operation = (async () => {
+      await this.prepareNamespaceForWrite();
       await mapDurableFileErrors(async () => {
         await this.#durableFiles.putExactBytes({
           relativePath: bundleRelativePath(prepared.blobDigest),
@@ -135,6 +141,7 @@ class FileRfc64KaBundleStoreV1 implements Rfc64KaBundleStoreV1 {
     this.requireOpen();
     const blobDigest = snapshotDigest(blobDigestInput, 'blobDigest');
     const operation = (async () => {
+      if (!await this.hasReadableNamespaceForDigest(blobDigest)) return null;
       const bundleBytes = await mapDurableFileErrors(async () =>
         this.#durableFiles.readOptionalBoundedBytes({
           relativePath: bundleRelativePath(blobDigest),
@@ -161,6 +168,62 @@ class FileRfc64KaBundleStoreV1 implements Rfc64KaBundleStoreV1 {
 
   private requireOpen(): void {
     if (this.#closed) fail('ka-bundle-store-closed', 'KA-bundle store is closed');
+  }
+
+  private async prepareNamespaceForWrite(): Promise<void> {
+    if (this.#namespacePreparation !== null) {
+      await this.#namespacePreparation;
+      return;
+    }
+    const preparation = mapDurableFileErrors(async () => {
+      await assertRfc64ExistingDirectoryV1(
+        this.#rfc64RootPath,
+        'RFC-64 persistence root',
+        { access: 'owner-only' },
+      );
+      await ensureRfc64SecureDirectoryTreeV1(
+        this.rootPath,
+        this.#rfc64RootPath,
+        'owner-only',
+      );
+      await ensureRfc64SecureDirectoryTreeV1(
+        join(this.rootPath, BUNDLES_DIRECTORY),
+        this.rootPath,
+        'owner-only',
+      );
+    });
+    this.#namespacePreparation = preparation;
+    try {
+      await preparation;
+    } catch (cause) {
+      if (this.#namespacePreparation === preparation) {
+        this.#namespacePreparation = null;
+      }
+      throw cause;
+    }
+  }
+
+  private async hasReadableNamespaceForDigest(blobDigest: Digest32V1): Promise<boolean> {
+    return mapDurableFileErrors(async () => {
+      await assertRfc64ExistingDirectoryV1(
+        this.#rfc64RootPath,
+        'RFC-64 persistence root',
+        { access: 'owner-only' },
+      );
+      if (!await assertOptionalRfc64SecureDirectoryV1(
+        this.rootPath,
+        'RFC-64 KA-bundle namespace',
+      )) return false;
+      const bundlesPath = join(this.rootPath, BUNDLES_DIRECTORY);
+      if (!await assertOptionalRfc64SecureDirectoryV1(
+        bundlesPath,
+        'RFC-64 KA-bundle directory',
+      )) return false;
+      return assertOptionalRfc64SecureDirectoryV1(
+        join(bundlesPath, blobDigest.slice(2, 4)),
+        'RFC-64 KA-bundle digest shard',
+      );
+    });
   }
 
   private trackOperation<T>(operation: Promise<T>): Promise<T> {
@@ -262,13 +325,45 @@ export async function openRfc64KaBundleStoreForOwnedPersistenceRootV1(
       'RFC-64 persistence root',
       { access: 'owner-only' },
     );
-    await ensureRfc64SecureDirectoryTreeV1(rootPath, rfc64RootPath);
-    await ensureRfc64SecureDirectoryTreeV1(join(rootPath, BUNDLES_DIRECTORY), rootPath);
+    if (await assertOptionalRfc64SecureDirectoryV1(
+      rootPath,
+      'RFC-64 KA-bundle namespace',
+    )) {
+      await assertOptionalRfc64SecureDirectoryV1(
+        join(rootPath, BUNDLES_DIRECTORY),
+        'RFC-64 KA-bundle directory',
+      );
+    }
   });
   return new FileRfc64KaBundleStoreV1(
     resolve(rootPath),
+    resolve(rfc64RootPath),
     createRfc64DurableFileStoreV1<Rfc64KaBundleStoreFileKindV1>(rootPath),
   );
+}
+
+async function assertOptionalRfc64SecureDirectoryV1(
+  path: string,
+  label: string,
+): Promise<boolean> {
+  try {
+    await lstat(path);
+  } catch (cause) {
+    if (isNodeError(cause, 'ENOENT')) return false;
+    throw new Rfc64DurableFileErrorV1(
+      'io',
+      `failed to inspect ${label}`,
+      { cause },
+    );
+  }
+  await assertRfc64ExistingDirectoryV1(path, label, { access: 'owner-only' });
+  return true;
+}
+
+function isNodeError(cause: unknown, code: string): boolean {
+  return cause instanceof Error
+    && 'code' in cause
+    && (cause as NodeJS.ErrnoException).code === code;
 }
 
 function fail(
