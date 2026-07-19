@@ -92,6 +92,30 @@ describe('RFC 8785 canonical JSON', () => {
     );
   });
 
+  it('decodes the complete JSON escape grammar in one Unicode-scalar path', () => {
+    expect(parseJsonStrict(
+      String.raw`["\"","\\","\/","\b","\f","\n","\r","\t","\u0061","\uD834\uDD1E"]`,
+    )).toEqual(['"', '\\', '/', '\b', '\f', '\n', '\r', '\t', 'a', '𝄞']);
+    expect(parseJsonStrict('"𝄞"')).toBe('𝄞');
+    // Preserve scalar semantics even when a direct JavaScript-string caller
+    // splits one pair across raw and escaped UTF-16 code units. Byte callers
+    // cannot carry the raw lone half because the UTF-8 decoder is fatal.
+    expect(parseJsonStrict(`"${'\ud834'}\\uDD1E"`)).toBe('𝄞');
+    expect(parseJsonStrict(`"\\uD834${'\udd1e'}"`)).toBe('𝄞');
+
+    for (const input of [
+      String.raw`"\uD834x"`,
+      String.raw`"\uD834\u0061"`,
+      String.raw`"\uDD1E"`,
+      String.raw`"\u12"`,
+      String.raw`"\u12xz"`,
+      String.raw`"\x61"`,
+      '"line\nbreak"',
+    ]) {
+      expect(() => parseJsonStrict(input), input).toThrow(CanonicalJsonError);
+    }
+  });
+
   it('rejects invalid UTF-8, a BOM, invalid grammar, and unpaired surrogates', () => {
     expect(() => parseJsonStrict(new Uint8Array([0xc3, 0x28]))).toThrow(/not valid UTF-8/);
     expect(() => parseJsonStrict(new Uint8Array([0xef, 0xbb, 0xbf, 0x6e, 0x75, 0x6c, 0x6c])))

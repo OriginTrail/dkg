@@ -14,7 +14,7 @@ const ZERO_DIGEST = `0x${'00'.repeat(32)}`;
 const BLOB_DIGEST = `0x${'11'.repeat(32)}`;
 const CHUNK_TREE_ROOT = `0x${'22'.repeat(32)}`;
 
-const VALID_MIN: KaTransferDescriptorV1 = {
+const VALID_MIN = validatedDescriptor({
   codec: 'dkg-ka-bundle-v1',
   projectionId: 'cg-shared-v1',
   projectionDigest: ZERO_DIGEST,
@@ -23,7 +23,7 @@ const VALID_MIN: KaTransferDescriptorV1 = {
   chunkCount: '1',
   blobDigest: BLOB_DIGEST,
   chunkTreeRoot: CHUNK_TREE_ROOT,
-};
+});
 
 // Normative RFC-64 fixture. Keep this literal independent from implementation output.
 const VALID_MIN_CANONICAL =
@@ -47,7 +47,7 @@ describe('KaTransferDescriptorV1', () => {
     ['maximum', '1073741824', '4096', 380],
   ])('accepts the %s boundary', (_name, byteLength, chunkCount, canonicalLength) => {
     const descriptor = { ...VALID_MIN, byteLength, chunkCount };
-    expect(() => assertKaTransferDescriptorV1(descriptor)).not.toThrow();
+    assertKaTransferDescriptorV1(descriptor);
     expect(canonicalizeKaTransferDescriptorV1(descriptor).length).toBe(canonicalLength);
   });
 
@@ -166,4 +166,9 @@ describe('KaTransferDescriptorV1', () => {
 
 function lowerHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function validatedDescriptor(value: unknown): KaTransferDescriptorV1 {
+  assertKaTransferDescriptorV1(value);
+  return value;
 }

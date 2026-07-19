@@ -4,7 +4,10 @@ import {
   MAX_KA_TRANSFER_BYTES_V1,
   MIN_KA_TRANSFER_BYTES_V1,
 } from './ka-transfer-descriptor.js';
-import type { Digest32V1 } from './sync-wire-scalars.js';
+import {
+  assertCanonicalDigest,
+  type Digest32V1,
+} from './sync-wire-scalars.js';
 
 export const KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n' as const;
 export const KA_BUNDLE_BLOB_DIGEST_DOMAIN_V1 = 'dkg-ka-transfer-v1\n' as const;
@@ -242,6 +245,7 @@ function digestToLowerHex(domain: Uint8Array, ...chunks: readonly Uint8Array[]):
   const digest = hasher.digest();
   let result = '0x';
   for (const byte of digest) result += byte.toString(16).padStart(2, '0');
+  assertCanonicalDigest(result);
   return result;
 }
 

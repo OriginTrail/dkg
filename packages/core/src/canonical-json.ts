@@ -277,13 +277,13 @@ function writeCanonicalJsonString(
       continue;
     }
 
-    if (unit >= 0xd800 && unit <= 0xdbff) {
+    if (isHighSurrogate(unit)) {
       const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+      if (!isLowSurrogate(next)) {
         throw new CanonicalJsonError(`${label} contains an unpaired high surrogate`);
       }
       index += 2;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+    } else if (isLowSurrogate(unit)) {
       throw new CanonicalJsonError(`${label} contains an unpaired low surrogate`);
     } else {
       index += 1;
@@ -294,21 +294,6 @@ function writeCanonicalJsonString(
 
   flushRaw(value.length);
   writer.appendAscii('"');
-}
-
-function assertUnicodeScalarString(value: string, label: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
-        throw new CanonicalJsonError(`${label} contains an unpaired high surrogate`);
-      }
-      index += 1;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      throw new CanonicalJsonError(`${label} contains an unpaired low surrogate`);
-    }
-  }
 }
 
 class StrictJsonParser {
@@ -384,32 +369,124 @@ class StrictJsonParser {
   }
 
   private parseString(): string {
-    const start = this.index;
+    // Decode and validate the JSON string in this one path. Keeping the escape
+    // grammar and Unicode-scalar invariant together avoids relying on a second
+    // parser whose accepted boundary could drift from the local scanner.
     this.index += 1;
-    let escaped = false;
+    const chunks: string[] = [];
+    let parts: string[] = [];
+    let partsLength = 0;
+    let rawStart = this.index;
+    let pendingHighSurrogate: number | undefined;
+
+    const flushParts = (): void => {
+      if (parts.length === 0) return;
+      chunks.push(parts.join(''));
+      parts = [];
+      partsLength = 0;
+    };
+    const appendPart = (value: string): void => {
+      if (value.length === 0) return;
+      parts.push(value);
+      partsLength += value.length;
+      // Bound both the number of retained fragments and temporary join size for
+      // escape-heavy hostile strings while preserving the no-escape slice path.
+      if (partsLength >= 8192 || parts.length >= 1024) flushParts();
+    };
+    const flushRaw = (end: number): void => {
+      if (end > rawStart) appendPart(this.text.slice(rawStart, end));
+      rawStart = end;
+    };
+    const appendCodeUnit = (unit: number): void => {
+      if (pendingHighSurrogate !== undefined) {
+        if (!isLowSurrogate(unit)) {
+          this.fail('JSON string contains an unpaired high surrogate');
+        }
+        appendPart(String.fromCharCode(pendingHighSurrogate, unit));
+        pendingHighSurrogate = undefined;
+      } else if (isHighSurrogate(unit)) {
+        pendingHighSurrogate = unit;
+      } else if (isLowSurrogate(unit)) {
+        this.fail('JSON string contains an unpaired low surrogate');
+      } else {
+        appendPart(String.fromCharCode(unit));
+      }
+    };
+
     while (this.index < this.text.length) {
       const code = this.text.charCodeAt(this.index);
-      if (!escaped && code === 0x22) {
-        this.index += 1;
-        const token = this.text.slice(start, this.index);
-        let value: string;
-        try {
-          value = JSON.parse(token) as string;
-        } catch {
-          this.fail('Invalid JSON string escape');
+      if (code === 0x22) {
+        if (pendingHighSurrogate !== undefined) {
+          this.fail('JSON string contains an unpaired high surrogate');
         }
-        assertUnicodeScalarString(value, 'JSON string');
-        return value;
+        flushRaw(this.index);
+        this.index += 1;
+        flushParts();
+        return chunks.join('');
       }
-      if (!escaped && code < 0x20) this.fail('Unescaped control character in string');
-      if (!escaped && code === 0x5c) {
-        escaped = true;
-      } else {
-        escaped = false;
+
+      if (code < 0x20) this.fail('Unescaped control character in string');
+      if (code !== 0x5c) {
+        if (pendingHighSurrogate !== undefined) {
+          flushRaw(this.index);
+          appendCodeUnit(code);
+          this.index += 1;
+          rawStart = this.index;
+        } else if (isHighSurrogate(code)) {
+          const next = this.text.charCodeAt(this.index + 1);
+          if (isLowSurrogate(next)) {
+            this.index += 2;
+          } else {
+            flushRaw(this.index);
+            pendingHighSurrogate = code;
+            this.index += 1;
+            rawStart = this.index;
+          }
+        } else if (isLowSurrogate(code)) {
+          this.fail('JSON string contains an unpaired low surrogate');
+        } else {
+          this.index += 1;
+        }
+        continue;
       }
+
+      flushRaw(this.index);
       this.index += 1;
+      if (this.index >= this.text.length) this.fail('Unterminated JSON string');
+      const escape = this.text.charCodeAt(this.index);
+      this.index += 1;
+      if (escape === 0x22 || escape === 0x2f || escape === 0x5c) {
+        appendCodeUnit(escape);
+      } else if (escape === 0x62) {
+        appendCodeUnit(0x08);
+      } else if (escape === 0x66) {
+        appendCodeUnit(0x0c);
+      } else if (escape === 0x6e) {
+        appendCodeUnit(0x0a);
+      } else if (escape === 0x72) {
+        appendCodeUnit(0x0d);
+      } else if (escape === 0x74) {
+        appendCodeUnit(0x09);
+      } else if (escape === 0x75) {
+        appendCodeUnit(this.parseEscapedHexCodeUnit());
+      } else {
+        this.fail('Invalid JSON string escape');
+      }
+      rawStart = this.index;
     }
     this.fail('Unterminated JSON string');
+  }
+
+  private parseEscapedHexCodeUnit(): number {
+    if (this.index + 4 > this.text.length) this.fail('Truncated JSON unicode escape');
+    let value = 0;
+    for (let offset = 0; offset < 4; offset += 1) {
+      const nibble = hexNibble(this.text.charCodeAt(this.index + offset));
+      if (nibble < 0) this.fail('Invalid JSON unicode escape');
+      value = (value << 4) | nibble;
+    }
+    this.index += 4;
+    return value;
   }
 
   private parseNumber(): number {
@@ -566,6 +643,21 @@ function isDigit(value: string | undefined): boolean {
 
 function isDigitOneToNine(value: string | undefined): boolean {
   return value !== undefined && value >= '1' && value <= '9';
+}
+
+function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function isLowSurrogate(unit: number): boolean {
+  return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
+function hexNibble(unit: number): number {
+  if (unit >= 0x30 && unit <= 0x39) return unit - 0x30;
+  if (unit >= 0x41 && unit <= 0x46) return unit - 0x41 + 10;
+  if (unit >= 0x61 && unit <= 0x66) return unit - 0x61 + 10;
+  return -1;
 }
 
 function assertJsonObjectShape(record: Record<string, unknown>): void {
