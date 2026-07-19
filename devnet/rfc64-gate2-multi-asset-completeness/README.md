@@ -1,74 +1,88 @@
-# RFC-64 Gate 2 — multi-asset completeness evidence contract
+# RFC-64 Gate 2 multi-asset completeness evidence contract
 
-A **closed, deterministic** evidence contract that proves multi-asset
-completeness: that a receiver's applied row set exactly reproduces an authored
-row set, with unique UALs, canonical ordering, matching content/bundle digests
-and lengths, exact total count, and an independently recomputed inventory set
-root — and that explicitly **rejects** missing, duplicate, and extra rows.
+A closed deterministic contract for the exact bounded product slice implemented
+by the Gate 2 producer, receiver, and inventory-completeness helper: one
+public/open author-catalog bucket containing **1..1,024 rows**.
 
-> **Fixture harness only.** `productBoundary` is `not-connected` and
-> `gateEvaluation` is `not-evaluated` on every artifact and verdict. This
-> contract is not wired to any product runtime, so its output **never asserts a
-> real Gate 2 pass**. `fixtureComplete` is a fixture-level property, deliberately
-> distinct from any gate disposition.
+> Fixture harness only. `productBoundary` is always `not-connected` and
+> `gateEvaluation` is always `not-evaluated`. A true `fixtureComplete` proves
+> only that the contract and its generated fixture agree; it is not a Gate 2
+> result. A real two-process adapter still has to supply product observations.
 
-## Contract
+## What is bound
 
-Raw evidence (`raw@1`) and verdict (`verdict@1`) schemas live in
-[`src/schema.ts`](src/schema.ts). A row binds `ual`, `contentDigest`,
-`contentLength`, `bundleDigest`, `bundleLength`.
+The `raw@1` artifact carries an authored and a received observation. Its
+fail-closed verifier checks:
 
-The verifier ([`src/verify.ts`](src/verify.ts)) is **fail-closed** — it always
-returns a verdict, never throws on bad input — and checks:
+- the exact nine-field catalog scope and its independently recomputed
+  `dkg-author-catalog-scope-v1` digest;
+- the receiver's exact authored catalog-head digest;
+- head `totalRows`, signed bucket row count, receiver row count, and the actual
+  signed/activated array lengths;
+- strict mathematical `kaId` order, independent duplicate-`kaId` and
+  duplicate-UAL rejection, and the 1..1,024 bucket bound;
+- each UAL's network, author, canonical KA number, and packed `kaId`;
+- exact per-row `catalogRowDigest`, projection/content digest, author-seal
+  digest, opaque-bundle digest, UAL, and activated triple count;
+- missing, extra, duplicate, and mismatched received rows; and
+- the receiver's declared applied-inventory digest, independently recomputed
+  with the production `dkg-rfc64-applied-inventory-v1` binary framing in numeric
+  `kaId` order.
 
-- `schemaWellFormed` — exact keys, types, lowercase sha-256 hex, non-negative
-  integer lengths; unknown/missing fields are rejected.
-- `authored/receivedUniqueUals` — duplicates detected on the raw array, before
-  any Map/Set collapse.
-- `authored/receivedCanonicalOrder` — the array **as given** equals its sorted
-  self (a complete-but-misordered set is still rejected).
-- `totalCountMatchesAuthored`, `noMissing`, `noExtra`, `perRowExactMatch`.
-- `inventorySetRootMatches` — the root is **recomputed from the received rows**
-  ([`src/set-root.ts`](src/set-root.ts), domain-tagged, full-row leaves, sorted)
-  and compared to the declared value; the declared field is never trusted.
+The legacy applied-inventory digest does not include `bundleDigest`. The
+contract therefore keeps bundle equality as a separate mandatory invariant;
+its mutation test proves that a wrong bundle is rejected even when the legacy
+inventory digest remains unchanged.
 
-## Determinism
+Serialization is bounded RFC 8785 JCS plus exactly one trailing LF. The JS
+boundary accepts only exact data descriptors, rejects accessors without invoking
+them, snapshots Proxies without property gets, caps rows before enumerating
+their keys, and caps depth, nodes, strings, input bytes, and output bytes.
 
-The generator ([`src/generate.ts`](src/generate.ts)) is a pure function of the
-asset count: no clock, randomness, host, or environment input. Output is
-canonical ([`src/canonical.ts`](src/canonical.ts): sorted keys, integers only,
-lowercase hex, single trailing LF).
+## Real two-process adapter mapping
 
-## Commands (run from the repo/worktree root toolchain)
+The adapter should build one raw artifact from these product values. Entries
+marked **gap** exist in the internal producer result but are not yet carried by
+`PublishOpenAuthorCatalogExactSetSuccessorResultV1`; exposing detached read-only
+copies is the minimal product-to-harness adapter seam.
 
-```
-# typecheck (erasable TS, noEmit)
+| Contract field | Product source |
+| --- | --- |
+| `authored.catalogScope` | **gap:** expose the exact `deriveAuthorCatalogScopeFromHeadV1(head.payload)` snapshot from `publishOpenAuthorCatalogExactSetSuccessorV1` |
+| `authored.declaredCatalogScopeDigest` | **gap:** expose `result.assets[0].projection.catalogScopeDigest` (and retain the producer's all-assets equality check) |
+| `authored.catalogHeadDigest` | existing public result `.headObjectDigest` |
+| `authored.catalogHeadTotalRows` | existing public result `.inventoryRowCount` (assigned directly from `head.payload.totalRows`) |
+| `authored.signedBucketRowCount` | **gap:** expose `produced.publication.bucket.payload.rows.length.toString()` independently of head count |
+| `authored.signedRows[].kaId` | existing public result `.assets[].kaId` |
+| `authored.signedRows[].catalogRowDigest` | existing public result `.assets[].catalogRowDigest` |
+| `authored.signedRows[].contentDigest` | existing public result `.assets[].contentDigest` |
+| `authored.signedRows[].sealDigest` | **gap:** expose internal `produced.assets[].sealBinding.sealDigest` |
+| `authored.signedRows[].bundleDigest` | existing public result `.assets[].bundleDigest` |
+| `authored.signedRows[].kaUal` | existing public result `.assets[].kaUal` |
+| `authored.signedRows[].activatedTripleCount` | **gap:** expose a checked safe-integer conversion of internal `produced.assets[].projection.publicTripleCount` |
+| `received.catalogHeadDigest` | `Rfc64PublicCatalogNativeMultiAssetActivationEvidenceV1.catalogHeadDigest` |
+| `received.declaredInventoryDigest` | `.inventoryDigest`, also equal to the durable applied-head post-read |
+| `received.inventoryRowCount` | `.inventoryRowCount` |
+| `received.activatedRows` | `.rows`, projected to the seven contract row fields (omit `swmGraph` and `authorship`) |
+
+The receiver side is already sufficient. The author side needs the five
+read-only gaps above; without them, a harness would have to synthesize scope,
+bucket count, seal, or triple-count claims from its own request instead of
+recording verified product output. After that small seam, orchestration can
+expose the exact-set publish and multi-row synchronization calls through two real
+DKGAgent child processes, carry these values verbatim, read the receiver's
+durable applied head using the exposed scope digest, and use a separate connected
+Gate 2 schema to make a real gate disposition.
+
+## Commands
+
+```sh
+cd devnet/rfc64-gate2-multi-asset-completeness
 tsc --noEmit -p tsconfig.json
-
-# mutation test suite (Node built-in runner; no external deps)
 node --experimental-strip-types --test test/completeness.test.ts
-
-# generate a fixture / verify one
-node --experimental-strip-types src/cli/generate.ts 8
-node --experimental-strip-types src/cli/generate.ts 8 | node --experimental-strip-types src/cli/verify.ts
-
-# two-run byte determinism
-node --experimental-strip-types src/cli/generate.ts 8 > a.json
-node --experimental-strip-types src/cli/generate.ts 8 > b.json
-cmp a.json b.json && shasum -a 256 a.json b.json
+node --experimental-strip-types src/cli/generate.ts 8 > raw.json
+node --experimental-strip-types src/cli/verify.ts raw.json > verdict.json
 ```
 
-## Verified results (at source commit `19892c1d`)
-
-- `tsc --noEmit`: clean.
-- `node --test`: **15 pass / 0 fail** — one per material invariant, each mutated
-  artifact still parses so the failure is the targeted invariant.
-- Two-run determinism (count=8): byte-identical,
-  `sha256 = b5bb0ad3c1b78b67dd19fa785ac7d59bf2f9d123975a8f065d0f8ba3d64b2892`.
-
-## Handoff
-
-To evaluate a real Gate 2, a future adapter feeds authored/received rows from the
-live producer/receiver into `generateCompleteFixture`'s place and sets a
-`productBoundary`/`gateEvaluation` state machine. Until that adapter exists, keep
-the markers `not-connected` / `not-evaluated`; a green fixture is not a gate pass.
+Two identical generator invocations must produce byte-identical raw artifacts;
+two verifier invocations over them must produce byte-identical verdicts.
