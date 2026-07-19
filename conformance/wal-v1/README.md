@@ -26,4 +26,6 @@ pnpm --filter @origintrail-official/dkg-wal-v1-conformance verify
 
 Experimental reconciliation window sizes and fallback thresholds do not live
 here. They remain in the WAL-005 experiment directory. The symbol-membership
-schedule, integer arithmetic, hashing domains, and wire bytes are normative.
+schedule, exact IEEE-754 binary64 arithmetic, hashing domains, and wire bytes
+are normative. No floating-point value is serialized: binary64 is used only
+to derive deterministic symbol membership indices.

@@ -7,7 +7,8 @@
     "mapping": {
       "multiplier": "0xda942042e4dd58b5",
       "indexOffset": 1.5,
-      "inverseSqrtNumerator": 4294967296
+      "inverseSqrtNumerator": 4294967296,
+      "arithmetic": "binary64"
     },
     "idLength": 32,
     "checksumLength": 32,

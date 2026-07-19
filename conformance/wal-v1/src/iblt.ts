@@ -4,7 +4,8 @@ import { DOMAINS } from './schema.js';
 
 const U64_MASK = 0xffff_ffff_ffff_ffffn;
 const MULTIPLIER = 0xda94_2042_e4dd_58b5n;
-const SCALE = 1n << 32n;
+const INVERSE_SQRT_NUMERATOR = 2 ** 32;
+const INDEX_OFFSET = 1.5;
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -32,17 +33,6 @@ function assertId(id: Uint8Array): void {
   if (id.length !== 32) throw new Error('WalObjectId must be bytes32');
 }
 
-export function integerSquareRoot(value: bigint): bigint {
-  if (value < 0n) throw new Error('square root of negative integer');
-  if (value < 2n) return value;
-  let current = 1n << BigInt(Math.ceil(value.toString(2).length / 2));
-  while (true) {
-    const next = (current + value / current) >> 1n;
-    if (next >= current) return current;
-    current = next;
-  }
-}
-
 export function deriveReconciliationSeed(
   requesterHeadId: Uint8Array,
   providerHeadId: Uint8Array,
@@ -68,15 +58,25 @@ export function createMappingCursor(seed: Uint8Array, id: Uint8Array): MappingCu
 
 export function advanceMapping(cursor: MappingCursor): number {
   cursor.state = (cursor.state * MULTIPLIER) & U64_MASK;
-  const denominator = integerSquareRoot(cursor.state + 1n);
-  const ratio = (1n << 64n) / denominator;
-  const numerator = BigInt(2 * cursor.index + 3) * (ratio - SCALE);
-  const denominatorFixed = 2n * SCALE;
-  const distance = numerator <= 0n ? 1n : (numerator + denominatorFixed - 1n) / denominatorFixed;
-  const next = BigInt(cursor.index) + (distance > 0n ? distance : 1n);
-  if (next > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('mapping index exceeds safe integer range');
-  cursor.index = Number(next);
+  cursor.index = mappingIndexForState(cursor.state, cursor.index);
   return cursor.index;
+}
+
+export function mappingIndexForState(state: bigint, index: number): number {
+  if (state < 0n || state > U64_MASK) throw new Error('mapping state must be an unsigned 64-bit integer');
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error('mapping index must be a non-negative safe integer');
+  const convertedState = Number(state);
+  const statePlusOne = convertedState + 1;
+  const squareRoot = Math.sqrt(statePlusOne);
+  const inverseSquareRoot = INVERSE_SQRT_NUMERATOR / squareRoot;
+  const adjustedInverseSquareRoot = inverseSquareRoot - 1;
+  const convertedIndex = Number(index);
+  const shiftedIndex = convertedIndex + INDEX_OFFSET;
+  const product = shiftedIndex * adjustedInverseSquareRoot;
+  const distance = Math.ceil(product);
+  const next = index + Math.max(1, distance);
+  if (!Number.isSafeInteger(next)) throw new Error('mapping index exceeds safe integer range');
+  return next;
 }
 
 export function mappingIndices(seed: Uint8Array, id: Uint8Array, lastInclusive: number): number[] {
@@ -216,32 +216,4 @@ export function decodeDifference(
     peelTrace,
     residual
   };
-}
-
-export function independentEncodeSymbols(ids: readonly Uint8Array[], seed: Uint8Array, count: number): SymbolV1[] {
-  const output = Array.from({ length: count }, (_, index) => emptySymbol(index));
-  const unique = new Set<string>();
-  for (const raw of ids) {
-    assertId(raw);
-    const key = hex(raw);
-    if (unique.has(key)) throw new Error('duplicate WalObjectId');
-    unique.add(key);
-    const digest = checksum(seed, raw);
-    let state = u64le(hash(DOMAINS.ibltMap, seed, raw).slice(0, 8));
-    let index = 0;
-    while (index < count) {
-      apply(output[index], raw, digest, 1n);
-      state = (state * MULTIPLIER) & U64_MASK;
-      const root = integerSquareRoot(state + 1n);
-      const fixedRatio = (1n << 64n) / root;
-      const dividend = BigInt(index * 2 + 3) * (fixedRatio - SCALE);
-      const divisor = SCALE * 2n;
-      let step = dividend <= 0n ? 1n : (dividend + divisor - 1n) / divisor;
-      if (step < 1n) step = 1n;
-      const next = BigInt(index) + step;
-      if (next > BigInt(Number.MAX_SAFE_INTEGER)) break;
-      index = Number(next);
-    }
-  }
-  return output;
 }

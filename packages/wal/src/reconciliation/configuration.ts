@@ -5,7 +5,7 @@ export interface RatelessMappingParameters {
   multiplier: bigint;
   indexOffset: number;
   inverseSqrtNumerator: number;
-  arithmetic?: 'binary64' | 'integer-v1';
+  arithmetic: 'binary64' | 'integer-v1';
 }
 
 export interface ProtocolV1IbltReconciliationAlgorithm {
@@ -44,7 +44,8 @@ export const PROTOCOL_V1_IBLT_RECONCILIATION_ALGORITHM: ProtocolV1IbltReconcilia
   mapping: Object.freeze({
     multiplier: 0xda94_2042_e4dd_58b5n,
     indexOffset: 1.5,
-    inverseSqrtNumerator: 2 ** 32
+    inverseSqrtNumerator: 2 ** 32,
+    arithmetic: 'binary64'
   }),
   idLength: 32,
   checksumLength: 32,
@@ -68,6 +69,7 @@ export const PAPER_BASELINE_V0: ReconciliationConfiguration = Object.freeze({
   limits: DEFAULT_RECONCILIATION_LIMITS
 });
 
+/** Benchmark-only alternative. It is not eligible for Protocol V1 negotiation or wire conformance. */
 export const INTEGER_ONLY_V1_CANDIDATE: ReconciliationConfiguration = Object.freeze({
   ...PAPER_BASELINE_V0,
   candidateName: 'integer-only-v1-candidate',
@@ -107,11 +109,7 @@ export function validateReconciliationConfiguration(configuration: Reconciliatio
   if (!Number.isFinite(mapping.inverseSqrtNumerator) || mapping.inverseSqrtNumerator <= 0) {
     throw new ReconciliationError('INVALID_CONFIGURATION', 'mapping inverseSqrtNumerator must be finite and positive');
   }
-  if (
-    mapping.arithmetic !== undefined &&
-    mapping.arithmetic !== 'binary64' &&
-    mapping.arithmetic !== 'integer-v1'
-  ) {
+  if (mapping.arithmetic !== 'binary64' && mapping.arithmetic !== 'integer-v1') {
     throw new ReconciliationError('INVALID_CONFIGURATION', 'mapping arithmetic must be binary64 or integer-v1');
   }
   for (const [name, value] of Object.entries(stream)) {

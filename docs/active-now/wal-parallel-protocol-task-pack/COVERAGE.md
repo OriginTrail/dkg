@@ -34,7 +34,7 @@ not replacements for the RFC.
 | 19. Implementation layout/concurrency/limits | `WAL-002`–`WAL-020` | Bounds suite in `WAL-009`, `WAL-019`, `WAL-021`. |
 | 20. API and readiness | `WAL-013`, `WAL-020` | Forced-state diagnostic suite in `WAL-020`/`WAL-022`. |
 | 21. Acceptance tests | `WAL-021`, `WAL-022`, `WAL-024` | Final release gate in `WAL-024`. |
-| 22. Protocol-version-1 freeze resolution | `WAL-001` plus specialized owners below | `WAL-001` proves the v0.6 resolutions and blocks dependent work until the normative schema/vectors pass. |
+| 22. Protocol-version-1 freeze resolution | `WAL-001` plus specialized owners below | `WAL-001` proves the v0.7 resolutions and blocks dependent work until the normative schema/vectors pass. |
 | 23. Fixed version-1 decisions | `WAL-001`–`WAL-023` | Conformance and full protocol proof in `WAL-021`/`WAL-024`. |
 | 24. References | System context and informative comparison | Provenance/checksum in `README.md`. |
 

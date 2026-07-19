@@ -16,7 +16,7 @@ experiment notes.
 - 100% statement, branch, function, and line coverage;
 - whole-object E2E synchronization and empty-receiver backfill;
 - 100,000 deterministic seed cases and N=10k/100k/1M at fixed k=32;
-- TypeScript and independent Go conformance consumers;
+- two separately written TypeScript conformance consumers;
 - tracked fresh-process 10k/100k/1M/10M encoded-byte and timing baseline,
   rotated repetitions, summary distributions, and regression gate;
 - static proof that the reconciliation source imports no RDF, SPARQL, network,

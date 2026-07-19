@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { equalBytes, fromHex, hash, hex } from '../src/bytes.js';
 import { decodeCanonical, encodeCanonical } from '../src/cbor.js';
-import { decodeDifference, deriveReconciliationSeed, encodeSymbolCbor, encodeSymbols } from '../src/iblt.js';
+import { decodeDifference, deriveReconciliationSeed, encodeSymbolCbor, encodeSymbols, mappingIndexForState } from '../src/iblt.js';
 import {
   independentCborDecode,
   independentCborEncode,
   independentDecryptAesGcm,
+  independentMappingIndexForState,
   independentReduceCase,
   independentRoot,
   independentSymbols,
@@ -211,6 +212,14 @@ describe('ProtocolV1IbltReconciliationAlgorithm', () => {
   const provider: Uint8Array[] = vectors.iblt.providerIds.map((value: string) => fromHex(value, 32));
   const seed = fromHex(vectors.iblt.reconciliationSeed, 32);
   const count = vectors.iblt.minimumCompleteSymbolCount;
+
+  it('freezes binary64 behavior at integer-conversion and operation boundaries', () => {
+    for (const value of vectors.iblt.binary64MappingBoundaryCases) {
+      const state = BigInt(value.state);
+      expect(mappingIndexForState(state, value.index), value.name).toBe(value.nextIndex);
+      expect(independentMappingIndexForState(state, value.index), value.name).toBe(value.nextIndex);
+    }
+  });
 
   it('derives the frozen seed and byte-identical symbols independently', () => {
     expect(hex(deriveReconciliationSeed(

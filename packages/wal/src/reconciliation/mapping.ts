@@ -50,8 +50,15 @@ export function mappingIndexForState(
     }
     return Number(nextIndex);
   }
-  const inverseSqrt = parameters.inverseSqrtNumerator / Math.sqrt(Number(state) + 1);
-  const distance = Math.ceil((lastIndex + parameters.indexOffset) * (inverseSqrt - 1));
+  const convertedState = Number(state);
+  const statePlusOne = convertedState + 1;
+  const squareRoot = Math.sqrt(statePlusOne);
+  const inverseSquareRoot = parameters.inverseSqrtNumerator / squareRoot;
+  const adjustedInverseSquareRoot = inverseSquareRoot - 1;
+  const convertedIndex = Number(lastIndex);
+  const shiftedIndex = convertedIndex + parameters.indexOffset;
+  const product = shiftedIndex * adjustedInverseSquareRoot;
+  const distance = Math.ceil(product);
   const nextIndex = lastIndex + Math.max(1, distance);
   if (!Number.isSafeInteger(nextIndex)) {
     throw new ReconciliationError('INTEGER_OUT_OF_RANGE', 'mapping index exceeds the safe integer range');

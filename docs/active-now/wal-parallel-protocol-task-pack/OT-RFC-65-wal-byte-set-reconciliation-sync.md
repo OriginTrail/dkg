@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.6
+version: 0.7
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -886,11 +886,13 @@ reconciliationSeed = BLAKE3(
 
 The requester chooses `requesterNonce` only after receiving the provider's
 signed immutable head. `requesterNonce` is bytes32. The normative
-`ProtocolV1IbltReconciliationAlgorithm` is integer-only:
+`ProtocolV1IbltReconciliationAlgorithm` uses an exact IEEE-754 binary64
+evaluation profile:
 
 ```text
 M = 0xda942042e4dd58b5
-SCALE = 2^32
+INVERSE_SQRT_NUMERATOR = 2^32
+INDEX_OFFSET = 1.5
 
 mapState(id) = u64le(first8(BLAKE3(
   "dkg-wal-iblt-map-v1\0" || reconciliationSeed || id
@@ -901,18 +903,31 @@ state_0 = mapState(id)
 
 after emitting at index_n:
   state_(n+1) = state_n * M mod 2^64
-  q = floor(2^64 / isqrt(state_(n+1) + 1))
-  distance = max(1, ceil(
-    ((2 * index_n + 3) * (q - SCALE)) / (2 * SCALE)
-  ))
+  x0 = binary64(state_(n+1))
+  x1 = binary64(x0 + 1.0)
+  x2 = sqrt64(x1)
+  x3 = binary64(INVERSE_SQRT_NUMERATOR / x2)
+  x4 = binary64(x3 - 1.0)
+  x5 = binary64(binary64(index_n) + INDEX_OFFSET)
+  x6 = binary64(x5 * x4)
+  distance = max(1, ceil(x6))
   index_(n+1) = index_n + distance
 ```
 
-`isqrt` is the exact floor integer square root; `ceil(a/b)` for nonnegative
-integers is `(a+b-1)/b`. Every ID contributes first to symbol zero and then to
-the strictly increasing indices above. No floating-point operation or
-implementation math library participates in symbol membership. `count` is a
-signed i64 and overflow fails the attempt. `idXor` and `checksumXor` are
+`binary64(u64)` converts the exact unsigned integer using IEEE-754
+round-to-nearest, ties-to-even. Every named `binary64(...)` operation rounds
+its result to binary64 using the same mode before the next operation.
+`sqrt64` is correctly rounded binary64 square root under that mode. Extended
+precision intermediates, fused operations, reassociation, algebraic
+simplification, and alternative evaluation orders are forbidden. An
+implementation whose native runtime cannot guarantee this profile MUST use a
+deterministic software routine and MUST reproduce the normative vectors. No
+floating-point value appears in CBOR or on the wire; binary64 is used only to
+derive integer symbol indices.
+
+Every ID contributes first to symbol zero and then to the strictly increasing
+indices above. `count` is a signed i64 and overflow fails the attempt.
+`idXor` and `checksumXor` are
 bytewise XOR. A symbol is pure only when count is exactly `+1` or `-1` and the
 checksum of `idXor` equals `checksumXor`. The decoder always peels the lowest
 available symbol index; a provider-only ID is subtracted from every received
@@ -926,6 +941,13 @@ growth policy, fallback thresholds, and performance candidates remain outside
 the wire specification and may iterate without changing symbol bytes. A
 provider can generate and cache the same deterministic symbol stream once per
 `(headId, reconciliationSeed)` and serve any requested contiguous window.
+
+The binary64 profile is the measured WAL-005 baseline. In a rotated
+fresh-process TypeScript A/B at N=10K, 100K, 1M, and 10M with a fixed 32-ID
+symmetric difference, the exact-integer candidate preserved symbol/byte counts
+but increased median end-to-end time by 20%–23% and symbol-stream time by
+72%–87%. The integer candidate remains informative experiment data, not the
+protocol-v1 schedule.
 
 The following rule is normative:
 
@@ -2045,7 +2067,7 @@ and vectors control implementation.
 |---|---|
 | Adapter payload envelope | Section 6.2 freezes numeric payload/codec/crypto values, exact associated data, and whole-object signature/identity coverage. Encryption valid/invalid vectors are published. |
 | Snapshot wire and closure | Section 17 freezes manifest, entry, conflict, legacy-genesis, custody-receipt, new-epoch, empty-parent/base, external-conflict, retention, expiry, and removed-custodian rules. |
-| WalObject, commitment, and IBLT | Sections 4, 6.1, 7, and 8 plus vectors freeze canonical bytes, signatures, IDs, empty/one/split roots, odd-nibble proofs, integer-only mapping, symbols, peeling, failures, reconstruction, and fallback pages. |
+| WalObject, commitment, and IBLT | Sections 4, 6.1, 7, and 8 plus vectors freeze canonical bytes, signatures, IDs, empty/one/split roots, odd-nibble proofs, exact binary64 mapping, symbols, peeling, failures, reconstruction, and fallback pages. |
 | Reducer convergence | Sections 6.3–6.5 and 13 define parents/base heads/state/touched-key relations, maximal common bases, compatibility, and reducer fixtures. |
 | Cross-view `MOVE_TIER` privacy | Section 6.6 uses a randomized public commitment, private source opening, and privacy-preserving threshold receipt; cross-view invalid vectors contain forbidden-value checks. |
 | Authority lifecycle | Section 6.12 freezes threshold authority sets, rotation, revocation, vector-epoch transition, and fail-closed rollback-guard recovery. |
@@ -2068,7 +2090,7 @@ promotion.
 
 Future tuning may change experimental window/growth/fallback policy without
 changing protocol bytes. Any change to a tuple, enum, domain, hard limit,
-integer mapping schedule, synchronization atom, or normative vector requires a
+binary64 mapping schedule, synchronization atom, or normative vector requires a
 new protocol version or an explicit compatible RFC amendment with regenerated
 fixtures.
 
@@ -2082,7 +2104,7 @@ fixtures.
 | Synchronization atom | One complete canonical `WalObjectV1` with inline opaque payload; no separately addressed payload, blob, chunk, or range. |
 | Range transfer | Ephemeral whole-object byte ranges with local resume state and complete-object verification before atomic promotion. |
 | Set commitment | Deterministic 16-way radix Merkle root, leaf 256, used for authenticated equality and decode verification rather than normal wire traversal. |
-| Set reconciliation | Integer-only `ProtocolV1IbltReconciliationAlgorithm` over `WalObjectId`, incremental symbol windows, lowest-index peeling, reconstructed-root verification, and bounded sorted-ID fallback. |
+| Set reconciliation | Exact IEEE-754 binary64 `ProtocolV1IbltReconciliationAlgorithm` over `WalObjectId`, incremental symbol windows, lowest-index peeling, reconstructed-root verification, and bounded sorted-ID fallback. |
 | Transport | Existing raw libp2p router with `wal-control`, `wal-reconcile`, and `wal-object` protocol IDs. |
 | Private crypto | Existing Sender Key distribution plus HKDF-SHA256 and AES-256-GCM content inline in the adapter payload envelope. |
 | RDF format | Canonical, sorted, blank-node-free N-Quads. |

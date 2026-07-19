@@ -56,7 +56,7 @@ distance = max(1, ceil(
 index = index + distance
 ```
 
-The TypeScript and independent Go conformance consumers agree on checked-in
+The two separately written TypeScript conformance consumers agree on checked-in
 mapping indices, symbols, decode output, roots, and pages. Alternative mapping
 values must be added as named configs and must produce new versioned vectors;
 they must never silently change an existing protocol profile.
@@ -111,7 +111,7 @@ implementation gate:
 - fixed `k=32` at N=10k, 100k, and 1M;
 - incremental commitment insertion/deletion/restart;
 - head-bound backfill and whole-object E2E transfer;
-- TypeScript and independent Go vector consumers;
+- two independent TypeScript vector consumers;
 - static semantic/network/object-payload boundary checks; and
 - isolated sorted-stream benchmarks at N=10k, 100k, 1M, and 10M with raw phase
   timings, rotated repetitions, summary distributions, memory telemetry, and a

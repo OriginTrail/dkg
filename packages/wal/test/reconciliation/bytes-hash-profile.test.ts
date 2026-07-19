@@ -82,6 +82,7 @@ describe('byte primitives and domain-separated hashing', () => {
 
 describe('candidate profile and mapping schedule', () => {
   it('generates a deterministic increasing membership sequence', () => {
+    expect(PAPER_BASELINE_V0.algorithm.mapping.arithmetic).toBe('binary64');
     const first = createMappingCursor(123n);
     const second = createMappingCursor(123n);
     const indices = Array.from({ length: 20 }, () => nextMappingIndex(first, PAPER_BASELINE_V0.algorithm.mapping));

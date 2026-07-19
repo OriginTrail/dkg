@@ -1,7 +1,7 @@
 import { webcrypto } from 'node:crypto';
 import { getBytes, verifyMessage } from 'ethers';
-import { compareBytes, concat, equalBytes, hash, hex, sortedUniqueBytes, utf8 } from './bytes.js';
-import { independentEncodeSymbols, type SymbolV1 } from './iblt.js';
+import { compareBytes, concat, equalBytes, hash, hex, sortedUniqueBytes, u64le, utf8, xorInto } from './bytes.js';
+import type { SymbolV1 } from './iblt.js';
 import { independentSetCommitmentRoot } from './set-commitment.js';
 import { DOMAINS } from './schema.js';
 import type { ReducerCase, ReducerDecision } from './reference.js';
@@ -138,8 +138,51 @@ export function independentRoot(ids: readonly Uint8Array[]): Uint8Array {
   return independentSetCommitmentRoot(ids);
 }
 
+export function independentMappingIndexForState(state: bigint, index: number): number {
+  if (state < 0n || state > 0xffff_ffff_ffff_ffffn) throw new Error('mapping state must be an unsigned 64-bit integer');
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error('mapping index must be a non-negative safe integer');
+  const stateAsNumber = Number(state);
+  const incrementedState = stateAsNumber + 1;
+  const root = Math.sqrt(incrementedState);
+  const scaledReciprocal = 4_294_967_296 / root;
+  const adjustedReciprocal = scaledReciprocal - 1;
+  const indexAsNumber = Number(index);
+  const offsetIndex = indexAsNumber + 1.5;
+  const scaledDistance = offsetIndex * adjustedReciprocal;
+  const distance = Math.ceil(scaledDistance);
+  const result = index + Math.max(1, distance);
+  if (!Number.isSafeInteger(result)) throw new Error('mapping index exceeds safe integer range');
+  return result;
+}
+
 export function independentSymbols(ids: readonly Uint8Array[], seed: Uint8Array, count: number): SymbolV1[] {
-  return independentEncodeSymbols(ids, seed, count);
+  if (seed.length !== 32) throw new Error('reconciliation seed must be bytes32');
+  if (!Number.isSafeInteger(count) || count <= 0) throw new Error('symbol count must be positive');
+  const symbols = Array.from({ length: count }, (_, index) => ({
+    index,
+    count: 0n,
+    idXor: new Uint8Array(32),
+    checksumXor: new Uint8Array(32)
+  }));
+  const unique = new Set<string>();
+  for (const id of ids) {
+    if (id.length !== 32) throw new Error('WalObjectId must be bytes32');
+    const key = hex(id);
+    if (unique.has(key)) throw new Error('duplicate WalObjectId');
+    unique.add(key);
+    const digest = hash(DOMAINS.ibltChecksum, seed, id);
+    let state = u64le(hash(DOMAINS.ibltMap, seed, id).subarray(0, 8));
+    let index = 0;
+    while (index < count) {
+      const symbol = symbols[index];
+      symbol.count += 1n;
+      xorInto(symbol.idXor, id);
+      xorInto(symbol.checksumXor, digest);
+      state = (state * 0xda94_2042_e4dd_58b5n) & 0xffff_ffff_ffff_ffffn;
+      index = independentMappingIndexForState(state, index);
+    }
+  }
+  return symbols;
 }
 
 export async function independentDecryptAesGcm(

@@ -32,7 +32,6 @@
     "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --matrix --check",
     "benchmark:reconciliation:check:quick": "node --import tsx scripts/benchmark.ts --check",
     "vectors": "node --import tsx scripts/generate-vectors.ts",
-    "test:conformance:go": "cd conformance/go && go test ./...",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo"
   },
   "dependencies": {

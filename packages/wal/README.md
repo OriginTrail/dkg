@@ -129,7 +129,7 @@ pnpm --filter @origintrail-official/dkg-wal test:types
 pnpm --filter @origintrail-official/dkg-wal test:coverage
 pnpm --filter @origintrail-official/dkg-wal test:e2e
 pnpm --filter @origintrail-official/dkg-wal test:stress
-pnpm --filter @origintrail-official/dkg-wal test:conformance:go
+pnpm --filter @origintrail-official/dkg-wal-v1-conformance verify
 pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:matrix
 ```
 
@@ -137,8 +137,9 @@ The executable source has 100% statement, branch, function, and line coverage.
 The stress suite runs 100,000 deterministic reconciliation seeds and fixed
 `k=32` at `N=10^4`, `10^5`, and `10^6`. The E2E suite exchanges encoded symbol
 windows, transfers only complete objects, proves empty-receiver backfill, and
-rejects corrupt object bytes. TypeScript and an independent Go implementation
-consume `conformance/vectors/protocol-v1.json`.
+rejects corrupt object bytes. Two separately written TypeScript consumers
+reproduce the language-neutral vectors under `conformance/wal-v1`; no new
+production or conformance language is required.
 
 ## Tracked benchmark
 

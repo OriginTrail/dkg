@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareBytes, concat, equalBytes, hash, hex, utf8 } from '../src/bytes.js';
 import { encodeCanonical } from '../src/cbor.js';
-import { decodeDifference, deriveReconciliationSeed, encodeSymbolCbor, encodeSymbols, mappingIndices } from '../src/iblt.js';
+import { decodeDifference, deriveReconciliationSeed, encodeSymbolCbor, encodeSymbols, mappingIndexForState, mappingIndices } from '../src/iblt.js';
 import {
   independentCborEncode,
   independentReduceCase,
@@ -71,6 +71,17 @@ function proofJson(proof: ReturnType<typeof createMembershipProof>) {
 }
 
 async function buildVectors() {
+  const mappingBoundaryInputs = [
+    { name: 'zero-state', state: 0n, index: 0 },
+    { name: 'exact-square-root-four', state: 3n, index: 0 },
+    { name: 'exact-square-root-sixteen', state: 15n, index: 1 },
+    { name: 'below-binary64-integer-rounding-boundary', state: 9_007_199_254_740_991n, index: 0 },
+    { name: 'at-binary64-integer-rounding-boundary', state: 9_007_199_254_740_992n, index: 1 },
+    { name: 'first-rounded-u64', state: 9_007_199_254_740_993n, index: 1_048_576 },
+    { name: 'high-bit-u64', state: 9_223_372_036_854_775_807n, index: 1_048_576 },
+    { name: 'maximum-u64-minus-one', state: 18_446_744_073_709_551_614n, index: 4_294_967_296 },
+    { name: 'maximum-u64-high-index', state: 18_446_744_073_709_551_615n, index: Number.MAX_SAFE_INTEGER - 2 }
+  ];
   const collectionKey = ['otp:2043', 'urn:dkg:cg:wal-fixture', null, BigInt(ENUMS.visibility.PUBLIC)] as const;
   const viewKey = [
     'otp:2043',
@@ -595,6 +606,12 @@ async function buildVectors() {
       providerIds: providerIds.map(hex),
       receiverRoot: hex(setCommitmentRoot(receiverIds)),
       providerRoot: hex(setCommitmentRoot(providerIds)),
+      binary64MappingBoundaryCases: mappingBoundaryInputs.map(({ name, state, index }) => ({
+        name,
+        state: state.toString(),
+        index,
+        nextIndex: mappingIndexForState(state, index)
+      })),
       firstMappingIndices: providerIds.map((id) => ({ id: hex(id), indices: mappingIndices(reconciliationSeed, id, symbolCount - 1) })),
       minimumCompleteSymbolCount: symbolCount,
       providerSymbols: providerSymbols.map(symbolJson),

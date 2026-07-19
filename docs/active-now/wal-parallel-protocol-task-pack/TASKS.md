@@ -100,7 +100,7 @@ operator-visible results.
 
 ### Objective
 
-Apply every resolution in RFC v0.6 Section 22 before production implementations
+Apply every resolution in RFC v0.7 Section 22 before production implementations
 encode incompatible assumptions. The result must be an executable normative
 wire/convergence contract, not additional prose ambiguity. The conformance
 harness is TypeScript-only; this task does not add Go or another implementation
@@ -174,6 +174,11 @@ language.
   rejection, reducer relations, common-base rules, resource limits, provider
   cold start, authority rotation/HA, rollback-guard recovery, cutover cohort,
   late-node behavior, private-safe `MOVE_TIER`, and VM finality policy.
+- Freeze the measured binary64 IBLT mapping exactly: unsigned-u64 conversion,
+  round-to-nearest-ties-to-even after every named binary64 operation, correctly
+  rounded square root, fixed evaluation order, and prohibition of extended
+  intermediates, reassociation, or fused evaluation. No float is serialized;
+  the result is a deterministic integer symbol index.
 - Publish byte fixtures for CBOR tuples, signatures, IDs, set commitments,
   rateless IBLT symbols/peeling, object ranges, encryption, snapshots, reducer
   cases, and cutover objects in the spec and code repos.
@@ -211,10 +216,13 @@ language.
       new whole-object identity and that v1 does not promise cross-object range
       deduplication or pre-completion content verification.
 - [ ] All ten former RFC implementation-freeze items have the explicit normative
-      v0.6 answer merged or approved in `dkgv10-spec`; none remains implicit in code.
+      v0.7 answer merged or approved in `dkgv10-spec`; none remains implicit in code.
 - [ ] At least two independently written TypeScript test implementations consume the same fixtures
       and produce byte-identical encodings, IDs, roots, proofs, and reducer
       digests; no new implementation language is introduced for conformance.
+- [ ] Binary64 boundary vectors cover u64-to-binary64 rounding, the `+1.0`
+      boundary, square-root/division/product rounding, `ceil`, minimum distance,
+      and safe-index overflow. Both TypeScript consumers reproduce every index.
 - [ ] Valid and invalid vectors cover empty, boundary, duplicate, reordered,
       truncated, oversized, cross-view, stale-authority, and downgrade cases.
 - [ ] The finality rule proves that an author-supplied value cannot weaken
@@ -381,10 +389,12 @@ transfer, authorization, admission, RDF, or SPARQL.
   simple reference root implementation. The tree is an authenticated
   commitment, not the normal wire reconciliation algorithm.
 - Implement the `ProtocolV1IbltReconciliationAlgorithm` exactly: seed
-  derivation, symbol-membership schedule, degree distribution, signed-i64 count
-  arithmetic, 32-byte ID XOR, domain-separated checksum XOR, deterministic
-  symbol order, and canonical symbol tuples. This name denotes an algorithm,
-  not a protocol object.
+  derivation, the RFC v0.7 binary64 symbol-membership evaluation order, degree
+  distribution, signed-i64 count arithmetic, 32-byte ID XOR, domain-separated
+  checksum XOR, deterministic symbol order, and canonical symbol tuples. This
+  name denotes an algorithm, not a protocol object. The exact-integer mapping
+  remains experiment evidence and MUST NOT be negotiated or emitted as
+  protocol-v1 membership.
 - Implement pure encode, subtract, incremental-window append, pure-symbol
   detection, deterministic peeling, and provider-only/receiver-only output.
 - Require successful decoding to leave a zero residual, pass every checksum,
@@ -397,9 +407,10 @@ transfer, authorization, admission, RDF, or SPARQL.
 - Implement deterministic sorted/paginated full-ID fallback bound to a signed
   head. Acceptance requires exact count and recomputed root; empty-node backfill
   may select this path immediately.
-- Publish cross-language golden vectors for the set root, seed, every symbol
+- Publish language-neutral golden vectors for the set root, seed, every symbol
   window, subtraction state, peel trace, decoded directions, reconstructed root,
-  failure cases, and fallback pages.
+  failure cases, and fallback pages; consume them with two independently written
+  TypeScript implementations without adding a production language.
 - Keep the module dependency-free from DKG semantics and expose pure interfaces
   that `WAL-009` and `WAL-019` can drive.
 - Enforce the atom boundary in code and schemas: the algorithm, parameters,
@@ -422,6 +433,11 @@ transfer, authorization, admission, RDF, or SPARQL.
       seeds/windows, signed positive/negative counts, XOR cancellation,
       checksum validation, incremental windows, deterministic peel order, and
       exact direction classification.
+- [ ] Binary64 mapping tests freeze the exact u64 conversion, per-operation
+      round-to-nearest-ties-to-even, correctly rounded square root, fixed
+      evaluation order, `ceil`, minimum step, and safe-index failure. No
+      implementation may substitute the rejected integer candidate under
+      protocol version 1.
 - [ ] Unit tests prove insufficient-symbol and non-peelable cores request more
       symbols, preserve prior decode work, and never emit an accepted partial
       result.
@@ -441,6 +457,12 @@ transfer, authorization, admission, RDF, or SPARQL.
 - [ ] Equal signed roots return before symbol generation; fixed `k` and `b`
       across increasing `N` satisfy the RFC reconciliation-byte bound and do not
       enumerate RDF.
+- [ ] Fresh-process benchmarks run both the normative binary64 profile and the
+      retained exact-integer experiment at `N = 10^4`, `10^5`, `10^6`, and
+      `10^7` for at least three rotated repetitions, assert the exact decoded
+      difference, and retain raw setup/stream/total time, symbols, canonical
+      bytes, CPU/memory telemetry, and median/p95/max summaries. The normative
+      baseline has a tracked regression gate.
 - [ ] The module imports no RDF, SPARQL, SWM/VM, graph-storage, discovery,
       libp2p, or object-transfer implementation.
 - [ ] Static schema/code tests find no `IbltProfileId`, `SymbolId`,

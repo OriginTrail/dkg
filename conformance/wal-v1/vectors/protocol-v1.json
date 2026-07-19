@@ -627,8 +627,14 @@
       "version": 1,
       "multiplierHex": "da942042e4dd58b5",
       "initialSymbolIndex": 0,
-      "fixedPointScale": "4294967296",
-      "integerSquareRoot": "floor",
+      "arithmetic": "IEEE-754 binary64",
+      "uint64Conversion": "roundTiesToEven",
+      "operationRounding": "roundTiesToEven-after-each-operation",
+      "squareRoot": "correctly-rounded-roundTiesToEven",
+      "inverseSquareRootNumerator": "4294967296",
+      "indexOffset": 1.5,
+      "reassociation": false,
+      "extendedPrecisionIntermediates": false,
       "mappingSeedEndian": "little",
       "countEncoding": "signed-i64",
       "peelOrder": "lowest-symbol-index-first"
@@ -650,6 +656,62 @@
     ],
     "receiverRoot": "f64e668953b3f13e3a4022ebf07cb74e6d45e7435de77a9bfa6e6e7ce4222ce7",
     "providerRoot": "84c57033bbcfaa2e23dd3de6b31c71e6a79dbe8ef75752ffee8cdd818ea714bd",
+    "binary64MappingBoundaryCases": [
+      {
+        "name": "zero-state",
+        "state": "0",
+        "index": 0,
+        "nextIndex": 6442450943
+      },
+      {
+        "name": "exact-square-root-four",
+        "state": "3",
+        "index": 0,
+        "nextIndex": 3221225471
+      },
+      {
+        "name": "exact-square-root-sixteen",
+        "state": "15",
+        "index": 1,
+        "nextIndex": 2684354559
+      },
+      {
+        "name": "below-binary64-integer-rounding-boundary",
+        "state": "9007199254740991",
+        "index": 0,
+        "nextIndex": 67
+      },
+      {
+        "name": "at-binary64-integer-rounding-boundary",
+        "state": "9007199254740992",
+        "index": 1,
+        "nextIndex": 112
+      },
+      {
+        "name": "first-rounded-u64",
+        "state": "9007199254740993",
+        "index": 1048576,
+        "nextIndex": 47453200
+      },
+      {
+        "name": "high-bit-u64",
+        "state": "9223372036854775807",
+        "index": 1048576,
+        "nextIndex": 1482912
+      },
+      {
+        "name": "maximum-u64-minus-one",
+        "state": "18446744073709551614",
+        "index": 4294967296,
+        "nextIndex": 4294967297
+      },
+      {
+        "name": "maximum-u64-high-index",
+        "state": "18446744073709551615",
+        "index": 9007199254740989,
+        "nextIndex": 9007199254740990
+      }
+    ],
     "firstMappingIndices": [
       {
         "id": "3039b5f9da87a0fcdfc4a9a8192f2e3ddec1428e417a753c0022649ad82f3cf6",
