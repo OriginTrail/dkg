@@ -55,7 +55,6 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type Rfc64InventoryV1CandidateApi,
-  type Rfc64InventoryV1OperationsV1,
   type VerifiedCandidateBucketLoadV1,
   type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
@@ -127,7 +126,6 @@ class InventoryV1TargetCloseError extends InventoryV1OpenError {
 }
 
 export interface Rfc64InventoryV1Foundation extends Rfc64InventoryV1CandidateApi {
-  readonly operations: Rfc64InventoryV1OperationsV1;
   readonly databasePath: string;
   readonly closed: boolean;
   quarantineAndRebuild(): void;
@@ -271,7 +269,6 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
-  readonly operations: Rfc64InventoryV1OperationsV1;
 
   constructor(
     private readonly sqlite: SqliteModuleV1,
@@ -283,7 +280,6 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#database = database;
     this.#candidate = this.createCandidateInventory(database);
     this.#lease = lease;
-    this.operations = createInventoryV1OperationsView(this);
   }
 
   get closed(): boolean {
@@ -516,29 +512,6 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     }
     throw error;
   }
-}
-
-function createInventoryV1OperationsView(
-  inventory: Rfc64InventoryV1CandidateApi,
-): Rfc64InventoryV1OperationsV1 {
-  return Object.freeze({
-    createCandidateSession: inventory.createCandidateSession.bind(inventory),
-    putVerifiedCandidateBucket: inventory.putVerifiedCandidateBucket.bind(inventory),
-    getCandidateBucket: inventory.getCandidateBucket.bind(inventory),
-    beginCandidateBucketRows: inventory.beginCandidateBucketRows.bind(inventory),
-    beginCandidateBucketDiff: inventory.beginCandidateBucketDiff.bind(inventory),
-    pageCandidateBucketRows: inventory.pageCandidateBucketRows.bind(inventory),
-    pageCandidateBucketAddedOrChanged:
-      inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
-    pageCandidateBucketRemoved: inventory.pageCandidateBucketRemoved.bind(inventory),
-    readVerifiedCandidateCatalogRow:
-      inventory.readVerifiedCandidateCatalogRow.bind(inventory),
-    verifyCandidateCatalogPrecommitV1:
-      inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
-    closeCandidateTraversal: inventory.closeCandidateTraversal.bind(inventory),
-    discardCandidateSessionBatch: inventory.discardCandidateSessionBatch.bind(inventory),
-    deleteCandidateBucket: inventory.deleteCandidateBucket.bind(inventory),
-  });
 }
 
 function reopenVerifiedOwnedDatabase(

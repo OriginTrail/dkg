@@ -129,7 +129,6 @@ export type Rfc64ControlObjectOperationsV1 = Pick<
 >;
 
 export interface Rfc64ControlObjectStoreV1 {
-  readonly operations: Rfc64ControlObjectOperationsV1;
   readonly rootPath: string;
   readonly closed: boolean;
   readonly namespaceDurability: Rfc64ControlObjectStoreNamespaceDurabilityV1;
@@ -172,14 +171,12 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   readonly #fileWriteTails = new Map<string, Promise<void>>();
   readonly #durableFiles: Rfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>;
   readonly namespaceDurability = rfc64NamespaceDurabilityV1();
-  readonly operations: Rfc64ControlObjectOperationsV1;
 
   constructor(
     readonly rootPath: string,
     lifecycle: Rfc64ControlObjectStoreLifecycleV1,
   ) {
     this.#durableFiles = createRfc64DurableFileStoreV1(rootPath, lifecycle);
-    this.operations = createControlObjectOperationsView(this);
   }
 
   get closed(): boolean {
@@ -364,17 +361,6 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     }).catch(() => undefined);
     return operation;
   }
-}
-
-function createControlObjectOperationsView(
-  controlObjectStore: Rfc64ControlObjectStoreV1,
-): Rfc64ControlObjectOperationsV1 {
-  return Object.freeze({
-    namespaceDurability: controlObjectStore.namespaceDurability,
-    stageVerifiedObjects:
-      controlObjectStore.stageVerifiedObjects.bind(controlObjectStore),
-    getVerifiedObject: controlObjectStore.getVerifiedObject.bind(controlObjectStore),
-  });
 }
 
 /** @internal Used only by the package-local test support module. */

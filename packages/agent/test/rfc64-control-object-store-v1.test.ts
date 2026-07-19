@@ -190,6 +190,7 @@ describe('RFC-64 durable control-object store v1', () => {
     const fixture = await signedFixture('1');
     const result = await store.stageVerifiedObjects([fixture]);
 
+    expect(store).not.toHaveProperty('operations');
     expect(result).toEqual({
       durable: true,
       namespaceDurability: process.platform === 'win32'

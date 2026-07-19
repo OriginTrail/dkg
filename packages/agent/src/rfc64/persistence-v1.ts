@@ -1,5 +1,6 @@
 import {
   openInventoryV1,
+  type Rfc64InventoryV1CandidateApi,
   type Rfc64InventoryV1Foundation,
   type Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
@@ -42,8 +43,8 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   ) {
     this.#ownedInventory = ownedInventory;
     this.#ownedControlObjectStore = ownedControlObjectStore;
-    this.inventory = ownedInventory.operations;
-    this.controlObjects = ownedControlObjectStore.operations;
+    this.inventory = createInventoryOperationsView(ownedInventory);
+    this.controlObjects = createControlObjectOperationsView(ownedControlObjectStore);
   }
 
   get closed(): boolean {
@@ -74,6 +75,41 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
       throw new AggregateError(failures, 'RFC-64 persistence resources failed to close');
     }
   }
+}
+
+/** The aggregate owner is the sole boundary that strips child lifecycle authority. */
+function createInventoryOperationsView(
+  inventory: Rfc64InventoryV1CandidateApi,
+): Rfc64InventoryV1OperationsV1 {
+  return Object.freeze({
+    createCandidateSession: inventory.createCandidateSession.bind(inventory),
+    putVerifiedCandidateBucket: inventory.putVerifiedCandidateBucket.bind(inventory),
+    getCandidateBucket: inventory.getCandidateBucket.bind(inventory),
+    beginCandidateBucketRows: inventory.beginCandidateBucketRows.bind(inventory),
+    beginCandidateBucketDiff: inventory.beginCandidateBucketDiff.bind(inventory),
+    pageCandidateBucketRows: inventory.pageCandidateBucketRows.bind(inventory),
+    pageCandidateBucketAddedOrChanged:
+      inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
+    pageCandidateBucketRemoved: inventory.pageCandidateBucketRemoved.bind(inventory),
+    readVerifiedCandidateCatalogRow:
+      inventory.readVerifiedCandidateCatalogRow.bind(inventory),
+    verifyCandidateCatalogPrecommitV1:
+      inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
+    closeCandidateTraversal: inventory.closeCandidateTraversal.bind(inventory),
+    discardCandidateSessionBatch: inventory.discardCandidateSessionBatch.bind(inventory),
+    deleteCandidateBucket: inventory.deleteCandidateBucket.bind(inventory),
+  });
+}
+
+function createControlObjectOperationsView(
+  controlObjectStore: Rfc64ControlObjectStoreV1,
+): Rfc64ControlObjectOperationsV1 {
+  return Object.freeze({
+    namespaceDurability: controlObjectStore.namespaceDurability,
+    stageVerifiedObjects:
+      controlObjectStore.stageVerifiedObjects.bind(controlObjectStore),
+    getVerifiedObject: controlObjectStore.getVerifiedObject.bind(controlObjectStore),
+  });
 }
 
 /**
