@@ -225,6 +225,12 @@ describe('AuthorCatalogRowV1 and key placement', () => {
     expect(() => assertAuthorCatalogRowV1({ ...VALID_ROW, assertionVersion: '01' })).toThrow(
       /catalog-scalar/,
     );
+    expect(() => assertAuthorCatalogRowV1({ ...VALID_ROW, assertionVersion: '0' })).toThrow(
+      /positive DecimalU64V1/,
+    );
+    expect(() => parseCanonicalAuthorCatalogRowV1(
+      ROW_CANONICAL.replace('"assertionVersion":"1"', '"assertionVersion":"0"'),
+    )).toThrow(/positive DecimalU64V1/);
     expect(() => assertAuthorCatalogRowV1({
       ...VALID_ROW,
       assertionCoordinate: 'bad/name',
