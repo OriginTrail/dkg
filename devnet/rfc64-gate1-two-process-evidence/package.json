@@ -1,0 +1,13 @@
+{
+  "name": "@devnet/rfc64-gate1-two-process-evidence",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Closed deterministic Gate 1 two-process evidence collector/verifier. Evidence contract only: productBoundary is not-connected and gateEvaluation is not-evaluated, so a green verdict never asserts a real Gate 1 pass.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/two-process.test.ts",
+    "generate": "node --experimental-strip-types src/cli/generate.ts",
+    "verify": "node --experimental-strip-types src/cli/verify.ts"
+  }
+}
