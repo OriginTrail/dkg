@@ -379,7 +379,7 @@ function wireSynchronizationEvidence(output: unknown): unknown {
     }
     verifiedControlObjectCount = rowControlObjectCount;
     return Object.freeze({
-      kaId: row.kaId,
+      kaId: canonicalDecimalWire(row.kaId, `synchronization.rows[${index}].kaId`),
       catalogRowDigest: row.catalogRowDigest,
       contentDigest: row.contentDigest,
       sealDigest: row.sealDigest,
@@ -401,6 +401,12 @@ function wireSynchronizationEvidence(output: unknown): unknown {
     rows: Object.freeze(rows),
     verifiedControlObjectCount,
   });
+}
+
+function canonicalDecimalWire(value: unknown, label: string): string {
+  if (typeof value === 'bigint' && value >= 0n) return value.toString();
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/u.test(value)) return value;
+  throw new TypeError(`${label} is not a canonical non-negative integer`);
 }
 
 function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string, boolean> {
