@@ -139,7 +139,7 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
     }
   });
 
-  it('executes the frozen DDL as STRICT tables with the named bucket index', () => {
+  it('executes the frozen DDL with bucket-first storage and head-wide uniqueness', () => {
     const database = new DatabaseSync(':memory:');
     try {
       database.exec('PRAGMA foreign_keys = ON');
@@ -147,7 +147,7 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
       const objects = database.prepare(
         `SELECT name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name`,
       ).all();
-      expect(objects).toHaveLength(3);
+      expect(objects).toHaveLength(Object.keys(INVENTORY_V1_USER_OBJECTS).length);
       for (const object of objects) {
         expect(normalizeInventoryV1SchemaSql(String(object.sql))).toBe(
           INVENTORY_V1_USER_OBJECTS[String(object.name)],
@@ -159,6 +159,31 @@ describe('RFC-64 inventory v1 SQLite lifecycle', () => {
       expect(database.prepare(
         `SELECT strict FROM pragma_table_list WHERE name = 'rfc64_candidate_bucket_rows_v1'`,
       ).get()?.strict).toBe(1);
+      const indexes = database.prepare(
+        `PRAGMA index_list('rfc64_candidate_bucket_rows_v1')`,
+      ).all();
+      const indexColumns = (name: unknown): string[] => database.prepare(
+        `PRAGMA index_info('${String(name)}')`,
+      ).all().map((row) => String(row.name));
+      expect(indexes.some((index) => index.origin === 'pk' && indexColumns(index.name)
+        .join(',') === [
+          'session_id',
+          'catalog_scope_digest',
+          'author_address',
+          'target_catalog_head_digest',
+          'bucket_id_u64be',
+          'ka_id_u256be',
+        ].join(','))).toBe(true);
+      expect(indexes.some((index) => index.origin === 'u' && indexColumns(index.name)
+        .join(',') === [
+          'session_id',
+          'catalog_scope_digest',
+          'author_address',
+          'target_catalog_head_digest',
+          'ka_id_u256be',
+        ].join(','))).toBe(true);
+      expect(indexes.some((index) => String(index.name)
+        .includes('rfc64_candidate_bucket_rows_by_bucket_v1'))).toBe(false);
     } finally {
       database.close();
     }

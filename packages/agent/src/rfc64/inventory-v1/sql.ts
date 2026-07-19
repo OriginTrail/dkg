@@ -206,6 +206,15 @@ CREATE TABLE rfc64_candidate_bucket_rows_v1 (
     catalog_scope_digest,
     author_address,
     target_catalog_head_digest,
+    bucket_id_u64be,
+    ka_id_u256be
+  ),
+
+  UNIQUE (
+    session_id,
+    catalog_scope_digest,
+    author_address,
+    target_catalog_head_digest,
     ka_id_u256be
   ),
 
@@ -242,27 +251,14 @@ CREATE TABLE rfc64_candidate_bucket_rows_v1 (
   ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT`;
 
-export const INVENTORY_V1_BUCKET_INDEX_SQL = `
-CREATE INDEX rfc64_candidate_bucket_rows_by_bucket_v1
-ON rfc64_candidate_bucket_rows_v1 (
-  session_id,
-  catalog_scope_digest,
-  author_address,
-  target_catalog_head_digest,
-  bucket_id_u64be,
-  ka_id_u256be
-)`;
-
 export const INVENTORY_V1_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
-  INVENTORY_V1_BUCKET_INDEX_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   rfc64_candidate_bucket_loads_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_LOADS_TABLE_SQL),
   rfc64_candidate_bucket_rows_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_ROWS_TABLE_SQL),
-  rfc64_candidate_bucket_rows_by_bucket_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_BUCKET_INDEX_SQL),
 });
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {
