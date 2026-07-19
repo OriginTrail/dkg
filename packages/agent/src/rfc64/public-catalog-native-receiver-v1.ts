@@ -7,7 +7,8 @@
  * head, one bucket, one row, root context-graph lane, and one complete bundle.
  * Every network hop is RFC-64 catalog-native. Activation happens only after
  * signed head/path/bucket verification, transfer verification, canonical
- * projection verification, one atomic SWM graph replace, and exact post-read.
+ * projection verification, one atomic projection-plus-seal replace, exact
+ * post-read, and a durable applied-head compare-and-swap.
  */
 
 import {
@@ -21,6 +22,7 @@ import {
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   buildAuthorAttestationTypedData,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
+  computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
   contextGraphWorkspaceGraphUri,
   deriveAuthorCatalogScopeFromHeadV1,
@@ -40,6 +42,7 @@ import {
   type SignedAuthorCatalogHeadEnvelopeV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
+import { sha256 } from '@noble/hashes/sha2.js';
 import {
   quadsToNQuads,
   readExactGraphPaged,
@@ -51,6 +54,10 @@ import { ethers } from 'ethers';
 import { parseNQuads } from '../dkg-agent-utils.js';
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
+import type {
+  AppliedCatalogHeadSnapshotV1,
+  Rfc64InventoryV1OperationsV1,
+} from './inventory-v1/index.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
@@ -63,18 +70,25 @@ import type {
 } from './public-catalog-transport-v1.js';
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const UTF8_ENCODER = new TextEncoder();
+const APPLIED_INVENTORY_DIGEST_DOMAIN_V1 = 'dkg-rfc64-applied-inventory-v1\n';
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   readonly headTransport: Rfc64PublicCatalogTransportV1;
   readonly contentTransport: Rfc64PublicCatalogNativeTransportV1;
   readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'stageVerifiedObjects'>;
+  readonly inventory: Pick<
+    Rfc64InventoryV1OperationsV1,
+    'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
+  >;
   readonly store: TripleStore;
   readonly transportTimeoutMs?: number;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
-  /** Exact signed successor head digest: the complete one-row inventory commitment. */
+  /** Digest computed from the exact semantic projection+seal post-read. */
   readonly inventoryDigest: Digest32V1;
+  readonly catalogHeadDigest: Digest32V1;
   readonly catalogRowDigest: Digest32V1;
   readonly contentDigest: Digest32V1;
   readonly bundleDigest: Digest32V1;
@@ -82,6 +96,7 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly inventoryRowCount: 1;
   readonly activatedTripleCount: number;
   readonly swmGraph: string;
+  readonly appliedHeadStatus: 'applied' | 'existing';
 }
 
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
@@ -90,7 +105,8 @@ export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-slice'
   | 'catalog-native-receiver-catalog'
   | 'catalog-native-receiver-transfer'
-  | 'catalog-native-receiver-activation';
+  | 'catalog-native-receiver-activation'
+  | 'catalog-native-receiver-history';
 
 export class Rfc64PublicCatalogNativeReceiverErrorV1 extends Error {
   constructor(
@@ -105,12 +121,15 @@ export class Rfc64PublicCatalogNativeReceiverErrorV1 extends Error {
 
 export class Rfc64PublicCatalogNativeReceiverV1 {
   readonly #timeoutMs: number;
+  readonly #scopeSynchronizations = new Map<string, Promise<void>>();
 
   constructor(private readonly options: Rfc64PublicCatalogNativeReceiverOptionsV1) {
     if (
       typeof options?.headTransport?.fetchCatalogHead !== 'function'
       || typeof options?.contentTransport?.fetchCatalogObject !== 'function'
       || typeof options.controlObjects?.stageVerifiedObjects !== 'function'
+      || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
+      || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
       || typeof options.store?.query !== 'function'
     ) {
       fail('catalog-native-receiver-input', 'receiver dependencies are incomplete');
@@ -127,6 +146,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
+    return this.withScopeSerialization(
+      catalogScopeLockKey(announcement),
+      () => this.synchronizeOnePublicOpenRowSerialized(remotePeerId, announcement, deployment),
+    );
+  }
+
+  private async synchronizeOnePublicOpenRowSerialized(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    deployment: CatalogSealDeploymentProfileV1,
+  ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     const fetchedHead = await this.options.headTransport.fetchCatalogHead(
       remotePeerId,
       announcement,
@@ -137,6 +167,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }
     const head = fetchedHead.envelope;
     assertFirstSliceHead(head);
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
+      deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    );
+    const currentAppliedHead = this.options.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      head.payload.authorAddress,
+    );
+    const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head);
     const scope = nativeScope(announcement, head);
 
     const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
@@ -277,7 +315,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified catalog objects could not be staged', cause);
     }
 
-    const swmGraph = await activateExactPublicProjection(
+    const activation = await activateExactPublicProjection(
       this.options.store,
       head,
       row,
@@ -287,17 +325,115 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       sealBinding,
     );
 
+    let appliedHeadStatus: 'applied' | 'existing';
+    if (replay) {
+      if (currentAppliedHead!.appliedInventoryDigest !== activation.inventoryDigest) {
+        fail(
+          'catalog-native-receiver-history',
+          'durable applied-head digest differs from exact semantic post-read',
+        );
+      }
+      appliedHeadStatus = 'existing';
+    } else {
+      try {
+        appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+          catalogScopeDigest,
+          authorAddress: head.payload.authorAddress,
+          expectedCurrentCatalogHeadDigest: head.payload.previousHeadDigest,
+          currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+          appliedInventoryDigest: activation.inventoryDigest,
+          catalogVersion: head.payload.version,
+          inventoryRowCount: '1' as never,
+        }).status;
+      } catch (cause) {
+        const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+          catalogScopeDigest,
+          head.payload.authorAddress,
+        );
+        if (
+          reconciled?.currentCatalogHeadDigest !== head.objectDigest
+          || reconciled.appliedInventoryDigest !== activation.inventoryDigest
+        ) {
+          fail(
+            'catalog-native-receiver-history',
+            'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
+            cause,
+          );
+        }
+        appliedHeadStatus = 'existing';
+      }
+    }
+
     return Object.freeze({
-      inventoryDigest: head.objectDigest as Digest32V1,
+      inventoryDigest: activation.inventoryDigest,
+      catalogHeadDigest: head.objectDigest as Digest32V1,
       catalogRowDigest: projectionMetadata.catalogRowDigest,
       contentDigest: projectionMetadata.projectionDigest,
       bundleDigest: row.transfer.blobDigest,
       kaUal: projectionMetadata.kaUal,
       inventoryRowCount: 1 as const,
       activatedTripleCount: Number(projectionMetadata.publicTripleCount),
-      swmGraph,
+      swmGraph: activation.swmGraph,
+      appliedHeadStatus,
     });
   }
+
+  private async withScopeSerialization<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#scopeSynchronizations.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.#scopeSynchronizations.set(key, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#scopeSynchronizations.get(key) === tail) {
+        this.#scopeSynchronizations.delete(key);
+      }
+    }
+  }
+}
+
+function catalogScopeLockKey(announcement: Rfc64PublicCatalogHeadAnnouncementV1): string {
+  return JSON.stringify([
+    announcement.networkId,
+    announcement.contextGraphId,
+    announcement.subGraphName,
+    announcement.authorAddress,
+  ]);
+}
+
+function assertMonotonicSuccessorHistory(
+  current: AppliedCatalogHeadSnapshotV1 | null,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+): boolean {
+  if (current === null) {
+    fail(
+      'catalog-native-receiver-history',
+      'successor requires a durable initialized predecessor head',
+    );
+  }
+  if (current.currentCatalogHeadDigest === head.objectDigest) {
+    if (current.catalogVersion !== head.payload.version || current.inventoryRowCount !== '1') {
+      fail('catalog-native-receiver-history', 'replayed head differs from its durable applied state');
+    }
+    return true;
+  }
+  if (
+    current.currentCatalogHeadDigest !== head.payload.previousHeadDigest
+    || BigInt(current.catalogVersion) + 1n !== BigInt(head.payload.version)
+  ) {
+    fail(
+      'catalog-native-receiver-history',
+      'successor does not monotonically extend the durable current head',
+    );
+  }
+  return false;
 }
 
 function assertFirstSliceHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
@@ -340,7 +476,7 @@ async function activateExactPublicProjection(
   projectionBytes: Uint8Array,
   expectedTripleCount: number,
   sealBinding: VerifiedCatalogSealBindingSnapshotV1,
-): Promise<string> {
+): Promise<{ swmGraph: string; inventoryDigest: Digest32V1 }> {
   let projectionText: string;
   let quads;
   try {
@@ -404,7 +540,61 @@ async function activateExactPublicProjection(
     fail('catalog-native-receiver-activation', 'exact SWM post-read differs from verified projection');
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
-  return swmGraph;
+  return {
+    swmGraph,
+    inventoryDigest: computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest: sealBinding.catalogScopeDigest,
+      rows: [{
+        catalogRowDigest: sealBinding.catalogRowDigest,
+        contentDigest: row.projectionDigest,
+        sealDigest: sealBinding.sealDigest,
+        kaUal,
+        activatedTripleCount: expectedTripleCount,
+      }],
+    }),
+  };
+}
+
+export interface Rfc64AppliedInventoryDigestRowV1 {
+  readonly catalogRowDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
+  readonly sealDigest: Digest32V1;
+  readonly kaUal: string;
+  readonly activatedTripleCount: number;
+}
+
+/** Compute an applied inventory commitment from exact semantic post-read evidence. */
+export function computeRfc64AppliedInventoryDigestV1(input: {
+  readonly catalogScopeDigest: Digest32V1;
+  readonly rows: readonly Rfc64AppliedInventoryDigestRowV1[];
+}): Digest32V1 {
+  const hasher = sha256.create();
+  hasher.update(UTF8_ENCODER.encode(APPLIED_INVENTORY_DIGEST_DOMAIN_V1));
+  hasher.update(ethers.getBytes(input.catalogScopeDigest));
+  hasher.update(encodeU64(input.rows.length, 'inventory row count'));
+  for (const row of [...input.rows].sort((left, right) => left.kaUal.localeCompare(right.kaUal))) {
+    hasher.update(ethers.getBytes(row.catalogRowDigest));
+    hasher.update(ethers.getBytes(row.contentDigest));
+    hasher.update(ethers.getBytes(row.sealDigest));
+    const ual = UTF8_ENCODER.encode(row.kaUal);
+    hasher.update(encodeU64(ual.byteLength, 'KA UAL byte length'));
+    hasher.update(ual);
+    hasher.update(encodeU64(row.activatedTripleCount, 'activated triple count'));
+  }
+  return ethers.hexlify(hasher.digest()) as Digest32V1;
+}
+
+function encodeU64(value: number, label: string): Uint8Array {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail('catalog-native-receiver-activation', `${label} is not a safe unsigned integer`);
+  }
+  const result = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    result[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return result;
 }
 
 /**
