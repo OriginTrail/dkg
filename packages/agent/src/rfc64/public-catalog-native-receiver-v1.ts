@@ -11,6 +11,7 @@
  */
 
 import {
+  AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   ZERO_DIGEST32_V1,
@@ -18,13 +19,16 @@ import {
   assertAuthorCatalogDirectoryNodeScopeBindingV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  buildAuthorAttestationTypedData,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   computeControlSignatureVariantDigestHex,
   contextGraphWorkspaceGraphUri,
   deriveAuthorCatalogScopeFromHeadV1,
+  readVerifiedCatalogSealBindingV1,
   readVerifiedAuthorCatalogBucketDescriptorV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
+  readVerifiedTransferredCatalogBundleMetadataV1,
   verifyAuthorCatalogDirectoryPathV1,
   verifyCgSharedProjectionV1,
   verifyTransferredCatalogBundleV1,
@@ -34,13 +38,15 @@ import {
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
+  type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
 import {
   quadsToNQuads,
   readExactGraphPaged,
-  tryReplaceGraphAtomically,
+  tryReplaceGraphAndSubjectAtomically,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { ethers } from 'ethers';
 
 import { parseNQuads } from '../dkg-agent-utils.js';
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
@@ -228,9 +234,20 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }
 
     let projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
+    let sealBinding: VerifiedCatalogSealBindingSnapshotV1;
     let projectionBytes: Uint8Array;
     try {
       const transferred = verifyTransferredCatalogBundleV1(head, row, bundle, deployment);
+      const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
+        transferred,
+        head,
+        row,
+        deployment,
+      );
+      sealBinding = readVerifiedCatalogSealBindingV1(
+        transferredMetadata.catalogSealBinding,
+      );
+      assertRecoverableAuthorAttestationV1(sealBinding);
       const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
       projectionMetadata = readVerifiedCgSharedProjectionMetadataV1(
         projection,
@@ -267,6 +284,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       projectionMetadata.kaUal,
       projectionBytes,
       Number(projectionMetadata.publicTripleCount),
+      sealBinding,
     );
 
     return Object.freeze({
@@ -321,6 +339,7 @@ async function activateExactPublicProjection(
   kaUal: string,
   projectionBytes: Uint8Array,
   expectedTripleCount: number,
+  sealBinding: VerifiedCatalogSealBindingSnapshotV1,
 ): Promise<string> {
   let projectionText: string;
   let quads;
@@ -344,14 +363,29 @@ async function activateExactPublicProjection(
   const graphQuads = quads.map((quad) => ({ ...quad, graph: swmGraph }));
   let replaced: boolean;
   try {
-    replaced = await tryReplaceGraphAtomically(store, swmGraph, graphQuads, {
-      source: 'rfc64-public-catalog-native-activation',
-    });
+    replaced = await tryReplaceGraphAndSubjectAtomically(
+      store,
+      swmGraph,
+      graphQuads,
+      sealBinding.placement.metaGraph,
+      sealBinding.placement.subject,
+      [...sealBinding.sealRows],
+      {
+        source: 'rfc64-public-catalog-native-activation',
+      },
+    );
   } catch (cause) {
-    fail('catalog-native-receiver-activation', `atomic SWM replace failed for ${kaUal}`, cause);
+    fail(
+      'catalog-native-receiver-activation',
+      `atomic SWM projection and author-seal replace failed for ${kaUal}`,
+      cause,
+    );
   }
   if (!replaced) {
-    fail('catalog-native-receiver-activation', 'store lacks atomic named-graph replacement');
+    fail(
+      'catalog-native-receiver-activation',
+      'store lacks atomic named-graph and author-seal replacement',
+    );
   }
 
   let readBack;
@@ -369,7 +403,101 @@ async function activateExactPublicProjection(
   if (`${quadsToNQuads(readBack)}\n` !== projectionText) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read differs from verified projection');
   }
+  await assertExactAuthorSealPostRead(store, sealBinding);
   return swmGraph;
+}
+
+/**
+ * Require the transferred v1 AuthorAttestation to recover the catalog author.
+ * This first receiver slice intentionally supports the recoverable EOA scheme;
+ * EIP-1271 contract-author admission needs a separately pinned chain verifier.
+ */
+export function assertRecoverableAuthorAttestationV1(
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): void {
+  const { seal } = binding;
+  if (seal.authorSchemeVersion !== String(AUTHOR_SCHEME_VERSION_V1)) {
+    fail('catalog-native-receiver-transfer', 'unsupported author attestation scheme');
+  }
+  try {
+    const typedData = buildAuthorAttestationTypedData({
+      chainId: BigInt(seal.assertedAtChainId),
+      kav10Address: seal.assertedAtKav10Address,
+      merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
+      authorAddress: seal.authorAddress,
+      reservedKaId: BigInt(seal.reservedKaId),
+      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+    });
+    const digest = ethers.TypedDataEncoder.hash(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    );
+    const signature = ethers.Signature.from({
+      r: seal.authorAttestationR,
+      yParityAndS: seal.authorAttestationVS,
+    });
+    const recovered = ethers.recoverAddress(digest, signature);
+    if (recovered.toLowerCase() !== seal.authorAddress) {
+      throw new Error(
+        `signature recovers ${recovered.toLowerCase()} instead of ${seal.authorAddress}`,
+      );
+    }
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-transfer',
+      'author attestation does not recover the catalog author',
+      cause,
+    );
+  }
+}
+
+async function assertExactAuthorSealPostRead(
+  store: TripleStore,
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): Promise<void> {
+  const expected = [...binding.sealRows].sort(compareQuads);
+  let result;
+  try {
+    result = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${binding.placement.metaGraph}> { `
+        + `<${binding.placement.subject}> ?p ?o } } ORDER BY ?p ?o `
+        + `LIMIT ${expected.length + 1}`,
+      {
+        source: 'rfc64-public-catalog-native-seal-post-read',
+        maxResponseBytes: 64 * 1024,
+      },
+    );
+  } catch (cause) {
+    fail('catalog-native-receiver-activation', 'exact author-seal post-read failed', cause);
+  }
+  if (result.type !== 'bindings' || result.bindings.length !== expected.length) {
+    fail('catalog-native-receiver-activation', 'author-seal post-read cardinality changed');
+  }
+  const actual = result.bindings.map((row) => {
+    if (typeof row.p !== 'string' || typeof row.o !== 'string') {
+      fail('catalog-native-receiver-activation', 'author-seal post-read row is incomplete');
+    }
+    return {
+      subject: binding.placement.subject,
+      predicate: row.p,
+      object: row.o,
+      graph: binding.placement.metaGraph,
+    };
+  }).sort(compareQuads);
+  if (quadsToNQuads(actual) !== quadsToNQuads(expected)) {
+    fail('catalog-native-receiver-activation', 'author-seal post-read differs from verified seal');
+  }
+}
+
+function compareQuads(
+  left: { subject: string; predicate: string; object: string; graph: string },
+  right: { subject: string; predicate: string; object: string; graph: string },
+): number {
+  return left.predicate.localeCompare(right.predicate)
+    || left.object.localeCompare(right.object)
+    || left.subject.localeCompare(right.subject)
+    || left.graph.localeCompare(right.graph);
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(
