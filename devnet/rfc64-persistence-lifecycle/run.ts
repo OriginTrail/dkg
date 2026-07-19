@@ -1,20 +1,23 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 
+import {
+  atomicWriteStableJson,
+  readCleanRepositoryHead,
+  stableJson,
+} from './evidence.js';
+
 const EVENT_PREFIX = 'RFC64_GATE0_EVENT ';
-const PRODUCTION_BASELINE_COMMIT = '11a848a57a8f30305716dc548ea3c83de286d024';
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const AGENT_PROCESS = join(import.meta.dirname, 'agent-process.ts');
 const LEASE_PROBE = join(import.meta.dirname, 'lease-probe.ts');
@@ -251,22 +254,6 @@ function snapshotContent(dataDir: string): ContentSnapshot {
   };
 }
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nested]) => [key, stableValue(nested)]),
-    );
-  }
-  return value;
-}
-
-function stableJson(value: unknown): string {
-  return `${JSON.stringify(stableValue(value), null, 2)}\n`;
-}
-
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
@@ -298,8 +285,10 @@ function assertExactSnapshot(snapshot: ContentSnapshot): void {
   }
 }
 
-const dataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate0-'));
 const artifactPath = resolve(process.env.DKG_RFC64_GATE0_ARTIFACT ?? DEFAULT_ARTIFACT);
+const testedRepositoryHead = readCleanRepositoryHead(REPO_ROOT);
+log(`testing clean repository HEAD ${testedRepositoryHead}`);
+const dataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate0-'));
 const active = new Set<ChildProcessWithoutNullStreams>();
 
 try {
@@ -347,11 +336,21 @@ try {
   const recoveredExit = await stopAgent(recovered, 'SIGTERM');
   assert(recoveredExit.code === 0 && recoveredExit.signal === null, 'recovered agent did not stop cleanly');
 
+  const finalRepositoryHead = readCleanRepositoryHead(REPO_ROOT);
+  assert(
+    finalRepositoryHead === testedRepositoryHead,
+    `repository HEAD changed during harness execution: ${testedRepositoryHead} -> ${finalRepositoryHead}`,
+  );
   const artifact = {
-    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v1',
+    schemaVersion: 'dkg-rfc64-gate0-persistence-evidence-v2',
     gate: 'OT-RFC-64 Gate 0',
-    productionBaselineCommit: PRODUCTION_BASELINE_COMMIT,
+    productionBaselineCommit: testedRepositoryHead,
     invocation: 'pnpm test:gate0:rfc64-persistence-lifecycle',
+    repository: {
+      testedHeadCommit: testedRepositoryHead,
+      trackedSourceCleanBeforeSpawn: true,
+      trackedSourceCleanAfterProcesses: true,
+    },
     runtimeBoundary: {
       agentClass: 'DKGAgent',
       processModel: 'three independent production agent processes',
@@ -400,11 +399,17 @@ try {
       ownerOnlyFileModes: process.platform === 'win32' ? 'not-applicable' : true,
       publicRuntimeDebugEndpointAdded: false,
     },
-    passed: true,
+    harnessChecksPassed: true,
+    gateEvaluation: {
+      status: 'not-evaluated',
+      reason: 'final RFC-64 integration has not been assembled',
+    },
   };
-  mkdirSync(dirname(artifactPath), { recursive: true });
-  writeFileSync(artifactPath, stableJson(artifact), { mode: 0o600 });
-  log(`PASS: deterministic evidence written to ${artifactPath}`);
+  const publication = atomicWriteStableJson(artifactPath, artifact);
+  log(`harness checks complete; evidence written to ${artifactPath}`);
+  log(`artifact publication durability: ${publication.durability}`);
+  log(`artifact SHA-256: ${publication.sha256}`);
+  log('Gate 0 remains not evaluated until the final RFC-64 integration is assembled');
 } finally {
   for (const child of active) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
