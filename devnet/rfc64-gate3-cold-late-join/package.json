@@ -1,0 +1,6 @@
+{
+  "name": "@origintrail-official/dkg-devnet-rfc64-gate3-cold-late-join",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

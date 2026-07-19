@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "mutation.test.ts",
+    "raw-evidence.ts",
+    "run.ts",
+    "verdict.ts",
+    "verify.ts"
+  ]
+}
