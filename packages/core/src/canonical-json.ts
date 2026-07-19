@@ -76,6 +76,12 @@ export function canonicalizeJson(
     }
 
     const object = input as object;
+    // Container depth is counted when entering the container, including when it
+    // is empty. This mirrors StrictJsonParser instead of relying on a recursive
+    // child visit to discover an over-limit empty object or array.
+    if (depth + 1 > maxDepth) {
+      throw new CanonicalJsonError(`JSON nesting exceeds ${maxDepth}`);
+    }
     if (ancestors.has(object)) {
       throw new CanonicalJsonError('Cyclic values are not JSON');
     }
@@ -407,13 +413,46 @@ class StrictJsonParser {
   }
 
   private parseNumber(): number {
-    const rest = this.text.slice(this.index);
-    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(rest);
-    if (!match) this.fail('Invalid JSON number');
-    const token = match[0];
-    this.index += token.length;
+    const start = this.index;
+
+    if (this.text[this.index] === '-') this.index += 1;
+
+    if (this.text[this.index] === '0') {
+      this.index += 1;
+    } else if (isDigitOneToNine(this.text[this.index])) {
+      this.index += 1;
+      while (isDigit(this.text[this.index])) this.index += 1;
+    } else {
+      this.fail('Invalid JSON number');
+    }
+
+    if (this.text[this.index] === '.') {
+      this.index += 1;
+      if (!isDigit(this.text[this.index])) this.fail('Invalid JSON number');
+      while (isDigit(this.text[this.index])) this.index += 1;
+    }
+
+    if (this.text[this.index] === 'e' || this.text[this.index] === 'E') {
+      this.index += 1;
+      if (this.text[this.index] === '+' || this.text[this.index] === '-') {
+        this.index += 1;
+      }
+      if (!isDigit(this.text[this.index])) this.fail('Invalid JSON number');
+      while (isDigit(this.text[this.index])) this.index += 1;
+    }
+
+    const token = this.text.slice(start, this.index);
     const value = Number(token);
     if (!Number.isFinite(value)) this.fail('JSON number is outside finite IEEE-754 range');
+
+    // A strict parse must not silently replace the supplied decimal value with
+    // another finite double. Compare the exact decimal value with the JCS/JSON
+    // rendering of the parsed double. This still accepts equivalent spellings
+    // such as 1.0 and 1e0, while rejecting unsafe integers, underflow, and
+    // non-canonical decimals that round to a different mathematical value.
+    if (!sameExactDecimalValue(token, JSON.stringify(value))) {
+      this.fail('JSON number loses information when converted to IEEE-754');
+    }
     return value;
   }
 
@@ -444,6 +483,89 @@ class StrictJsonParser {
   private fail(message: string): never {
     throw new CanonicalJsonError(`${message} at character ${this.index}`);
   }
+}
+
+interface NormalizedDecimal {
+  readonly negative: boolean;
+  readonly digits: string;
+  readonly exponent: number;
+}
+
+function sameExactDecimalValue(left: string, right: string): boolean {
+  const normalizedLeft = normalizeDecimalToken(left);
+  const normalizedRight = normalizeDecimalToken(right);
+  return normalizedLeft !== null
+    && normalizedRight !== null
+    && normalizedLeft.negative === normalizedRight.negative
+    && normalizedLeft.digits === normalizedRight.digits
+    && normalizedLeft.exponent === normalizedRight.exponent;
+}
+
+/** Normalize one already-tokenized JSON decimal as digits * 10^exponent. */
+function normalizeDecimalToken(token: string): NormalizedDecimal | null {
+  const match = /^(-)?([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(token);
+  if (match === null) return null;
+
+  const integerDigits = match[2];
+  const fractionDigits = match[3] ?? '';
+  let digits = integerDigits + fractionDigits;
+
+  let firstNonZero = 0;
+  while (firstNonZero < digits.length && digits.charCodeAt(firstNonZero) === 0x30) {
+    firstNonZero += 1;
+  }
+  if (firstNonZero === digits.length) {
+    // All textual zero spellings, including -0 and large zero exponents,
+    // preserve the JSON numeric value zero.
+    return { negative: false, digits: '0', exponent: 0 };
+  }
+  digits = digits.slice(firstNonZero);
+
+  const explicitExponent = parseBoundedDecimalExponent(match[4]);
+  if (explicitExponent === null) return null;
+  let exponent = explicitExponent - fractionDigits.length;
+
+  let end = digits.length;
+  while (end > 1 && digits.charCodeAt(end - 1) === 0x30) {
+    end -= 1;
+    exponent += 1;
+  }
+
+  return {
+    negative: match[1] === '-',
+    digits: digits.slice(0, end),
+    exponent,
+  };
+}
+
+function parseBoundedDecimalExponent(raw: string | undefined): number | null {
+  if (raw === undefined) return 0;
+  let index = 0;
+  let sign = 1;
+  if (raw[index] === '+' || raw[index] === '-') {
+    if (raw[index] === '-') sign = -1;
+    index += 1;
+  }
+  while (raw.charCodeAt(index) === 0x30) index += 1;
+  const significant = raw.slice(index);
+  if (significant.length === 0) return 0;
+
+  // With an 8 MiB input ceiling, a finite nonzero token can need at most a
+  // seven-digit exponent to offset its coefficient length. A longer value
+  // cannot be made exact by the bounded fraction and is rejected without
+  // constructing an attacker-sized BigInt.
+  if (significant.length > 15) return null;
+  const magnitude = Number(significant);
+  if (!Number.isSafeInteger(magnitude)) return null;
+  return sign * magnitude;
+}
+
+function isDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= '0' && value <= '9';
+}
+
+function isDigitOneToNine(value: string | undefined): boolean {
+  return value !== undefined && value >= '1' && value <= '9';
 }
 
 function assertJsonObjectShape(record: Record<string, unknown>): void {
