@@ -952,7 +952,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       await this.node.start();
     } catch (cause) {
       try {
-        this.closeRfc64InventoryV1();
+        await this.closeRfc64InventoryV1();
       } catch (closeCause) {
         throw new AggregateError(
           [cause, closeCause],

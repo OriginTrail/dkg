@@ -14,7 +14,9 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
+  EIP1271_CANONICAL_ABI_RETURN_V1,
   verifyControlEnvelopeIssuerSignatureV1,
+  type CurrentFinalizedEvmCallV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -29,15 +31,19 @@ import {
   RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
   RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64ControlObjectStoreErrorV1,
-  createRfc64ControlObjectStoreTestOpenerV1,
-  type Rfc64ControlObjectStoreDurabilityBoundaryV1,
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
 import { putRfc64ExactBytesV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
+import {
+  createRfc64ControlObjectStoreTestOpenerV1,
+  type Rfc64ControlObjectStoreDurabilityBoundaryV1,
+} from './support/rfc64-control-object-store-test-support.js';
 
 const PRIVATE_KEY = `0x${'42'.repeat(32)}`;
+const SAFE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const BLOCK_HASH = `0x${'44'.repeat(32)}`;
 const wallet = new ethers.Wallet(PRIVATE_KEY);
 const ISSUER = wallet.address.toLowerCase() as EvmAddressV1;
 const openRfc64ControlObjectStoreV1 = createRfc64ControlObjectStoreTestOpenerV1();
@@ -102,6 +108,52 @@ async function signedFixture(
     envelope,
     issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
   };
+}
+
+const finalizedEip1271Call: CurrentFinalizedEvmCallV1 = async (request) => ({
+  chainId: request.chainId,
+  blockNumber: '123',
+  blockHash: BLOCK_HASH,
+  returnData: EIP1271_CANONICAL_ABI_RETURN_V1,
+});
+
+async function contractSignatureVariantsFixture(): Promise<
+  readonly [StageVerifiedControlObjectV1, StageVerifiedControlObjectV1]
+> {
+  const unsigned = {
+    issuer: SAFE,
+    objectType: 'dkg-rfc64-control-store-contract-test-v1',
+    payload: { sequence: 'variants' },
+    signatureEvidence: {
+      kind: 'eip1271-current-finalized',
+      chainId: '20430',
+      contractAddress: SAFE,
+    },
+    signatureSuite: 'eip1271-current-finalized-v1',
+  } satisfies UnsignedControlEnvelopeV1;
+  const objectDigest = computeControlObjectDigestHex(unsigned);
+  const firstEnvelope = {
+    ...unsigned,
+    objectDigest,
+    signature: '0x12',
+  } as SignedControlEnvelopeV1;
+  const secondEnvelope = {
+    ...unsigned,
+    objectDigest,
+    signature: '0x1234',
+  } as SignedControlEnvelopeV1;
+  const [firstProof, secondProof] = await Promise.all([
+    verifyControlEnvelopeIssuerSignatureV1(firstEnvelope, {
+      callEvmAtCurrentFinalized: finalizedEip1271Call,
+    }),
+    verifyControlEnvelopeIssuerSignatureV1(secondEnvelope, {
+      callEvmAtCurrentFinalized: finalizedEip1271Call,
+    }),
+  ]);
+  return [{ envelope: firstEnvelope, issuerSignature: firstProof }, {
+    envelope: secondEnvelope,
+    issuerSignature: secondProof,
+  }];
 }
 
 function pathsFor(
@@ -245,7 +297,8 @@ describe('RFC-64 durable control-object store v1', () => {
       'object.temp-written',
       'object.temp-mode-secured',
       'object.temp-fsynced',
-      'object.renamed',
+      'object.published-no-replace',
+      'object.temp-unlinked',
       'object.parent-fsynced',
       'directory.created',
       'directory.mode-secured',
@@ -260,19 +313,20 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.temp-written',
       'signature.temp-mode-secured',
       'signature.temp-fsynced',
-      'signature.renamed',
+      'signature.published-no-replace',
+      'signature.temp-unlinked',
       'signature.parent-fsynced',
       'signature.existing-fsynced',
       'signature.existing-parent-fsynced',
     ];
     expect([...boundaries].sort()).toEqual([...expectedBoundaries].sort());
     expect(boundaries.indexOf('object.temp-written'))
-      .toBeLessThan(boundaries.indexOf('object.renamed'));
-    expect(boundaries.indexOf('object.renamed'))
+      .toBeLessThan(boundaries.indexOf('object.published-no-replace'));
+    expect(boundaries.indexOf('object.published-no-replace'))
       .toBeLessThan(boundaries.indexOf('object.existing-fsynced'));
     expect(boundaries.indexOf('signature.temp-written'))
-      .toBeLessThan(boundaries.indexOf('signature.renamed'));
-    expect(boundaries.indexOf('signature.renamed'))
+      .toBeLessThan(boundaries.indexOf('signature.published-no-replace'));
+    expect(boundaries.indexOf('signature.published-no-replace'))
       .toBeLessThan(boundaries.indexOf('signature.existing-fsynced'));
     boundaries.length = 0;
     await store.stageVerifiedObjects([fixture]);
@@ -282,6 +336,39 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.existing-fsynced',
       'signature.existing-parent-fsynced',
     ]);
+  });
+
+  it('coexists and reads exact signature variants for one immutable object', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const [first, second] = await contractSignatureVariantsFixture();
+    expect(first.envelope.objectDigest).toBe(second.envelope.objectDigest);
+
+    const result = await store.stageVerifiedObjects([first, second]);
+    expect(result.objects[0]?.objectDigest).toBe(result.objects[1]?.objectDigest);
+    expect(result.objects[0]?.signatureVariantDigest)
+      .not.toBe(result.objects[1]?.signatureVariantDigest);
+    const firstPaths = pathsFor(dataDir, first.envelope);
+    const secondPaths = pathsFor(dataDir, second.envelope);
+    expect(firstPaths.object).toBe(secondPaths.object);
+    expect(firstPaths.signature).not.toBe(secondPaths.signature);
+    await expect(readFile(firstPaths.signature)).resolves.not.toHaveLength(0);
+    await expect(readFile(secondPaths.signature)).resolves.not.toHaveLength(0);
+
+    const verifyIssuerSignature = (envelope: SignedControlEnvelopeV1) =>
+      verifyControlEnvelopeIssuerSignatureV1(envelope, {
+        callEvmAtCurrentFinalized: finalizedEip1271Call,
+      });
+    await expect(store.getVerifiedObject({
+      objectDigest: first.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: firstPaths.signatureDigest,
+      verifyIssuerSignature,
+    })).resolves.toMatchObject({ envelope: first.envelope });
+    await expect(store.getVerifiedObject({
+      objectDigest: second.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: secondPaths.signatureDigest,
+      verifyIssuerSignature,
+    })).resolves.toMatchObject({ envelope: second.envelope });
   });
 
   it('allows independent digest keys to stage concurrently without a store-wide queue', async () => {
@@ -484,7 +571,38 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(slowRead).resolves.toMatchObject({ envelope: first.envelope });
   });
 
-  it('cleans an unrenamed temp after a pre-visibility fault and converges on retry', async () => {
+  it('drains an admitted durable write before close can release ownership', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const entered = deferred();
+    const release = deferred();
+    let paused = false;
+    const store = await createRfc64ControlObjectStoreTestOpenerV1({
+      boundary: async (boundary) => {
+        if (boundary === 'object.temp-written' && !paused) {
+          paused = true;
+          entered.resolve();
+          await release.promise;
+        }
+      },
+    })(dataDir);
+    const fixture = await signedFixture('close-drain');
+    const stage = store.stageVerifiedObjects([fixture]);
+    await entered.promise;
+
+    let closeSettled = false;
+    const close = store.close().then(() => { closeSettled = true; });
+    expect(store.closed).toBe(true);
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+
+    release.resolve();
+    await expect(stage).rejects.toMatchObject({ code: 'control-store-closed' });
+    await expect(close).resolves.toBeUndefined();
+    expect(closeSettled).toBe(true);
+    await expect(store.close()).resolves.toBeUndefined();
+  });
+
+  it('cleans an unpublished temp after a pre-visibility fault and converges on retry', async () => {
     const dataDir = await temporaryDataDirectory();
     const fixture = await signedFixture('7');
     let injected = false;
@@ -492,7 +610,7 @@ describe('RFC-64 durable control-object store v1', () => {
       boundary: (boundary) => {
         if (boundary === 'object.temp-fsynced' && !injected) {
           injected = true;
-          throw new Error('injected pre-rename fault');
+          throw new Error('injected pre-publish fault');
         }
       },
     })(dataDir);
@@ -504,7 +622,7 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(store.stageVerifiedObjects([fixture])).resolves.toMatchObject({ durable: true });
   });
 
-  it('treats a post-rename fault as an unreachable orphan and safely completes on retry', async () => {
+  it('treats a post-publish fault as an unreachable orphan and safely completes on retry', async () => {
     const dataDir = await temporaryDataDirectory();
     const fixture = await signedFixture('8');
     let injected = false;
@@ -512,9 +630,9 @@ describe('RFC-64 durable control-object store v1', () => {
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
       boundary: (boundary) => {
         boundaries.push(boundary);
-        if (boundary === 'object.renamed' && !injected) {
+        if (boundary === 'object.published-no-replace' && !injected) {
           injected = true;
-          throw new Error('injected post-rename fault');
+          throw new Error('injected post-publish fault');
         }
       },
     })(dataDir);
@@ -534,7 +652,7 @@ describe('RFC-64 durable control-object store v1', () => {
     const dataDir = await temporaryDataDirectory();
     const outside = await temporaryDataDirectory();
     const first = await openRfc64ControlObjectStoreV1(dataDir);
-    first.close();
+    await first.close();
     const objects = join(dataDir, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH, 'objects');
     await rm(objects, { recursive: true, force: true });
     await symlink(outside, objects, process.platform === 'win32' ? 'junction' : 'dir');
@@ -561,7 +679,7 @@ describe('RFC-64 durable control-object store v1', () => {
 
       await chmod(paths.object, RFC64_CONTROL_OBJECT_STORE_FILE_MODE);
       await chmod(dirname(dirname(paths.object)), 0o755);
-      store.close();
+      await store.close();
       await expect(openRfc64ControlObjectStoreV1(dataDir))
         .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
     },
@@ -577,7 +695,7 @@ describe('RFC-64 durable control-object store v1', () => {
         RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
         'objects',
       );
-      directoryStore.close();
+      await directoryStore.close();
       grantWindowsEveryoneRead(objectsDirectory, true);
       await expect(openRfc64ControlObjectStoreV1(directoryDataDir))
         .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
@@ -626,7 +744,7 @@ describe('RFC-64 durable control-object store v1', () => {
     expect(() => store.stageVerifiedObjects(holey))
       .toThrow(expect.objectContaining({ code: 'control-store-input' }));
 
-    store.close();
+    await store.close();
     expect(store.closed).toBe(true);
     expect(() => store.stageVerifiedObjects([fixture]))
       .toThrow(expect.objectContaining({ code: 'control-store-closed' }));
@@ -651,6 +769,38 @@ describe('RFC-64 durable control-object store v1', () => {
         randomSuffix: () => '00'.repeat(16),
       }),
     })).rejects.toMatchObject({ code: 'unsafe-path' });
+  });
+
+  it('publishes immutable keys without clobbering a racing independent writer', async () => {
+    const containmentRoot = await temporaryDataDirectory();
+    const relativePath = join('race', 'immutable.jcs');
+    const firstBytes = new TextEncoder().encode('{"writer":"first"}');
+    const secondBytes = new TextEncoder().encode('{"writer":"second"}');
+    const write = (bytes: Uint8Array, suffixByte: string) => putRfc64ExactBytesV1({
+      containmentRoot,
+      relativePath,
+      bytes,
+      maxBytes: 1024,
+      label: 'racing immutable fixture',
+      kind: 'object' as const,
+      io: Object.freeze({
+        boundary: () => {},
+        randomSuffix: () => suffixByte.repeat(32),
+      }),
+    });
+
+    const outcomes = await Promise.allSettled([
+      write(firstBytes, 'a'),
+      write(secondBytes, 'b'),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'corrupt' },
+    });
+    const stored = await readFile(join(containmentRoot, relativePath));
+    expect([firstBytes, secondBytes].some((bytes) => Buffer.from(bytes).equals(stored))).toBe(true);
   });
 
   it('uses a closed typed error registry', () => {

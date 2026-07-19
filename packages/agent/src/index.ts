@@ -36,22 +36,6 @@ export {
 } from './auth/agent-delegation.js';
 export * from './rfc64/catalog-row-authorship.js';
 export * from './rfc64/author-catalog-producer.js';
-export {
-  RFC64_CONTROL_OBJECT_STORE_ERROR_CODES_V1,
-  RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
-  RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY,
-  RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
-  RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
-  Rfc64ControlObjectStoreErrorV1,
-  type GetVerifiedControlObjectInputV1,
-  type Rfc64ControlObjectStoreErrorCodeV1,
-  type Rfc64ControlObjectStoreNamespaceDurabilityV1,
-  type Rfc64ControlObjectStoreV1,
-  type StageVerifiedControlObjectV1,
-  type StageVerifiedControlObjectsResultV1,
-  type StagedVerifiedControlObjectV1,
-  type StoredVerifiedControlObjectV1,
-} from './rfc64/control-object-store-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {

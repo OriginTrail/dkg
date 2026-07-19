@@ -1583,10 +1583,10 @@ export class DKGAgentBase {
    * Relinquish the control store and single inventory foundation. Clear local
    * references before closing so fail-stop cleanup cannot be retried.
    */
-  protected closeRfc64InventoryV1(): void {
+  protected async closeRfc64InventoryV1(): Promise<void> {
     const persistence = this.rfc64PersistenceV1;
     this.rfc64PersistenceV1 = undefined;
-    persistence?.close();
+    await persistence?.close();
   }
 
   /**

@@ -5,10 +5,9 @@ import {
   type Rfc64InventoryV1Foundation,
 } from './inventory-v1/index.js';
 import {
-  openRfc64ControlObjectStoreV1,
   type Rfc64ControlObjectStoreV1,
 } from './control-object-store-v1.js';
-import { createRfc64PersistenceOwnerCapabilityV1 } from './persistence-owner-capability-v1.js';
+import { openRfc64ControlObjectStoreAtOwnedRootV1 } from './control-object-store-v1-internal.js';
 
 export interface OpenRfc64PersistenceOptionsV1 {
   /** Yield after each non-terminal fixed-size startup purge batch. */
@@ -20,12 +19,13 @@ export interface Rfc64PersistenceV1 {
   readonly inventory: Rfc64InventoryV1Foundation;
   readonly controlObjectStore: Rfc64ControlObjectStoreV1;
   readonly closed: boolean;
-  /** Close the control store before releasing inventory ownership. */
-  close(): void;
+  /** Drain the control store before releasing inventory ownership. */
+  close(): Promise<void>;
 }
 
 class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   #closed = false;
+  #closePromise: Promise<void> | null = null;
 
   constructor(
     readonly inventory: Rfc64InventoryV1Foundation,
@@ -36,12 +36,17 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
     return this.#closed;
   }
 
-  close(): void {
-    if (this.#closed) return;
+  close(): Promise<void> {
+    if (this.#closePromise !== null) return this.#closePromise;
     this.#closed = true;
+    this.#closePromise = this.closeOwnedResources();
+    return this.#closePromise;
+  }
+
+  private async closeOwnedResources(): Promise<void> {
     const failures: unknown[] = [];
     try {
-      this.controlObjectStore.close();
+      await this.controlObjectStore.close();
     } catch (cause) {
       failures.push(cause);
     }
@@ -77,11 +82,9 @@ export async function openRfc64PersistenceV1(
       if (batch.done) break;
       await yieldAfterPurgeBatch();
     }
-    const ownership = createRfc64PersistenceOwnerCapabilityV1(
+    const controlObjectStore = await openRfc64ControlObjectStoreAtOwnedRootV1(
       dirname(inventory.databasePath),
-      () => !inventory.closed,
     );
-    const controlObjectStore = await openRfc64ControlObjectStoreV1(ownership);
     return new OwnedRfc64PersistenceV1(inventory, controlObjectStore);
   } catch (cause) {
     try {

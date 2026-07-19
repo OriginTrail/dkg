@@ -12,9 +12,9 @@ import { open } from 'node:fs/promises';
 export const RFC64_SECURE_DIRECTORY_MODE_V1 = 0o700;
 export const RFC64_SECURE_FILE_MODE_V1 = 0o600;
 export const RFC64_POSIX_NAMESPACE_DURABILITY_V1 =
-  'posix-atomic-rename-directory-fsync-v1' as const;
+  'posix-hardlink-no-replace-directory-fsync-v1' as const;
 export const RFC64_WINDOWS_NAMESPACE_DURABILITY_V1 =
-  'windows-file-flush-atomic-rename-v1' as const;
+  'windows-file-flush-hardlink-no-replace-v1' as const;
 
 export type Rfc64NamespaceDurabilityV1 =
   | typeof RFC64_POSIX_NAMESPACE_DURABILITY_V1

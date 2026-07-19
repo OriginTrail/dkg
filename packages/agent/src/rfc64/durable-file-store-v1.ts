@@ -1,4 +1,4 @@
-import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
@@ -34,7 +34,8 @@ type Rfc64DurableFilePublishBoundaryV1 =
   | 'temp-written'
   | 'temp-mode-secured'
   | 'temp-fsynced'
-  | 'renamed'
+  | 'published-no-replace'
+  | 'temp-unlinked'
   | 'parent-fsynced'
   | 'existing-fsynced'
   | 'existing-parent-fsynced';
@@ -47,7 +48,9 @@ export type Rfc64DurableFileBoundaryV1<TKind extends string = string> =
   | `${TKind}.${Rfc64DurableFilePublishBoundaryV1}`;
 
 export interface Rfc64DurableFileIoV1<TKind extends string = string> {
-  readonly boundary: (boundary: Rfc64DurableFileBoundaryV1<TKind>) => void;
+  readonly boundary: (
+    boundary: Rfc64DurableFileBoundaryV1<TKind>,
+  ) => void | Promise<void>;
   readonly randomSuffix: () => string;
 }
 
@@ -79,53 +82,31 @@ export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
   containmentRoot: string,
   io: Rfc64DurableFileIoV1<TKind>,
 ): Promise<void> {
-  const resolvedTarget = resolve(target);
-  const resolvedRoot = resolve(containmentRoot);
-  const relativeTarget = relative(resolvedRoot, resolvedTarget);
-  if (
-    relativeTarget === '..'
-    || relativeTarget.startsWith(`..${sep}`)
-    || isAbsolute(relativeTarget)
-  ) {
-    fail('unsafe-path', 'durable directory escaped its containment root');
-  }
-
-  if (relativeTarget.length === 0) {
-    await assertRfc64ExistingDirectoryV1(
-      resolvedTarget,
-      'durable store directory',
-      true,
-    );
-    return;
-  }
-  await assertRfc64ExistingDirectoryV1(
-    resolvedRoot,
-    'durable store containment root',
+  await walkRfc64ContainedDirectoryTreeV1(
+    target,
+    containmentRoot,
     false,
-  );
-  let current = resolvedRoot;
-  for (const component of relativeTarget.split(sep).filter(Boolean)) {
-    current = join(current, component);
-    let created = false;
-    try {
-      await mkdir(current, { mode: RFC64_SECURE_DIRECTORY_MODE_V1 });
-      created = true;
-      io.boundary('directory.created');
-    } catch (cause) {
-      if (!isNodeError(cause, 'EEXIST')) {
-        fail('io', `failed to create durable store directory ${current}`, cause);
+    async (current) => {
+      let created = false;
+      try {
+        await mkdir(current, { mode: RFC64_SECURE_DIRECTORY_MODE_V1 });
+        created = true;
+        await io.boundary('directory.created');
+      } catch (cause) {
+        if (!isNodeError(cause, 'EEXIST')) {
+          fail('io', `failed to create durable store directory ${current}`, cause);
+        }
       }
-    }
-    if (created) {
-      await chmodSecure(current, RFC64_SECURE_DIRECTORY_MODE_V1, 'directory');
-      io.boundary('directory.mode-secured');
-      await fsyncDirectory(current);
-      io.boundary('directory.self-fsynced');
-      await fsyncDirectory(dirname(current));
-      io.boundary('directory.parent-fsynced');
-    }
-    await assertRfc64ExistingDirectoryV1(current, 'durable store directory', true);
-  }
+      if (created) {
+        await chmodSecure(current, RFC64_SECURE_DIRECTORY_MODE_V1, 'directory');
+        await io.boundary('directory.mode-secured');
+        await fsyncDirectory(current);
+        await io.boundary('directory.self-fsynced');
+        await fsyncDirectory(dirname(current));
+        await io.boundary('directory.parent-fsynced');
+      }
+    },
+  );
 }
 
 export interface PutRfc64ExactBytesInputV1<TKind extends string> {
@@ -159,12 +140,12 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
     if (!bytesEqual(existing, bytes)) {
       fail('corrupt', `${label} bytes differ for the same immutable key`);
     }
-    // A prior attempt can fail after rename but before the parent-directory
-    // barrier. Re-establish both barriers before an idempotent retry succeeds.
+    // A prior attempt can fail after no-replace publication but before the
+    // parent-directory barrier. Re-establish both barriers before retry succeeds.
     await fsyncRegularFile(targetPath, label);
-    io.boundary(`${kind}.existing-fsynced`);
+    await io.boundary(`${kind}.existing-fsynced`);
     await fsyncDirectory(dirname(targetPath));
-    io.boundary(`${kind}.existing-parent-fsynced`);
+    await io.boundary(`${kind}.existing-parent-fsynced`);
     return;
   }
 
@@ -174,31 +155,59 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
   }
   const tempPath = join(dirname(targetPath), `.${basename(targetPath)}.${suffix}.tmp`);
   let createdTemp = false;
-  let renamed = false;
+  let tempPresent = false;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
     handle = await open(tempPath, 'wx', RFC64_SECURE_FILE_MODE_V1);
     createdTemp = true;
+    tempPresent = true;
     await handle.writeFile(bytes);
-    io.boundary(`${kind}.temp-written`);
+    await io.boundary(`${kind}.temp-written`);
     await chmodSecure(tempPath, RFC64_SECURE_FILE_MODE_V1, `${label} temp file`);
-    io.boundary(`${kind}.temp-mode-secured`);
+    await io.boundary(`${kind}.temp-mode-secured`);
     await handle.sync();
-    io.boundary(`${kind}.temp-fsynced`);
+    await io.boundary(`${kind}.temp-fsynced`);
     await handle.close();
     handle = null;
-    await rename(tempPath, targetPath);
-    renamed = true;
-    io.boundary(`${kind}.renamed`);
+    try {
+      // Hard-link publication creates the immutable key atomically and fails
+      // with EEXIST instead of replacing a target won by another writer.
+      await link(tempPath, targetPath);
+    } catch (cause) {
+      if (!isNodeError(cause, 'EEXIST')) throw cause;
+      await unlink(tempPath);
+      tempPresent = false;
+      const racedExisting = await readRfc64OptionalBoundedBytesV1({
+        containmentRoot,
+        relativePath,
+        maxBytes,
+        label,
+      });
+      if (racedExisting === null) {
+        fail('durability', `${label} disappeared after a no-replace publish conflict`);
+      }
+      if (!bytesEqual(racedExisting, bytes)) {
+        fail('corrupt', `${label} bytes differ for the same immutable key`);
+      }
+      await fsyncRegularFile(targetPath, label);
+      await io.boundary(`${kind}.existing-fsynced`);
+      await fsyncDirectory(dirname(targetPath));
+      await io.boundary(`${kind}.existing-parent-fsynced`);
+      return;
+    }
+    await io.boundary(`${kind}.published-no-replace`);
+    await unlink(tempPath);
+    tempPresent = false;
+    await io.boundary(`${kind}.temp-unlinked`);
     await fsyncDirectory(dirname(targetPath));
-    io.boundary(`${kind}.parent-fsynced`);
+    await io.boundary(`${kind}.parent-fsynced`);
     await assertExistingRegularFile(targetPath, `${label} cache file`, true);
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('durability', `failed to durably stage ${label} bytes`, cause);
   } finally {
     if (handle !== null) await handle.close().catch(() => undefined);
-    if (createdTemp && !renamed) await unlink(tempPath).catch(() => undefined);
+    if (createdTemp && tempPresent) await unlink(tempPath).catch(() => undefined);
   }
 }
 
@@ -272,6 +281,19 @@ async function assertRfc64SecureDirectoryTreeV1(
   target: string,
   containmentRoot: string,
 ): Promise<void> {
+  await walkRfc64ContainedDirectoryTreeV1(
+    target,
+    containmentRoot,
+    true,
+  );
+}
+
+async function walkRfc64ContainedDirectoryTreeV1(
+  target: string,
+  containmentRoot: string,
+  requireSecureRoot: boolean,
+  prepareComponent?: (path: string) => Promise<void>,
+): Promise<void> {
   const resolvedTarget = resolve(target);
   const resolvedRoot = resolve(containmentRoot);
   const relativeTarget = relative(resolvedRoot, resolvedTarget);
@@ -285,11 +307,12 @@ async function assertRfc64SecureDirectoryTreeV1(
   await assertRfc64ExistingDirectoryV1(
     resolvedRoot,
     'durable store containment root',
-    true,
+    relativeTarget.length === 0 || requireSecureRoot,
   );
   let current = resolvedRoot;
   for (const component of relativeTarget.split(sep).filter(Boolean)) {
     current = join(current, component);
+    await prepareComponent?.(current);
     await assertRfc64ExistingDirectoryV1(current, 'durable store directory', true);
   }
 }

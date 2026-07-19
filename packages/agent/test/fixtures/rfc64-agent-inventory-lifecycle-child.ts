@@ -20,13 +20,15 @@ let terminating = false;
 process.once('SIGTERM', () => {
   if (terminating) return;
   terminating = true;
-  try {
-    agent.closeRfc64InventoryV1();
-    process.stdout.write('CLOSED\n', () => process.exit(0));
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    process.exit(1);
-  }
+  void (async () => {
+    try {
+      await agent.closeRfc64InventoryV1();
+      process.stdout.write('CLOSED\n', () => process.exit(0));
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+      process.exit(1);
+    }
+  })();
 });
 
 process.stdout.write('READY\n');
