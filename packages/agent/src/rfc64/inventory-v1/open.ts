@@ -55,6 +55,7 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type Rfc64InventoryV1CandidateApi,
+  type Rfc64InventoryV1OperationsV1,
   type VerifiedCandidateBucketLoadV1,
   type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
@@ -126,6 +127,7 @@ class InventoryV1TargetCloseError extends InventoryV1OpenError {
 }
 
 export interface Rfc64InventoryV1Foundation extends Rfc64InventoryV1CandidateApi {
+  readonly operations: Rfc64InventoryV1OperationsV1;
   readonly databasePath: string;
   readonly closed: boolean;
   quarantineAndRebuild(): void;
@@ -269,6 +271,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
+  readonly operations: Rfc64InventoryV1OperationsV1;
 
   constructor(
     private readonly sqlite: SqliteModuleV1,
@@ -280,6 +283,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#database = database;
     this.#candidate = this.createCandidateInventory(database);
     this.#lease = lease;
+    this.operations = createInventoryV1OperationsView(this);
   }
 
   get closed(): boolean {
@@ -514,6 +518,29 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   }
 }
 
+function createInventoryV1OperationsView(
+  inventory: Rfc64InventoryV1CandidateApi,
+): Rfc64InventoryV1OperationsV1 {
+  return Object.freeze({
+    createCandidateSession: inventory.createCandidateSession.bind(inventory),
+    putVerifiedCandidateBucket: inventory.putVerifiedCandidateBucket.bind(inventory),
+    getCandidateBucket: inventory.getCandidateBucket.bind(inventory),
+    beginCandidateBucketRows: inventory.beginCandidateBucketRows.bind(inventory),
+    beginCandidateBucketDiff: inventory.beginCandidateBucketDiff.bind(inventory),
+    pageCandidateBucketRows: inventory.pageCandidateBucketRows.bind(inventory),
+    pageCandidateBucketAddedOrChanged:
+      inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
+    pageCandidateBucketRemoved: inventory.pageCandidateBucketRemoved.bind(inventory),
+    readVerifiedCandidateCatalogRow:
+      inventory.readVerifiedCandidateCatalogRow.bind(inventory),
+    verifyCandidateCatalogPrecommitV1:
+      inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
+    closeCandidateTraversal: inventory.closeCandidateTraversal.bind(inventory),
+    discardCandidateSessionBatch: inventory.discardCandidateSessionBatch.bind(inventory),
+    deleteCandidateBucket: inventory.deleteCandidateBucket.bind(inventory),
+  });
+}
+
 function reopenVerifiedOwnedDatabase(
   sqlite: SqliteModuleV1,
   databasePath: string,
@@ -638,7 +665,7 @@ async function acquireInventoryLease(
       await waitForCommittedRacingLease(path);
     }
   }
-  applySecurePermissions(path, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(path, INVENTORY_V1_FILE_MODE, 'file');
 
   let database: DatabaseSyncV1 | null = null;
   let transactionOpen = false;
@@ -1328,7 +1355,7 @@ function prepareSecureDirectory(dataDirectory: string, directoryPath: string): v
     }
     currentDirectory = nextDirectory;
   }
-  applySecurePermissions(directoryPath, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(directoryPath, INVENTORY_V1_DIRECTORY_MODE, 'directory');
 }
 
 function preflightExistingRecoveryMarker(
@@ -1369,11 +1396,11 @@ function preflightExistingRecoveryMarker(
 function createSecureEmptyFile(databasePath: string): void {
   const descriptor = openSync(databasePath, 'wx', INVENTORY_V1_FILE_MODE);
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, 'file');
 }
 
 function tightenOwnedFileMode(databasePath: string): void {
-  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, 'file');
 }
 
 function assertFilesystemOwner(path: string): void {
@@ -1397,12 +1424,16 @@ function assertOwnedUnitOwners(databasePath: string): void {
   }
 }
 
-function applySecurePermissions(path: string, mode: number, directory: boolean): void {
+function applySecurePermissions(
+  path: string,
+  mode: number,
+  entryKind: 'file' | 'directory',
+): void {
   // Never let chmod or Set-Acl turn a foreign existing entry into an owned one.
   // Newly created entries are also checked because they must already be owned
   // by this process before their permissions are tightened.
   try {
-    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
+    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, { entryKind });
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to set secure permissions on ${path}`, { cause });
   }
@@ -1569,14 +1600,14 @@ function beginQuarantine(
     mkdirSync(quarantineRoot, { mode: INVENTORY_V1_DIRECTORY_MODE });
   }
   assertOwnedDirectory(quarantineRoot, 'inventory quarantine directory');
-  applySecurePermissions(quarantineRoot, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(quarantineRoot, INVENTORY_V1_DIRECTORY_MODE, 'directory');
   fsyncDirectory(inventoryDirectory);
   lifecycle.boundary('begin.inventory-directory.fsync-after-quarantine-root');
   const suffix = `${Date.now()}-${randomBytes(8).toString('hex')}`;
   const quarantineDirectory = join(quarantineRoot, `inventory-v1-${suffix}`);
   mkdirSync(quarantineDirectory, { mode: INVENTORY_V1_DIRECTORY_MODE });
   assertOwnedDirectory(quarantineDirectory, 'inventory quarantine generation');
-  applySecurePermissions(quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, 'directory');
   assertSameFilesystem(inventoryDirectory, quarantineDirectory, 'inventory quarantine generation');
   for (const member of members) {
     const source = recoverySourcePath(databasePath, member);
@@ -1595,7 +1626,7 @@ function beginQuarantine(
   const marker: RecoveryMarkerV1 = { version: 1, quarantineDirectory, members };
   writeFileSync(markerPath, JSON.stringify(marker), { encoding: 'utf8', flag: 'wx', mode: INVENTORY_V1_FILE_MODE });
   lifecycle.boundary('begin.marker.write');
-  applySecurePermissions(markerPath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(markerPath, INVENTORY_V1_FILE_MODE, 'file');
   fsyncRegularFile(markerPath, 'inventory recovery marker');
   lifecycle.boundary('begin.marker.file-fsync');
   fsyncDirectory(inventoryDirectory);

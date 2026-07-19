@@ -365,9 +365,10 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     },
   );
 
-  it('releases an acquired inventory when node startup fails', async () => {
+  it('awaits asynchronous persistence cleanup before rejecting node startup', async () => {
     const failure = new Error('node start failed');
-    const close = vi.fn();
+    const cleanup = deferred();
+    const close = vi.fn(() => cleanup.promise);
     const agent = syntheticAgent();
     Object.assign(agent, {
       started: false,
@@ -379,7 +380,45 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       log: { info: vi.fn(), warn: vi.fn() },
     });
 
-    await expect(agent.start()).rejects.toBe(failure);
+    const start = agent.start();
+    let settled = false;
+    void start.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+
+    cleanup.resolve();
+    await expect(start).rejects.toBe(failure);
+    expect(close).toHaveBeenCalledOnce();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.started).toBe(false);
+  });
+
+  it('aggregates asynchronous persistence cleanup failure with node startup failure', async () => {
+    const startupFailure = new Error('node start failed');
+    const cleanupFailure = new Error('persistence cleanup failed');
+    const close = vi.fn(async () => { throw cleanupFailure; });
+    const agent = syntheticAgent();
+    Object.assign(agent, {
+      started: false,
+      coreHostRecordingGeneration: 0,
+      prepareRfc64PersistenceV1: vi.fn(async () => {
+        agent.rfc64PersistenceV1 = { close };
+      }),
+      node: { start: vi.fn(async () => { throw startupFailure; }) },
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const rejection = await agent.start().catch((cause: unknown) => cause);
+    expect(rejection).toBeInstanceOf(AggregateError);
+    expect((rejection as AggregateError).errors).toEqual([
+      startupFailure,
+      cleanupFailure,
+    ]);
     expect(close).toHaveBeenCalledOnce();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);

@@ -1,9 +1,10 @@
 import {
   openInventoryV1,
-  type Rfc64InventoryV1CandidateApi,
   type Rfc64InventoryV1Foundation,
+  type Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
 import {
+  type Rfc64ControlObjectOperationsV1,
   type Rfc64ControlObjectStoreV1,
 } from './control-object-store-v1.js';
 import { openRfc64ControlObjectStoreAtOwnedRootV1 } from './control-object-store-v1-internal.js';
@@ -15,20 +16,10 @@ export interface OpenRfc64PersistenceOptionsV1 {
 }
 
 /** One lifecycle owner for every RFC-64 resource protected by the inventory lease. */
-export type Rfc64InventoryOperationsV1 = Omit<
-  Rfc64InventoryV1CandidateApi,
-  'purgeNextStartupStaleCandidateBatch'
->;
-
-export type Rfc64ControlObjectOperationsV1 = Pick<
-  Rfc64ControlObjectStoreV1,
-  'namespaceDurability' | 'stageVerifiedObjects' | 'getVerifiedObject'
->;
-
 export interface Rfc64PersistenceV1 {
   readonly rootPath: string;
   /** Non-owning inventory operations; lifecycle methods remain private to this owner. */
-  readonly inventory: Rfc64InventoryOperationsV1;
+  readonly inventory: Rfc64InventoryV1OperationsV1;
   /** Non-owning cache operations; lifecycle methods remain private to this owner. */
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   readonly closed: boolean;
@@ -41,7 +32,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   #closePromise: Promise<void> | null = null;
   readonly #ownedInventory: Rfc64InventoryV1Foundation;
   readonly #ownedControlObjectStore: Rfc64ControlObjectStoreV1;
-  readonly inventory: Rfc64InventoryOperationsV1;
+  readonly inventory: Rfc64InventoryV1OperationsV1;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
 
   constructor(
@@ -51,8 +42,8 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   ) {
     this.#ownedInventory = ownedInventory;
     this.#ownedControlObjectStore = ownedControlObjectStore;
-    this.inventory = createInventoryOperationsView(ownedInventory);
-    this.controlObjects = createControlObjectOperationsView(ownedControlObjectStore);
+    this.inventory = ownedInventory.operations;
+    this.controlObjects = ownedControlObjectStore.operations;
   }
 
   get closed(): boolean {
@@ -121,38 +112,4 @@ export async function openRfc64PersistenceV1(
     }
     throw cause;
   }
-}
-
-function createInventoryOperationsView(
-  inventory: Rfc64InventoryV1Foundation,
-): Rfc64InventoryOperationsV1 {
-  return Object.freeze({
-    createCandidateSession: inventory.createCandidateSession.bind(inventory),
-    putVerifiedCandidateBucket: inventory.putVerifiedCandidateBucket.bind(inventory),
-    getCandidateBucket: inventory.getCandidateBucket.bind(inventory),
-    beginCandidateBucketRows: inventory.beginCandidateBucketRows.bind(inventory),
-    beginCandidateBucketDiff: inventory.beginCandidateBucketDiff.bind(inventory),
-    pageCandidateBucketRows: inventory.pageCandidateBucketRows.bind(inventory),
-    pageCandidateBucketAddedOrChanged:
-      inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
-    pageCandidateBucketRemoved: inventory.pageCandidateBucketRemoved.bind(inventory),
-    readVerifiedCandidateCatalogRow:
-      inventory.readVerifiedCandidateCatalogRow.bind(inventory),
-    verifyCandidateCatalogPrecommitV1:
-      inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
-    closeCandidateTraversal: inventory.closeCandidateTraversal.bind(inventory),
-    discardCandidateSessionBatch: inventory.discardCandidateSessionBatch.bind(inventory),
-    deleteCandidateBucket: inventory.deleteCandidateBucket.bind(inventory),
-  });
-}
-
-function createControlObjectOperationsView(
-  controlObjectStore: Rfc64ControlObjectStoreV1,
-): Rfc64ControlObjectOperationsV1 {
-  return Object.freeze({
-    namespaceDurability: controlObjectStore.namespaceDurability,
-    stageVerifiedObjects:
-      controlObjectStore.stageVerifiedObjects.bind(controlObjectStore),
-    getVerifiedObject: controlObjectStore.getVerifiedObject.bind(controlObjectStore),
-  });
 }

@@ -16,6 +16,7 @@ export {
   type CandidateSessionV1,
   type InventoryV1CandidateErrorCode,
   type Rfc64InventoryV1CandidateApi,
+  type Rfc64InventoryV1OperationsV1,
   type VerifiedCandidateBucketLoadV1,
   type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';

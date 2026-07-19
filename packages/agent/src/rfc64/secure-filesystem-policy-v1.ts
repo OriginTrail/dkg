@@ -20,6 +20,12 @@ export type Rfc64NamespaceDurabilityV1 =
   | typeof RFC64_POSIX_NAMESPACE_DURABILITY_V1
   | typeof RFC64_WINDOWS_NAMESPACE_DURABILITY_V1;
 
+export type Rfc64FilesystemEntryKindV1 = 'file' | 'directory';
+
+export interface Rfc64FilesystemEntryPolicyV1 {
+  readonly entryKind: Rfc64FilesystemEntryKindV1;
+}
+
 export function rfc64UsesWindowsFilesystemPolicyV1(): boolean {
   return process.platform === 'win32';
 }
@@ -42,7 +48,10 @@ export function rfc64PosixModeMatchesV1(mode: number, expected: number): boolean
 
 export function assertRfc64FilesystemOwnerSyncV1(path: string): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    assertWindowsFilesystemOwnerSync(path, statSync(path).isDirectory());
+    assertWindowsFilesystemOwnerSync(
+      path,
+      statSync(path).isDirectory() ? 'directory' : 'file',
+    );
     return;
   }
   if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
@@ -53,10 +62,10 @@ export function assertRfc64FilesystemOwnerSyncV1(path: string): void {
 export function assertRfc64OwnerOnlyPermissionsSyncV1(
   path: string,
   expectedMode: number,
-  directory: boolean,
+  policy: Rfc64FilesystemEntryPolicyV1,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    assertWindowsOwnerOnlyPermissionsSync(path, directory);
+    assertWindowsOwnerOnlyPermissionsSync(path, policy.entryKind);
     return;
   }
   const stat = statSync(path);
@@ -73,15 +82,15 @@ export function assertRfc64OwnerOnlyPermissionsSyncV1(
 export function applyRfc64OwnerOnlyPermissionsSyncV1(
   path: string,
   mode: number,
-  directory: boolean,
+  policy: Rfc64FilesystemEntryPolicyV1,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    applyWindowsOwnerOnlyPermissionsSync(path, directory);
+    applyWindowsOwnerOnlyPermissionsSync(path, policy.entryKind);
     return;
   }
   assertRfc64FilesystemOwnerSyncV1(path);
   chmodSync(path, mode);
-  assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
+  assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, policy);
 }
 
 /** Node cannot FlushFileBuffers on a Windows directory handle. */
@@ -180,10 +189,13 @@ function Assert-OwnerOnly($acl) {
 }
 `;
 
-function assertWindowsFilesystemOwnerSync(path: string, directory: boolean): void {
+function assertWindowsFilesystemOwnerSync(
+  path: string,
+  entryKind: Rfc64FilesystemEntryKindV1,
+): void {
   runWindowsAclOperation(
     path,
-    directory,
+    entryKind,
     'owner assertion',
     `${WINDOWS_ACL_POWERSHELL_PRELUDE}
 $acl = Read-TargetAcl
@@ -191,10 +203,13 @@ Assert-CurrentOwner $acl`,
   );
 }
 
-function assertWindowsOwnerOnlyPermissionsSync(path: string, directory: boolean): void {
+function assertWindowsOwnerOnlyPermissionsSync(
+  path: string,
+  entryKind: Rfc64FilesystemEntryKindV1,
+): void {
   runWindowsAclOperation(
     path,
-    directory,
+    entryKind,
     'owner-only assertion',
     `${WINDOWS_ACL_POWERSHELL_PRELUDE}
 ${WINDOWS_OWNER_ONLY_ASSERTION}
@@ -204,10 +219,13 @@ Assert-OwnerOnly $acl`,
   );
 }
 
-function applyWindowsOwnerOnlyPermissionsSync(path: string, directory: boolean): void {
+function applyWindowsOwnerOnlyPermissionsSync(
+  path: string,
+  entryKind: Rfc64FilesystemEntryKindV1,
+): void {
   runWindowsAclOperation(
     path,
-    directory,
+    entryKind,
     'owner-only application',
     `${WINDOWS_ACL_POWERSHELL_PRELUDE}
 ${WINDOWS_OWNER_ONLY_ASSERTION}
@@ -246,7 +264,7 @@ Assert-OwnerOnly $acl`,
 
 function runWindowsAclOperation(
   path: string,
-  directory: boolean,
+  entryKind: Rfc64FilesystemEntryKindV1,
   operation: string,
   script: string,
 ): void {
@@ -258,7 +276,7 @@ function runWindowsAclOperation(
       windowsHide: true,
       env: {
         ...process.env,
-        DKG_RFC64_ACL_DIRECTORY: String(directory),
+        DKG_RFC64_ACL_DIRECTORY: String(entryKind === 'directory'),
         DKG_RFC64_ACL_PATH: path,
       },
     },

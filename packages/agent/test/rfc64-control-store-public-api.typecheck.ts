@@ -1,5 +1,6 @@
 import * as packageRoot from '../src/index.js';
 import * as productionControlStoreModule from '../src/rfc64/control-object-store-v1.js';
+import { DKGAgent as PublishedDkgAgent } from '@origintrail-official/dkg-agent';
 
 type PackageRootHasRawControlStoreOpener =
   'openRfc64ControlObjectStoreV1' extends keyof typeof packageRoot ? true : false;
@@ -14,6 +15,8 @@ type ProductionModuleHasRawControlStoreOpener =
 type ProductionModuleHasTestOpener =
   'createRfc64ControlObjectStoreTestOpenerV1' extends
   keyof typeof productionControlStoreModule ? true : false;
+type PublishedPackageRootHasDkgAgent =
+  'create' extends keyof typeof PublishedDkgAgent ? true : false;
 
 // The stable package root intentionally withholds the implementation-shaped
 // cache API until an RFC-64 public workflow consumes it.
@@ -21,6 +24,7 @@ const packageRootHasRawControlStoreOpener: PackageRootHasRawControlStoreOpener =
 const packageRootHasControlStoreLayout: PackageRootHasControlStoreLayout = false;
 const productionModuleHasRawControlStoreOpener: ProductionModuleHasRawControlStoreOpener = false;
 const productionModuleHasTestOpener: ProductionModuleHasTestOpener = false;
+const publishedPackageRootHasDkgAgent: PublishedPackageRootHasDkgAgent = true;
 
 // @ts-expect-error Low-level store types are not part of the stable package root.
 type PackageRootStoreType = packageRoot.Rfc64ControlObjectStoreV1;
@@ -32,5 +36,6 @@ void packageRootHasRawControlStoreOpener;
 void packageRootHasControlStoreLayout;
 void productionModuleHasRawControlStoreOpener;
 void productionModuleHasTestOpener;
+void publishedPackageRootHasDkgAgent;
 void (undefined as PackageRootStoreType | undefined);
 void (undefined as PublishedInternalControlStoreModule | undefined);

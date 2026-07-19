@@ -12,13 +12,14 @@
     }
   },
   "scripts": {
-    "build": "tsc && pnpm run test:types",
+    "build": "tsc && pnpm run test:types && pnpm run test:package-root",
     "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:types": "tsc --project tsconfig.type-tests.json",
+    "test:package-root": "node --input-type=module -e \"const agent = await import('@origintrail-official/dkg-agent'); if (typeof agent.DKGAgent !== 'function') throw new Error('published package root did not expose DKGAgent')\"",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

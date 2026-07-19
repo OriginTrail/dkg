@@ -11,7 +11,18 @@ import {
   fsyncRfc64DirectoryV1,
   rfc64RegularFileFsyncOpenFlagsV1,
   rfc64RegularFileReadOpenFlagsV1,
+  type Rfc64FilesystemEntryKindV1,
 } from './secure-filesystem-policy-v1.js';
+
+type Rfc64ExistingAccessV1 = 'owner' | 'owner-only';
+
+interface Rfc64ExistingDirectoryPolicyV1 {
+  readonly access: Rfc64ExistingAccessV1;
+}
+
+interface Rfc64SecureAccessPolicyV1 extends Rfc64ExistingDirectoryPolicyV1 {
+  readonly entryKind: Rfc64FilesystemEntryKindV1;
+}
 
 export type Rfc64DurableFileErrorCodeV1 =
   | 'input'
@@ -76,7 +87,7 @@ export function createRfc64DurableFileStoreV1<TKind extends string>(
 export async function assertRfc64ExistingDirectoryV1(
   path: string,
   label: string,
-  requireSecureMode: boolean,
+  policy: Rfc64ExistingDirectoryPolicyV1,
 ): Promise<void> {
   try {
     const entry = await lstat(path);
@@ -86,8 +97,7 @@ export async function assertRfc64ExistingDirectoryV1(
     assertSecureAccess(
       path,
       RFC64_SECURE_DIRECTORY_MODE_V1,
-      true,
-      requireSecureMode,
+      { entryKind: 'directory', access: policy.access },
       label,
     );
   } catch (cause) {
@@ -104,7 +114,7 @@ export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
   await walkRfc64ContainedDirectoryTreeV1(
     target,
     containmentRoot,
-    false,
+    'owner',
     async (current) => {
       let created = false;
       try {
@@ -249,7 +259,11 @@ async function publishRfc64NoReplaceV1<TKind extends string>(
     await lifecycle.boundary(`${kind}.temp-unlinked`);
     await fsyncDirectory(dirname(targetPath));
     await lifecycle.boundary(`${kind}.parent-fsynced`);
-    await assertExistingRegularFile(targetPath, `${label} cache file`, true);
+    await assertExistingRegularFile(
+      targetPath,
+      `${label} cache file`,
+      { access: 'owner-only' },
+    );
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('durability', `failed to publish durable ${label} bytes`, cause);
@@ -314,8 +328,7 @@ async function readRfc64OptionalBoundedBytesV1(
     assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
-      false,
-      true,
+      { entryKind: 'file', access: 'owner-only' },
       label,
     );
     return bytes;
@@ -335,14 +348,14 @@ async function assertRfc64ExistingSecureDirectoryTreeV1(
   await walkRfc64ContainedDirectoryTreeV1(
     target,
     containmentRoot,
-    true,
+    'owner-only',
   );
 }
 
 async function walkRfc64ContainedDirectoryTreeV1(
   target: string,
   containmentRoot: string,
-  requireSecureRoot: boolean,
+  containmentRootAccess: Rfc64ExistingAccessV1,
   prepareComponent?: (path: string) => Promise<void>,
 ): Promise<void> {
   const resolvedTarget = resolve(target);
@@ -358,20 +371,28 @@ async function walkRfc64ContainedDirectoryTreeV1(
   await assertRfc64ExistingDirectoryV1(
     resolvedRoot,
     'durable store containment root',
-    relativeTarget.length === 0 || requireSecureRoot,
+    {
+      access: relativeTarget.length === 0
+        ? 'owner-only'
+        : containmentRootAccess,
+    },
   );
   let current = resolvedRoot;
   for (const component of relativeTarget.split(sep).filter(Boolean)) {
     current = join(current, component);
     await prepareComponent?.(current);
-    await assertRfc64ExistingDirectoryV1(current, 'durable store directory', true);
+    await assertRfc64ExistingDirectoryV1(
+      current,
+      'durable store directory',
+      { access: 'owner-only' },
+    );
   }
 }
 
 async function assertExistingRegularFile(
   path: string,
   label: string,
-  requireSecureMode: boolean,
+  policy: Rfc64ExistingDirectoryPolicyV1,
 ): Promise<void> {
   try {
     const entry = await lstat(path);
@@ -381,8 +402,7 @@ async function assertExistingRegularFile(
     assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
-      false,
-      requireSecureMode,
+      { entryKind: 'file', access: policy.access },
       label,
     );
   } catch (cause) {
@@ -394,7 +414,9 @@ async function assertExistingRegularFile(
 async function chmodSecure(path: string, mode: number, label: string): Promise<void> {
   try {
     const entry = await lstat(path);
-    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, entry.isDirectory());
+    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, {
+      entryKind: entry.isDirectory() ? 'directory' : 'file',
+    });
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('unsafe-path', `failed to secure ${label}`, cause);
@@ -404,18 +426,23 @@ async function chmodSecure(path: string, mode: number, label: string): Promise<v
 function assertSecureAccess(
   path: string,
   mode: number,
-  directory: boolean,
-  requireOwnerOnly: boolean,
+  policy: Rfc64SecureAccessPolicyV1,
   label: string,
 ): void {
   try {
-    if (requireOwnerOnly) {
-      assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
+    if (policy.access === 'owner-only') {
+      assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, {
+        entryKind: policy.entryKind,
+      });
     } else {
       assertRfc64FilesystemOwnerSyncV1(path);
     }
   } catch (cause) {
-    fail('unsafe-path', `${label} does not satisfy the owner-only access policy`, cause);
+    fail(
+      'unsafe-path',
+      `${label} does not satisfy the ${policy.access} ${policy.entryKind} access policy`,
+      cause,
+    );
   }
 }
 
@@ -438,8 +465,7 @@ async function fsyncRegularFile(path: string, label: string): Promise<void> {
     assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
-      false,
-      true,
+      { entryKind: 'file', access: 'owner-only' },
       label,
     );
     await handle.sync();

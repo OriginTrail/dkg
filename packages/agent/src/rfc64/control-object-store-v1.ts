@@ -10,6 +10,7 @@ export {
   type GetVerifiedControlObjectInputV1,
   type Rfc64ControlObjectStoreErrorCodeV1,
   type Rfc64ControlObjectStoreNamespaceDurabilityV1,
+  type Rfc64ControlObjectOperationsV1,
   type Rfc64ControlObjectStoreV1,
   type StageVerifiedControlObjectV1,
   type StageVerifiedControlObjectsResultV1,

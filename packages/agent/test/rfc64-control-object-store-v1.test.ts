@@ -62,8 +62,11 @@ async function temporaryDataDirectory(): Promise<string> {
   return path;
 }
 
-function grantWindowsEveryoneRead(path: string, directory: boolean): void {
-  const permission = directory
+function grantWindowsEveryoneRead(
+  path: string,
+  entryKind: 'file' | 'directory',
+): void {
+  const permission = entryKind === 'directory'
     ? '*S-1-1-0:(OI)(CI)(RX)'
     : '*S-1-1-0:(R)';
   const result = spawnSync(
@@ -493,7 +496,7 @@ describe('RFC-64 durable control-object store v1', () => {
     applyRfc64OwnerOnlyPermissionsSyncV1(
       wrongPath,
       RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
-      false,
+      { entryKind: 'file' },
     );
     const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
 
@@ -759,7 +762,7 @@ describe('RFC-64 durable control-object store v1', () => {
         'objects',
       );
       await directoryStore.close();
-      grantWindowsEveryoneRead(objectsDirectory, true);
+      grantWindowsEveryoneRead(objectsDirectory, 'directory');
       await expect(openRfc64ControlObjectStoreV1(directoryDataDir))
         .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
 
@@ -768,7 +771,7 @@ describe('RFC-64 durable control-object store v1', () => {
       const fixture = await signedFixture('8c');
       await fileStore.stageVerifiedObjects([fixture]);
       const paths = pathsFor(fileDataDir, fixture.envelope);
-      grantWindowsEveryoneRead(paths.object, false);
+      grantWindowsEveryoneRead(paths.object, 'file');
       await expect(fileStore.getVerifiedObject({
         objectDigest: fixture.envelope.objectDigest as Digest32V1,
         signatureVariantDigest: paths.signatureDigest,
@@ -838,7 +841,7 @@ describe('RFC-64 durable control-object store v1', () => {
     applyRfc64OwnerOnlyPermissionsSyncV1(
       containmentRoot,
       RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      true,
+      { entryKind: 'directory' },
     );
     const relativePath = join('race', 'immutable.jcs');
     const firstBytes = new TextEncoder().encode('{"writer":"first"}');

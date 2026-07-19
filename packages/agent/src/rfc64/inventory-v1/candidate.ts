@@ -244,6 +244,12 @@ export interface Rfc64InventoryV1CandidateApi {
   deleteCandidateBucket(loadKey: CandidateBucketLoadKeyV1): void;
 }
 
+/** Candidate operations safe to share without inventory lifecycle ownership. */
+export type Rfc64InventoryV1OperationsV1 = Omit<
+  Rfc64InventoryV1CandidateApi,
+  'purgeNextStartupStaleCandidateBatch'
+>;
+
 interface SessionContextV1 {
   readonly scopeHex: string;
   readonly authorHex: string;
