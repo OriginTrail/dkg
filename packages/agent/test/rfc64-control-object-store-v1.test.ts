@@ -1,11 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
   computeControlObjectDigestHex,
-  computeControlSignatureVariantDigestHex,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -19,7 +16,6 @@ import {
   type CurrentFinalizedEvmCallV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
-import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -28,97 +24,34 @@ import {
   RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
   RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS,
   RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY,
-  RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
   RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64ControlObjectStoreErrorV1,
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
-import { createRfc64DurableFileStoreV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
-import {
-  applyRfc64OwnerOnlyPermissionsSyncV1,
-  applyRfc64OwnerOnlyPermissionsV1,
-  assertRfc64FilesystemOwnerSyncV1,
-  assertRfc64FilesystemOwnerV1,
-  assertRfc64OwnerOnlyPermissionsSyncV1,
-  assertRfc64OwnerOnlyPermissionsV1,
-} from '../src/rfc64/secure-filesystem-policy-v1.js';
+import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
 import {
   createRfc64ControlObjectStoreTestOpenerV1,
   type Rfc64ControlObjectStoreDurabilityBoundaryV1,
 } from './support/rfc64-control-object-store-test-support.js';
+import {
+  createTemporaryDataDirectoryFixture,
+  deferred,
+  ISSUER,
+  pathsFor,
+  signedFixture,
+  wallet,
+} from './support/rfc64-control-object-store-fixtures.js';
 
-const PRIVATE_KEY = `0x${'42'.repeat(32)}`;
 const SAFE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const BLOCK_HASH = `0x${'44'.repeat(32)}`;
-const wallet = new ethers.Wallet(PRIVATE_KEY);
-const ISSUER = wallet.address.toLowerCase() as EvmAddressV1;
 const openRfc64ControlObjectStoreV1 = createRfc64ControlObjectStoreTestOpenerV1();
-
-const temporaryDirectories: string[] = [];
-
-function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
-  let resolvePromise: (() => void) | undefined;
-  const promise = new Promise<void>((resolve) => { resolvePromise = resolve; });
-  return { promise, resolve: () => resolvePromise?.() };
-}
-
-async function temporaryDataDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), 'dkg-rfc64-control-store-'));
-  temporaryDirectories.push(path);
-  return path;
-}
-
-function grantWindowsEveryoneRead(
-  path: string,
-  entryKind: 'file' | 'directory',
-): void {
-  const permission = entryKind === 'directory'
-    ? '*S-1-1-0:(OI)(CI)(RX)'
-    : '*S-1-1-0:(R)';
-  const result = spawnSync(
-    'icacls.exe',
-    [path, '/grant', permission],
-    { encoding: 'utf8', windowsHide: true },
-  );
-  if (result.error !== undefined || result.status !== 0) {
-    throw new Error(
-      `failed to grant the Windows ACL test permission: ${
-        result.error?.message ?? (result.stderr.trim() || `icacls exited ${result.status}`)
-      }`,
-      result.error === undefined ? {} : { cause: result.error },
-    );
-  }
-}
+const temporaryDirectories = createTemporaryDataDirectoryFixture();
+const { temporaryDataDirectory } = temporaryDirectories;
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map(async (path) => {
-    await rm(path, { recursive: true, force: true });
-  }));
+  await temporaryDirectories.cleanup();
 });
-
-async function signedFixture(
-  sequence: string,
-): Promise<StageVerifiedControlObjectV1> {
-  const unsigned = {
-    issuer: ISSUER,
-    objectType: 'dkg-rfc64-control-store-test-v1',
-    payload: { sequence },
-    signatureEvidence: { kind: 'none' },
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  } satisfies UnsignedControlEnvelopeV1;
-  const objectDigest = computeControlObjectDigestHex(unsigned);
-  const signature = await wallet.signMessage(ethers.getBytes(objectDigest));
-  const envelope = {
-    ...unsigned,
-    objectDigest,
-    signature,
-  } as SignedControlEnvelopeV1;
-  return {
-    envelope,
-    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
-  };
-}
 
 const finalizedEip1271Call: CurrentFinalizedEvmCallV1 = async (request) => ({
   chainId: request.chainId,
@@ -166,73 +99,7 @@ async function contractSignatureVariantsFixture(): Promise<
   }];
 }
 
-function pathsFor(
-  dataDir: string,
-  envelope: SignedControlEnvelopeV1,
-): { root: string; object: string; signature: string; signatureDigest: Digest32V1 } {
-  const root = join(dataDir, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH);
-  const objectHex = envelope.objectDigest.slice(2);
-  const signatureDigest = computeControlSignatureVariantDigestHex(
-    envelope.objectDigest,
-    envelope.signature,
-  ) as Digest32V1;
-  return {
-    root,
-    object: join(root, 'objects', objectHex.slice(0, 2), `${objectHex}.jcs`),
-    signature: join(
-      root,
-      'signatures',
-      objectHex.slice(0, 2),
-      objectHex,
-      `${signatureDigest.slice(2)}.jcs`,
-    ),
-    signatureDigest,
-  };
-}
-
 describe('RFC-64 durable control-object store v1', () => {
-  it('keeps synchronous inventory and asynchronous durable policy twins aligned', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const policy = { entryKind: 'directory' as const };
-    applyRfc64OwnerOnlyPermissionsSyncV1(
-      dataDir,
-      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      policy,
-    );
-
-    expect(() => assertRfc64FilesystemOwnerSyncV1(dataDir)).not.toThrow();
-    await expect(assertRfc64FilesystemOwnerV1(dataDir)).resolves.toBeUndefined();
-    expect(() => assertRfc64OwnerOnlyPermissionsSyncV1(
-      dataDir,
-      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      policy,
-    )).not.toThrow();
-    await expect(assertRfc64OwnerOnlyPermissionsV1(
-      dataDir,
-      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      policy,
-    )).resolves.toBeUndefined();
-    await expect(applyRfc64OwnerOnlyPermissionsV1(
-      dataDir,
-      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      policy,
-    )).resolves.toBeUndefined();
-
-    if (process.platform !== 'win32') {
-      await chmod(dataDir, 0o755);
-      expect(() => assertRfc64OwnerOnlyPermissionsSyncV1(
-        dataDir,
-        RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-        policy,
-      )).toThrow(/path mode 755/);
-      await expect(assertRfc64OwnerOnlyPermissionsV1(
-        dataDir,
-        RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-        policy,
-      )).rejects.toThrow(/path mode 755/);
-    }
-  });
-
   it('rechecks NODE_ENV when the source-level test opener is invoked', async () => {
     const opener = createRfc64ControlObjectStoreTestOpenerV1();
     const previousNodeEnv = process.env.NODE_ENV;
@@ -639,272 +506,6 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(slowRead).resolves.toMatchObject({ envelope: first.envelope });
   });
 
-  it('drains an admitted durable write before close can release ownership', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const entered = deferred();
-    const release = deferred();
-    let paused = false;
-    const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: async (boundary) => {
-        if (boundary === 'object.temp-written' && !paused) {
-          paused = true;
-          entered.resolve();
-          await release.promise;
-        }
-      },
-    })(dataDir);
-    const fixture = await signedFixture('close-drain');
-    const stage = store.stageVerifiedObjects([fixture]);
-    await entered.promise;
-
-    let closeSettled = false;
-    const close = store.close().then(() => { closeSettled = true; });
-    expect(store.closed).toBe(true);
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-
-    release.resolve();
-    await expect(stage).resolves.toMatchObject({ durable: true });
-    await expect(close).resolves.toBeUndefined();
-    expect(closeSettled).toBe(true);
-    await expect(store.close()).resolves.toBeUndefined();
-  });
-
-  it('drains every sibling write in a failed batch before close resolves', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const entered = deferred();
-    const release = deferred();
-    let pauseEnabled = false;
-    let paused = false;
-    const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: async (boundary) => {
-        if (pauseEnabled && boundary === 'object.temp-written' && !paused) {
-          paused = true;
-          entered.resolve();
-          await release.promise;
-        }
-      },
-    })(dataDir);
-    const corrupt = await signedFixture('failed-batch-corrupt');
-    const slow = await signedFixture('failed-batch-slow');
-    await store.stageVerifiedObjects([corrupt]);
-    await writeFile(pathsFor(dataDir, corrupt.envelope).object, '{}');
-    pauseEnabled = true;
-
-    let stageSettled = false;
-    const stage = store.stageVerifiedObjects([corrupt, slow]);
-    void stage.finally(() => { stageSettled = true; }).catch(() => undefined);
-    await entered.promise;
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
-    expect(stageSettled).toBe(false);
-
-    let closeSettled = false;
-    const close = store.close().then(() => { closeSettled = true; });
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
-    expect(closeSettled).toBe(false);
-
-    release.resolve();
-    await expect(stage).rejects.toMatchObject({ code: 'control-store-corrupt' });
-    await expect(close).resolves.toBeUndefined();
-    expect(closeSettled).toBe(true);
-    await expect(readFile(pathsFor(dataDir, slow.envelope).object)).resolves.not.toHaveLength(0);
-    await expect(readFile(pathsFor(dataDir, slow.envelope).signature)).resolves.not.toHaveLength(0);
-  });
-
-  it('drains an admitted verified read before close can release ownership', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const store = await openRfc64ControlObjectStoreV1(dataDir);
-    const fixture = await signedFixture('close-read-drain');
-    await store.stageVerifiedObjects([fixture]);
-    const entered = deferred();
-    const release = deferred();
-    const read = store.getVerifiedObject({
-      objectDigest: fixture.envelope.objectDigest as Digest32V1,
-      signatureVariantDigest: pathsFor(dataDir, fixture.envelope).signatureDigest,
-      verifyIssuerSignature: async (envelope) => {
-        entered.resolve();
-        await release.promise;
-        return verifyControlEnvelopeIssuerSignatureV1(envelope);
-      },
-    });
-    await entered.promise;
-
-    let closeSettled = false;
-    const close = store.close().then(() => { closeSettled = true; });
-    expect(store.closed).toBe(true);
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-
-    release.resolve();
-    await expect(read).resolves.toMatchObject({ envelope: fixture.envelope });
-    await expect(close).resolves.toBeUndefined();
-    expect(closeSettled).toBe(true);
-  });
-
-  it('cleans an unpublished temp after a pre-visibility fault and converges on retry', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const fixture = await signedFixture('7');
-    let injected = false;
-    const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: (boundary) => {
-        if (boundary === 'object.temp-fsynced' && !injected) {
-          injected = true;
-          throw new Error('injected pre-publish fault');
-        }
-      },
-    })(dataDir);
-    const paths = pathsFor(dataDir, fixture.envelope);
-
-    await expect(store.stageVerifiedObjects([fixture]))
-      .rejects.toMatchObject({ code: 'control-store-durability' });
-    await expect(stat(paths.object)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(store.stageVerifiedObjects([fixture])).resolves.toMatchObject({ durable: true });
-  });
-
-  it('treats a post-publish fault as an unreachable orphan and safely completes on retry', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const fixture = await signedFixture('8');
-    let injected = false;
-    const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
-    const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: (boundary) => {
-        boundaries.push(boundary);
-        if (boundary === 'object.published-no-replace' && !injected) {
-          injected = true;
-          throw new Error('injected post-publish fault');
-        }
-      },
-    })(dataDir);
-    const paths = pathsFor(dataDir, fixture.envelope);
-
-    await expect(store.stageVerifiedObjects([fixture]))
-      .rejects.toMatchObject({ code: 'control-store-durability' });
-    expect(await readFile(paths.object, 'utf8')).toContain('dkg-rfc64-control-store-test-v1');
-    await expect(stat(paths.signature)).rejects.toMatchObject({ code: 'ENOENT' });
-    const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
-    await expect(store.getVerifiedObject({
-      objectDigest: fixture.envelope.objectDigest as Digest32V1,
-      signatureVariantDigest: paths.signatureDigest,
-      verifyIssuerSignature,
-    })).resolves.toBeNull();
-    expect(verifyIssuerSignature).not.toHaveBeenCalled();
-    boundaries.length = 0;
-    await expect(store.stageVerifiedObjects([fixture])).resolves.toMatchObject({ durable: true });
-    expect(boundaries).toContain('object.existing-fsynced');
-    expect(boundaries).toContain('object.existing-parent-fsynced');
-  });
-
-  it('rejects symlinked store topology instead of following it', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const outside = await temporaryDataDirectory();
-    const first = await openRfc64ControlObjectStoreV1(dataDir);
-    await first.close();
-    const objects = join(dataDir, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH, 'objects');
-    await rm(objects, { recursive: true, force: true });
-    await symlink(outside, objects, process.platform === 'win32' ? 'junction' : 'dir');
-
-    await expect(openRfc64ControlObjectStoreV1(dataDir))
-      .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-  });
-
-  it.runIf(process.platform !== 'win32')(
-    'rejects symlinked digest files before reading or verifying outside bytes',
-    async () => {
-      for (const target of ['object', 'signature'] as const) {
-        const dataDir = await temporaryDataDirectory();
-        const outside = await temporaryDataDirectory();
-        const store = await openRfc64ControlObjectStoreV1(dataDir);
-        const fixture = await signedFixture(`symlink-${target}`);
-        await store.stageVerifiedObjects([fixture]);
-        const paths = pathsFor(dataDir, fixture.envelope);
-        const targetPath = paths[target];
-        const outsideFile = join(outside, `${target}.jcs`);
-        await writeFile(outsideFile, '{"outside":true}');
-        await unlink(targetPath);
-        await symlink(outsideFile, targetPath, 'file');
-        const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
-
-        await expect(store.getVerifiedObject({
-          objectDigest: fixture.envelope.objectDigest as Digest32V1,
-          signatureVariantDigest: paths.signatureDigest,
-          verifyIssuerSignature,
-        })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-        expect(verifyIssuerSignature).not.toHaveBeenCalled();
-      }
-    },
-  );
-
-  it.runIf(process.platform !== 'win32')(
-    'rejects permissive existing files and directories instead of trusting or tightening them',
-    async () => {
-      const dataDir = await temporaryDataDirectory();
-      const store = await openRfc64ControlObjectStoreV1(dataDir);
-      const fixture = await signedFixture('8b');
-      await store.stageVerifiedObjects([fixture]);
-      const paths = pathsFor(dataDir, fixture.envelope);
-
-      await chmod(paths.object, 0o644);
-      await expect(store.getVerifiedObject({
-        objectDigest: fixture.envelope.objectDigest as Digest32V1,
-        signatureVariantDigest: paths.signatureDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-
-      await chmod(paths.object, RFC64_CONTROL_OBJECT_STORE_FILE_MODE);
-      await chmod(dirname(dirname(paths.object)), 0o755);
-      await store.close();
-      await expect(openRfc64ControlObjectStoreV1(dataDir))
-        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-    },
-  );
-
-  it('rejects a permissive control-store root before publishing a new immutable key', async () => {
-    const dataDir = await temporaryDataDirectory();
-    const store = await openRfc64ControlObjectStoreV1(dataDir);
-    const fixture = await signedFixture('permissive-root-after-open');
-    const paths = pathsFor(dataDir, fixture.envelope);
-    if (process.platform === 'win32') {
-      grantWindowsEveryoneRead(paths.root, 'directory');
-    } else {
-      await chmod(paths.root, 0o777);
-    }
-
-    await expect(store.stageVerifiedObjects([fixture]))
-      .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-    await expect(stat(paths.object)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(stat(paths.signature)).rejects.toMatchObject({ code: 'ENOENT' });
-    await store.close();
-  });
-
-  it.runIf(process.platform === 'win32')(
-    'rejects permissive existing Windows file and directory ACLs',
-    async () => {
-      const directoryDataDir = await temporaryDataDirectory();
-      const directoryStore = await openRfc64ControlObjectStoreV1(directoryDataDir);
-      const objectsDirectory = join(
-        directoryDataDir,
-        RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
-        'objects',
-      );
-      await directoryStore.close();
-      grantWindowsEveryoneRead(objectsDirectory, 'directory');
-      await expect(openRfc64ControlObjectStoreV1(directoryDataDir))
-        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-
-      const fileDataDir = await temporaryDataDirectory();
-      const fileStore = await openRfc64ControlObjectStoreV1(fileDataDir);
-      const fixture = await signedFixture('8c');
-      await fileStore.stageVerifiedObjects([fixture]);
-      const paths = pathsFor(fileDataDir, fixture.envelope);
-      grantWindowsEveryoneRead(paths.object, 'file');
-      await expect(fileStore.getVerifiedObject({
-        objectDigest: fixture.envelope.objectDigest as Digest32V1,
-        signatureVariantDigest: paths.signatureDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-    },
-  );
-
   it('returns null for an exact cache miss without calling the verifier', async () => {
     const dataDir = await temporaryDataDirectory();
     const store = await openRfc64ControlObjectStoreV1(dataDir);
@@ -944,51 +545,6 @@ describe('RFC-64 durable control-object store v1', () => {
       signatureVariantDigest: pathsFor(dataDir, fixture.envelope).signatureDigest,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     })).toThrow(expect.objectContaining({ code: 'control-store-closed' }));
-  });
-
-  it('rejects an escaping durable-file relative key inside the write operation', async () => {
-    const containmentRoot = await temporaryDataDirectory();
-    const durableFiles = createRfc64DurableFileStoreV1<'object'>(containmentRoot);
-    await expect(durableFiles.putExactBytes({
-      relativePath: join('..', 'escaped.jcs'),
-      bytes: new TextEncoder().encode('{}'),
-      maxBytes: 16,
-      label: 'test control object',
-      kind: 'object',
-    })).rejects.toMatchObject({ code: 'unsafe-path' });
-  });
-
-  it('publishes immutable keys without clobbering a racing independent writer', async () => {
-    const containmentRoot = await temporaryDataDirectory();
-    applyRfc64OwnerOnlyPermissionsSyncV1(
-      containmentRoot,
-      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
-      { entryKind: 'directory' },
-    );
-    const relativePath = join('race', 'immutable.jcs');
-    const firstBytes = new TextEncoder().encode('{"writer":"first"}');
-    const secondBytes = new TextEncoder().encode('{"writer":"second"}');
-    const durableFiles = createRfc64DurableFileStoreV1<'object'>(containmentRoot);
-    const write = (bytes: Uint8Array) => durableFiles.putExactBytes({
-      relativePath,
-      bytes,
-      maxBytes: 1024,
-      label: 'racing immutable fixture',
-      kind: 'object' as const,
-    });
-
-    const outcomes = await Promise.allSettled([
-      write(firstBytes),
-      write(secondBytes),
-    ]);
-    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
-    const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
-    expect(rejected).toMatchObject({
-      status: 'rejected',
-      reason: { code: 'corrupt' },
-    });
-    const stored = await readFile(join(containmentRoot, relativePath));
-    expect([firstBytes, secondBytes].some((bytes) => Buffer.from(bytes).equals(stored))).toBe(true);
   });
 
   it('uses a closed typed error registry', () => {
