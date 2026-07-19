@@ -74,11 +74,83 @@ export interface Rfc64DurableFileStoreV1<TKind extends string> {
 
 export function createRfc64DurableFileStoreV1<TKind extends string>(
   containmentRoot: string,
+): Rfc64DurableFileStoreV1<TKind> {
+  return createRfc64DurableFileStoreWithLifecycleV1(
+    containmentRoot,
+    PRODUCTION_DURABLE_FILE_LIFECYCLE_V1,
+  );
+}
+
+/** @internal Package-local fault injection; unavailable outside source tests. */
+export function createRfc64DurableFileStoreForTestV1<TKind extends string>(
+  containmentRoot: string,
   lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
 ): Rfc64DurableFileStoreV1<TKind> {
+  assertRfc64DurableFileTestEnvironmentV1();
+  const guardedLifecycle = Object.freeze({
+    boundary: async (boundary: Rfc64DurableFileBoundaryV1<TKind>): Promise<void> => {
+      assertRfc64DurableFileTestEnvironmentV1();
+      await lifecycle.boundary(boundary);
+    },
+  });
+  return createRfc64DurableFileStoreWithLifecycleV1(
+    containmentRoot,
+    guardedLifecycle,
+  );
+}
+
+const PRODUCTION_DURABLE_FILE_LIFECYCLE_V1 = Object.freeze({
+  boundary: (): void => {},
+}) satisfies Rfc64DurableFileLifecycleV1;
+
+function createRfc64DurableFileStoreWithLifecycleV1<TKind extends string>(
+  containmentRoot: string,
+  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+): Rfc64DurableFileStoreV1<TKind> {
+  const directoryPreparations = new Map<string, Promise<void>>();
+  const prepareDirectoryTree = async (
+    target: string,
+    containmentRootAccess: Rfc64ExistingAccessV1,
+  ): Promise<void> => {
+    // Every caller independently revalidates the protected root before it may
+    // join an in-process preparation. The keyed promise only closes the brief
+    // Windows mkdir-before-DACL race; it does not weaken fail-closed admission.
+    if (containmentRootAccess === 'owner-only') {
+      await assertRfc64ExistingDirectoryV1(
+        containmentRoot,
+        'durable store containment root',
+        { access: 'owner-only' },
+      );
+    }
+    const key = resolve(target);
+    const current = directoryPreparations.get(key);
+    if (current !== undefined) {
+      await current;
+      return;
+    }
+    const operation = ensureRfc64SecureDirectoryTreeWithLifecycleV1(
+      target,
+      containmentRoot,
+      lifecycle,
+      containmentRootAccess,
+    );
+    directoryPreparations.set(key, operation);
+    try {
+      await operation;
+    } finally {
+      if (directoryPreparations.get(key) === operation) {
+        directoryPreparations.delete(key);
+      }
+    }
+  };
   return Object.freeze({
     putExactBytes: (input: PutRfc64ExactBytesInputV1<TKind>) =>
-      putRfc64ExactBytesV1({ ...input, containmentRoot, lifecycle }),
+      putRfc64ExactBytesV1({
+        ...input,
+        containmentRoot,
+        lifecycle,
+        prepareDirectoryTree,
+      }),
     readOptionalBoundedBytes: (input: ReadRfc64OptionalBoundedBytesInputV1) =>
       readRfc64OptionalBoundedBytesV1({ ...input, containmentRoot }),
   });
@@ -109,8 +181,43 @@ export async function assertRfc64ExistingDirectoryV1(
 export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
   target: string,
   containmentRoot: string,
+  containmentRootAccess: Rfc64ExistingAccessV1 = 'owner',
+): Promise<void> {
+  return ensureRfc64SecureDirectoryTreeWithLifecycleV1(
+    target,
+    containmentRoot,
+    PRODUCTION_DURABLE_FILE_LIFECYCLE_V1,
+    containmentRootAccess,
+  );
+}
+
+/** @internal Package-local fault injection; unavailable outside source tests. */
+export async function ensureRfc64SecureDirectoryTreeForTestV1<TKind extends string>(
+  target: string,
+  containmentRoot: string,
   lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
   containmentRootAccess: Rfc64ExistingAccessV1 = 'owner',
+): Promise<void> {
+  assertRfc64DurableFileTestEnvironmentV1();
+  const guardedLifecycle = Object.freeze({
+    boundary: async (boundary: Rfc64DurableFileBoundaryV1<TKind>): Promise<void> => {
+      assertRfc64DurableFileTestEnvironmentV1();
+      await lifecycle.boundary(boundary);
+    },
+  });
+  return ensureRfc64SecureDirectoryTreeWithLifecycleV1(
+    target,
+    containmentRoot,
+    guardedLifecycle,
+    containmentRootAccess,
+  );
+}
+
+async function ensureRfc64SecureDirectoryTreeWithLifecycleV1<TKind extends string>(
+  target: string,
+  containmentRoot: string,
+  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  containmentRootAccess: Rfc64ExistingAccessV1,
 ): Promise<void> {
   await walkRfc64ContainedDirectoryTreeV1(
     target,
@@ -151,18 +258,27 @@ interface InternalPutRfc64ExactBytesInputV1<TKind extends string>
   extends PutRfc64ExactBytesInputV1<TKind> {
   readonly containmentRoot: string;
   readonly lifecycle: Rfc64DurableFileLifecycleV1<TKind>;
+  readonly prepareDirectoryTree: (
+    target: string,
+    containmentRootAccess: Rfc64ExistingAccessV1,
+  ) => Promise<void>;
 }
 
 async function putRfc64ExactBytesV1<TKind extends string>(
   input: InternalPutRfc64ExactBytesInputV1<TKind>,
 ): Promise<void> {
-  const { containmentRoot, relativePath, bytes, maxBytes, label, lifecycle } = input;
+  const {
+    containmentRoot,
+    relativePath,
+    bytes,
+    maxBytes,
+    label,
+    prepareDirectoryTree,
+  } = input;
   const targetPath = resolveContainedFileTarget(containmentRoot, relativePath);
   assertByteBounds(bytes, maxBytes, label);
-  await ensureRfc64SecureDirectoryTreeV1(
+  await prepareDirectoryTree(
     dirname(targetPath),
-    containmentRoot,
-    lifecycle,
     'owner-only',
   );
   const resolvedInput = { ...input, targetPath };
@@ -542,4 +658,10 @@ function fail(
     message,
     cause === undefined ? {} : { cause },
   );
+}
+
+function assertRfc64DurableFileTestEnvironmentV1(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    fail('input', 'RFC-64 durable-file fault injection is unavailable outside NODE_ENV=test');
+  }
 }

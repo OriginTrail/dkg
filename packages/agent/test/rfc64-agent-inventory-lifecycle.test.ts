@@ -25,6 +25,7 @@ import {
 } from '../src/rfc64/control-object-store-v1.js';
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from '../src/rfc64/control-object-store-v1-internal.js';
+import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
@@ -326,10 +327,10 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     replacement.close();
   });
 
-  it('invalidates sibling-resource ownership capability when inventory closes', async () => {
+  it('invalidates package-internal persistence-root ownership when inventory closes', async () => {
     const dataDirectory = temporaryDataDirectory();
     const inventory = await openInventoryV1(dataDirectory);
-    const ownership = inventory.controlObjectStoreOwnership;
+    const ownership = getRfc64PersistenceRootOwnershipForInventoryV1(inventory);
     inventory.close();
 
     await expect(openRfc64ControlObjectStoreForOwnedInventoryV1(ownership))

@@ -2,6 +2,8 @@ import * as packageRoot from '../src/index.js';
 import * as productionControlStoreModule from '../src/rfc64/control-object-store-v1.js';
 import { DKGAgent as PublishedDkgAgent } from '@origintrail-official/dkg-agent';
 import { DKGAgent as LegacySubpathDkgAgent } from '@origintrail-official/dkg-agent/dist/dkg-agent.js';
+import { produceEmptyAuthorCatalogGenesisV1 as LegacyCatalogProducer } from '@origintrail-official/dkg-agent/dist/rfc64/author-catalog-producer.js';
+import { openInventoryV1 as LegacyInventoryOpener } from '@origintrail-official/dkg-agent/dist/rfc64/inventory-v1/index.js';
 
 type PackageRootHasRawControlStoreOpener =
   'openRfc64ControlObjectStoreV1' extends keyof typeof packageRoot ? true : false;
@@ -46,6 +48,8 @@ void productionModuleHasRawControlStoreOpener;
 void productionModuleHasTestOpener;
 void publishedPackageRootHasDkgAgent;
 void legacySubpathHasDkgAgent;
+void LegacyCatalogProducer;
+void LegacyInventoryOpener;
 void (undefined as PackageRootStoreType | undefined);
 void (undefined as PublishedInternalControlStoreModule | undefined);
 void (undefined as PublishedDurableFileStoreModule | undefined);

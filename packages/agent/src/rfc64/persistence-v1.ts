@@ -10,6 +10,7 @@ import {
 } from './control-object-store-v1.js';
 import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from './control-object-store-v1-internal.js';
 import { resolveRfc64PersistenceRootV1 } from './persistence-layout-v1.js';
+import { getRfc64PersistenceRootOwnershipForInventoryV1 } from './persistence-root-ownership-v1-internal.js';
 
 export interface OpenRfc64PersistenceOptionsV1 {
   /** Yield after each non-terminal fixed-size startup purge batch. */
@@ -117,7 +118,7 @@ export async function openRfc64PersistenceV1(
       await yieldAfterPurgeBatch();
     }
     const controlObjectStore = await openRfc64ControlObjectStoreForOwnedInventoryV1(
-      inventory.controlObjectStoreOwnership,
+      getRfc64PersistenceRootOwnershipForInventoryV1(inventory),
     );
     return new OwnedRfc64PersistenceV1(rootPath, inventory, controlObjectStore);
   } catch (cause) {

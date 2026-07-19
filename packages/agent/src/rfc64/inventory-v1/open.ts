@@ -35,6 +35,7 @@ import {
   resolveRfc64InventoryDatabasePathV1,
   resolveRfc64PersistenceRootV1,
 } from '../persistence-layout-v1.js';
+import { registerRfc64PersistenceRootOwnershipV1 } from '../persistence-root-ownership-v1-internal.js';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
@@ -128,23 +129,8 @@ class InventoryV1TargetCloseError extends InventoryV1OpenError {
   }
 }
 
-const RFC64_INVENTORY_OWNED_ROOT_V1: unique symbol = Symbol(
-  'rfc64-inventory-owned-root-v1',
-);
-
-/**
- * Nominal capability minted only after the inventory lease is acquired.
- * Internal sibling resources must present it instead of accepting a raw path.
- */
-export interface Rfc64InventoryOwnedRootCapabilityV1 {
-  readonly [RFC64_INVENTORY_OWNED_ROOT_V1]: true;
-  assertOwnedAndGetRootPathV1(): string;
-}
-
 export interface Rfc64InventoryV1Foundation extends Rfc64InventoryV1CandidateApi {
   readonly databasePath: string;
-  /** Lifecycle authority intentionally omitted from non-owning operation views. */
-  readonly controlObjectStoreOwnership: Rfc64InventoryOwnedRootCapabilityV1;
   readonly closed: boolean;
   quarantineAndRebuild(): void;
   close(): void;
@@ -294,8 +280,6 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
-  readonly controlObjectStoreOwnership: Rfc64InventoryOwnedRootCapabilityV1;
-
   constructor(
     private readonly sqlite: SqliteModuleV1,
     readonly databasePath: string,
@@ -307,13 +291,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#database = database;
     this.#candidate = this.createCandidateInventory(database);
     this.#lease = lease;
-    this.controlObjectStoreOwnership = Object.freeze({
-      [RFC64_INVENTORY_OWNED_ROOT_V1]: true as const,
-      assertOwnedAndGetRootPathV1: (): string => {
-        this.requireOpen();
-        return rfc64RootPath;
-      },
-    });
+    registerRfc64PersistenceRootOwnershipV1(
+      this,
+      rfc64RootPath,
+      () => { this.requireOpen(); },
+    );
   }
 
   get closed(): boolean {

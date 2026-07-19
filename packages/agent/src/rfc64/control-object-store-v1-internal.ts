@@ -17,7 +17,9 @@ import {
 import {
   Rfc64DurableFileErrorV1,
   assertRfc64ExistingDirectoryV1,
+  createRfc64DurableFileStoreForTestV1,
   createRfc64DurableFileStoreV1,
+  ensureRfc64SecureDirectoryTreeForTestV1,
   ensureRfc64SecureDirectoryTreeV1,
   type Rfc64DurableFileBoundaryV1,
   type Rfc64DurableFileLifecycleV1,
@@ -36,9 +38,7 @@ import {
   resolveRfc64ControlObjectStorePathV1,
   resolveRfc64PersistenceRootV1,
 } from './persistence-layout-v1.js';
-import type {
-  Rfc64InventoryOwnedRootCapabilityV1,
-} from './inventory-v1/open.js';
+import type { Rfc64PersistenceRootOwnershipV1 } from './persistence-root-ownership-v1-internal.js';
 
 export { RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH };
 export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -89,10 +89,6 @@ export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
 
 interface Rfc64ControlObjectStoreLifecycleV1
   extends Rfc64DurableFileLifecycleV1<Rfc64ControlObjectStoreFileKindV1> {}
-
-const PRODUCTION_LIFECYCLE = Object.freeze({
-  boundary: (_boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1): void => {},
-}) satisfies Rfc64ControlObjectStoreLifecycleV1;
 
 export interface StageVerifiedControlObjectV1 {
   readonly envelope: SignedControlEnvelopeV1;
@@ -152,10 +148,10 @@ export interface Rfc64ControlObjectStoreV1 {
 
 /** Open only with lifecycle authority minted by the leased inventory owner. */
 export async function openRfc64ControlObjectStoreForOwnedInventoryV1(
-  ownership: Rfc64InventoryOwnedRootCapabilityV1,
+  ownership: Rfc64PersistenceRootOwnershipV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  const rfc64RootPath = ownership.assertOwnedAndGetRootPathV1();
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, PRODUCTION_LIFECYCLE);
+  const rfc64RootPath = ownership.assertHeldAndGetRootPathV1();
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, null);
 }
 
 interface PreparedStoredControlObjectV1 {
@@ -185,9 +181,9 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
 
   constructor(
     readonly rootPath: string,
-    lifecycle: Rfc64ControlObjectStoreLifecycleV1,
+    durableFiles: Rfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>,
   ) {
-    this.#durableFiles = createRfc64DurableFileStoreV1(rootPath, lifecycle);
+    this.#durableFiles = durableFiles;
   }
 
   get closed(): boolean {
@@ -461,7 +457,11 @@ export async function openRfc64ControlObjectStoreForTestV1(
       'DKG data directory',
       { access: 'owner' },
     );
-    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, guardedLifecycle);
+    await ensureRfc64SecureDirectoryTreeForTestV1(
+      rfc64RootPath,
+      dataDir,
+      guardedLifecycle,
+    );
   });
   return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, guardedLifecycle);
 }
@@ -477,9 +477,9 @@ function assertRfc64ControlObjectStoreTestEnvironmentV1(): void {
 
 async function openRfc64ControlObjectStoreAtRootV1(
   rfc64RootPathInput: string,
-  lifecycle: Rfc64ControlObjectStoreLifecycleV1,
+  testLifecycle: Rfc64ControlObjectStoreLifecycleV1 | null,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  if (!Object.isFrozen(lifecycle)) {
+  if (testLifecycle !== null && !Object.isFrozen(testLifecycle)) {
     fail('control-store-input', 'control object store lifecycle adapter must be immutable');
   }
   const rfc64RootPath = resolve(rfc64RootPathInput);
@@ -490,19 +490,19 @@ async function openRfc64ControlObjectStoreAtRootV1(
       'RFC-64 persistence root',
       { access: 'owner-only' },
     );
-    await ensureRfc64SecureDirectoryTreeV1(rootPath, rfc64RootPath, lifecycle);
-    await ensureRfc64SecureDirectoryTreeV1(
-      join(rootPath, OBJECTS_DIRECTORY),
-      rootPath,
-      lifecycle,
-    );
-    await ensureRfc64SecureDirectoryTreeV1(
-      join(rootPath, SIGNATURES_DIRECTORY),
-      rootPath,
-      lifecycle,
-    );
+    const ensureTree = testLifecycle === null
+      ? (target: string, root: string) =>
+          ensureRfc64SecureDirectoryTreeV1(target, root)
+      : (target: string, root: string) =>
+          ensureRfc64SecureDirectoryTreeForTestV1(target, root, testLifecycle);
+    await ensureTree(rootPath, rfc64RootPath);
+    await ensureTree(join(rootPath, OBJECTS_DIRECTORY), rootPath);
+    await ensureTree(join(rootPath, SIGNATURES_DIRECTORY), rootPath);
   });
-  return new FileRfc64ControlObjectStoreV1(rootPath, lifecycle);
+  const durableFiles = testLifecycle === null
+    ? createRfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>(rootPath)
+    : createRfc64DurableFileStoreForTestV1(rootPath, testLifecycle);
+  return new FileRfc64ControlObjectStoreV1(rootPath, durableFiles);
 }
 
 function prepareStageBatch(

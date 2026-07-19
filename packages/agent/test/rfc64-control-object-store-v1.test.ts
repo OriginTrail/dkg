@@ -948,10 +948,7 @@ describe('RFC-64 durable control-object store v1', () => {
 
   it('rejects an escaping durable-file relative key inside the write operation', async () => {
     const containmentRoot = await temporaryDataDirectory();
-    const durableFiles = createRfc64DurableFileStoreV1(
-      containmentRoot,
-      Object.freeze({ boundary: () => {} }),
-    );
+    const durableFiles = createRfc64DurableFileStoreV1<'object'>(containmentRoot);
     await expect(durableFiles.putExactBytes({
       relativePath: join('..', 'escaped.jcs'),
       bytes: new TextEncoder().encode('{}'),
@@ -971,10 +968,7 @@ describe('RFC-64 durable control-object store v1', () => {
     const relativePath = join('race', 'immutable.jcs');
     const firstBytes = new TextEncoder().encode('{"writer":"first"}');
     const secondBytes = new TextEncoder().encode('{"writer":"second"}');
-    const durableFiles = createRfc64DurableFileStoreV1(
-      containmentRoot,
-      Object.freeze({ boundary: () => {} }),
-    );
+    const durableFiles = createRfc64DurableFileStoreV1<'object'>(containmentRoot);
     const write = (bytes: Uint8Array) => durableFiles.putExactBytes({
       relativePath,
       bytes,

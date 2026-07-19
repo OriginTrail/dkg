@@ -15,8 +15,11 @@ persistence.inventory.controlObjectStoreOwnership;
 // @ts-expect-error startup purge authority is not a shared inventory operation
 persistence.inventory.purgeNextStartupStaleCandidateBatch();
 
+// @ts-expect-error public inventory foundations do not expose sibling-resource authority
+ownedInventory.controlObjectStoreOwnership;
 await openRfc64ControlObjectStoreForOwnedInventoryV1(
-  ownedInventory.controlObjectStoreOwnership,
+  // @ts-expect-error an inventory object is not the package-internal ownership capability
+  ownedInventory,
 );
 // @ts-expect-error a raw filesystem path cannot bypass inventory lease ownership
 await openRfc64ControlObjectStoreForOwnedInventoryV1('/tmp/rfc64-sync');
