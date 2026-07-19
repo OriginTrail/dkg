@@ -165,11 +165,21 @@ interface PreparedStoredControlObjectV1 {
   readonly signatureVariantBytes: Uint8Array;
 }
 
+interface PreparedControlObjectFileV1 {
+  readonly relativePath: string;
+  readonly bytes: Uint8Array;
+  readonly kind: Rfc64ControlObjectStoreFileKindV1;
+}
+
+interface PreparedControlObjectGroupV1 {
+  readonly object: PreparedControlObjectFileV1;
+  readonly signatures: readonly PreparedControlObjectFileV1[];
+}
+
 class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closed = false;
   #closePromise: Promise<void> | null = null;
   readonly #inFlightOperations = new Set<Promise<unknown>>();
-  readonly #fileWriteTails = new Map<string, Promise<void>>();
   readonly #durableFiles: Rfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>;
   readonly namespaceDurability = rfc64NamespaceDurabilityV1();
 
@@ -189,14 +199,23 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   ): Promise<StageVerifiedControlObjectsResultV1> {
     this.requireOpen();
     const prepared = prepareStageBatch(input);
+    const groups = this.planStageGroups(prepared);
     const operation = (async () => {
-      const result = await settleAllOrThrowV1(prepared.map(async (item) => {
-        await this.stagePrepared(item);
-        return Object.freeze({
+      await settleAllOrThrowV1(groups.map(async (group) => {
+        await this.putExactFile(
+          group.object.relativePath,
+          group.object.bytes,
+          group.object.kind,
+        );
+        await settleAllOrThrowV1(group.signatures.map(async (signature) => {
+          await this.putExactFile(signature.relativePath, signature.bytes, signature.kind);
+        }), 'RFC-64 control-object signature staging failed');
+      }), 'RFC-64 control-object batch staging failed');
+      const result = prepared.map((item) =>
+        Object.freeze({
           objectDigest: item.objectDigest,
           signatureVariantDigest: item.signatureVariantDigest,
-        });
-      }), 'RFC-64 control-object batch staging failed');
+        }));
       return Object.freeze({
         durable: true as const,
         namespaceDurability: this.namespaceDurability,
@@ -253,9 +272,8 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         fail('control-store-corrupt', 'stored control object is not canonical for its exact keys', cause);
       }
 
-      // The caller callback intentionally runs outside every file-key tail. It
-      // may compose this cache with another exact read without deadlocking the
-      // write that produced the snapshot above.
+      // The caller callback runs after both bounded file snapshots and outside
+      // durable-file publication, so it may compose another exact cache read.
       let issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
       try {
         issuerSignature = await verifyIssuerSignature(envelope);
@@ -280,15 +298,60 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     return this.#closePromise;
   }
 
-  private async stagePrepared(item: PreparedStoredControlObjectV1): Promise<void> {
-    const objectPath = this.objectRelativePath(item.objectDigest);
-    await this.stageFileByKey(objectPath, item.unsignedBytes, 'object');
-
-    const signaturePath = this.signatureRelativePath(
-      item.objectDigest,
-      item.signatureVariantDigest,
-    );
-    await this.stageFileByKey(signaturePath, item.signatureVariantBytes, 'signature');
+  private planStageGroups(
+    prepared: readonly PreparedStoredControlObjectV1[],
+  ): readonly PreparedControlObjectGroupV1[] {
+    const groups = new Map<string, {
+      readonly object: PreparedControlObjectFileV1;
+      readonly signatures: Map<string, PreparedControlObjectFileV1>;
+    }>();
+    const addUnique = (
+      files: Map<string, PreparedControlObjectFileV1>,
+      relativePath: string,
+      bytes: Uint8Array,
+      kind: Rfc64ControlObjectStoreFileKindV1,
+    ): PreparedControlObjectFileV1 => {
+      const existing = files.get(relativePath);
+      if (existing !== undefined) {
+        if (!byteArraysEqual(existing.bytes, bytes) || existing.kind !== kind) {
+          fail(
+            'control-store-verification',
+            'one immutable control-object key resolved to conflicting prepared bytes',
+          );
+        }
+        return existing;
+      }
+      const file = Object.freeze({ relativePath, bytes, kind });
+      files.set(relativePath, file);
+      return file;
+    };
+    const objects = new Map<string, PreparedControlObjectFileV1>();
+    for (const item of prepared) {
+      const objectPath = this.objectRelativePath(item.objectDigest);
+      let group = groups.get(objectPath);
+      if (group === undefined) {
+        group = {
+          object: addUnique(objects, objectPath, item.unsignedBytes, 'object'),
+          signatures: new Map(),
+        };
+        groups.set(objectPath, group);
+      } else if (!byteArraysEqual(group.object.bytes, item.unsignedBytes)) {
+        fail(
+          'control-store-verification',
+          'one immutable control-object key resolved to conflicting prepared bytes',
+        );
+      }
+      addUnique(
+        group.signatures,
+        this.signatureRelativePath(item.objectDigest, item.signatureVariantDigest),
+        item.signatureVariantBytes,
+        'signature',
+      );
+    }
+    return Object.freeze([...groups.values()].map((group) => Object.freeze({
+      object: group.object,
+      signatures: Object.freeze([...group.signatures.values()]),
+    })));
   }
 
   private objectRelativePath(objectDigest: Digest32V1): string {
@@ -312,26 +375,6 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       objectHex,
       `${variantHex}${CANONICAL_FILE_SUFFIX}`,
     );
-  }
-
-  private stageFileByKey(
-    relativePath: string,
-    bytes: Uint8Array,
-    kind: 'object' | 'signature',
-  ): Promise<void> {
-    const previous = this.#fileWriteTails.get(relativePath) ?? Promise.resolve();
-    const run = previous.then(async () => {
-      await this.putExactFile(relativePath, bytes, kind);
-    }, async () => {
-      await this.putExactFile(relativePath, bytes, kind);
-    });
-    this.#fileWriteTails.set(relativePath, run);
-    void run.finally(() => {
-      if (this.#fileWriteTails.get(relativePath) === run) {
-        this.#fileWriteTails.delete(relativePath);
-      }
-    }).catch(() => undefined);
-    return run;
   }
 
   private async putExactFile(
@@ -363,6 +406,14 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     }).catch(() => undefined);
     return operation;
   }
+}
+
+function byteArraysEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 async function settleAllOrThrowV1<T>(

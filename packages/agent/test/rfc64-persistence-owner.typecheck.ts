@@ -12,6 +12,8 @@ persistence.inventory.close();
 await persistence.controlObjects.close();
 // @ts-expect-error the non-owning inventory view cannot mint sibling resources
 persistence.inventory.controlObjectStoreOwnership;
+// @ts-expect-error startup purge authority is not a shared inventory operation
+persistence.inventory.purgeNextStartupStaleCandidateBatch();
 
 await openRfc64ControlObjectStoreForOwnedInventoryV1(
   ownedInventory.controlObjectStoreOwnership,

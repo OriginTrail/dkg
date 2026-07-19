@@ -26,6 +26,11 @@ export interface Rfc64FilesystemEntryPolicyV1 {
   readonly entryKind: Rfc64FilesystemEntryKindV1;
 }
 
+interface Rfc64PosixFilesystemSnapshotV1 {
+  readonly uid: number;
+  readonly mode: number;
+}
+
 export function rfc64UsesWindowsFilesystemPolicyV1(): boolean {
   return process.platform === 'win32';
 }
@@ -47,27 +52,29 @@ export function rfc64PosixModeMatchesV1(mode: number, expected: number): boolean
 }
 
 export function assertRfc64FilesystemOwnerSyncV1(path: string): void {
+  const entry = statSync(path);
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    assertWindowsFilesystemOwnerSync(
+    runWindowsAclOperationSync(
       path,
-      statSync(path).isDirectory() ? 'directory' : 'file',
+      entry.isDirectory() ? 'directory' : 'file',
+      WINDOWS_FILESYSTEM_OWNER_OPERATION,
     );
     return;
   }
-  if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
-    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
-  }
+  assertRfc64PosixFilesystemOwnerV1(entry);
 }
 
 export async function assertRfc64FilesystemOwnerV1(path: string): Promise<void> {
+  const entry = await stat(path);
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    const entry = await stat(path);
-    await assertWindowsFilesystemOwner(path, entry.isDirectory() ? 'directory' : 'file');
+    await runWindowsAclOperationAsync(
+      path,
+      entry.isDirectory() ? 'directory' : 'file',
+      WINDOWS_FILESYSTEM_OWNER_OPERATION,
+    );
     return;
   }
-  if (!rfc64CurrentUserOwnsUidV1((await stat(path)).uid)) {
-    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
-  }
+  assertRfc64PosixFilesystemOwnerV1(entry);
 }
 
 export function assertRfc64OwnerOnlyPermissionsSyncV1(
@@ -76,18 +83,10 @@ export function assertRfc64OwnerOnlyPermissionsSyncV1(
   policy: Rfc64FilesystemEntryPolicyV1,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    assertWindowsOwnerOnlyPermissionsSync(path, policy.entryKind);
+    runWindowsAclOperationSync(path, policy.entryKind, WINDOWS_OWNER_ONLY_ASSERTION_OPERATION);
     return;
   }
-  const stat = statSync(path);
-  if (!rfc64CurrentUserOwnsUidV1(stat.uid)) {
-    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
-  }
-  if (!rfc64PosixModeMatchesV1(stat.mode, expectedMode)) {
-    throw new Error(
-      `RFC-64 path mode ${(stat.mode & 0o777).toString(8)} does not match ${expectedMode.toString(8)}`,
-    );
-  }
+  assertRfc64PosixOwnerOnlyPermissionsV1(statSync(path), expectedMode);
 }
 
 export async function assertRfc64OwnerOnlyPermissionsV1(
@@ -96,18 +95,14 @@ export async function assertRfc64OwnerOnlyPermissionsV1(
   policy: Rfc64FilesystemEntryPolicyV1,
 ): Promise<void> {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    await assertWindowsOwnerOnlyPermissions(path, policy.entryKind);
+    await runWindowsAclOperationAsync(
+      path,
+      policy.entryKind,
+      WINDOWS_OWNER_ONLY_ASSERTION_OPERATION,
+    );
     return;
   }
-  const entry = await stat(path);
-  if (!rfc64CurrentUserOwnsUidV1(entry.uid)) {
-    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
-  }
-  if (!rfc64PosixModeMatchesV1(entry.mode, expectedMode)) {
-    throw new Error(
-      `RFC-64 path mode ${(entry.mode & 0o777).toString(8)} does not match ${expectedMode.toString(8)}`,
-    );
-  }
+  assertRfc64PosixOwnerOnlyPermissionsV1(await stat(path), expectedMode);
 }
 
 export function applyRfc64OwnerOnlyPermissionsSyncV1(
@@ -116,12 +111,12 @@ export function applyRfc64OwnerOnlyPermissionsSyncV1(
   policy: Rfc64FilesystemEntryPolicyV1,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    applyWindowsOwnerOnlyPermissionsSync(path, policy.entryKind);
+    runWindowsAclOperationSync(path, policy.entryKind, WINDOWS_OWNER_ONLY_APPLICATION_OPERATION);
     return;
   }
-  assertRfc64FilesystemOwnerSyncV1(path);
+  assertRfc64PosixFilesystemOwnerV1(statSync(path));
   chmodSync(path, mode);
-  assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, policy);
+  assertRfc64PosixOwnerOnlyPermissionsV1(statSync(path), mode);
 }
 
 export async function applyRfc64OwnerOnlyPermissionsV1(
@@ -130,12 +125,36 @@ export async function applyRfc64OwnerOnlyPermissionsV1(
   policy: Rfc64FilesystemEntryPolicyV1,
 ): Promise<void> {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    await applyWindowsOwnerOnlyPermissions(path, policy.entryKind);
+    await runWindowsAclOperationAsync(
+      path,
+      policy.entryKind,
+      WINDOWS_OWNER_ONLY_APPLICATION_OPERATION,
+    );
     return;
   }
-  await assertRfc64FilesystemOwnerV1(path);
+  assertRfc64PosixFilesystemOwnerV1(await stat(path));
   await chmod(path, mode);
-  await assertRfc64OwnerOnlyPermissionsV1(path, mode, policy);
+  assertRfc64PosixOwnerOnlyPermissionsV1(await stat(path), mode);
+}
+
+function assertRfc64PosixFilesystemOwnerV1(
+  entry: Rfc64PosixFilesystemSnapshotV1,
+): void {
+  if (!rfc64CurrentUserOwnsUidV1(entry.uid)) {
+    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
+  }
+}
+
+function assertRfc64PosixOwnerOnlyPermissionsV1(
+  entry: Rfc64PosixFilesystemSnapshotV1,
+  expectedMode: number,
+): void {
+  assertRfc64PosixFilesystemOwnerV1(entry);
+  if (!rfc64PosixModeMatchesV1(entry.mode, expectedMode)) {
+    throw new Error(
+      `RFC-64 path mode ${(entry.mode & 0o777).toString(8)} does not match ${expectedMode.toString(8)}`,
+    );
+  }
 }
 
 /** Node cannot FlushFileBuffers on a Windows directory handle. */
@@ -277,104 +296,47 @@ $acl = Read-TargetAcl
 Assert-CurrentOwner $acl
 Assert-OwnerOnly $acl`;
 
-function assertWindowsFilesystemOwnerSync(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-): void {
-  runWindowsAclOperation(
-    path,
-    entryKind,
-    'owner assertion',
-    WINDOWS_FILESYSTEM_OWNER_SCRIPT,
-  );
+interface Rfc64WindowsAclOperationV1 {
+  readonly label: string;
+  readonly script: string;
 }
 
-async function assertWindowsFilesystemOwner(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-): Promise<void> {
-  await runWindowsAclOperationAsync(
-    path,
-    entryKind,
-    'owner assertion',
-    WINDOWS_FILESYSTEM_OWNER_SCRIPT,
-  );
-}
+const WINDOWS_FILESYSTEM_OWNER_OPERATION = Object.freeze({
+  label: 'owner assertion',
+  script: WINDOWS_FILESYSTEM_OWNER_SCRIPT,
+}) satisfies Rfc64WindowsAclOperationV1;
 
-function assertWindowsOwnerOnlyPermissionsSync(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-): void {
-  runWindowsAclOperation(
-    path,
-    entryKind,
-    'owner-only assertion',
-    WINDOWS_OWNER_ONLY_ASSERTION_SCRIPT,
-  );
-}
+const WINDOWS_OWNER_ONLY_ASSERTION_OPERATION = Object.freeze({
+  label: 'owner-only assertion',
+  script: WINDOWS_OWNER_ONLY_ASSERTION_SCRIPT,
+}) satisfies Rfc64WindowsAclOperationV1;
 
-async function assertWindowsOwnerOnlyPermissions(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-): Promise<void> {
-  await runWindowsAclOperationAsync(
-    path,
-    entryKind,
-    'owner-only assertion',
-    WINDOWS_OWNER_ONLY_ASSERTION_SCRIPT,
-  );
-}
+const WINDOWS_OWNER_ONLY_APPLICATION_OPERATION = Object.freeze({
+  label: 'owner-only application',
+  script: WINDOWS_OWNER_ONLY_APPLICATION_SCRIPT,
+}) satisfies Rfc64WindowsAclOperationV1;
 
-function applyWindowsOwnerOnlyPermissionsSync(
+function runWindowsAclOperationSync(
   path: string,
   entryKind: Rfc64FilesystemEntryKindV1,
-): void {
-  runWindowsAclOperation(
-    path,
-    entryKind,
-    'owner-only application',
-    WINDOWS_OWNER_ONLY_APPLICATION_SCRIPT,
-  );
-}
-
-async function applyWindowsOwnerOnlyPermissions(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-): Promise<void> {
-  await runWindowsAclOperationAsync(
-    path,
-    entryKind,
-    'owner-only application',
-    WINDOWS_OWNER_ONLY_APPLICATION_SCRIPT,
-  );
-}
-
-function runWindowsAclOperation(
-  path: string,
-  entryKind: Rfc64FilesystemEntryKindV1,
-  operation: string,
-  script: string,
+  operation: Rfc64WindowsAclOperationV1,
 ): void {
   const result = spawnSync(
     'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    windowsAclArgumentsV1(operation),
     {
       encoding: 'utf8',
       windowsHide: true,
-      env: {
-        ...process.env,
-        DKG_RFC64_ACL_DIRECTORY: String(entryKind === 'directory'),
-        DKG_RFC64_ACL_PATH: path,
-      },
+      env: windowsAclEnvironmentV1(path, entryKind),
     },
   );
   if (result.error !== undefined || result.status !== 0) {
-    throw new Error(
-      `RFC-64 Windows ACL ${operation} failed for ${path}: ${
-        result.error?.message
-          ?? (result.stderr.trim() || `PowerShell exited ${result.status}`)
-      }`,
-      result.error === undefined ? {} : { cause: result.error },
+    throw windowsAclFailureV1(
+      path,
+      operation,
+      result.error?.message
+        ?? (result.stderr.trim() || `PowerShell exited ${result.status}`),
+      result.error,
     );
   }
 }
@@ -382,21 +344,16 @@ function runWindowsAclOperation(
 async function runWindowsAclOperationAsync(
   path: string,
   entryKind: Rfc64FilesystemEntryKindV1,
-  operation: string,
-  script: string,
+  operation: Rfc64WindowsAclOperationV1,
 ): Promise<void> {
   await new Promise<void>((resolveOperation, rejectOperation) => {
     const child = spawn(
       'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      windowsAclArgumentsV1(operation),
       {
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe'],
-        env: {
-          ...process.env,
-          DKG_RFC64_ACL_DIRECTORY: String(entryKind === 'directory'),
-          DKG_RFC64_ACL_PATH: path,
-        },
+        env: windowsAclEnvironmentV1(path, entryKind),
       },
     );
     let stderr = '';
@@ -405,21 +362,45 @@ async function runWindowsAclOperationAsync(
       stderr += chunk;
     });
     child.once('error', (cause) => {
-      rejectOperation(new Error(
-        `RFC-64 Windows ACL ${operation} failed for ${path}: ${cause.message}`,
-        { cause },
-      ));
+      rejectOperation(windowsAclFailureV1(path, operation, cause.message, cause));
     });
     child.once('close', (code) => {
       if (code === 0) {
         resolveOperation();
         return;
       }
-      rejectOperation(new Error(
-        `RFC-64 Windows ACL ${operation} failed for ${path}: ${
-          stderr.trim() || `PowerShell exited ${code}`
-        }`,
+      rejectOperation(windowsAclFailureV1(
+        path,
+        operation,
+        stderr.trim() || `PowerShell exited ${code}`,
       ));
     });
   });
+}
+
+function windowsAclArgumentsV1(operation: Rfc64WindowsAclOperationV1): string[] {
+  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', operation.script];
+}
+
+function windowsAclEnvironmentV1(
+  path: string,
+  entryKind: Rfc64FilesystemEntryKindV1,
+): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    DKG_RFC64_ACL_DIRECTORY: String(entryKind === 'directory'),
+    DKG_RFC64_ACL_PATH: path,
+  };
+}
+
+function windowsAclFailureV1(
+  path: string,
+  operation: Rfc64WindowsAclOperationV1,
+  detail: string,
+  cause?: unknown,
+): Error {
+  return new Error(
+    `RFC-64 Windows ACL ${operation.label} failed for ${path}: ${detail}`,
+    cause === undefined ? {} : { cause },
+  );
 }

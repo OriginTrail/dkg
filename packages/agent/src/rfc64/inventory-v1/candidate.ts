@@ -245,9 +245,21 @@ export interface Rfc64InventoryV1CandidateApi {
 }
 
 /** Candidate operations safe to share without inventory lifecycle ownership. */
-export type Rfc64InventoryV1OperationsV1 = Omit<
+export type Rfc64InventoryV1OperationsV1 = Pick<
   Rfc64InventoryV1CandidateApi,
-  'purgeNextStartupStaleCandidateBatch'
+  | 'createCandidateSession'
+  | 'putVerifiedCandidateBucket'
+  | 'getCandidateBucket'
+  | 'beginCandidateBucketRows'
+  | 'beginCandidateBucketDiff'
+  | 'pageCandidateBucketRows'
+  | 'pageCandidateBucketAddedOrChanged'
+  | 'pageCandidateBucketRemoved'
+  | 'readVerifiedCandidateCatalogRow'
+  | 'verifyCandidateCatalogPrecommitV1'
+  | 'closeCandidateTraversal'
+  | 'discardCandidateSessionBatch'
+  | 'deleteCandidateBucket'
 >;
 
 interface SessionContextV1 {

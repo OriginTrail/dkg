@@ -9,7 +9,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./dist/rfc64/control-object-store-v1-internal.js": null,
+    "./dist/*": "./dist/*"
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
@@ -19,7 +21,7 @@
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:types": "tsc --project tsconfig.type-tests.json",
-    "test:package-root": "node --input-type=module -e \"const agent = await import('@origintrail-official/dkg-agent'); if (typeof agent.DKGAgent !== 'function') throw new Error('published package root did not expose DKGAgent')\"",
+    "test:package-root": "node --input-type=module -e \"const root = await import('@origintrail-official/dkg-agent'); const legacy = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js'); if (typeof root.DKGAgent !== 'function' || typeof legacy.DKGAgent !== 'function') throw new Error('published agent entry points did not expose DKGAgent'); try { await import('@origintrail-official/dkg-agent/dist/rfc64/control-object-store-v1-internal.js'); throw new Error('internal RFC-64 module unexpectedly resolved'); } catch (error) { if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }\"",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

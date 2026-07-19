@@ -35,7 +35,14 @@ import {
 } from '../src/rfc64/control-object-store-v1.js';
 import { createRfc64DurableFileStoreV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
-import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
+import {
+  applyRfc64OwnerOnlyPermissionsSyncV1,
+  applyRfc64OwnerOnlyPermissionsV1,
+  assertRfc64FilesystemOwnerSyncV1,
+  assertRfc64FilesystemOwnerV1,
+  assertRfc64OwnerOnlyPermissionsSyncV1,
+  assertRfc64OwnerOnlyPermissionsV1,
+} from '../src/rfc64/secure-filesystem-policy-v1.js';
 import {
   createRfc64ControlObjectStoreTestOpenerV1,
   type Rfc64ControlObjectStoreDurabilityBoundaryV1,
@@ -184,6 +191,48 @@ function pathsFor(
 }
 
 describe('RFC-64 durable control-object store v1', () => {
+  it('keeps synchronous inventory and asynchronous durable policy twins aligned', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const policy = { entryKind: 'directory' as const };
+    applyRfc64OwnerOnlyPermissionsSyncV1(
+      dataDir,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      policy,
+    );
+
+    expect(() => assertRfc64FilesystemOwnerSyncV1(dataDir)).not.toThrow();
+    await expect(assertRfc64FilesystemOwnerV1(dataDir)).resolves.toBeUndefined();
+    expect(() => assertRfc64OwnerOnlyPermissionsSyncV1(
+      dataDir,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      policy,
+    )).not.toThrow();
+    await expect(assertRfc64OwnerOnlyPermissionsV1(
+      dataDir,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      policy,
+    )).resolves.toBeUndefined();
+    await expect(applyRfc64OwnerOnlyPermissionsV1(
+      dataDir,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      policy,
+    )).resolves.toBeUndefined();
+
+    if (process.platform !== 'win32') {
+      await chmod(dataDir, 0o755);
+      expect(() => assertRfc64OwnerOnlyPermissionsSyncV1(
+        dataDir,
+        RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+        policy,
+      )).toThrow(/path mode 755/);
+      await expect(assertRfc64OwnerOnlyPermissionsV1(
+        dataDir,
+        RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+        policy,
+      )).rejects.toThrow(/path mode 755/);
+    }
+  });
+
   it('rechecks NODE_ENV when the source-level test opener is invoked', async () => {
     const opener = createRfc64ControlObjectStoreTestOpenerV1();
     const previousNodeEnv = process.env.NODE_ENV;
@@ -293,7 +342,7 @@ describe('RFC-64 durable control-object store v1', () => {
     expect(store).not.toHaveProperty('advanceHead');
   });
 
-  it('is idempotent and serializes concurrent staging for exact digest keys', async () => {
+  it('converges concurrent staging through durable no-replace keys', async () => {
     const dataDir = await temporaryDataDirectory();
     const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
@@ -313,6 +362,9 @@ describe('RFC-64 durable control-object store v1', () => {
       'object.temp-written',
       'object.temp-mode-secured',
       'object.temp-fsynced',
+      'object.temp-written',
+      'object.temp-mode-secured',
+      'object.temp-fsynced',
       'object.published-no-replace',
       'object.temp-unlinked',
       'object.parent-fsynced',
@@ -329,6 +381,9 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.temp-written',
       'signature.temp-mode-secured',
       'signature.temp-fsynced',
+      'signature.temp-written',
+      'signature.temp-mode-secured',
+      'signature.temp-fsynced',
       'signature.published-no-replace',
       'signature.temp-unlinked',
       'signature.parent-fsynced',
@@ -336,14 +391,6 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.existing-parent-fsynced',
     ];
     expect([...boundaries].sort()).toEqual([...expectedBoundaries].sort());
-    expect(boundaries.indexOf('object.temp-written'))
-      .toBeLessThan(boundaries.indexOf('object.published-no-replace'));
-    expect(boundaries.indexOf('object.published-no-replace'))
-      .toBeLessThan(boundaries.indexOf('object.existing-fsynced'));
-    expect(boundaries.indexOf('signature.temp-written'))
-      .toBeLessThan(boundaries.indexOf('signature.published-no-replace'));
-    expect(boundaries.indexOf('signature.published-no-replace'))
-      .toBeLessThan(boundaries.indexOf('signature.existing-fsynced'));
     boundaries.length = 0;
     await store.stageVerifiedObjects([fixture]);
     expect(boundaries).toEqual([
@@ -356,7 +403,10 @@ describe('RFC-64 durable control-object store v1', () => {
 
   it('coexists and reads exact signature variants for one immutable object', async () => {
     const dataDir = await temporaryDataDirectory();
-    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
+    const store = await createRfc64ControlObjectStoreTestOpenerV1({
+      boundary: (boundary) => boundaries.push(boundary),
+    })(dataDir);
     const [first, second] = await contractSignatureVariantsFixture();
     expect(first.envelope.objectDigest).toBe(second.envelope.objectDigest);
 
@@ -368,6 +418,8 @@ describe('RFC-64 durable control-object store v1', () => {
     const secondPaths = pathsFor(dataDir, second.envelope);
     expect(firstPaths.object).toBe(secondPaths.object);
     expect(firstPaths.signature).not.toBe(secondPaths.signature);
+    expect(boundaries.filter((boundary) => boundary === 'object.temp-written')).toHaveLength(1);
+    expect(boundaries.filter((boundary) => boundary === 'signature.temp-written')).toHaveLength(2);
     await expect(readFile(firstPaths.signature)).resolves.not.toHaveLength(0);
     await expect(readFile(secondPaths.signature)).resolves.not.toHaveLength(0);
 
