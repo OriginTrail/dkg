@@ -1,4 +1,7 @@
 import {
+  AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+  AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+  AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
   computeControlSignatureVariantDigestHex,
   type AuthorCatalogScopeV1,
@@ -35,7 +38,11 @@ const CONTEXT_GRAPH_ID =
 const GOVERNANCE_CONTRACT =
   '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
+const OTHER_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
+const HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
+const DELEGATION_EFFECTIVE_AT = '1773899999000' as TimestampMsV1;
+const DELEGATION_EXPIRES_AT = '1774000000000' as TimestampMsV1;
 const DELEGATION_DIGEST = `0x${'72'.repeat(32)}` as Digest32V1;
 
 type RouterHandler = (
@@ -104,6 +111,22 @@ function controlObjects(): Rfc64ControlObjectOperationsV1 {
   };
 }
 
+function exactStageReceipt(
+  input: readonly { readonly envelope: { readonly objectDigest: string; readonly signature: string } }[],
+) {
+  return Object.freeze({
+    durable: true as const,
+    namespaceDurability: 'posix-hardlink-no-replace-directory-fsync-v1' as const,
+    objects: Object.freeze(input.map(({ envelope }) => Object.freeze({
+      objectDigest: envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: computeControlSignatureVariantDigestHex(
+        envelope.objectDigest,
+        envelope.signature,
+      ),
+    }))),
+  });
+}
+
 function inertReconciler(): Rfc64PublicCatalogReceiverReconcilerV1 {
   return {
     isHeadApplied: async () => false,
@@ -129,6 +152,35 @@ function acceptPolicy(service: Rfc64PublicCatalogServiceV1) {
     contextGraphId: CONTEXT_GRAPH_ID,
     ownerAddress: AUTHOR,
   });
+}
+
+function genesisInput(
+  service: Rfc64PublicCatalogServiceV1,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    scope: {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as AuthorCatalogScopeV1,
+    signer: {
+      issuer: AUTHOR,
+      signDigest: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    },
+    issuedAt: HEAD_ISSUED_AT,
+    catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+    catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+    policy: acceptPolicy(service),
+    peers: ['peer-a'],
+    ...overrides,
+  };
 }
 
 function announcement(policyDigest: Digest32V1): Rfc64PublicCatalogHeadAnnouncementV1 {
@@ -157,6 +209,138 @@ function countEvent(router: RecordingRouter, event: string): number {
 }
 
 describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
+  it('durably stages the exact signed delegation before genesis and only then announces', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    vi.mocked(store.stageVerifiedObjects).mockImplementation(async (input) => {
+      router.events.push(`stage:${input.map(({ envelope }) => envelope.objectType).join(',')}`);
+      return exactStageReceipt(input);
+    });
+    router.sendResponse = async () => Uint8Array.of(1);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+    });
+    service.start();
+
+    const result = await service.publishOpenAuthorCatalogGenesis(genesisInput(service));
+    const stageCalls = vi.mocked(store.stageVerifiedObjects).mock.calls;
+    expect(stageCalls).toHaveLength(2);
+    expect(stageCalls[0][0].map(({ envelope }) => envelope.objectType)).toEqual([
+      AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+    ]);
+    expect(stageCalls[1][0].map(({ envelope }) => envelope.objectType)).toEqual([
+      AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+      AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    ]);
+    const delegation = result.catalogIssuerAuthorization.catalogIssuerDelegation;
+    expect(result.catalogIssuerDelegationObjectDigest).toBe(delegation.objectDigest);
+    expect(result.catalogIssuerDelegationSignatureVariantDigest).toBe(
+      computeControlSignatureVariantDigestHex(delegation.objectDigest, delegation.signature),
+    );
+    const head = stageCalls[1][0].at(-1)?.envelope;
+    expect(head?.payload).toMatchObject({
+      catalogIssuerDelegationDigest: delegation.objectDigest,
+      issuedAt: HEAD_ISSUED_AT,
+    });
+    expect(result.catalogIssuerAuthorization.parentAuthorAgentEvidence).toBeNull();
+    expect(router.events.filter((event) => event.startsWith('stage:') || event.startsWith('send:')))
+      .toEqual([
+        `stage:${AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1}`,
+        `stage:${AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1},${AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1}`,
+        `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
+      ]);
+    expect(result.announcedPeers).toEqual(['peer-a']);
+    await service.close();
+  });
+
+  it('rejects signer and accepted-policy scope mismatches before staging or announcing', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+    });
+    service.start();
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, {
+      signer: {
+        issuer: OTHER_WALLET.address.toLowerCase(),
+        signDigest: (digest: Uint8Array) => OTHER_WALLET.signMessage(digest),
+      },
+    }) as never)).rejects.toThrow(/signer must equal the exact catalog author/);
+
+    const wrongPolicy = service.acceptOpenPolicy({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
+    });
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, {
+      policy: wrongPolicy,
+    }) as never)).rejects.toThrow(/not bound to the exact catalog/);
+    expect(store.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
+  it('rejects an expired delegation before signing, staging, or announcing', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    const signDigest = vi.fn((digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+    });
+    service.start();
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, {
+      signer: { issuer: AUTHOR, signDigest },
+      catalogIssuerDelegationExpiresAt: HEAD_ISSUED_AT,
+    }) as never)).rejects.toThrow(/half-open interval/);
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(store.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
+  it('does not construct or announce a head when delegation staging is not durable', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    vi.mocked(store.stageVerifiedObjects).mockRejectedValueOnce(
+      new Error('delegation durability barrier failed'),
+    );
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+    });
+    service.start();
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service)))
+      .rejects.toThrow('delegation durability barrier failed');
+    expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(1);
+    expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
+  it('does not announce when genesis staging fails after durable delegation staging', async () => {
+    const router = new RecordingRouter();
+    const store = controlObjects();
+    vi.mocked(store.stageVerifiedObjects)
+      .mockImplementationOnce(async (input) => exactStageReceipt(input))
+      .mockRejectedValueOnce(new Error('genesis durability barrier failed'));
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: store,
+    });
+    service.start();
+
+    await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service)))
+      .rejects.toThrow('genesis durability barrier failed');
+    expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
+    expect(router.events.some((event) => event.startsWith('send:'))).toBe(false);
+    await service.close();
+  });
+
   it('constructs one reconciler with frozen fetch-only capabilities and the configured timeout', async () => {
     const router = new RecordingRouter();
     let clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1> | undefined;

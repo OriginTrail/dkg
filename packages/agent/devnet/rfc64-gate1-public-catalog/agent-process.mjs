@@ -75,11 +75,21 @@ async function handle(cmd) {
         author: wallet,
         peers: cmd.peers,
         issuedAt: cmd.issuedAt,
+        catalogIssuerDelegationEffectiveAt: cmd.catalogIssuerDelegationEffectiveAt,
+        catalogIssuerDelegationExpiresAt: cmd.catalogIssuerDelegationExpiresAt,
+      });
+      const delegationReadBack = await agent.readRfc64StagedCatalogIssuerDelegationV1({
+        objectDigest: result.catalogIssuerDelegationObjectDigest,
+        signatureVariantDigest: result.catalogIssuerDelegationSignatureVariantDigest,
       });
       emit({
         event: 'published',
         headObjectDigest: result.headObjectDigest,
         signatureVariantDigest: result.signatureVariantDigest,
+        catalogIssuerDelegationObjectDigest: result.catalogIssuerDelegationObjectDigest,
+        catalogIssuerDelegationSignatureVariantDigest:
+          result.catalogIssuerDelegationSignatureVariantDigest,
+        catalogIssuerDelegationReadBack: delegationReadBack,
         policyDigest: result.announcement.policyDigest,
         announcedPeers: result.announcedPeers,
         failedPeers: result.failedPeers,

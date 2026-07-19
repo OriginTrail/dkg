@@ -12,8 +12,9 @@
  *     exact post-read, and durable applied-inventory commit,
  *   - answers the transport's open-policy check from the accepted-policy
  *     registry ({@link Rfc64AcceptedOpenCatalogPolicyRegistryV1}),
- *   - and provides the author path: produce a genesis head, durably stage it,
- *     then best-effort announce its availability to peers.
+ *   - and provides the author path: sign + durably stage the direct-author
+ *     issuer delegation, produce + durably stage its bound genesis head, then
+ *     best-effort announce availability to peers.
  *
  * Omitting a reconciler retains a staging-only diagnostic mode for the earlier
  * Gate-1A demo. That mode never reports a head as applied and never uses staged
@@ -21,6 +22,8 @@
  */
 
 import {
+  assertAuthorCatalogScopeV1,
+  computeControlSignatureVariantDigestHex,
   type ProtocolRouter,
   type SendOptions,
   type SignedControlEnvelopeV1,
@@ -37,10 +40,15 @@ import {
   produceEmptyAuthorCatalogGenesisV1,
   type Rfc64AuthorCatalogEip191SignerV1,
 } from './author-catalog-producer.js';
-import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
+import type {
+  Rfc64ControlObjectOperationsV1,
+  StageVerifiedControlObjectV1,
+  StageVerifiedControlObjectsResultV1,
+} from './control-object-store-v1.js';
 import {
   Rfc64AcceptedOpenCatalogPolicyRegistryV1,
   buildOpenOwnerContextGraphPolicyV1,
+  computeOpenContextGraphPolicyDigestV1,
   type AcceptedOpenCatalogPolicyV1,
   type BuildOpenOwnerContextGraphPolicyInputV1,
 } from './open-catalog-policy-v1.js';
@@ -56,6 +64,12 @@ import {
   type Rfc64PublicCatalogNativeAuthorizationV1,
   type Rfc64PublicCatalogNativeTransportOptionsV1,
 } from './public-catalog-native-transport-v1.js';
+import {
+  produceDirectAuthorCatalogIssuerDelegationV1,
+} from './public-catalog-issuer-delegation-v1.js';
+import type {
+  Rfc64PublicCatalogIssuerAuthorizationV1,
+} from './public-catalog-successor-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   Rfc64PublicCatalogTransportV1,
@@ -115,8 +129,9 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
 export interface PublishOpenAuthorCatalogGenesisInputV1 {
   readonly scope: AuthorCatalogScopeV1;
   readonly signer: Rfc64AuthorCatalogEip191SignerV1;
-  readonly catalogIssuerDelegationDigest: Digest32V1;
   readonly issuedAt: TimestampMsV1;
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
   /** The accepted open policy for the CG; its digest stamps the announcement. */
   readonly policy: AcceptedOpenCatalogPolicyV1;
   /** Peers to announce availability to. Announcements are best-effort hints. */
@@ -127,6 +142,10 @@ export interface PublishOpenAuthorCatalogGenesisResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly headObjectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
+  /** Exact signed direct-author proof usable by the hardened successor producer. */
+  readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  readonly catalogIssuerDelegationObjectDigest: Digest32V1;
+  readonly catalogIssuerDelegationSignatureVariantDigest: Digest32V1;
   /** Peers the announcement was acknowledged by. */
   readonly announcedPeers: readonly string[];
   /** Peers whose announcement failed (best-effort; correctness comes from pull). */
@@ -243,19 +262,55 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 
   /**
-   * Author path: produce a signed empty genesis head, durably stage its
-   * immutable objects, then best-effort announce availability to `peers`. The
-   * head is durable before any announcement; announcements grant no authority.
+   * Author path: produce and durably stage the signed issuer delegation, then
+   * produce and durably stage its bound empty genesis, then best-effort
+   * announce availability to `peers`. Both durability barriers complete before
+   * any announcement; announcements grant no authority.
    */
   async publishOpenAuthorCatalogGenesis(
     input: PublishOpenAuthorCatalogGenesisInputV1,
   ): Promise<PublishOpenAuthorCatalogGenesisResultV1> {
     this.#requireStarted();
+    const scope = snapshotCatalogScope(input.scope);
+    const signer = Object.freeze({
+      issuer: input.signer.issuer,
+      signDigest: input.signer.signDigest,
+    });
+    const issuedAt = input.issuedAt;
+    const effectiveAt = input.catalogIssuerDelegationEffectiveAt;
+    const expiresAt = input.catalogIssuerDelegationExpiresAt;
+    const peers = Object.freeze(Array.from(input.peers));
+    const heldPolicy = this.#policies.lookup(scope.networkId, scope.contextGraphId);
+    assertOpenPolicyMatchesCatalogScope(input.policy, heldPolicy, scope);
+    const policyDigest = heldPolicy!.policyDigest;
+    const delegation = await produceDirectAuthorCatalogIssuerDelegationV1({
+      scope,
+      signer,
+      effectiveAt,
+      expiresAt,
+      catalogHeadIssuedAt: issuedAt,
+    });
+
+    // The delegation is an independent durable prerequisite.  A single batch
+    // would permit the store to write its objects concurrently; two awaited
+    // barriers prove the named delegation is durable before any head that
+    // references it can be durably staged or announced.
+    const delegationEnvelope = delegation.authorization.catalogIssuerDelegation;
+    const delegationObject: StageVerifiedControlObjectV1 = Object.freeze({
+      envelope: delegationEnvelope,
+      issuerSignature: delegation.issuerSignature,
+    });
+    const stagedDelegation = await this.#controlObjects.stageVerifiedObjects([
+      delegationObject,
+    ]);
+    assertExactDurableStageReceipt(stagedDelegation, [delegationEnvelope]);
+    const delegationKeys = stagedDelegation.objects[0]!;
+
     const produced = await produceEmptyAuthorCatalogGenesisV1({
-      scope: input.scope,
-      catalogIssuerDelegationDigest: input.catalogIssuerDelegationDigest,
-      issuedAt: input.issuedAt,
-      signer: input.signer,
+      scope,
+      catalogIssuerDelegationDigest: delegationEnvelope.objectDigest as Digest32V1,
+      issuedAt,
+      signer,
     });
 
     const verified = await Promise.all(
@@ -265,6 +320,7 @@ export class Rfc64PublicCatalogServiceV1 {
       })),
     );
     const staged = await this.#controlObjects.stageVerifiedObjects(verified);
+    assertExactDurableStageReceipt(staged, produced.stagedObjects);
     const headKeys = staged.objects.at(-1);
     if (headKeys === undefined) {
       throw new Error('RFC-64 author catalog producer staged no head object');
@@ -278,14 +334,14 @@ export class Rfc64PublicCatalogServiceV1 {
       authorAddress: produced.head.payload.authorAddress,
       catalogEra: produced.head.payload.era,
       catalogVersion: produced.head.payload.version,
-      policyDigest: input.policy.policyDigest,
+      policyDigest,
       catalogHeadObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
     });
 
     const announcedPeers: string[] = [];
     const failedPeers: Array<{ peerId: string; error: string }> = [];
-    for (const peerId of input.peers) {
+    for (const peerId of peers) {
       try {
         await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions());
         announcedPeers.push(peerId);
@@ -301,6 +357,9 @@ export class Rfc64PublicCatalogServiceV1 {
       announcement,
       headObjectDigest: headKeys.objectDigest,
       signatureVariantDigest: headKeys.signatureVariantDigest,
+      catalogIssuerAuthorization: delegation.authorization,
+      catalogIssuerDelegationObjectDigest: delegationKeys.objectDigest,
+      catalogIssuerDelegationSignatureVariantDigest: delegationKeys.signatureVariantDigest,
       announcedPeers: Object.freeze(announcedPeers),
       failedPeers: Object.freeze(failedPeers),
     });
@@ -355,6 +414,69 @@ export class Rfc64PublicCatalogServiceV1 {
   #requireStarted(): void {
     if (!this.#started || this.#closed) {
       throw new Error('RFC-64 public catalog service is not started');
+    }
+  }
+}
+
+function snapshotCatalogScope(input: AuthorCatalogScopeV1): Readonly<AuthorCatalogScopeV1> {
+  const scope = Object.freeze({
+    networkId: input.networkId,
+    contextGraphId: input.contextGraphId,
+    governanceChainId: input.governanceChainId,
+    governanceContractAddress: input.governanceContractAddress,
+    ownershipTransitionDigest: input.ownershipTransitionDigest,
+    subGraphName: input.subGraphName,
+    authorAddress: input.authorAddress,
+    era: input.era,
+    bucketCount: input.bucketCount,
+  });
+  assertAuthorCatalogScopeV1(scope);
+  return scope;
+}
+
+function assertOpenPolicyMatchesCatalogScope(
+  supplied: AcceptedOpenCatalogPolicyV1,
+  held: AcceptedOpenCatalogPolicyV1 | null,
+  scope: AuthorCatalogScopeV1,
+): void {
+  const policy = supplied.policy;
+  if (
+    held === null
+    || held.policyDigest !== supplied.policyDigest
+    || supplied.policyDigest !== computeOpenContextGraphPolicyDigestV1(policy)
+    || policy.networkId !== scope.networkId
+    || policy.contextGraphId !== scope.contextGraphId
+    || policy.governanceChainId !== scope.governanceChainId
+    || policy.governanceContractAddress !== scope.governanceContractAddress
+    || policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
+    || policy.era !== scope.era
+    || policy.source.kind !== 'owner-signed-unregistered'
+    || policy.source.ownerAddress !== scope.authorAddress
+  ) {
+    throw new Error(
+      'RFC-64 open policy is not bound to the exact catalog network, CG, governance scope, era, and author',
+    );
+  }
+}
+
+function assertExactDurableStageReceipt(
+  receipt: StageVerifiedControlObjectsResultV1,
+  expected: readonly SignedControlEnvelopeV1[],
+): void {
+  if (receipt?.durable !== true || receipt.objects.length !== expected.length) {
+    throw new Error('RFC-64 control-object store did not return an exact durable receipt');
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    const envelope = expected[index];
+    const staged = receipt.objects[index];
+    if (
+      staged.objectDigest !== envelope.objectDigest
+      || staged.signatureVariantDigest !== computeControlSignatureVariantDigestHex(
+        envelope.objectDigest,
+        envelope.signature,
+      )
+    ) {
+      throw new Error('RFC-64 control-object store receipt changed an exact staged object');
     }
   }
 }

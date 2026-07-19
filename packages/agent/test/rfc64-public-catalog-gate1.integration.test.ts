@@ -28,6 +28,8 @@ const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/gate-1' as ContextGraphIdV1;
 const FIXED_HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
+const FIXED_DELEGATION_EFFECTIVE_AT = '1773899999000' as TimestampMsV1;
+const FIXED_DELEGATION_EXPIRES_AT = '1774000000000' as TimestampMsV1;
 
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
@@ -102,6 +104,8 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
       author: AUTHOR_WALLET,
       peers: [receiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: FIXED_DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: FIXED_DELEGATION_EXPIRES_AT,
     });
 
     // Author and receiver independently computed the same policy digest.
@@ -110,6 +114,10 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
     // router — proving send() delivers across the dialed connection + admission.
     expect(published.announcedPeers).toEqual([receiver.peerId]);
     expect(published.failedPeers).toEqual([]);
+    expect(await author.readRfc64StagedCatalogIssuerDelegationV1({
+      objectDigest: published.catalogIssuerDelegationObjectDigest,
+      signatureVariantDigest: published.catalogIssuerDelegationSignatureVariantDigest,
+    })).toBe(published.catalogIssuerDelegationObjectDigest);
 
     // The receiver's wired scheduler fetched + staged the head.
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
@@ -139,6 +147,8 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
       author: AUTHOR_WALLET,
       peers: [receiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: FIXED_DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: FIXED_DELEGATION_EXPIRES_AT,
     });
     expect(republished.announcement.catalogHeadObjectDigest).toBe(published.headObjectDigest);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
@@ -172,10 +182,16 @@ describe('RFC-64 Gate 1 public catalog wiring — two real DKGAgent instances', 
       author: AUTHOR_WALLET,
       peers: [receiver.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: FIXED_DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: FIXED_DELEGATION_EXPIRES_AT,
     });
     // The announcement is refused by the receiver's policy gate.
     expect(published.announcedPeers).toEqual([]);
     expect(published.failedPeers).toHaveLength(1);
+    expect(await author.readRfc64StagedCatalogIssuerDelegationV1({
+      objectDigest: published.catalogIssuerDelegationObjectDigest,
+      signatureVariantDigest: published.catalogIssuerDelegationSignatureVariantDigest,
+    })).toBe(published.catalogIssuerDelegationObjectDigest);
 
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
     const stagedDigest = await receiver.readRfc64StagedAuthorCatalogHeadV1({

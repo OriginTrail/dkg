@@ -123,6 +123,7 @@ export default defineConfig({
       "test/rfc64-public-catalog-transport-v1.test.ts",
       "test/rfc64-public-catalog-receiver-v1.test.ts",
       "test/rfc64-public-catalog-service-v1.test.ts",
+      "test/rfc64-public-catalog-issuer-delegation-v1.test.ts",
       "test/rfc64-public-catalog-gate1.integration.test.ts",
       "test/rfc64-public-catalog-native-transport-v1.test.ts",
       "test/rfc64-public-catalog-native-reconciler-v1.test.ts",

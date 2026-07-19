@@ -9,7 +9,8 @@
  *   - construct + start {@link Rfc64PublicCatalogServiceV1} on the production
  *     router during `start()` (dormant when no `dataDir` opened the RFC-64
  *     persistence), and drain + close it during `stop()`;
- *   - expose the author path (produce + durably stage + best-effort announce a
+ *   - expose the author path (sign + durably stage the direct-author issuer
+ *     delegation, produce + durably stage + best-effort announce its bound
  *     genesis head) and the accepted-open-policy seed used by both sides;
  *   - expose read-only observability for tests / evidence.
  *
@@ -18,6 +19,7 @@
  */
 
 import {
+  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   createOperationContext,
   type OperationContext,
   type ContextGraphIdV1,
@@ -41,15 +43,6 @@ import {
   type PublishOpenAuthorCatalogGenesisResultV1,
   type Rfc64PublicCatalogServiceStatsV1,
 } from './rfc64/public-catalog-service-v1.js';
-
-/**
- * Gate-1 simplification: a genesis head carries a placeholder catalog-issuer
- * delegation digest. The transport verifies generic envelope cryptography, not
- * issuer delegation, so this does not weaken any Gate-1 check; real
- * delegation-authority binding lands in a later phase.
- */
-export const RFC64_GATE1_PLACEHOLDER_DELEGATION_DIGEST_V1 =
-  `0x${'11'.repeat(32)}` as Digest32V1;
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64OpenCatalogAuthorSignerV1 {
@@ -76,14 +69,21 @@ export interface PublishOpenAuthorCatalogGenesisParamsV1 {
   readonly peers: readonly string[];
   /** Head object timestamp; defaults to now. */
   readonly issuedAt?: TimestampMsV1;
+  /** Required half-open validity interval for the signed direct-author delegation. */
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
   /** Open-policy timestamps; MUST match on every party (default '0'). */
   readonly policyIssuedAt?: TimestampMsV1;
   readonly policyEffectiveAt?: TimestampMsV1;
   readonly ownerAuthorityEra?: DecimalU64V1;
-  readonly catalogIssuerDelegationDigest?: Digest32V1;
 }
 
 export interface Rfc64StagedAuthorCatalogHeadRefV1 {
+  readonly objectDigest: Digest32V1;
+  readonly signatureVariantDigest: Digest32V1;
+}
+
+export interface Rfc64StagedCatalogIssuerDelegationRefV1 {
   readonly objectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
 }
@@ -126,8 +126,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Author path: accept the CG's open policy, produce a signed genesis head,
-   * durably stage its immutable objects, then best-effort announce availability.
+   * Author path: accept the CG's open policy, durably stage its signed direct-
+   * author issuer delegation, durably stage the bound genesis, then best-effort
+   * announce availability.
    */
   async publishOpenAuthorCatalogGenesisV1(
     this: DKGAgent,
@@ -158,12 +159,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       issuer: authorAddress,
       signDigest: (objectDigest) => params.author.signMessage(objectDigest),
     };
+    const issuedAt = params.issuedAt ?? (Date.now().toString() as TimestampMsV1);
     return service.publishOpenAuthorCatalogGenesis({
       scope,
       signer,
-      catalogIssuerDelegationDigest:
-        params.catalogIssuerDelegationDigest ?? RFC64_GATE1_PLACEHOLDER_DELEGATION_DIGEST_V1,
-      issuedAt: params.issuedAt ?? (Date.now().toString() as TimestampMsV1),
+      issuedAt,
+      catalogIssuerDelegationEffectiveAt: params.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: params.catalogIssuerDelegationExpiresAt,
       policy,
       peers: params.peers,
     });
@@ -185,6 +187,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
     return stored === null ? null : (stored.envelope.objectDigest as Digest32V1);
+  }
+
+  /** Read back the exact durably staged delegation returned by genesis publication. */
+  async readRfc64StagedCatalogIssuerDelegationV1(
+    this: DKGAgent,
+    ref: Rfc64StagedCatalogIssuerDelegationRefV1,
+  ): Promise<Digest32V1 | null> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) return null;
+    const stored = await persistence.controlObjects.getVerifiedObject({
+      objectDigest: ref.objectDigest,
+      signatureVariantDigest: ref.signatureVariantDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    if (stored === null) return null;
+    assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(stored.envelope);
+    return stored.envelope.objectDigest as Digest32V1;
   }
 
   /** Await the receiver scheduler draining all queued + in-flight fetch/stage work. */

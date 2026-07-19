@@ -1,11 +1,9 @@
 import {
-  AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
-  computeControlObjectDigestHex,
   decodeOpaqueKaBundleV1,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
@@ -14,13 +12,12 @@ import {
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
-  type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
 import {
   Rfc64PublicCatalogSuccessorProducerV1,
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
@@ -354,37 +351,27 @@ async function directCatalogAuthorization(
   contextGraphId: ContextGraphIdV1,
 ) {
   const authorAddress = wallet.address.toLowerCase() as EvmAddressV1;
-  const unsigned: UnsignedControlEnvelopeV1 = {
-    issuer: authorAddress,
-    objectType: AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
-    payload: {
-      authorAddress,
-      authorAuthorityEvidenceDigest: null,
-      catalogEra: '0',
-      catalogIssuerKey: authorAddress,
+  const produced = await produceDirectAuthorCatalogIssuerDelegationV1({
+    scope: {
+      networkId: NETWORK_ID,
       contextGraphId,
-      effectiveAt: '1773899999000',
-      expiresAt: '1774000000000',
       governanceChainId: '20430',
       governanceContractAddress: GOVERNANCE,
-      networkId: NETWORK_ID,
       ownershipTransitionDigest: null,
-      previousDelegationDigest: null,
       subGraphName: null,
+      authorAddress,
+      era: '0',
+      bucketCount: '1',
+    } as AuthorCatalogScopeV1,
+    signer: {
+      issuer: authorAddress,
+      signDigest: (digest) => wallet.signMessage(digest),
     },
-    signatureEvidence: { kind: 'none' },
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  };
-  const objectDigest = computeControlObjectDigestHex(unsigned);
-  const catalogIssuerDelegation = {
-    ...unsigned,
-    objectDigest,
-    signature: await wallet.signMessage(ethers.getBytes(objectDigest)),
-  } as SignedAuthorCatalogIssuerDelegationEnvelopeV1;
-  return Object.freeze({
-    catalogIssuerDelegation,
-    parentAuthorAgentEvidence: null,
+    effectiveAt: '1773899999000' as never,
+    expiresAt: '1774000000000' as never,
+    catalogHeadIssuedAt: '1773900000000' as never,
   });
+  return produced.authorization;
 }
 
 function durableBundleReceipt(

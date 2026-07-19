@@ -116,6 +116,8 @@ async function main() {
     authorPrivateKey: AUTHOR_PRIVATE_KEY,
     peers: [receiverReady.peerId],
     issuedAt: ISSUED_AT,
+    catalogIssuerDelegationEffectiveAt: '1773899999000',
+    catalogIssuerDelegationExpiresAt: '1774000000000',
   });
   const published = await author.waitFor('published');
 
@@ -132,6 +134,10 @@ async function main() {
     authorCatalogServiceStarted: authorReady.catalogServiceStarted === true,
     receiverCatalogServiceStarted: receiverReady.catalogServiceStarted === true,
     policyDigestsMatchIndependently: receiverPolicy.policyDigest === published.policyDigest,
+    signedDirectAuthorDelegation:
+      /^0x[0-9a-f]{64}$/.test(published.catalogIssuerDelegationObjectDigest)
+      && published.catalogIssuerDelegationReadBack
+        === published.catalogIssuerDelegationObjectDigest,
     announcementAcknowledged:
       Array.isArray(published.announcedPeers)
       && published.announcedPeers.includes(receiverReady.peerId)
@@ -159,6 +165,9 @@ async function main() {
       objectDigest: published.headObjectDigest,
       signatureVariantDigest: published.signatureVariantDigest,
       policyDigest: published.policyDigest,
+      catalogIssuerDelegationObjectDigest: published.catalogIssuerDelegationObjectDigest,
+      catalogIssuerDelegationSignatureVariantDigest:
+        published.catalogIssuerDelegationSignatureVariantDigest,
     },
     receiver: {
       independentlyAcceptedPolicyDigest: receiverPolicy.policyDigest,
