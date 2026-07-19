@@ -297,6 +297,48 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(0);
   });
 
+  it('treats explicit revert evidence as terminal when its message also mentions gas', async () => {
+    const first = await startRpcServer(successfulHandler({
+      callError: { code: 3, message: 'execution reverted: out of gas' },
+    }));
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+
+    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'revert' });
+    expect(first.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('keeps mixed revert-and-gas evidence terminal after a stable fallback post-read', async () => {
+    const first = await startRpcServer(successfulHandler({
+      callError: { code: 3, message: 'execution reverted: gas required exceeds allowance' },
+    }));
+    const second = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+
+    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'revert' });
+    expect(first.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_getBlockByNumber',
+    ]);
+    expect(second.calls).toHaveLength(0);
+  });
+
   it('rejects malformed contract returns but preserves exact wrong magic for the verifier', async () => {
     const malformed = await startRpcServer(successfulHandler({ returnData: '0x1626ba7e' }));
     const malformedAdapter = createStrictCurrentFinalizedEvmChainAdapterV1({
@@ -411,6 +453,7 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
 
 interface SuccessfulHandlerOptions {
   readonly blockHash?: string | (() => string);
+  readonly callError?: { readonly code: number; readonly message: string };
   readonly code?: string;
   readonly outOfGas?: boolean;
   readonly returnData?: string;
@@ -434,7 +477,9 @@ function successfulHandler(options: SuccessfulHandlerOptions = {}): LoopbackHand
         sendResult(response, call, options.code ?? '0x6000');
         return;
       case 'eth_call':
-        if (options.outOfGas) {
+        if (options.callError) {
+          sendError(response, call, options.callError.code, options.callError.message);
+        } else if (options.outOfGas) {
           sendError(response, call, -32000, 'out of gas');
         } else if (options.revert) {
           sendError(response, call, 3, 'execution reverted');

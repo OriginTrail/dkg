@@ -477,6 +477,18 @@ function classifyJsonRpcError(
   error: RpcErrorEnvelopeV1,
 ): CurrentFinalizedEvmCallErrorV1 {
   const message = error.message.toLowerCase();
+  // Explicit revert evidence is deterministic even when a gateway decorates
+  // the message with gas-related text (for example, code 3 plus
+  // "execution reverted: out of gas"). A fixed-cap exhaustion that did not
+  // execute a REVERT remains a resource refusal below, but a proven REVERT
+  // must win so callers cannot misclassify invalid EIP-1271 evidence as merely
+  // unsupported.
+  if (method === 'eth_call' && (error.code === 3 || message.includes('revert'))) {
+    return new CurrentFinalizedEvmCallErrorV1(
+      'revert',
+      'EIP-1271 contract call reverted at the resolved finalized anchor',
+    );
+  }
   if (
     method === 'eth_call'
     && (
@@ -489,12 +501,6 @@ function classifyJsonRpcError(
   ) {
     return anchorDependentResourceLimited(
       'EIP-1271 execution could not complete within the fixed gas cap',
-    );
-  }
-  if (method === 'eth_call' && (error.code === 3 || message.includes('revert'))) {
-    return new CurrentFinalizedEvmCallErrorV1(
-      'revert',
-      'EIP-1271 contract call reverted at the resolved finalized anchor',
     );
   }
   if (message.includes('timeout') || message.includes('timed out')) {
