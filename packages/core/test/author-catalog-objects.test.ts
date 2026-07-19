@@ -235,6 +235,26 @@ describe('AuthorCatalogBucketV1 structural codec', () => {
     })).toThrow(/catalog-object-type/);
   });
 
+  it('rejects assertion version zero through bucket and envelope admission', () => {
+    expect(() => assertAuthorCatalogBucketV1({
+      ...VALID_BUCKET,
+      rows: [{ ...VALID_ROW, assertionVersion: '0' }],
+    })).toThrow(/positive DecimalU64V1/);
+    const zeroVersionBucket = BUCKET_CANONICAL.replace(
+      '"assertionVersion":"1"',
+      '"assertionVersion":"0"',
+    );
+    expect(() => parseCanonicalAuthorCatalogBucketPayloadV1(zeroVersionBucket)).toThrow(
+      /positive DecimalU64V1/,
+    );
+    expect(() => parseCanonicalUnsignedAuthorCatalogBucketEnvelopeV1(
+      BUCKET_UNSIGNED_CANONICAL.replace(
+        '"assertionVersion":"1"',
+        '"assertionVersion":"0"',
+      ),
+    )).toThrow(/positive DecimalU64V1/);
+  });
+
   it('wraps and strictly parses the generic signed envelope without authority checks', () => {
     expect(() => assertSignedAuthorCatalogBucketEnvelopeV1(BUCKET_SIGNED)).not.toThrow();
     const bytes = canonicalizeSignedAuthorCatalogBucketEnvelopeBytesV1(BUCKET_SIGNED);
