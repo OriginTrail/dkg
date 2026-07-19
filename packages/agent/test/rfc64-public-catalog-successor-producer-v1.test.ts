@@ -435,6 +435,191 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageKaBundle).not.toHaveBeenCalled();
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
+
+  it('durably stages every exact-set bundle before control objects and fails control staging last', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageFirstRow(genesis, authorization);
+    const events: string[] = [];
+    const stageKaBundle = vi.fn(async (input) => {
+      events.push('bundle');
+      return durableBundleReceipt(input);
+    });
+    const stageVerifiedObjects = vi.fn(async () => {
+      events.push('objects');
+      throw new Error('durable control-object write failed');
+    });
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      assets: [
+        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) },
+        { assertionCoordinate: 'gate-2-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER) },
+      ],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-control-stage' });
+
+    // Every bundle is durably staged before the single control-object write;
+    // a control-stage failure can leave only unreferenced bundles, never a head
+    // pointing at an unavailable bundle.
+    expect(events).toEqual(['bundle', 'bundle', 'objects']);
+    expect(stageKaBundle).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects an empty-to-many bulk jump that changes more than one row', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStageExactSet({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      // Two rows over an empty (0-row) predecessor is a +2 bulk jump; an ordinary
+      // successor may change exactly one KA row, so this fails closed on history.
+      assets: [
+        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) },
+        { assertionCoordinate: 'gate-2-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER) },
+      ],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-history' });
+
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('rejects a one-row previous head whose bucket is missing before any staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageFirstRow(genesis, authorization);
+    expect(first.publication.head.payload).toMatchObject({ totalRows: '1' });
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      // A totalRows='1' head requires an exact one-row bucket; null is out of slice.
+      previousBucket: null,
+      assets: [
+        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) },
+      ],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-history' });
+
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('replaces a single row in place by incrementing its assertionVersion', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageFirstRow(genesis, authorization);
+    expect(first.publication.head.payload).toMatchObject({ version: '1', totalRows: '1' });
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: {
+        stageVerifiedObjects: vi.fn(async () => Object.freeze({
+          durable: true as const,
+          namespaceDurability: 'test-exact-durable' as never,
+          objects: Object.freeze([]),
+        })),
+      } as never,
+      stageKaBundle: vi.fn(durableBundleReceipt),
+    });
+
+    const replaced = await producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      // Same KA/coordinate, assertionVersion incremented by one: a valid in-place
+      // one-row replacement (not an insertion, removal, or KA swap).
+      assets: [
+        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, KA_NUMBER, '2') },
+      ],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+
+    expect(replaced.publication.head.payload).toMatchObject({
+      totalRows: '1',
+      version: '2',
+      previousHeadDigest: first.publication.head.objectDigest,
+    });
+    expect(replaced.assets.map(({ row }) => row.kaId)).toEqual([KA_ID]);
+    expect(replaced.assets[0]?.row).not.toEqual(first.row);
+  });
+
+  it('grows the live set one row at a time (1 -> 2 -> 3) in canonical order', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageFirstRow(genesis, authorization);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: {
+        stageVerifiedObjects: vi.fn(async () => Object.freeze({
+          durable: true as const,
+          namespaceDurability: 'test-exact-durable' as never,
+          objects: Object.freeze([]),
+        })),
+      } as never,
+      stageKaBundle: vi.fn(durableBundleReceipt),
+    });
+    const one = { assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) };
+    const two = { assertionCoordinate: 'gate-2-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER) };
+    const three = { assertionCoordinate: 'gate-3-object' as never, projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, 9n) };
+    const thirdKaId = ((BigInt(AUTHOR) << 96n) | 9n).toString();
+
+    const grown2 = await producer.produceAndStageExactSet({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      previousBucket: first.publication.bucket,
+      assets: [one, two],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+    expect(grown2.publication.head.payload).toMatchObject({ totalRows: '2', version: '2' });
+    expect(grown2.assets.map(({ row }) => row.kaId)).toEqual([KA_ID, SECOND_KA_ID]);
+
+    const grown3 = await producer.produceAndStageExactSet({
+      previousHead: grown2.publication.head,
+      previousDirectoryPath: grown2.publication.directoryPath,
+      previousBucket: grown2.publication.bucket,
+      assets: [one, two, three],
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900003000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    });
+    expect(grown3.publication.head.payload).toMatchObject({
+      totalRows: '3',
+      version: '3',
+      previousHeadDigest: grown2.publication.head.objectDigest,
+    });
+    expect(grown3.assets.map(({ row }) => row.kaId)).toEqual([KA_ID, SECOND_KA_ID, thirdKaId]);
+    expect(grown3.publication.bucket?.payload.rows).toEqual(grown3.assets.map(({ row }) => row));
+  });
 });
 
 type BundleStageInput = {
@@ -461,6 +646,39 @@ async function producerHistory() {
     signer: catalogSigner(),
   });
   return { genesis, authorization };
+}
+
+/**
+ * Produce and durably stage a valid one-row (KA7) predecessor over genesis
+ * through working mocks, so exact-set growth/replace/unsupported-slice paths
+ * can be exercised against a real totalRows='1' previous slice.
+ */
+async function stageFirstRow(
+  genesis: Awaited<ReturnType<typeof producerHistory>>['genesis'],
+  authorization: Awaited<ReturnType<typeof directCatalogAuthorization>>,
+) {
+  const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+    controlObjects: {
+      stageVerifiedObjects: vi.fn(async () => Object.freeze({
+        durable: true as const,
+        namespaceDurability: 'test-exact-durable' as never,
+        objects: Object.freeze([]),
+      })),
+    } as never,
+    stageKaBundle: vi.fn(durableBundleReceipt),
+  });
+  return producer.produceAndStage({
+    previousHead: genesis.head,
+    previousDirectoryPath: genesis.directoryPath,
+    previousBucket: null,
+    assertionCoordinate: 'gate-1-object' as never,
+    projectionBytes: PROJECTION,
+    seal: await authorSeal(AUTHOR_WALLET),
+    deployment: DEPLOYMENT,
+    issuedAt: '1773900001000' as never,
+    catalogSigner: catalogSigner(),
+    catalogIssuerAuthorization: authorization,
+  });
 }
 
 async function directCatalogAuthorization(
@@ -511,6 +729,7 @@ function catalogSigner() {
 async function authorSeal(
   signingWallet: ethers.Wallet,
   kaNumber = KA_NUMBER,
+  assertionVersion = '1',
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
@@ -538,7 +757,7 @@ async function authorSeal(
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: '2',
     privateTripleCount: '0',
     privateMerkleRoot: null,
