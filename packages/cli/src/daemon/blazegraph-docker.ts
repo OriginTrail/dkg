@@ -30,6 +30,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import * as net from 'node:net';
+import * as os from 'node:os';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 /**
@@ -90,6 +91,31 @@ export const BLAZEGRAPH_IMAGE = BLAZEGRAPH_IMAGE_METADATA.image;
 /** Container HTTP port declared alongside the selected image. */
 export const BLAZEGRAPH_CONTAINER_PORT = BLAZEGRAPH_IMAGE_METADATA.containerPort;
 
+/**
+ * In-container journal data dir. Provenance: the deployed image's
+ * RWStore.properties sets a RELATIVE path (`com.bigdata.journal.
+ * AbstractJournal.file=blazegraph.jnl`) — it is the image's startup
+ * wiring that lands the journal at /data/bigdata.jnl. The constants
+ * below were verified against the LIVE fleet containers
+ * (`docker exec <container> find / -name '*.jnl'` → /data/bigdata.jnl,
+ * owned tomcat:tomcat), not inferred from RWStore.properties. Mounting
+ * a named volume here is what makes a container recreate data-safe
+ * (2026-07-18 wedge incident: the fleet's legacy containers keep the
+ * journal in the writable layer, so `docker rm` would destroy the only
+ * copy).
+ */
+export const BLAZEGRAPH_DATA_DIR = '/data';
+
+/** Absolute journal path inside the container (see BLAZEGRAPH_DATA_DIR). */
+export const BLAZEGRAPH_JOURNAL_FILE = '/data/bigdata.jnl';
+
+/**
+ * Numeric uid:gid of the image's tomcat user (verified on the fleet:
+ * /data is owned tomcat:tomcat = 100:1000). Used when seeding a volume
+ * with a journal copied out of a legacy container.
+ */
+export const BLAZEGRAPH_TOMCAT_UID_GID = '100:1000';
+
 /** Default starting host port, matches devnet.sh and Blazegraph defaults. */
 const DEFAULT_HOST_PORT_START = 9999;
 /** Inclusive range above start to scan for a free port before failing. */
@@ -134,6 +160,10 @@ export interface ProvisionBlazegraphDockerOptions {
   pollIntervalMs?: number;
   /** Total time to wait for Blazegraph to come up. */
   pollTimeoutMs?: number;
+  /** Host RAM probe used for the JVM heap computation. Default: os.totalmem. */
+  totalMemoryBytes?: () => number;
+  /** Environment for operator overrides (DKG_BLAZEGRAPH_HEAP_MB). Default: process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface ProvisionBlazegraphDockerResult {
@@ -161,7 +191,12 @@ export interface ProvisionBlazegraphDockerResult {
 // Default real-world implementations of the injectables.
 // --------------------------------------------------------------------
 
-function defaultDockerRunner(): DockerRunner {
+/**
+ * Real `docker` CLI runner. Exported for the sibling modules that share
+ * the provisioner's docker boundary (blazegraph-harden.ts migration,
+ * store-health-check.ts runtime monitor); tests inject mocks instead.
+ */
+export function defaultDockerRunner(): DockerRunner {
   return {
     run(args, opts) {
       return new Promise<DockerCommandResult>((resolve, reject) => {
@@ -171,8 +206,9 @@ function defaultDockerRunner(): DockerRunner {
         child.stdout.on('data', (b) => { stdout += b.toString('utf-8'); });
         child.stderr.on('data', (b) => { stderr += b.toString('utf-8'); });
         const timeoutMs = opts?.timeoutMs;
+        let timedOut = false;
         const timer = timeoutMs
-          ? setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs)
+          ? setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs)
           : undefined;
         child.once('error', (err) => {
           if (timer) clearTimeout(timer);
@@ -187,9 +223,25 @@ function defaultDockerRunner(): DockerRunner {
           }
           reject(err);
         });
-        child.once('close', (exitCode) => {
+        child.once('close', (exitCode, signal) => {
           if (timer) clearTimeout(timer);
-          resolve({ stdout, stderr, exitCode: exitCode ?? 0 });
+          // A signal-terminated child reports `exitCode: null` + a non-null
+          // signal. The old `exitCode ?? 0` turned our own timeout SIGKILL
+          // into a FAKE SUCCESS — a `docker stop`/`docker cp` that was
+          // killed mid-flight must never look like it completed. Callers
+          // treat non-zero as failure, so report -1 with a stderr note.
+          if (exitCode === null || signal !== null) {
+            resolve({
+              stdout,
+              stderr:
+                `${stderr}${stderr.endsWith('\n') || stderr === '' ? '' : '\n'}` +
+                `docker terminated by signal ${signal ?? 'unknown'}` +
+                `${timedOut ? ` after the ${timeoutMs}ms timeout` : ''} — treated as failure`,
+              exitCode: -1,
+            });
+            return;
+          }
+          resolve({ stdout, stderr, exitCode });
         });
       });
     },
@@ -238,6 +290,117 @@ export function normaliseBlazegraphNamespace(namespace: string): string {
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
   return slug || 'dkg-node';
+}
+
+/**
+ * JVM heap sizing policy (2026-07-18 wedge incident): the islandora image
+ * ships NO -Xmx, so the JVM defaults to ~25% of host RAM and dies in a G1
+ * full-GC spiral under sync-responder load. Policy: 40% of host RAM,
+ * clamped to [2 GiB, 8 GiB]. An operator override via
+ * `DKG_BLAZEGRAPH_HEAP_MB` wins verbatim (unclamped) — the operator knows
+ * their host better than the clamp does.
+ */
+export function computeBlazegraphHeapMb(
+  totalMemBytes: number,
+  envOverride?: string,
+): number {
+  // Strictly decimal digits only. `Number()` also accepts '0x10', '6e3',
+  // '3.0', Infinity-adjacent forms etc. — an operator typo like '6e3'
+  // must fall back to the computed policy, not become a 6000 MB heap by
+  // accident (or '0x10' → 16 MB, which would OOM-loop the store).
+  const raw = envOverride?.trim();
+  if (raw && /^\d+$/.test(raw)) {
+    const override = Number(raw);
+    if (Number.isInteger(override) && override > 0) return override;
+  }
+  const forty = Math.round((0.4 * totalMemBytes) / 2 ** 20);
+  return Math.min(8192, Math.max(2048, forty));
+}
+
+/** Named docker volume holding the journal for a given container. */
+export function blazegraphVolumeName(containerName: string): string {
+  return `${containerName}-data`;
+}
+
+/**
+ * Container-side health probe: a bounded empty-pattern ASK against the
+ * namespace endpoint. Catches the alive-but-deaf failure mode (JVM up,
+ * Tomcat's HTTP poller thread OOME-killed) that `--restart unless-stopped`
+ * can never see — the wedged container shows `unhealthy` in `docker ps`.
+ * curl is verified present in the image at /usr/bin/curl.
+ */
+export function blazegraphHealthCmd(namespace: string): string {
+  return `curl -sf -m 8 'http://127.0.0.1:${BLAZEGRAPH_CONTAINER_PORT}/bigdata/namespace/${encodeURIComponent(namespace)}/sparql?query=ASK%7B%7D'`;
+}
+
+/**
+ * Full `docker run` argv for a hardened Blazegraph container. Extracted
+ * from the inline array in the fresh-create path so the survivability
+ * flags are unit-testable and shared with the `dkg store harden`
+ * migration (blazegraph-harden.ts):
+ *   - TOMCAT_JAVA_OPTS is the verified env hook — the image's
+ *     /opt/tomcat/bin/setenv.sh does `export JAVA_OPTS="${TOMCAT_JAVA_OPTS}"`
+ *     (with-contenv, re-read on every container start).
+ *   - -XX:+ExitOnOutOfMemoryError turns the OOME wedge into a JVM exit,
+ *     which `--restart unless-stopped` can actually heal.
+ *   - Named volume keeps the journal out of the writable layer.
+ *   - json-file log caps stop the >4 GB unrotated log growth seen on fleet.
+ */
+export function buildBlazegraphRunArgs(opts: {
+  containerName: string;
+  hostPort: number;
+  namespace: string;
+  heapMb: number;
+  image?: string;
+}): string[] {
+  return [
+    'run',
+    '-d',
+    '--restart', 'unless-stopped',
+    '--name', opts.containerName,
+    // Blazegraph is an implementation detail of the local node. Do not publish
+    // its unauthenticated SPARQL/update endpoint on every host interface.
+    '-p', `127.0.0.1:${opts.hostPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
+    '-e', `TOMCAT_JAVA_OPTS=-Xmx${opts.heapMb}m -XX:+ExitOnOutOfMemoryError`,
+    '-v', `${blazegraphVolumeName(opts.containerName)}:${BLAZEGRAPH_DATA_DIR}`,
+    '--log-opt', 'max-size=64m',
+    '--log-opt', 'max-file=3',
+    '--health-cmd', blazegraphHealthCmd(opts.namespace),
+    '--health-interval', '30s',
+    '--health-timeout', '10s',
+    '--health-retries', '3',
+    // Fresh provisions create the namespace only after the container is up,
+    // so give the health probe a generous start period before it counts.
+    '--health-start-period', '120s',
+    opts.image ?? BLAZEGRAPH_IMAGE,
+  ];
+}
+
+/**
+ * Resolve the daemon-managed container name from `config.store.options`.
+ * Prefers a persisted `options.containerName` (written by `dkg store
+ * harden`); otherwise derives it from the SPARQL URL's namespace segment.
+ * Fleet configs persist only `{url, managedByDkg}` and the node name is
+ * NOT the namespace (e.g. node "saturn_station" runs namespace "dkg" in
+ * container "dkg-blazegraph-dkg"), so the URL is the only truthful source.
+ * Returns null when neither is available — callers must treat that as
+ * "not managed" and never touch docker.
+ */
+export function deriveBlazegraphContainerName(
+  storeOptions: Record<string, unknown> | undefined,
+): string | null {
+  if (typeof storeOptions?.containerName === 'string' && storeOptions.containerName) {
+    return storeOptions.containerName;
+  }
+  const url = storeOptions?.url;
+  if (typeof url !== 'string') return null;
+  const match = url.match(/\/bigdata\/namespace\/([^/]+)\/sparql\/?$/);
+  if (!match) return null;
+  try {
+    return sanitiseContainerName(decodeURIComponent(match[1]));
+  } catch {
+    return null;
+  }
 }
 
 function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
@@ -303,9 +466,11 @@ async function inspectContainer(
 /**
  * Polls `/bigdata/status` until the server answers HTTP 200 or the
  * timeout elapses. Mirrors the 30-attempt loop in devnet.sh but
- * surfaces the failure as a thrown error.
+ * surfaces the failure as a thrown error. Exported so the
+ * `dkg store harden` migration (blazegraph-harden.ts) reuses the same
+ * readiness poll after recreating a container.
  */
-async function waitForBlazegraphReady(opts: {
+export async function waitForBlazegraphReady(opts: {
   url: string;
   fetch: typeof globalThis.fetch;
   intervalMs: number;
@@ -461,20 +626,31 @@ export async function provisionBlazegraphDocker(
     }
   }
 
-  // 4. Fresh create path — choose a port and run.
+  // 4. Fresh create path — choose a port and run with the survivability
+  //    flags (heap policy, journal volume, healthcheck, log caps). See
+  //    buildBlazegraphRunArgs for the incident rationale.
   const portStart = opts.port ?? DEFAULT_HOST_PORT_START;
   const chosenPort = await findFreePort(portStart, portRange, isPortFree, log);
+  const heapMb = computeBlazegraphHeapMb(
+    (opts.totalMemoryBytes ?? os.totalmem)(),
+    (opts.env ?? process.env).DKG_BLAZEGRAPH_HEAP_MB,
+  );
   log(`  Starting Blazegraph container "${containerName}" on port ${chosenPort}…`);
-  const runResult = await docker.run([
-    'run',
-    '-d',
-    '--restart', 'unless-stopped',
-    '--name', containerName,
-    // Blazegraph is an implementation detail of the local node. Do not publish
-    // its unauthenticated SPARQL/update endpoint on every host interface.
-    '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
-    BLAZEGRAPH_IMAGE,
-  ]);
+  log(`  JVM heap: ${heapMb} MB (40% of host RAM, clamped 2G..8G)`);
+  // Idempotent — `docker volume create` on an existing volume is a no-op.
+  const volumeResult = await docker.run(['volume', 'create', blazegraphVolumeName(containerName)]);
+  if (volumeResult.exitCode !== 0) {
+    throw new Error(
+      `Failed to create Blazegraph journal volume — docker volume create exited ${volumeResult.exitCode}. ` +
+      `stderr: ${volumeResult.stderr.trim() || '(empty)'}`,
+    );
+  }
+  const runResult = await docker.run(buildBlazegraphRunArgs({
+    containerName,
+    hostPort: chosenPort,
+    namespace,
+    heapMb,
+  }));
   if (runResult.exitCode !== 0) {
     throw new Error(
       `Failed to start Blazegraph container — docker run exited ${runResult.exitCode}. ` +

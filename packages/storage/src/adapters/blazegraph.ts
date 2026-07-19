@@ -35,6 +35,17 @@ import { readResponseTextBounded } from '../http-response-limit.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
+/**
+ * Per-request server-side query bound. Verified present in the deployed
+ * fleet binary (BigdataRDFContext reads `X-BIGDATA-MAX-QUERY-MILLIS` into
+ * `maxQueryTimeMillis`); the fleet's web.xml ships `queryTimeout=0`, so
+ * this header is the ONLY server-side bound on query work. Without it an
+ * abandoned request (client AbortController fired at the operation
+ * deadline) keeps executing inside Blazegraph, stacking orphan working
+ * sets until the heap dies — the 2026-07-18 mainnet wedge amplifier.
+ */
+const BLAZEGRAPH_MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
+
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
   timeout?: number;
@@ -45,6 +56,8 @@ interface StoreOperationDeadline {
   waitFor<T>(work: Promise<T>): Promise<T>;
   check(): void;
   dispose(): void;
+  /** Milliseconds left until the operation deadline (0 when elapsed). */
+  remainingMs(): number;
 }
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
@@ -65,6 +78,32 @@ function resolveOperationTimeout(configured: number | undefined): number {
     throw new Error('BlazegraphStore timeout must be a positive integer in milliseconds');
   }
   return configured;
+}
+
+/**
+ * Server-side query bound derived from the client-side operation deadline:
+ * the server kills its own work ~2s BEFORE the client AbortController
+ * abandons the request, so nothing keeps running unobserved. 5s floor so a
+ * nearly-elapsed deadline still gives the server a sane bound instead of 0
+ * (Blazegraph treats 0 as "no limit").
+ */
+export function serverSideQueryTimeoutMillis(remainingMs: number): number {
+  return Math.max(5_000, Math.floor(remainingMs) - 2_000);
+}
+
+/**
+ * Header block for the server-side timeout. The env escape hatch is read
+ * per call so operators can flip it on a live fleet without a code change.
+ * Computed inside the scheduler-admitted work fn so the value reflects the
+ * budget actually left, not the nominal operation timeout.
+ */
+function serverTimeoutHeaders(deadline: StoreOperationDeadline): Record<string, string> {
+  if (process.env.DKG_BLAZEGRAPH_SERVER_TIMEOUT_DISABLED === '1') return {};
+  return {
+    [BLAZEGRAPH_MAX_QUERY_MILLIS_HEADER]: String(
+      serverSideQueryTimeoutMillis(deadline.remainingMs()),
+    ),
+  };
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -150,6 +189,7 @@ function createStoreOperationDeadline(
       }
       detachCaller();
     },
+    remainingMs: () => Math.max(0, deadlineAt - performance.now()),
   };
 }
 
@@ -413,6 +453,7 @@ export class BlazegraphStore implements TripleStore {
         headers: {
           'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
           Accept: 'application/sparql-results+json',
+          ...serverTimeoutHeaders(deadline),
         },
         body: trimmed,
         signal: deadline.signal,
@@ -452,6 +493,7 @@ export class BlazegraphStore implements TripleStore {
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: 'text/x-nquads, application/n-quads',
+        ...serverTimeoutHeaders(deadline),
       },
       body: sparql,
       signal: deadline.signal,
@@ -553,9 +595,15 @@ export class BlazegraphStore implements TripleStore {
     //
     // SPARQL_UPDATE_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
     await this.runStoreWork(operation, options, async (deadline) => {
+      // Header honored on updates is unverified for Blazegraph 2.1.5 (the
+      // constant is confirmed on the query path only) — sent anyway because
+      // an unrecognized header is simply ignored.
       const res = await deadline.waitFor(fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
+        headers: {
+          'Content-Type': SPARQL_UPDATE_CONTENT_TYPE,
+          ...serverTimeoutHeaders(deadline),
+        },
         body: update,
         signal: deadline.signal,
       }));

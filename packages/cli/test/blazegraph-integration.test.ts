@@ -49,6 +49,8 @@ import { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import {
   provisionBlazegraphDocker,
   isDockerAvailable,
+  blazegraphVolumeName,
+  BLAZEGRAPH_DATA_DIR,
   type ProvisionBlazegraphDockerResult,
 } from '../src/daemon/blazegraph-docker.js';
 import { chainResetWipe } from '../src/daemon/chain-reset-wipe.js';
@@ -67,6 +69,17 @@ function execDocker(args: readonly string[], timeoutMs = 30_000): Promise<void> 
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.once('close', () => { clearTimeout(timer); resolve(); });
     child.once('error', () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+function execDockerCapture(args: readonly string[], timeoutMs = 30_000): Promise<string> {
+  return new Promise<string>((resolve) => {
+    const child = spawn('docker', [...args], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (b) => { out += b.toString('utf-8'); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.once('close', () => { clearTimeout(timer); resolve(out); });
+    child.once('error', () => { clearTimeout(timer); resolve(out); });
   });
 }
 
@@ -287,6 +300,40 @@ describe.skipIf(!ENABLED)('Blazegraph end-to-end integration', () => {
     // Namespace was created on first run; second run must NOT try to
     // re-create it (Blazegraph 409s on duplicates).
     expect(again.namespaceCreated).toBe(false);
+  });
+
+  // -----------------------------------------------------------------
+  // Store-survivability flags (2026-07-18 wedge) — real-docker proof
+  // that buildBlazegraphRunArgs' flags actually land on the container.
+  // -----------------------------------------------------------------
+
+  it('fresh provision carries the survivability flags on the real container', async () => {
+    // Skip when the container was reused: a pre-existing (possibly
+    // legacy) container keeps its shape — upgrading it is exclusively
+    // `dkg store harden`.
+    if (provisioned!.reused) return;
+    const raw = await execDockerCapture(['inspect', provisioned!.containerName]);
+    const info = JSON.parse(raw)[0] as {
+      Config: { Env: string[] | null; Healthcheck?: { Test?: string[] } | null };
+      Mounts: Array<{ Destination?: string; Name?: string }>;
+      HostConfig: { LogConfig?: { Config?: Record<string, string> } };
+    };
+    // Journal volume mounted at /data.
+    expect(info.Mounts.some(
+      (m) => m.Destination === BLAZEGRAPH_DATA_DIR
+        && m.Name === blazegraphVolumeName(provisioned!.containerName),
+    )).toBe(true);
+    // JVM memory policy via the verified TOMCAT_JAVA_OPTS hook.
+    const tomcatOpts = info.Config.Env?.find((e) => e.startsWith('TOMCAT_JAVA_OPTS='));
+    expect(tomcatOpts).toMatch(/-Xmx\d+m/);
+    expect(tomcatOpts).toContain('-XX:+ExitOnOutOfMemoryError');
+    // Healthcheck present.
+    expect(info.Config.Healthcheck?.Test?.join(' ')).toContain('ASK%7B%7D');
+    // json-file rotation caps.
+    expect(info.HostConfig.LogConfig?.Config).toMatchObject({
+      'max-size': '64m',
+      'max-file': '3',
+    });
   });
 });
 

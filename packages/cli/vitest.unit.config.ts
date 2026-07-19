@@ -76,9 +76,13 @@ export default defineConfig({
           'test/chain-reset-wipe.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
           'test/store-health-check.test.ts',
+          // Store-survivability build (2026-07-18 wedge) — runtime store
+          // monitor state machine + legacy-container harden migration.
+          'test/store-monitor.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-harden.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
