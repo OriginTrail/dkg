@@ -1,0 +1,58 @@
+{
+  "name": "@origintrail-official/dkg-wal",
+  "version": "10.0.8",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./reconciliation": {
+      "types": "./dist/reconciliation/index.d.ts",
+      "import": "./dist/reconciliation/index.js",
+      "default": "./dist/reconciliation/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test:types": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "vitest run test/e2e",
+    "test:stress": "NODE_OPTIONS=--max-old-space-size=8192 WAL_RECONCILIATION_STRESS=1 WAL_RECONCILIATION_FULL_SCALE=1 vitest run test/reconciliation/scale.test.ts",
+    "test:stress:quick": "WAL_RECONCILIATION_STRESS=1 vitest run test/reconciliation/scale.test.ts",
+    "benchmark:reconciliation": "node --import tsx scripts/benchmark.ts",
+    "benchmark:reconciliation:full": "NODE_OPTIONS=--max-old-space-size=8192 node --import tsx scripts/benchmark.ts --full",
+    "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --check",
+    "vectors": "node --import tsx scripts/generate-vectors.ts",
+    "test:conformance:go": "cd conformance/go && go test ./...",
+    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@vitest/coverage-v8": "^4.0.18",
+    "tsx": "^4.21.0",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/wal"
+  }
+}

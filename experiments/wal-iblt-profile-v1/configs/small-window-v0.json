@@ -1,20 +1,10 @@
 {
-  "profileName": "small-window-v0",
+  "candidateName": "small-window-v0",
   "status": "experimental-not-wire-stable",
-  "mapping": {
-    "multiplierHex": "0xda942042e4dd58b5",
-    "indexOffset": 1.5,
-    "inverseSqrtNumerator": 4294967296
-  },
+  "extends": "paper-baseline-v0",
   "stream": {
     "initialWindowSymbols": 4,
     "windowGrowthNumerator": 2,
-    "windowGrowthDenominator": 1,
-    "maximumSymbols": 1048576
-  },
-  "fallback": {
-    "preferEnumerationWhenReceiverCountIsZero": true,
-    "maximumDecodedDifference": 250000,
-    "maximumOverheadRatio": 2.5
+    "windowGrowthDenominator": 1
   }
 }

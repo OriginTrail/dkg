@@ -1,0 +1,97 @@
+{
+  "schema": "dkg-wal-reconciliation-benchmark-v1",
+  "recordedAt": "2026-07-19T01:07:22.403Z",
+  "runtime": {
+    "node": "v25.2.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "eachSideDifference": 16,
+  "maximumTotalTimeRegressionRatio": 1.5,
+  "results": [
+    {
+      "setSize": 10000,
+      "differenceSize": 32,
+      "setupMs": 205.63204199999998,
+      "streamMs": 88.600458,
+      "totalMs": 294.23249999999996,
+      "setupIdsPerSecond": 97261,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 287.158375
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 176.918458
+      }
+    },
+    {
+      "setSize": 100000,
+      "differenceSize": 32,
+      "setupMs": 1773.9801669999997,
+      "streamMs": 1273.9554580000004,
+      "totalMs": 3047.935625,
+      "setupIdsPerSecond": 112741,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 2993.279917
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 2134.1283750000002
+      }
+    },
+    {
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "setupMs": 19814.440625000003,
+      "streamMs": 12488.099458,
+      "totalMs": 32302.540083,
+      "setupIdsPerSecond": 100936,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 31587.441625
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 21892.534625
+      }
+    }
+  ]
+}

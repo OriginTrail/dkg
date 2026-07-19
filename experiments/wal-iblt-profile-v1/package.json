@@ -4,20 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "sweep": "tsx scripts/sweep.ts",
-    "vectors": "tsx scripts/generate-vectors.ts",
+    "sweep": "node --import tsx scripts/sweep.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@noble/hashes": "^2.2.0"
+    "@origintrail-official/dkg-wal": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22",
-    "@vitest/coverage-v8": "^4.0.18",
     "tsx": "^4.21.0",
-    "typescript": "^5.7",
-    "vitest": "^4.0.18"
+    "typescript": "^5.7"
   }
 }

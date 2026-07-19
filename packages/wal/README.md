@@ -1,0 +1,159 @@
+# DKG WAL reconciliation
+
+## Abstract
+
+`@origintrail-official/dkg-wal` implements the application-agnostic WAL-005
+set-reconciliation layer. The only element it reconciles is a 32-byte
+`WalObjectId`. A provider and receiver compare a head-bound object count and
+16-way radix-Merkle set root; when they differ, the provider streams canonical
+rateless IBLT symbols and the receiver incrementally subtracts its local set
+and peels provider-only and receiver-only IDs. A decode is accepted only when
+the reconstructed set exactly matches the provider head. Empty receivers,
+resource exhaustion, excessive symbol overhead, and undecodable residuals use
+strictly sorted, paginated full-ID enumeration bound to the same head.
+
+The synchronization atom remains one complete, canonical `WalObjectV1` byte
+string. Reconciliation symbols, pages, commitment nodes, mapping cursors, and
+peel state are disposable control data: they have no content IDs and cannot be
+stored or synchronized independently. This package does not import RDF,
+SPARQL, SWM/VM reducers, network transports, object payloads, or DKG semantic
+logic. A caller authenticates the signed head, runs this module over IDs, and
+then fetches each complete missing `WalObjectV1` through its object-transfer
+layer. SPARQL conflict handling remains a downstream adapter concern.
+
+## Atom and trust boundary
+
+```text
+Durable synchronized atom:  WalObjectV1 bytes -> WalObjectId
+Reconciled set element:      WalObjectId (exactly 32 bytes)
+Disposable protocol data:   symbols, windows, pages, roots, cursors, traces
+Authenticated by caller:    signed reconciliation head and peer/session roles
+Verified by this package:    count, object-set root, head binding, decoded IDs
+Out of scope:                object transfer, discovery, RDF/SPARQL, SWM/VM
+```
+
+There is no payload offset in a reconciliation element. Large objects are
+still transferred as complete `WalObjectV1` values by the object-transfer
+protocol. Chunking may be a transport optimization, but chunks are not durable
+atoms, do not enter the reconciled set, and are accepted only after the full
+object is reconstructed and its `WalObjectId` is verified.
+
+## IBLT sequence
+
+```mermaid
+sequenceDiagram
+    participant R as Receiver
+    participant P as Provider
+    participant D as WAL reconciliation
+    participant O as WalObjectStore
+    R->>P: Authenticate signed head (headId, count, objectSetRoot)
+    R->>D: Local WalObjectIds + verified provider head
+    alt Local count and root match
+        D-->>R: equal, zero symbols
+    else Sets differ
+        loop Contiguous windows within budgets
+            R->>P: Request next symbol window
+            P-->>R: Canonical CBOR symbol tuples
+            R->>D: Append bytes, subtract local stream, peel lowest index
+        end
+        D->>D: Reconstruct provider set
+        D->>D: Verify unique IDs, count, and objectSetRoot
+        D-->>R: providerOnly and receiverOnly WalObjectIds
+        loop Every provider-only ID
+            R->>P: Request complete WalObjectV1 by WalObjectId
+            P-->>R: Complete canonical object bytes
+            R->>O: Verify content address, then admit whole object
+        end
+    end
+```
+
+## Backfill and fallback sequence
+
+```mermaid
+sequenceDiagram
+    participant R as Receiver
+    participant P as Provider
+    participant D as WAL reconciliation
+    R->>P: Authenticate signed provider head
+    alt Receiver is empty
+        R->>P: Request sorted ID pages for exact headId
+    else IBLT hits a resource or overhead limit
+        D-->>R: Stable fallback reason code
+        R->>P: Request sorted ID pages for exact headId
+    end
+    loop Paginated enumeration
+        P-->>R: headId, offset, sorted WalObjectIds, done
+        R->>D: Verify head binding, offset, done, and strict order
+    end
+    D->>D: Verify exact object count and objectSetRoot
+    D-->>R: Verified full provider ID set
+```
+
+Backfill is therefore an explicit first-class path, not an attempt to encode
+the entire retained set as an IBLT difference.
+
+## Protocol shape
+
+- `ProtocolV1IbltReconciliationAlgorithm` fixes bytes32 IDs/checksums,
+  signed-i64 counts, deterministic CBOR tuples, the rateless mapping schedule,
+  and lowest-symbol-index-first peeling.
+- `RatelessIbltEncoder` emits contiguous symbol or canonical byte windows.
+- `RatelessIbltDecoder` appends windows without discarding earlier work and
+  exposes no accepted result until all received residual cells decode.
+- `MutableSetCommitment` supports insertion, deletion, reference-compatible
+  roots, and deterministic restart snapshots. Leaves contain at most 256 IDs.
+- `ReconciliationHead` binds `headId`, exact object count, and object-set root.
+- `createFallbackPages` and `verifyFallbackPages` implement head-bound exact
+  enumeration.
+- `reconcileSets` applies equal/IBLT/fallback policy and returns stable reason
+  codes with resource usage.
+
+Budgets independently cap symbols, decoded IDs, operations, accounted memory,
+and elapsed time. Malformed input, non-canonical bytes, overflow, duplicate
+output, count/root mismatch, and fallback corruption have stable machine
+codes in `RECONCILIATION_ERROR_CODES`.
+
+## Candidate tuning
+
+Wire and safety invariants live in this package. Values that need empirical
+iteration—mapping candidates, stream-window policy, and fallback thresholds—
+are recorded under `experiments/wal-iblt-profile-v1/configs/` and compared by
+that directory's sweep. This keeps experimental values explicit without
+forking the implementation.
+
+## Verification
+
+```sh
+pnpm --filter @origintrail-official/dkg-wal build
+pnpm --filter @origintrail-official/dkg-wal test:types
+pnpm --filter @origintrail-official/dkg-wal test:coverage
+pnpm --filter @origintrail-official/dkg-wal test:e2e
+pnpm --filter @origintrail-official/dkg-wal test:stress
+pnpm --filter @origintrail-official/dkg-wal test:conformance:go
+pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:check
+```
+
+The executable source has 100% statement, branch, function, and line coverage.
+The stress suite runs 100,000 deterministic reconciliation seeds and fixed
+`k=32` at `N=10^4`, `10^5`, and `10^6`. The E2E suite exchanges encoded symbol
+windows, transfers only complete objects, proves empty-receiver backfill, and
+rejects corrupt object bytes. TypeScript and an independent Go implementation
+consume `conformance/vectors/protocol-v1.json`.
+
+## Tracked benchmark
+
+`benchmarks/reconciliation-baseline.json` records the reproducible encoded-byte
+benchmark and a maximum 1.5x total-time regression ratio. The initial arm64,
+Node 25 baseline for a symmetric difference of 32 is:
+
+| Set size | Symbols | Canonical bytes | Total time | Accounted decoder peak |
+|---:|---:|---:|---:|---:|
+| 10,000 | 47 | 3,454 | 0.294 s | 1,290,112 B |
+| 100,000 | 65 | 4,788 | 3.048 s | 12,812,416 B |
+| 1,000,000 | 52 | 3,882 | 32.303 s | 128,010,752 B |
+
+Use `benchmark:reconciliation` for the quick 10k/100k report,
+`benchmark:reconciliation:full` for all three sizes, and
+`benchmark:reconciliation:check` for the regression gate. Timing comparisons
+must use comparable hardware and runtime; symbol and byte counts are fully
+deterministic across machines.

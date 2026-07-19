@@ -4,9 +4,11 @@ import {
   RatelessIbltDecoder,
   RatelessIbltEncoder,
   deriveReconciliationSeed,
-  type IbltCandidateProfile
-} from '../src/index.js';
-import { deterministicId, deterministicSet } from './fixtures.js';
+  type ReconciliationConfiguration,
+  type ReconciliationSeed,
+  type WalObjectId
+} from '@origintrail-official/dkg-wal/reconciliation';
+import { deterministicHeadId, deterministicId, deterministicSet } from './fixtures.js';
 
 interface SweepRow {
   profile: string;
@@ -19,10 +21,13 @@ interface SweepRow {
   elapsedMs: number;
 }
 
-const profiles: IbltCandidateProfile[] = [1.25, 1.5, 1.75].map((indexOffset) => ({
+const configurations: ReconciliationConfiguration[] = [1.25, 1.5, 1.75].map((indexOffset) => ({
   ...PAPER_BASELINE_V0,
-  profileName: `paper-mapping-offset-${indexOffset}`,
-  mapping: { ...PAPER_BASELINE_V0.mapping, indexOffset }
+  candidateName: `paper-mapping-offset-${indexOffset}`,
+  algorithm: {
+    ...PAPER_BASELINE_V0.algorithm,
+    mapping: { ...PAPER_BASELINE_V0.algorithm.mapping, indexOffset }
+  }
 }));
 const cases = [
   { setSize: 100, difference: 2 },
@@ -48,21 +53,31 @@ function symbolsSentForWindows(required: number, initial: number, numerator: num
 }
 
 function exactDecodeSymbols(
-  provider: readonly Uint8Array[],
-  receiver: readonly Uint8Array[],
-  seed: Uint8Array,
-  profile: IbltCandidateProfile
+  provider: readonly WalObjectId[],
+  receiver: readonly WalObjectId[],
+  seed: ReconciliationSeed,
+  configuration: ReconciliationConfiguration
 ): number {
-  const encoder = new RatelessIbltEncoder(provider, seed, profile.mapping);
-  const decoder = new RatelessIbltDecoder(receiver, seed, profile.mapping, profile.fallback.maximumDecodedDifference);
-  while ((decoder.receivedSymbols === 0 || !decoder.complete) && decoder.receivedSymbols < profile.stream.maximumSymbols) {
+  const encoder = new RatelessIbltEncoder({
+    ids: provider,
+    reconciliationSeed: seed,
+    algorithm: configuration.algorithm,
+    limits: configuration.limits
+  });
+  const decoder = new RatelessIbltDecoder({
+    receiverIds: receiver,
+    reconciliationSeed: seed,
+    algorithm: configuration.algorithm,
+    limits: configuration.limits
+  });
+  while ((decoder.receivedSymbols === 0 || !decoder.complete) && decoder.receivedSymbols < configuration.limits.maximumSymbols) {
     decoder.addProviderSymbol(encoder.produceNext());
   }
-  if (!decoder.complete) throw new Error(`candidate ${profile.profileName} exhausted the symbol budget`);
+  if (!decoder.complete) throw new Error(`candidate ${configuration.candidateName} exhausted the symbol budget`);
   return decoder.receivedSymbols;
 }
 
-for (const profile of profiles) {
+for (const configuration of configurations) {
   for (const scenario of cases) {
     for (let repetition = 0; repetition < 3; repetition += 1) {
       const oneSided = scenario.difference / 2;
@@ -70,14 +85,14 @@ for (const profile of profiles) {
       const provider = [...common, ...deterministicSet(`provider:${scenario.setSize}:${repetition}`, oneSided)];
       const receiver = [...common, ...deterministicSet(`receiver:${scenario.setSize}:${repetition}`, oneSided)];
       const seed = deriveReconciliationSeed(
-        deterministicId(`requester-head:${repetition}`),
-        deterministicId(`provider-head:${repetition}`),
+        deterministicHeadId(`requester-head:${repetition}`),
+        deterministicHeadId(`provider-head:${repetition}`),
         deterministicId(`nonce:${repetition}`)
       );
       const started = performance.now();
-      const exactSymbols = exactDecodeSymbols(provider, receiver, seed, profile);
+      const exactSymbols = exactDecodeSymbols(provider, receiver, seed, configuration);
       rows.push({
-        profile: profile.profileName,
+        profile: configuration.candidateName,
         setSize: scenario.setSize,
         symmetricDifference: scenario.difference,
         repetition,
@@ -98,10 +113,10 @@ for (const profile of profiles) {
   }
 }
 
-const summaries = profiles.map((profile) => {
-  const profileRows = rows.filter((row) => row.profile === profile.profileName);
+const summaries = configurations.map((configuration) => {
+  const profileRows = rows.filter((row) => row.profile === configuration.candidateName);
   return {
-    profile: profile.profileName,
+    profile: configuration.candidateName,
     meanExactOverhead: profileRows.reduce((sum, row) => sum + row.exactOverhead, 0) / profileRows.length,
     maximumExactOverhead: Math.max(...profileRows.map((row) => row.exactOverhead)),
     meanElapsedMs: profileRows.reduce((sum, row) => sum + row.elapsedMs, 0) / profileRows.length

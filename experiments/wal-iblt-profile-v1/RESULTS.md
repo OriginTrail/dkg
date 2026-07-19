@@ -41,11 +41,19 @@ freeze four: smaller requests cost more round trips for larger differences,
 and the quick sweep did not simulate latency, loss, multiplexing, or frame
 amortization.
 
-### Required next sweep
+### WAL-005 scale and benchmark follow-up
 
-- at least 100,000 deterministic reconciliation seeds;
-- `N = 10^4`, `10^5`, and `10^6` with fixed `k`, plus disjoint sets;
-- `k` buckets from one through the fallback threshold;
+- the production acceptance suite now passes 100,000 deterministic
+  reconciliation seeds;
+- fixed `k=32` now passes at `N = 10^4`, `10^5`, and `10^6`;
+- the tracked encoded-byte baseline records symbol count, wire bytes, setup and
+  stream time, operation count, and accounted peak memory at all three sizes;
+- the N=1,000,000 baseline used 52 symbols and 3,882 canonical bytes for the
+  32-ID symmetric difference.
+
+The next empirical sweep should add:
+
+- disjoint sets and `k` buckets from one through the fallback threshold;
 - separate symbol-generation CPU, decoder CPU, peak memory, encoded CBOR
   bytes, request count, and wall time;
 - network models covering direct/relay RTT, loss, cancellation, and provider

@@ -1,20 +1,34 @@
 {
-  "profileName": "paper-baseline-v0",
+  "candidateName": "paper-baseline-v0",
   "status": "experimental-not-wire-stable",
-  "mapping": {
-    "multiplierHex": "0xda942042e4dd58b5",
-    "indexOffset": 1.5,
-    "inverseSqrtNumerator": 4294967296
+  "algorithm": {
+    "name": "ProtocolV1IbltReconciliationAlgorithm",
+    "version": 1,
+    "mapping": {
+      "multiplierHex": "0xda942042e4dd58b5",
+      "indexOffset": 1.5,
+      "inverseSqrtNumerator": 4294967296
+    },
+    "idLength": 32,
+    "checksumLength": 32,
+    "countEncoding": "signed-i64",
+    "symbolEncoding": "deterministic-cbor-tuple-v1",
+    "peelOrder": "lowest-symbol-index-first"
   },
   "stream": {
     "initialWindowSymbols": 32,
     "windowGrowthNumerator": 2,
-    "windowGrowthDenominator": 1,
-    "maximumSymbols": 1048576
+    "windowGrowthDenominator": 1
   },
   "fallback": {
     "preferEnumerationWhenReceiverCountIsZero": true,
-    "maximumDecodedDifference": 250000,
     "maximumOverheadRatio": 2.5
+  },
+  "limits": {
+    "maximumSymbols": 1048576,
+    "maximumDecodedDifference": 250000,
+    "maximumOperations": 1000000000,
+    "maximumMemoryBytes": 536870912,
+    "maximumElapsedMs": 120000
   }
 }
