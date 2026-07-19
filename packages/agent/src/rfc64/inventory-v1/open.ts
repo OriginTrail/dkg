@@ -1127,7 +1127,14 @@ function assertFilesystemOwner(path: string): void {
   if (process.platform === 'win32') {
     const script = String.raw`
 $ErrorActionPreference = 'Stop'
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$userSid = $identity.User
+$defaultOwnerSid = $identity.Owner
+$administratorsSid = [System.Security.Principal.SecurityIdentifier]::new(
+  [System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,
+  $null
+)
+$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 $target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
 $acl = if ([System.IO.Directory]::Exists($target)) {
   [System.IO.Directory]::GetAccessControl(
@@ -1141,7 +1148,26 @@ $acl = if ([System.IO.Directory]::Exists($target)) {
   )
 }
 $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
-if ($owner.Value -ne $sid.Value) { exit 40 }
+# An elevated Windows token may create entries with its distinct default-owner
+# SID (normally BUILTIN\Administrators) even though the process account SID is
+# the user. GitHub-hosted and service runners may also pre-create the caller's
+# temp root with BUILTIN\Administrators as owner while the active token is an
+# administrator. Accept that one exact well-known group only when it is active
+# in this token; arbitrary token groups are deliberately not accepted.
+$isActiveAdministratorsOwner = (
+  $owner.Value -eq $administratorsSid.Value -and
+  $principal.IsInRole($administratorsSid)
+)
+if (
+  $owner.Value -ne $userSid.Value -and
+  $owner.Value -ne $defaultOwnerSid.Value -and
+  -not $isActiveAdministratorsOwner
+) {
+  [Console]::Error.WriteLine(
+    "owner SID $($owner.Value) is neither token user $($userSid.Value) nor token default owner $($defaultOwnerSid.Value)"
+  )
+  exit 40
+}
 `;
     const result = spawnSync(
       'powershell.exe',

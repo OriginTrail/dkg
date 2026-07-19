@@ -6,6 +6,7 @@ export {
   CONTROL_EIP1271_GAS_LIMIT_V1,
   CONTROL_EIP1271_MAX_ATTEMPTS_V1,
   CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
   CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
   CONTROL_SIGNATURE_VERIFICATION_ERROR_CODES_V1,
@@ -14,6 +15,8 @@ export {
   EIP1271_MAGIC_VALUE_V1,
   ControlSignatureVerificationErrorV1,
   CurrentFinalizedEvmCallErrorV1,
+  assertVerifiedControlEnvelopeIssuerSignatureV1,
+  readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
   type ControlSignatureVerificationDispositionV1,
   type ControlSignatureVerificationErrorCodeV1,
@@ -23,6 +26,7 @@ export {
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureSnapshotV1,
   type VerifyControlEnvelopeIssuerSignatureOptionsV1,
 } from './control-object-signature-verifier.js';
 export {
