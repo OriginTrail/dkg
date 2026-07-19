@@ -152,6 +152,52 @@ describe('CanonicalGraphScopedAuthorSealV1 typed store inverse', () => {
     });
   });
 
+  it('canonicalizes EIP-55 checksummed store addresses to the lowercase seal', () => {
+    // Hardhat #1 / #0 — genuine EIP-55 checksummed addresses. They contain a–f
+    // digits, so the checksummed form differs from lowercase; the 0x3333…/0x4444…
+    // fixtures above would make this regression vacuous (they have no letters).
+    const CHECKSUMMED_AUTHOR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+    const CHECKSUMMED_KAV10 = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+    const lowerAuthor = CHECKSUMMED_AUTHOR.toLowerCase();
+    const lowerKav10 = CHECKSUMMED_KAV10.toLowerCase();
+    expect(CHECKSUMMED_AUTHOR).not.toBe(lowerAuthor);
+    expect(CHECKSUMMED_KAV10).not.toBe(lowerKav10);
+
+    const coordinate = validatedCoordinate({ ...COORDINATE, authorAddress: lowerAuthor });
+    const payload = validatedPayload({
+      ...PAYLOAD,
+      authorAddress: lowerAuthor,
+      assertedAtKav10Address: lowerKav10,
+      kaUal: `did:dkg:otp:20430/${lowerAuthor}/7`,
+      reservedKaId: ((BigInt(lowerAuthor) << 96n) | 7n).toString(),
+    });
+
+    const lowerRows = toStoreRows(projectCanonicalGraphScopedAuthorSealRowsV1(payload, coordinate));
+    const checksummedRows = lowerRows.map((row) => {
+      if (row.predicateIri === ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS) {
+        return { ...row, object: toStoreObject(JSON.stringify(CHECKSUMMED_AUTHOR)) };
+      }
+      if (row.predicateIri === ASSERTION_SEAL_PREDICATES.ASSERTED_AT_KAV10_ADDRESS) {
+        return { ...row, object: toStoreObject(JSON.stringify(CHECKSUMMED_KAV10)) };
+      }
+      return row;
+    });
+
+    const lower = decodeCanonicalGraphScopedAuthorSealRowsV1(lowerRows, coordinate);
+    const checksummed = decodeCanonicalGraphScopedAuthorSealRowsV1(checksummedRows, coordinate);
+
+    // Checksummed store rows decode to the identical canonical payload, seal
+    // bytes, and digest as the lowercase rows — the property that matters.
+    expect(checksummed.payload.authorAddress).toBe(lowerAuthor);
+    expect(checksummed.payload.assertedAtKav10Address).toBe(lowerKav10);
+    expect(checksummed.payload).toEqual(lower.payload);
+    expect(checksummed.sealDigest).toBe(lower.sealDigest);
+    expect(checksummed.canonicalSealBytes).toEqual(lower.canonicalSealBytes);
+    // The PR #1780 candidate classifier still admits the checksummed rows.
+    expect(() => classifyCanonicalGraphScopedAuthorSealRowsV1(checksummedRows, coordinate))
+      .not.toThrow();
+  });
+
   it('pins Oxigraph/Blazegraph typed-term parity rendering', () => {
     const base = { subjectIri: SUBJECT, predicateIri: 'urn:predicate', graphIri: META_GRAPH };
     expect(renderCanonicalAuthorSealStoreRowV1({

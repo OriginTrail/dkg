@@ -99,6 +99,17 @@ const ALLOWED_PREDICATES = new Set<string>([
   PRIVATE_ROOT_PREDICATE,
 ]);
 
+/**
+ * Store-row predicates whose object is a bare EVM address string literal. The
+ * deployed finalizer (`buildAssertionSealQuads`) persists `ethers.getAddress`
+ * output verbatim, so honest seal rows can carry EIP-55 checksummed addresses;
+ * these are canonicalized to the lowercase wire form at the store boundary.
+ */
+const ADDRESS_PREDICATES = new Set<string>([
+  ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+  ASSERTION_SEAL_PREDICATES.ASSERTED_AT_KAV10_ADDRESS,
+]);
+
 export interface CanonicalGraphScopedAuthorSealV1 {
   readonly assertionMerkleRoot: Digest32V1;
   readonly authorAddress: EvmAddressV1;
@@ -510,7 +521,13 @@ export function decodeCanonicalGraphScopedAuthorSealRowsV1(
     if (!Object.prototype.hasOwnProperty.call(rows, index)) {
       fail('canonical-seal-row-schema', 'canonical author-seal row array must be dense');
     }
-    const current = renderCanonicalAuthorSealStoreRowV1(rows[index]);
+    const rendered = renderCanonicalAuthorSealStoreRowV1(rows[index]);
+    // Canonicalize EVM address literals (the only field the deployed producer
+    // writes non-canonically) to lowercase before parsing and the byte-exact
+    // round-trip; every other RDF term is compared unchanged.
+    const current = ADDRESS_PREDICATES.has(rendered.predicate)
+      ? { ...rendered, object: canonicalizeStoreAddressLiteral(rendered.object) }
+      : rendered;
     if (current.subject !== placement.subject || current.graph !== placement.metaGraph) {
       fail('canonical-seal-row-term', 'author-seal row has the wrong subject or graph');
     }
@@ -868,6 +885,22 @@ function parsePlainAddressObject(object: string, label: string): string {
   const match = /^"(0x[0-9a-f]{40})"$/.exec(object);
   if (!match) fail('canonical-seal-row-term', `${label} is not the exact plain address term`);
   return match[1];
+}
+
+/**
+ * Fold a store-row EVM address string literal to the canonical lowercase form.
+ *
+ * Honest finalized seals can store EIP-55 checksummed `authorAddress` /
+ * `assertedAtKav10Address` literals because the deployed `buildAssertionSealQuads`
+ * persists `ethers.getAddress` output verbatim. Lowercasing here lets those
+ * existing rows decode to the same canonical payload and seal digest as a
+ * lowercase-stored row, without touching the deployed producer or the canonical
+ * wire schema (which remains lowercase-only). A literal that is not a 20-byte
+ * `0x` address is returned unchanged so the strict term parser still rejects it.
+ */
+function canonicalizeStoreAddressLiteral(object: string): string {
+  const match = /^"0x([0-9a-fA-F]{40})"$/.exec(object);
+  return match ? `"0x${match[1].toLowerCase()}"` : object;
 }
 
 function parseIntegerObject(object: string, label: string): string {
