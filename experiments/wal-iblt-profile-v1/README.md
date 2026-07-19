@@ -20,6 +20,8 @@ implementation in `packages/wal`.
 ```sh
 pnpm --filter @origintrail-experiments/wal-iblt-profile-v1 typecheck
 pnpm --filter @origintrail-experiments/wal-iblt-profile-v1 sweep
+pnpm --filter @origintrail-experiments/wal-iblt-profile-v1 compare:schedules
+pnpm --filter @origintrail-experiments/wal-iblt-profile-v1 compare:mappings -- --repetitions=3
 ```
 
 The sweep writes JSON to standard output. Capture the source revision, machine,
@@ -30,6 +32,9 @@ runtime, and full candidate config with every retained result.
 - `PROFILE.md` records frozen architecture invariants and tunable choices.
 - `configs/` contains explicit candidate values.
 - `scripts/sweep.ts` runs candidate comparisons against `packages/wal`.
+- `scripts/compare-mappings.ts` runs the rotated 10K/100K/1M/10M full-reconciliation A/B.
+- `scripts/compare-schedules.ts` measures exact membership-schedule divergence.
+- `results/` retains raw A/B samples, summaries, and schedule-agreement evidence.
 - `RESULTS.md` records retained observations and their limits.
 - `STATUS.md` points to the completed WAL-005 verification surface.
 

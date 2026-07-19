@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  INTEGER_ONLY_V1_CANDIDATE,
   PAPER_BASELINE_V0,
   assertLength,
   bytesToHex,
@@ -14,6 +15,8 @@ import {
   idChecksum,
   idMappingSeed,
   isReconciliationError,
+  integerSquareRoot,
+  mappingIndexForState,
   isZero,
   nextMappingIndex,
   readU64le,
@@ -88,6 +91,36 @@ describe('candidate profile and mapping schedule', () => {
     expect(expectedMembershipProbability(2)).toBe(0.5);
   });
 
+  it('generates the integer-only candidate with exact square roots', () => {
+    expect(integerSquareRoot(0n)).toBe(0n);
+    expect(integerSquareRoot(1n)).toBe(1n);
+    expect(integerSquareRoot(2n)).toBe(1n);
+    expect(integerSquareRoot(16n)).toBe(4n);
+    expect(integerSquareRoot(17n)).toBe(4n);
+    expect(() => integerSquareRoot(-1n)).toThrow('negative integer');
+
+    const first = createMappingCursor(123n);
+    const second = createMappingCursor(123n);
+    const indices = Array.from(
+      { length: 20 },
+      () => nextMappingIndex(first, INTEGER_ONLY_V1_CANDIDATE.algorithm.mapping)
+    );
+    expect(indices).toEqual(Array.from(
+      { length: 20 },
+      () => nextMappingIndex(second, INTEGER_ONLY_V1_CANDIDATE.algorithm.mapping)
+    ));
+    expect(indices.every((value, index) => index === 0 || value > indices[index - 1])).toBe(true);
+    expect(mappingIndexForState(
+      0xffff_ffff_ffff_ffffn,
+      7,
+      INTEGER_ONLY_V1_CANDIDATE.algorithm.mapping
+    )).toBe(8);
+
+    const unsafe = createMappingCursor(1n);
+    unsafe.lastIndex = Number.MAX_SAFE_INTEGER;
+    expect(() => nextMappingIndex(unsafe, INTEGER_ONLY_V1_CANDIDATE.algorithm.mapping)).toThrow('safe integer');
+  });
+
   it('rejects invalid cursor, index, and profile values', () => {
     expect(() => createMappingCursor(-1n)).toThrow('unsigned 64-bit');
     expect(() => createMappingCursor(1n << 64n)).toThrow('unsigned 64-bit');
@@ -109,6 +142,7 @@ describe('candidate profile and mapping schedule', () => {
       { ...PAPER_BASELINE_V0, algorithm: { ...PAPER_BASELINE_V0.algorithm, mapping: { ...PAPER_BASELINE_V0.algorithm.mapping, multiplier: 2n } } },
       { ...PAPER_BASELINE_V0, algorithm: { ...PAPER_BASELINE_V0.algorithm, mapping: { ...PAPER_BASELINE_V0.algorithm.mapping, indexOffset: 0 } } },
       { ...PAPER_BASELINE_V0, algorithm: { ...PAPER_BASELINE_V0.algorithm, mapping: { ...PAPER_BASELINE_V0.algorithm.mapping, inverseSqrtNumerator: Number.NaN } } },
+      { ...PAPER_BASELINE_V0, algorithm: { ...PAPER_BASELINE_V0.algorithm, mapping: { ...PAPER_BASELINE_V0.algorithm.mapping, arithmetic: 'decimal' as never } } },
       { ...PAPER_BASELINE_V0, stream: { ...PAPER_BASELINE_V0.stream, initialWindowSymbols: 0 } },
       { ...PAPER_BASELINE_V0, fallback: { ...PAPER_BASELINE_V0.fallback, maximumOverheadRatio: 1 } },
       {

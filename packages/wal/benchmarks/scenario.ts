@@ -1,4 +1,5 @@
 import {
+  INTEGER_ONLY_V1_CANDIDATE,
   PAPER_BASELINE_V0,
   RatelessIbltDecoder,
   RatelessIbltEncoder,
@@ -12,6 +13,8 @@ import {
   type WalObjectId
 } from '../src/reconciliation/index.js';
 
+export type ReconciliationMappingCandidate = 'floating-point' | 'integer-only';
+
 export interface FixedDifferenceScenario {
   provider: WalObjectId[];
   receiver: WalObjectId[];
@@ -20,6 +23,7 @@ export interface FixedDifferenceScenario {
 }
 
 export interface ReconciliationBenchmarkResult {
+  mappingCandidate: ReconciliationMappingCandidate;
   setSize: number;
   differenceSize: number;
   inputMode: 'sorted-stream';
@@ -127,16 +131,20 @@ export function createFixedDifferenceStreamingInput(
 export function runReconciliationBenchmark(
   setSize: number,
   eachSideDifference = 16,
-  maximumSymbols = 4_096
+  maximumSymbols = 4_096,
+  mappingCandidate: ReconciliationMappingCandidate = 'floating-point'
 ): ReconciliationBenchmarkResult {
   const startedAt = performance.now();
   const scenario = createFixedDifferenceStreamingInput(setSize, eachSideDifference);
   const scenarioBuiltAt = performance.now();
   const seed = reconciliationSeed(hashBytes(u64be(BigInt(setSize))));
+  const configuration = mappingCandidate === 'integer-only'
+    ? INTEGER_ONLY_V1_CANDIDATE
+    : PAPER_BASELINE_V0;
   const limits: ReconciliationLimits = {
-    ...PAPER_BASELINE_V0.limits,
+    ...configuration.limits,
     maximumMemoryBytes: Math.max(
-      PAPER_BASELINE_V0.limits.maximumMemoryBytes,
+      configuration.limits.maximumMemoryBytes,
       setSize * 128 + maximumSymbols * 128 + eachSideDifference * 128
     ),
     maximumElapsedMs: 30 * 60 * 1_000
@@ -146,7 +154,7 @@ export function runReconciliationBenchmark(
     idCount: setSize,
     idsAreSorted: true,
     reconciliationSeed: seed,
-    algorithm: PAPER_BASELINE_V0.algorithm,
+    algorithm: configuration.algorithm,
     limits
   });
   const encoderBuiltAt = performance.now();
@@ -155,7 +163,7 @@ export function runReconciliationBenchmark(
     idCount: setSize,
     idsAreSorted: true,
     reconciliationSeed: seed,
-    algorithm: PAPER_BASELINE_V0.algorithm,
+    algorithm: configuration.algorithm,
     limits
   });
   const streamingStartedAt = performance.now();
@@ -185,6 +193,7 @@ export function runReconciliationBenchmark(
   const memory = process.memoryUsage();
   const resourceUsage = process.resourceUsage();
   return {
+    mappingCandidate,
     setSize,
     differenceSize,
     inputMode: 'sorted-stream',

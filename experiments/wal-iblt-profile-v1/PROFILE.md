@@ -61,6 +61,12 @@ mapping indices, symbols, decode output, roots, and pages. Alternative mapping
 values must be added as named configs and must produce new versioned vectors;
 they must never silently change an existing protocol profile.
 
+`integer-only-v1-candidate` is such an alternative. It replaces binary64
+square root and rounding with exact `isqrt`, fixed-point division, and integer
+ceiling while leaving the atom, symbol tuple, seed, checksum, and peel rules
+unchanged. It remains an experiment and does not silently redefine the
+benchmarked `paper-baseline-v0`; see `RESULTS.md` for the rotated A/B.
+
 ## Canonical symbol tuple
 
 Each symbol is deterministic CBOR:

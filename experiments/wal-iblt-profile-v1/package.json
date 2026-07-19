@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "compare:mappings": "node --import tsx scripts/compare-mappings.ts",
+    "compare:schedules": "node --import tsx scripts/compare-schedules.ts",
     "sweep": "node --import tsx scripts/sweep.ts",
     "typecheck": "tsc --noEmit"
   },
