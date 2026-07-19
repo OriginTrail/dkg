@@ -290,25 +290,31 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await expect(agent.stop()).resolves.toBeUndefined();
   });
 
-  it('restarts after graceful SIGTERM inventory release', async () => {
-    const dataDirectory = temporaryDataDirectory();
-    const first = spawnLifecycleHolder(dataDirectory);
-    await waitForReady(first);
-    expect(await terminate(first, 'SIGTERM')).toEqual({ code: 0, signal: null });
+  it.runIf(process.platform !== 'win32')(
+    'restarts after graceful SIGTERM inventory release',
+    async () => {
+      const dataDirectory = temporaryDataDirectory();
+      const first = spawnLifecycleHolder(dataDirectory);
+      await waitForReady(first);
+      expect(await terminate(first, 'SIGTERM')).toEqual({ code: 0, signal: null });
 
-    const restarted = spawnLifecycleHolder(dataDirectory);
-    await waitForReady(restarted);
-    expect(await terminate(restarted, 'SIGTERM')).toEqual({ code: 0, signal: null });
-  });
+      const restarted = spawnLifecycleHolder(dataDirectory);
+      await waitForReady(restarted);
+      expect(await terminate(restarted, 'SIGTERM')).toEqual({ code: 0, signal: null });
+    },
+  );
 
-  it('recovers the operating-system lease after SIGKILL without cleanup', async () => {
-    const dataDirectory = temporaryDataDirectory();
-    const first = spawnLifecycleHolder(dataDirectory);
-    await waitForReady(first);
-    expect(await terminate(first, 'SIGKILL')).toEqual({ code: null, signal: 'SIGKILL' });
+  it.runIf(process.platform !== 'win32')(
+    'recovers the operating-system lease after SIGKILL without cleanup',
+    async () => {
+      const dataDirectory = temporaryDataDirectory();
+      const first = spawnLifecycleHolder(dataDirectory);
+      await waitForReady(first);
+      expect(await terminate(first, 'SIGKILL')).toEqual({ code: null, signal: 'SIGKILL' });
 
-    const restarted = spawnLifecycleHolder(dataDirectory);
-    await waitForReady(restarted);
-    expect(await terminate(restarted, 'SIGTERM')).toEqual({ code: 0, signal: null });
-  });
+      const restarted = spawnLifecycleHolder(dataDirectory);
+      await waitForReady(restarted);
+      expect(await terminate(restarted, 'SIGTERM')).toEqual({ code: 0, signal: null });
+    },
+  );
 });

@@ -6,7 +6,9 @@ on:
       - '.github/workflows/rfc64-inventory-windows.yml'
       - 'packages/agent/src/rfc64/inventory-v1/**'
       - 'packages/agent/test/rfc64-inventory-v1-*.test.ts'
+      - 'packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts'
       - 'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'
+      - 'packages/agent/test/fixtures/rfc64-agent-inventory-lifecycle-child.ts'
       - 'packages/agent/vitest.unit.config.ts'
       - 'packages/agent/package.json'
       - 'packages/core/**'
@@ -59,3 +61,4 @@ jobs:
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
           test/rfc64-inventory-v1
+          test/rfc64-agent-inventory-lifecycle.test.ts
