@@ -1552,8 +1552,13 @@ function snapshotEncodedHeader(
   row: SqlRowV1,
   key: EncodedLoadKeyV1,
 ): EncodedHeaderV1 {
-  const subgraphName = row.subgraph_name;
-  if (subgraphName !== null && typeof subgraphName !== 'string') {
+  const rawSubgraphName = row.subgraph_name;
+  let subgraphName: string | null;
+  if (rawSubgraphName === null) {
+    subgraphName = null;
+  } else if (typeof rawSubgraphName === 'string') {
+    subgraphName = rawSubgraphName;
+  } else {
     throw new InventoryV1CandidateError(
       'candidate-database-corrupt',
       'stored candidate subgraph_name is neither text nor NULL',
