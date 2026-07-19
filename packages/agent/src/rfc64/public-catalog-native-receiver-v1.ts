@@ -17,6 +17,7 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+  DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   ZERO_DIGEST32_V1,
   assertAuthorCatalogHeadScopeBindingV1,
@@ -61,7 +62,9 @@ import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dk
 import {
   quadsToNQuads,
   readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
   tryReplaceGraphAndSubjectAtomically,
+  type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -98,6 +101,13 @@ import type {
 } from './public-catalog-transport-v1.js';
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const MAX_TRANSITION_JOURNAL_ENTRIES_V1 = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
+const MAX_TRANSITION_GRAPH_QUADS_V1 =
+  DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxPublicTriples;
+// Includes the graph IRI repeated on every materialized N-Quad, so it must be
+// wider than the verified projection-byte ceiling while remaining finite.
+const MAX_TRANSITION_GRAPH_NQUADS_BYTES_V1 = 256 * 1024 * 1024;
+const MAX_TRANSITION_SEAL_SUBJECT_ROWS_V1 = 15;
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
@@ -760,33 +770,47 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified catalog objects could not be staged', cause);
     }
 
+    const transitionJournal = await snapshotSemanticTransitionV1(
+      this.options.store,
+      [
+        ...plannedRemovals.map((removal) => transitionLocationFromRemoval(removal)),
+        ...preparedRows.map((prepared) => transitionLocationFromTarget(
+          head,
+          prepared.row,
+          prepared.sealBinding,
+        )),
+      ],
+    );
     const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
-    for (const removal of plannedRemovals) {
-      throwIfAborted(signal);
-      await deactivateExactOwnedPublicProjection(this.options.store, removal);
-      removedRows.push(removal);
-    }
-
     const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
-    for (const prepared of preparedRows) {
-      throwIfAborted(signal);
-      const activation = await activateExactPublicProjection(
-        this.options.store,
-        head,
-        prepared.row,
-        prepared.projectionMetadata.kaUal,
-        prepared.projectionBytes,
-        Number(prepared.projectionMetadata.publicTripleCount),
-        prepared.sealBinding,
-      );
-      activatedRows.push(Object.freeze({
-        ...activation.evidence,
-        swmGraph: activation.swmGraph,
-        authorship: prepared.authorship,
-      }));
-    }
-    let completion: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
+    let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
+    let activatedTripleCount = 0;
+    let semanticMutationAttempted = false;
     try {
+      for (const removal of plannedRemovals) {
+        throwIfAborted(signal);
+        semanticMutationAttempted = true;
+        await deactivateExactOwnedPublicProjection(this.options.store, removal);
+        removedRows.push(removal);
+      }
+      for (const prepared of preparedRows) {
+        throwIfAborted(signal);
+        semanticMutationAttempted = true;
+        const activation = await activateExactPublicProjection(
+          this.options.store,
+          head,
+          prepared.row,
+          prepared.projectionMetadata.kaUal,
+          prepared.projectionBytes,
+          Number(prepared.projectionMetadata.publicTripleCount),
+          prepared.sealBinding,
+        );
+        activatedRows.push(Object.freeze({
+          ...activation.evidence,
+          swmGraph: activation.swmGraph,
+          authorship: prepared.authorship,
+        }));
+      }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
         catalogScope: trustedCatalogScope,
         expectedTotalRows: head.payload.totalRows as CountV1,
@@ -801,19 +825,35 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           activatedTripleCount: row.activatedTripleCount,
         })),
       });
+      activatedTripleCount = activatedRows.reduce(
+        (total, row) => total + row.activatedTripleCount,
+        0,
+      );
+      if (!Number.isSafeInteger(activatedTripleCount)) {
+        fail(
+          'catalog-native-receiver-activation',
+          'total activated triple count is not a safe integer',
+        );
+      }
     } catch (cause) {
+      if (semanticMutationAttempted) {
+        try {
+          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
+        } catch (rollbackCause) {
+          fail(
+            'catalog-native-receiver-activation',
+            'semantic transition failed and its exact predecessor rollback also failed',
+            new AggregateError([cause, rollbackCause]),
+          );
+        }
+      }
+      if (signal?.aborted && cause === signal.reason) throw cause;
+      if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
       fail(
         'catalog-native-receiver-activation',
-        'semantic post-reads do not equal the exact signed inventory',
+        'semantic transition failed after mutation began',
         cause,
       );
-    }
-    const activatedTripleCount = activatedRows.reduce(
-      (total, row) => total + row.activatedTripleCount,
-      0,
-    );
-    if (!Number.isSafeInteger(activatedTripleCount)) {
-      fail('catalog-native-receiver-activation', 'total activated triple count is not a safe integer');
     }
 
     let appliedHeadStatus: 'applied' | 'existing';
@@ -1412,6 +1452,175 @@ function planOwnedRowRemoval(
     sealMetaGraph: placement.metaGraph,
     sealSubject: placement.subject,
   });
+}
+
+interface Rfc64SemanticTransitionLocationV1 {
+  readonly swmGraph: string;
+  readonly sealMetaGraph: string;
+  readonly sealSubject: string;
+}
+
+interface Rfc64SemanticTransitionPreimageV1
+  extends Rfc64SemanticTransitionLocationV1 {
+  readonly graphQuads: readonly Readonly<Quad>[];
+  readonly sealQuads: readonly Readonly<Quad>[];
+}
+
+function transitionLocationFromRemoval(
+  removal: Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>,
+): Readonly<Rfc64SemanticTransitionLocationV1> {
+  return Object.freeze({
+    swmGraph: removal.swmGraph,
+    sealMetaGraph: removal.sealMetaGraph,
+    sealSubject: removal.sealSubject,
+  });
+}
+
+function transitionLocationFromTarget(
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  row: Readonly<AuthorCatalogRowV1>,
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): Readonly<Rfc64SemanticTransitionLocationV1> {
+  return Object.freeze({
+    swmGraph: derivePublicSwmGraph(head.payload.contextGraphId, row.kaId),
+    sealMetaGraph: binding.placement.metaGraph,
+    sealSubject: binding.placement.subject,
+  });
+}
+
+/**
+ * Capture only the exact graph/subject pairs this verified transition may
+ * mutate. The journal is deliberately in-memory: it closes returned-failure
+ * consistency, while process-death recovery remains a Gate-4 durable protocol.
+ */
+async function snapshotSemanticTransitionV1(
+  store: TripleStore,
+  locations: readonly Readonly<Rfc64SemanticTransitionLocationV1>[],
+): Promise<readonly Readonly<Rfc64SemanticTransitionPreimageV1>[]> {
+  if (locations.length > MAX_TRANSITION_JOURNAL_ENTRIES_V1) {
+    fail(
+      'catalog-native-receiver-activation',
+      `semantic transition exceeds ${MAX_TRANSITION_JOURNAL_ENTRIES_V1} exact preimages`,
+    );
+  }
+  const journal: Rfc64SemanticTransitionPreimageV1[] = [];
+  try {
+    for (const location of locations) {
+      const graphQuads = await readExactGraphPagedWithDiscoveredCount(
+        store,
+        location.swmGraph,
+        {
+          maxQuadCount: MAX_TRANSITION_GRAPH_QUADS_V1,
+          maxNQuadsBytes: MAX_TRANSITION_GRAPH_NQUADS_BYTES_V1,
+          outputGraph: location.swmGraph,
+          queryOptions: { source: 'rfc64-public-catalog-transition-snapshot' },
+        },
+      );
+      const sealQuads = await readExactSealSubjectRowsV1(
+        store,
+        location.sealMetaGraph,
+        location.sealSubject,
+        'rfc64-public-catalog-transition-snapshot',
+      );
+      journal.push(Object.freeze({
+        ...location,
+        graphQuads: Object.freeze(graphQuads.map((quad) => Object.freeze({ ...quad }))),
+        sealQuads,
+      }));
+    }
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-activation',
+      'bounded exact semantic transition snapshot failed before mutation',
+      cause,
+    );
+  }
+  return Object.freeze(journal);
+}
+
+async function restoreSemanticTransitionV1(
+  store: TripleStore,
+  journal: readonly Readonly<Rfc64SemanticTransitionPreimageV1>[],
+): Promise<void> {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const preimage = journal[index];
+    if (preimage === undefined) continue;
+    const restored = await tryReplaceGraphAndSubjectAtomically(
+      store,
+      preimage.swmGraph,
+      preimage.graphQuads.map((quad) => ({ ...quad })),
+      preimage.sealMetaGraph,
+      preimage.sealSubject,
+      preimage.sealQuads.map((quad) => ({ ...quad })),
+      { source: 'rfc64-public-catalog-transition-rollback' },
+    );
+    if (!restored) {
+      throw new Error('store lacks atomic graph/subject replacement during semantic rollback');
+    }
+    await assertExactSemanticTransitionPreimageV1(store, preimage);
+  }
+}
+
+async function assertExactSemanticTransitionPreimageV1(
+  store: TripleStore,
+  preimage: Readonly<Rfc64SemanticTransitionPreimageV1>,
+): Promise<void> {
+  const [graphQuads, sealQuads] = await Promise.all([
+    readExactGraphPaged(store, preimage.swmGraph, {
+      expectedQuadCount: preimage.graphQuads.length,
+      maxQuadCount: MAX_TRANSITION_GRAPH_QUADS_V1,
+      maxNQuadsBytes: MAX_TRANSITION_GRAPH_NQUADS_BYTES_V1,
+      outputGraph: preimage.swmGraph,
+      queryOptions: { source: 'rfc64-public-catalog-transition-rollback-post-read' },
+    }),
+    readExactSealSubjectRowsV1(
+      store,
+      preimage.sealMetaGraph,
+      preimage.sealSubject,
+      'rfc64-public-catalog-transition-rollback-post-read',
+    ),
+  ]);
+  if (
+    canonicalQuadSetV1(graphQuads) !== canonicalQuadSetV1(preimage.graphQuads)
+    || canonicalQuadSetV1(sealQuads) !== canonicalQuadSetV1(preimage.sealQuads)
+  ) {
+    throw new Error('semantic transition rollback post-read differs from its exact preimage');
+  }
+}
+
+async function readExactSealSubjectRowsV1(
+  store: TripleStore,
+  metaGraph: string,
+  subject: string,
+  source: string,
+): Promise<readonly Readonly<Quad>[]> {
+  const result = await store.query(
+    `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } } `
+      + `ORDER BY ?p ?o LIMIT ${MAX_TRANSITION_SEAL_SUBJECT_ROWS_V1 + 1}`,
+    { source, maxResponseBytes: 64 * 1024 },
+  );
+  if (
+    result.type !== 'bindings'
+    || result.bindings.length > MAX_TRANSITION_SEAL_SUBJECT_ROWS_V1
+  ) {
+    throw new Error('exact transition seal subject exceeds its bounded row contract');
+  }
+  const quads = result.bindings.map((row) => {
+    if (typeof row.p !== 'string' || typeof row.o !== 'string') {
+      throw new Error('exact transition seal subject row is incomplete');
+    }
+    return Object.freeze({
+      subject,
+      predicate: row.p,
+      object: row.o,
+      graph: metaGraph,
+    });
+  });
+  return Object.freeze(quads);
+}
+
+function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
+  return quadsToNQuads([...quads].sort(compareQuads));
 }
 
 async function deactivateExactOwnedPublicProjection(
