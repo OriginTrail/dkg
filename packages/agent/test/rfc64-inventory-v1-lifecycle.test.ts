@@ -46,6 +46,7 @@ const CHILD_FIXTURE = resolve(
   'fixtures/rfc64-inventory-v1-child.ts',
 );
 const HOSTILE_SIDECAR_BYTES = Object.freeze({
+  journal: Buffer.from('hostile-rfc64-journal-evidence\0\u0000\u0001', 'utf8'),
   wal: Buffer.from('hostile-rfc64-wal-evidence\0\u0001\u0002', 'utf8'),
   shm: Buffer.from('hostile-rfc64-shm-evidence\0\u0003\u0004', 'utf8'),
 });
@@ -55,9 +56,10 @@ const openInventoryV1 = (dataDirectory: string) => openProductionInventoryV1(
   { quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY },
 );
 
-type RecoveryMember = 'wal' | 'shm' | 'main';
+type RecoveryMember = 'journal' | 'wal' | 'shm' | 'main';
 type RecoveryManifest =
   | readonly ['main']
+  | readonly ['journal', 'main']
   | readonly ['wal', 'main']
   | readonly ['shm', 'main']
   | readonly ['wal', 'shm', 'main'];
@@ -68,6 +70,8 @@ type SeededRecoveryTopology = Readonly<{
 }>;
 
 const FULL_RECOVERY_MANIFEST = ['wal', 'shm', 'main'] as const;
+type FullRecoveryMember = (typeof FULL_RECOVERY_MANIFEST)[number];
+const JOURNAL_RECOVERY_MANIFEST = ['journal', 'main'] as const;
 const FULL_MANIFEST_FAULT_BOUNDARIES = [
   'begin.source.wal.file-fsync',
   'begin.source.shm.file-fsync',
@@ -101,6 +105,34 @@ const MOVED_PREFIX_FAULT_BOUNDARIES = FULL_RECOVERY_MANIFEST.flatMap((member) =>
   `resume.prefix.${member}.generation-directory-fsync`,
   `resume.prefix.${member}.inventory-directory-fsync`,
 ] as const) satisfies readonly InventoryV1QuarantineBoundary[];
+
+const JOURNAL_PREFIX_FAULT_BOUNDARIES = [
+  'resume.prefix.journal.file-fsync',
+  'resume.prefix.journal.generation-directory-fsync',
+  'resume.prefix.journal.inventory-directory-fsync',
+] as const satisfies readonly InventoryV1QuarantineBoundary[];
+
+const JOURNAL_AUTOMATIC_FAULT_BOUNDARIES = [
+  'begin.source.journal.file-fsync',
+  'begin.source.main.file-fsync',
+  'begin.inventory-directory.fsync-after-quarantine-root',
+  'begin.quarantine-root.fsync-after-generation',
+  'begin.marker.write',
+  'begin.marker.file-fsync',
+  'begin.inventory-directory.fsync-after-marker',
+  'resume.source.journal.file-fsync-after-quiescence',
+  'resume.source.main.file-fsync-after-quiescence',
+  'resume.member.journal.rename',
+  'resume.member.journal.file-fsync',
+  'resume.member.journal.generation-directory-fsync',
+  'resume.member.journal.inventory-directory-fsync',
+  'resume.member.main.rename',
+  'resume.member.main.file-fsync',
+  'resume.member.main.generation-directory-fsync',
+  'resume.member.main.inventory-directory-fsync',
+  'resume.marker.unlink',
+  'resume.inventory-directory.fsync-after-marker-unlink',
+] as const satisfies readonly InventoryV1QuarantineBoundary[];
 
 function expectedFullManifestTrace(
   boundary: (typeof FULL_MANIFEST_FAULT_BOUNDARIES)[number],
@@ -146,6 +178,12 @@ function pragmaInteger(database: DatabaseSync, pragma: string): number {
   const value = Object.values(row)[0];
   if (typeof value !== 'number') throw new Error(`invalid PRAGMA ${pragma}`);
   return value;
+}
+
+function u64be(value: bigint): Buffer {
+  const encoded = Buffer.alloc(8);
+  encoded.writeBigUInt64BE(value);
+  return encoded;
 }
 
 function expectOpenErrorCode(error: unknown, code: InventoryV1OpenError['code']): boolean {
@@ -240,6 +278,61 @@ setInterval(() => {}, 60_000);
   expect(await exit).toEqual({ code: null, signal: 'SIGKILL' });
   expect(existsSync(`${path}-wal`)).toBe(true);
   expect(existsSync(`${path}-shm`)).toBe(true);
+}
+
+async function leaveHotRollbackJournal(
+  path: string,
+  transactionSql: string,
+): Promise<void> {
+  const script = String.raw`
+const { DatabaseSync } = require('node:sqlite');
+const database = new DatabaseSync(process.env.DKG_RFC64_HOT_JOURNAL_PATH);
+database.exec('PRAGMA journal_mode=DELETE; BEGIN IMMEDIATE');
+database.exec(process.env.DKG_RFC64_HOT_JOURNAL_SQL);
+process.stdout.write('READY\n');
+setInterval(() => {}, 60_000);
+`;
+  const child = spawn(process.execPath, ['--experimental-sqlite', '-e', script], {
+    env: {
+      ...process.env,
+      DKG_RFC64_HOT_JOURNAL_PATH: path,
+      DKG_RFC64_HOT_JOURNAL_SQL: transactionSql,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let stdout = '';
+    const timeout = setTimeout(() => {
+      rejectReady(new Error(`hot-journal child did not become ready: ${stderr}`));
+    }, 10_000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (!stdout.includes('READY\n')) return;
+      clearTimeout(timeout);
+      resolveReady();
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      rejectReady(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      rejectReady(new Error(
+        `hot-journal child exited before ready: code=${code} signal=${signal} stderr=${stderr}`,
+      ));
+    });
+  });
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolveExit) => child.once('exit', (code, signal) => resolveExit({ code, signal })),
+  );
+  child.kill('SIGKILL');
+  expect(await exit).toEqual({ code: null, signal: 'SIGKILL' });
+  expect(lstatSync(`${path}-journal`).isFile()).toBe(true);
+  expect(lstatSync(`${path}-journal`).size).toBeGreaterThan(512);
 }
 
 function sha256File(path: string): string {
@@ -838,6 +931,113 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     }
   });
 
+  it('rejects hostile transfer geometry while accepting every exact chunk boundary', () => {
+    const database = new DatabaseSync(':memory:');
+    try {
+      database.exec('PRAGMA foreign_keys = ON');
+      database.exec(INVENTORY_V1_DDL);
+      const session = Buffer.alloc(32, 1);
+      const scope = Buffer.alloc(32, 2);
+      const author = Buffer.alloc(20, 3);
+      const head = Buffer.alloc(32, 4);
+      database.prepare(
+        'INSERT INTO rfc64_candidate_bucket_loads_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+      ).run(
+        session,
+        scope,
+        author,
+        head,
+        null,
+        u64be(0n),
+        u64be(1n),
+        u64be(0n),
+        Buffer.alloc(32, 5),
+        u64be(4n),
+        u64be(512n),
+      );
+      const insert = database.prepare(
+        'INSERT INTO rfc64_candidate_bucket_rows_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      );
+      let nonce = 1;
+      const insertGeometry = (byteLength: bigint, chunkCount: bigint): void => {
+        const unique = nonce;
+        nonce += 1;
+        const kaId = Buffer.alloc(32);
+        kaId.writeUInt32BE(unique, 28);
+        insert.run(
+          session,
+          scope,
+          author,
+          head,
+          u64be(0n),
+          kaId,
+          Buffer.from(kaId),
+          `coordinate-${unique}`,
+          u64be(1n),
+          'cg-shared-v1',
+          Buffer.alloc(32, 6),
+          Buffer.alloc(32, 7),
+          'dkg-ka-bundle-v1',
+          u64be(byteLength),
+          u64be(262_144n),
+          u64be(chunkCount),
+          Buffer.alloc(32, 8),
+          Buffer.alloc(32, 9),
+          Buffer.alloc(32, 10),
+        );
+      };
+
+      for (let chunkCount = 1n; chunkCount <= 4_096n; chunkCount += 1n) {
+        const lowerBoundary = chunkCount === 1n
+          ? 16n
+          : ((chunkCount - 1n) * 262_144n) + 1n;
+        const upperBoundary = chunkCount * 262_144n;
+        expect(() => insertGeometry(lowerBoundary, chunkCount)).not.toThrow();
+        expect(() => insertGeometry(upperBoundary, chunkCount)).not.toThrow();
+      }
+      for (const [byteLength, chunkCount] of [
+        [0n, 0n],
+        [16n, 0n],
+        [16n, 4_096n],
+        [262_144n, 2n],
+        [262_145n, 1n],
+        [262_145n, 3n],
+        [1_073_741_824n, 4_095n],
+      ] as const) {
+        expect(() => insertGeometry(byteLength, chunkCount)).toThrow(/constraint/i);
+      }
+
+      expect(database.prepare(
+        'SELECT count(*) AS count FROM rfc64_candidate_bucket_rows_v1',
+      ).get()?.count).toBe(8_192);
+      const plan = database.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT ka_id_u256be
+        FROM rfc64_candidate_bucket_rows_v1
+        WHERE session_id = ?
+          AND catalog_scope_digest = ?
+          AND author_address = ?
+          AND target_catalog_head_digest = ?
+          AND bucket_id_u64be = ?
+          AND ka_id_u256be > ?
+        ORDER BY ka_id_u256be
+        LIMIT 256
+      `).all(
+        session,
+        scope,
+        author,
+        head,
+        u64be(0n),
+        Buffer.alloc(32),
+      );
+      expect(plan.map((row) => String(row.detail)).join('\n')).toMatch(
+        /USING COVERING INDEX rfc64_candidate_bucket_rows_by_bucket_v1 \(session_id=\? AND catalog_scope_digest=\? AND author_address=\? AND target_catalog_head_digest=\? AND bucket_id_u64be=\? AND ka_id_u256be>\?\)/,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it('refuses a valid foreign application_id without modifying or quarantining it', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
@@ -940,6 +1140,168 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     } finally {
       foundation.close();
     }
+  });
+
+  it('classifies and safely recovers a main-plus-hot-journal unit before enabling WAL', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    const initialized = await openInventoryV1(dataDirectory);
+    initialized.close();
+    await leaveHotRollbackJournal(
+      path,
+      "CREATE TABLE uncommitted_intruder (value TEXT); INSERT INTO uncommitted_intruder VALUES ('lost')",
+    );
+    const journalBefore = fileOracle(`${path}-journal`);
+
+    const reopened = await openInventoryV1(dataDirectory);
+    try {
+      assertInitializedInventory(path);
+      const database = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(database.prepare(
+          "SELECT count(*) AS count FROM sqlite_schema WHERE name = 'uncommitted_intruder'",
+        ).get()?.count).toBe(0);
+      } finally {
+        database.close();
+      }
+      expect(journalBefore.size).toBeGreaterThan(512);
+      expect(existsSync(`${path}-journal`)).toBe(false);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('recovers a hot journal before automatically quarantining its incompatible main', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    createIncompatibleOwnedInventory(path, 'committed-before-hot-journal');
+    await leaveHotRollbackJournal(
+      path,
+      "INSERT INTO wrong_v1 VALUES ('uncommitted-before-crash')",
+    );
+
+    const foundation = await openInventoryV1(dataDirectory);
+    try {
+      assertInitializedInventory(path);
+      const generation = evidenceGeneration(path);
+      expect(lstatSync(join(generation, 'inventory-v1.sqlite3-journal')).isFile()).toBe(true);
+      const quarantined = new DatabaseSync(
+        join(generation, 'inventory-v1.sqlite3'),
+        { readOnly: true },
+      );
+      try {
+        expect(quarantined.prepare('SELECT value FROM wrong_v1 ORDER BY rowid').all()).toEqual([
+          { value: 'committed-before-hot-journal' },
+        ]);
+      } finally {
+        quarantined.close();
+      }
+    } finally {
+      foundation.close();
+    }
+  });
+
+  it('moves residual rollback-journal evidence in the automatic quarantine manifest', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    createIncompatibleOwnedInventory(path, 'residual-journal');
+    const evidence = HOSTILE_SIDECAR_BYTES.journal;
+    const openWithResidualJournal = createInventoryV1TestOpener({
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+      closeTarget: (close, reason) => {
+        close();
+        if (reason === 'automatic-schema-quarantine') {
+          writeFileSync(`${path}-journal`, evidence);
+        }
+      },
+    });
+
+    const foundation = await openWithResidualJournal(dataDirectory);
+    try {
+      assertInitializedInventory(path);
+      const generation = evidenceGeneration(path);
+      expect(readFileSync(join(generation, 'inventory-v1.sqlite3-journal'))).toEqual(evidence);
+      expect(existsSync(`${path}-journal`)).toBe(false);
+    } finally {
+      foundation.close();
+    }
+  });
+
+  it('fails closed on rollback-journal evidence beside a WAL-mode main header', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    createIncompatibleOwnedInventory(path, 'wal-header-journal');
+    const wal = new DatabaseSync(path);
+    wal.exec('PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(TRUNCATE);');
+    wal.close();
+    expect(readFileSync(path).subarray(18, 20)).toEqual(Buffer.from([2, 2]));
+
+    const journalEvidence = HOSTILE_SIDECAR_BYTES.journal;
+    const opener = createInventoryV1TestOpener({
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+      closeTarget: (close, reason) => {
+        close();
+        if (reason === 'automatic-schema-quarantine') {
+          writeFileSync(`${path}-journal`, journalEvidence);
+        }
+      },
+    });
+    await expect(opener(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'ambiguous-database'),
+    );
+    expect(readFileSync(`${path}-journal`)).toEqual(journalEvidence);
+    expect(existsSync(`${path}.rebuild-required`)).toBe(false);
+    expect(quarantineGenerations(path)).toEqual([]);
+  });
+
+  it('rejects pre-existing mixed journal modes before SQLite can mutate either sidecar', async () => {
+    for (const mixedMember of ['wal', 'shm'] as const) {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      const initialized = await openInventoryV1(dataDirectory);
+      initialized.close();
+      writeFileSync(`${path}-journal`, HOSTILE_SIDECAR_BYTES.journal);
+      writeFileSync(`${path}-${mixedMember}`, HOSTILE_SIDECAR_BYTES[mixedMember]);
+      const before = {
+        main: fileOracle(path),
+        journal: fileOracle(`${path}-journal`),
+        mixed: fileOracle(`${path}-${mixedMember}`),
+      };
+
+      await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+        (error: unknown) => expectOpenErrorCode(error, 'ambiguous-database'),
+      );
+      expect(fileOracle(path)).toEqual(before.main);
+      expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+      expect(fileOracle(`${path}-${mixedMember}`)).toEqual(before.mixed);
+      expectNoQuarantine(path);
+    }
+  });
+
+  it('fails closed on mixed rollback-journal and WAL evidence without starting quarantine', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    createIncompatibleOwnedInventory(path, 'mixed-journal-mode-evidence');
+    const journalEvidence = HOSTILE_SIDECAR_BYTES.journal;
+    const walEvidence = HOSTILE_SIDECAR_BYTES.wal;
+    const openWithMixedEvidence = createInventoryV1TestOpener({
+      quarantineCapability: INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
+      closeTarget: (close, reason) => {
+        close();
+        if (reason === 'automatic-schema-quarantine') {
+          writeFileSync(`${path}-journal`, journalEvidence);
+          writeFileSync(`${path}-wal`, walEvidence);
+        }
+      },
+    });
+
+    await expect(openWithMixedEvidence(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'database-io'),
+    );
+    expect(readFileSync(`${path}-journal`)).toEqual(journalEvidence);
+    expect(readFileSync(`${path}-wal`)).toEqual(walEvidence);
+    expect(existsSync(`${path}.rebuild-required`)).toBe(false);
+    expect(quarantineGenerations(path)).toEqual([]);
   });
 
   it('fails closed before automatic quarantine when namespace durability is unavailable', async () => {
@@ -1132,7 +1494,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       database.close();
       const sidecarTarget = join(sidecarData, 'sidecar-target');
       writeFileSync(sidecarTarget, 'sidecar');
-      symlinkSync(sidecarTarget, `${sidecarPath}-wal`);
+      symlinkSync(sidecarTarget, `${sidecarPath}-journal`);
       await expect(openInventoryV1(sidecarData)).rejects.toSatisfy((error: unknown) =>
         expectOpenErrorCode(error, 'unsafe-path'));
       expectNoQuarantine(sidecarPath);
@@ -1176,7 +1538,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       const dataDirectory = temporaryDataDirectory();
       const path = databasePath(dataDirectory);
       const originalMode = statSync(dataDirectory).mode & 0o777;
-      const actualUid = process.getuid();
+      const actualUid = process.getuid!();
       const uid = vi.spyOn(process, 'getuid').mockReturnValue(actualUid + 1);
       try {
         await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy((error: unknown) =>
@@ -1301,6 +1663,11 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       { version: 1, quarantineDirectory: 'placeholder' },
       { version: 1, quarantineDirectory: 'placeholder', members: ['main'], extra: true },
       { version: 1, quarantineDirectory: 'placeholder', members: ['main', 'wal'] },
+      { version: 1, quarantineDirectory: 'placeholder', members: ['main', 'journal'] },
+      { version: 1, quarantineDirectory: 'placeholder', members: ['journal', 'journal', 'main'] },
+      { version: 1, quarantineDirectory: 'placeholder', members: ['journal', 'wal', 'main'] },
+      { version: 1, quarantineDirectory: 'placeholder', members: ['journal', 'shm', 'main'] },
+      { version: 1, quarantineDirectory: 'placeholder', members: ['journal', 'wal', 'shm', 'main'] },
       { version: 1, quarantineDirectory: 'placeholder', members: ['wal', 'wal', 'main'] },
       { version: 1, quarantineDirectory: 'placeholder', members: ['unknown', 'main'] },
     ];
@@ -1616,6 +1983,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
   it('exhaustively rejects every non-prefix source/destination/missing/duplicate manifest topology without mutation', async () => {
     const manifests = [
       ['main'],
+      ['journal', 'main'],
       ['wal', 'main'],
       ['shm', 'main'],
       ['wal', 'shm', 'main'],
@@ -1719,6 +2087,94 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     } finally {
       foundation.close();
     }
+  });
+
+  it('fails closed without opening or moving a restarted zero-prefix journal manifest', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    const generation = join(
+      dirname(path),
+      'quarantine',
+      'inventory-v1-1234567890-9898989898989898',
+    );
+    mkdirSync(generation, { recursive: true });
+    createIncompatibleOwnedInventory(path, 'journal-zero-prefix-holder');
+    const holder = new DatabaseSync(path);
+    holder.exec(`
+      PRAGMA journal_mode = DELETE;
+      BEGIN IMMEDIATE;
+      INSERT INTO wrong_v1 VALUES ('uncommitted-live-holder');
+    `);
+    expect(lstatSync(`${path}-journal`).size).toBeGreaterThan(512);
+    const marker = Buffer.from(JSON.stringify({
+      version: 1,
+      quarantineDirectory: generation,
+      members: ['journal', 'main'],
+    }));
+    writeFileSync(`${path}.rebuild-required`, marker);
+    const before = {
+      main: fileOracle(path),
+      journal: fileOracle(`${path}-journal`),
+      marker: fileOracle(`${path}.rebuild-required`),
+      sourceNames: readdirSync(dirname(path))
+        .filter((name) => name.startsWith('inventory-v1.sqlite3'))
+        .sort(),
+      destinationNames: readdirSync(generation).sort(),
+    };
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+          (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+        );
+        expect(fileOracle(path)).toEqual(before.main);
+        expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+        expect(fileOracle(`${path}.rebuild-required`)).toEqual(before.marker);
+        expect(readdirSync(dirname(path))
+          .filter((name) => name.startsWith('inventory-v1.sqlite3'))
+          .sort()).toEqual(before.sourceNames);
+        expect(readdirSync(generation).sort()).toEqual(before.destinationNames);
+        expect(readFileSync(`${path}.rebuild-required`)).toEqual(marker);
+      }
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+  });
+
+  it('leaves a zero-prefix journal marker with a WAL-mode main untouched', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    const generation = join(
+      dirname(path),
+      'quarantine',
+      'inventory-v1-1234567890-9797979797979797',
+    );
+    mkdirSync(generation, { recursive: true });
+    createIncompatibleOwnedInventory(path, 'wal-marker-journal');
+    const wal = new DatabaseSync(path);
+    wal.exec('PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(TRUNCATE);');
+    wal.close();
+    writeFileSync(`${path}-journal`, HOSTILE_SIDECAR_BYTES.journal);
+    const marker = Buffer.from(JSON.stringify({
+      version: 1,
+      quarantineDirectory: generation,
+      members: ['journal', 'main'],
+    }));
+    writeFileSync(`${path}.rebuild-required`, marker);
+    const before = {
+      main: fileOracle(path),
+      journal: fileOracle(`${path}-journal`),
+      marker: fileOracle(`${path}.rebuild-required`),
+      destinationNames: readdirSync(generation).sort(),
+    };
+
+    await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'ambiguous-database'),
+    );
+    expect(fileOracle(path)).toEqual(before.main);
+    expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+    expect(fileOracle(`${path}.rebuild-required`)).toEqual(before.marker);
+    expect(readdirSync(generation).sort()).toEqual(before.destinationNames);
   });
 
   it('resumes a partial recovery-marker move before rebuilding', async () => {
@@ -1881,6 +2337,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
   it('converges every frozen recovery manifest and valid moved-prefix topology', async () => {
     const manifests = [
       ['main'],
+      ['journal', 'main'],
       ['wal', 'main'],
       ['shm', 'main'],
       ['wal', 'shm', 'main'],
@@ -1897,6 +2354,22 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
           label,
         );
         const path = databasePath(dataDirectory);
+
+        if (members[0] === 'journal' && movedPrefix === 0) {
+          const before = new Map(members.map((member) => {
+            const evidence = recoverySourcePath(path, member);
+            return [evidence, fileOracle(evidence)] as const;
+          }));
+          const markerBefore = fileOracle(`${path}.rebuild-required`);
+          await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+            (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+          );
+          expect(fileOracle(`${path}.rebuild-required`)).toEqual(markerBefore);
+          for (const [evidence, oracle] of before) {
+            expect(fileOracle(evidence)).toEqual(oracle);
+          }
+          continue;
+        }
 
         const foundation = await openInventoryV1(dataDirectory);
         try {
@@ -1996,9 +2469,125 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     }
   }, 180_000);
 
+  it('recovers a journal moved-prefix in a fresh process after SIGKILL at every prefix durability boundary', async () => {
+    for (const boundary of JOURNAL_PREFIX_FAULT_BOUNDARIES) {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      const label = `journal-prefix-fault-${boundary}`;
+      const seeded = seedPendingRecoveryTopology(
+        dataDirectory,
+        JOURNAL_RECOVERY_MANIFEST,
+        1,
+        label,
+        true,
+      );
+      const journalBefore = fileOracle(
+        recoveryDestinationPath(seeded.generation, 'journal'),
+      );
+      const mainBefore = fileOracle(path);
+      const tracePath = join(dataDirectory, `trace-${boundary}.jsonl`);
+      const trace = await killAtInventoryBoundary(dataDirectory, boundary, tracePath, {
+        DKG_RFC64_CHILD_PROTECT_EVIDENCE: '1',
+      });
+      expect(trace.map((entry) => entry.boundary)).toEqual(
+        JOURNAL_PREFIX_FAULT_BOUNDARIES.slice(
+          0,
+          JOURNAL_PREFIX_FAULT_BOUNDARIES.indexOf(boundary) + 1,
+        ),
+      );
+
+      await reopenInventoryInFreshProcess(dataDirectory);
+      assertInitializedInventory(path);
+      assertRecoveredManifestEvidence(
+        path,
+        JOURNAL_RECOVERY_MANIFEST,
+        label,
+        seeded.generation,
+        seeded.hashes,
+      );
+      expect(fileOracle(recoveryDestinationPath(seeded.generation, 'journal'))).toEqual(
+        journalBefore,
+      );
+      expect(fileOracle(recoveryDestinationPath(seeded.generation, 'main'))).toEqual(
+        mainBefore,
+      );
+    }
+  }, 60_000);
+
+  it('preserves or resumes automatic journal quarantine at every crash boundary', async () => {
+    for (const boundary of JOURNAL_AUTOMATIC_FAULT_BOUNDARIES) {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      const label = `automatic-journal-fault-${boundary}`;
+      createIncompatibleOwnedInventory(path, label);
+      const tracePath = join(dataDirectory, `trace-${boundary}.jsonl`);
+      const trace = await killAtInventoryBoundary(dataDirectory, boundary, tracePath, {
+        DKG_RFC64_CHILD_SYNTHETIC_JOURNAL: '1',
+      });
+      expect(trace.map((entry) => entry.boundary)).toEqual([
+        'target-exclusivity-proven',
+        ...JOURNAL_AUTOMATIC_FAULT_BOUNDARIES.slice(
+          0,
+          JOURNAL_AUTOMATIC_FAULT_BOUNDARIES.indexOf(boundary) + 1,
+        ),
+      ]);
+
+      const markerPath = `${path}.rebuild-required`;
+      const generation = quarantineGenerations(path).find((candidate) =>
+        existsSync(recoveryDestinationPath(candidate, 'journal'))
+        || existsSync(recoveryDestinationPath(candidate, 'main'))
+        || existsSync(markerPath));
+      const journalAtDestination = generation !== undefined
+        && existsSync(recoveryDestinationPath(generation, 'journal'));
+
+      if (existsSync(markerPath) && !journalAtDestination) {
+        const before = {
+          main: fileOracle(path),
+          journal: fileOracle(`${path}-journal`),
+          marker: fileOracle(markerPath),
+          destinationNames: generation === undefined ? [] : readdirSync(generation).sort(),
+        };
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+            (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+          );
+          expect(fileOracle(path)).toEqual(before.main);
+          expect(fileOracle(`${path}-journal`)).toEqual(before.journal);
+          expect(fileOracle(markerPath)).toEqual(before.marker);
+          if (generation !== undefined) {
+            expect(readdirSync(generation).sort()).toEqual(before.destinationNames);
+          }
+        }
+        continue;
+      }
+
+      const killedEvidence = new Map<RecoveryMember, FileOracle>();
+      const committedMembers = journalAtDestination
+        ? JOURNAL_RECOVERY_MANIFEST
+        : (['main'] as const);
+      for (const member of committedMembers) {
+        const source = recoverySourcePath(path, member);
+        const destination = generation === undefined
+          ? undefined
+          : recoveryDestinationPath(generation, member);
+        const evidence = existsSync(source) ? source : destination;
+        if (evidence !== undefined && existsSync(evidence)) {
+          killedEvidence.set(member, fileOracle(evidence));
+        }
+      }
+
+      await reopenInventoryInFreshProcess(dataDirectory);
+      assertInitializedInventory(path);
+      const recoveredGeneration = evidenceGeneration(path);
+      for (const [member, oracle] of killedEvidence) {
+        expect(fileOracle(recoveryDestinationPath(recoveredGeneration, member))).toEqual(oracle);
+      }
+    }
+  }, 120_000);
+
   it('recovers in a fresh process after SIGKILL at every moved-prefix re-fsync boundary', async () => {
     for (const boundary of MOVED_PREFIX_FAULT_BOUNDARIES) {
-      const member = boundary.split('.')[2] as RecoveryMember;
+      const member = boundary.split('.')[2] as FullRecoveryMember;
       const movedPrefix = FULL_RECOVERY_MANIFEST.indexOf(member) + 1;
       const dataDirectory = temporaryDataDirectory();
       const path = databasePath(dataDirectory);

@@ -14,20 +14,20 @@ export type InventoryV1QuarantineCapability =
 
 export type InventoryV1QuarantineBoundary =
   | 'target-exclusivity-proven'
-  | `begin.source.${'wal' | 'shm' | 'main'}.file-fsync`
+  | `begin.source.${'journal' | 'wal' | 'shm' | 'main'}.file-fsync`
   | 'begin.inventory-directory.fsync-after-quarantine-root'
   | 'begin.quarantine-root.fsync-after-generation'
   | 'begin.marker.write'
   | 'begin.marker.file-fsync'
   | 'begin.inventory-directory.fsync-after-marker'
-  | `resume.prefix.${'wal' | 'shm' | 'main'}.file-fsync`
-  | `resume.prefix.${'wal' | 'shm' | 'main'}.generation-directory-fsync`
-  | `resume.prefix.${'wal' | 'shm' | 'main'}.inventory-directory-fsync`
-  | `resume.source.${'wal' | 'shm' | 'main'}.file-fsync-after-quiescence`
-  | `resume.member.${'wal' | 'shm' | 'main'}.rename`
-  | `resume.member.${'wal' | 'shm' | 'main'}.file-fsync`
-  | `resume.member.${'wal' | 'shm' | 'main'}.generation-directory-fsync`
-  | `resume.member.${'wal' | 'shm' | 'main'}.inventory-directory-fsync`
+  | `resume.prefix.${'journal' | 'wal' | 'shm' | 'main'}.file-fsync`
+  | `resume.prefix.${'journal' | 'wal' | 'shm' | 'main'}.generation-directory-fsync`
+  | `resume.prefix.${'journal' | 'wal' | 'shm' | 'main'}.inventory-directory-fsync`
+  | `resume.source.${'journal' | 'wal' | 'shm' | 'main'}.file-fsync-after-quiescence`
+  | `resume.member.${'journal' | 'wal' | 'shm' | 'main'}.rename`
+  | `resume.member.${'journal' | 'wal' | 'shm' | 'main'}.file-fsync`
+  | `resume.member.${'journal' | 'wal' | 'shm' | 'main'}.generation-directory-fsync`
+  | `resume.member.${'journal' | 'wal' | 'shm' | 'main'}.inventory-directory-fsync`
   | 'resume.marker.unlink'
   | 'resume.inventory-directory.fsync-after-marker-unlink';
 

@@ -4,6 +4,31 @@ export const INVENTORY_V1_RELATIVE_PATH = 'rfc64-sync/inventory-v1.sqlite3';
 export const INVENTORY_V1_DIRECTORY_MODE = 0o700;
 export const INVENTORY_V1_FILE_MODE = 0o600;
 
+// SQL-1 stores protocol integers only as canonical fixed-width big-endian
+// BLOBs. Decode the bounded low hexadecimal suffix with SQLite core built-ins
+// solely inside the relational CHECK below; no redundant numeric authority,
+// extension function, trigger, or connection-local UDF is introduced.
+function unsignedHexSuffixIntegerSql(column: string, nibbles: number): string {
+  const firstPosition = 17 - nibbles;
+  return Array.from({ length: nibbles }, (_unused, index) => {
+    const position = firstPosition + index;
+    const multiplier = 16 ** (nibbles - index - 1);
+    return `((instr('0123456789ABCDEF', substr(hex(${column}), ${position}, 1)) - 1) * ${multiplier})`;
+  }).join(' + ');
+}
+
+const TRANSFER_BYTE_LENGTH_INTEGER_SQL = unsignedHexSuffixIntegerSql(
+  'transfer_byte_length_u64be',
+  8,
+);
+const TRANSFER_CHUNK_COUNT_INTEGER_SQL = unsignedHexSuffixIntegerSql(
+  'transfer_chunk_count_u64be',
+  4,
+);
+const TRANSFER_CHUNK_GEOMETRY_CHECK_SQL =
+  `((${TRANSFER_BYTE_LENGTH_INTEGER_SQL}) + 262143) / 262144`
+  + ` = (${TRANSFER_CHUNK_COUNT_INTEGER_SQL})`;
+
 export const INVENTORY_V1_LOADS_TABLE_SQL = `
 CREATE TABLE rfc64_candidate_bucket_loads_v1 (
   session_id BLOB NOT NULL
@@ -183,6 +208,7 @@ CREATE TABLE rfc64_candidate_bucket_rows_v1 (
   transfer_chunk_count_u64be BLOB NOT NULL CHECK (
     typeof(transfer_chunk_count_u64be) = 'blob' AND length(transfer_chunk_count_u64be) = 8
     AND transfer_chunk_count_u64be >= x'0000000000000001' AND transfer_chunk_count_u64be <= x'0000000000001000'
+    AND ${TRANSFER_CHUNK_GEOMETRY_CHECK_SQL}
   ),
 
   transfer_blob_digest BLOB NOT NULL
