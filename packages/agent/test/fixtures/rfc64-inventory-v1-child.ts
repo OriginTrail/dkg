@@ -71,6 +71,15 @@ if (mode === 'fault') {
             : Buffer.alloc(0),
         );
       }
+      if (
+        process.env.DKG_RFC64_CHILD_SYNTHETIC_JOURNAL === '1'
+        && reason === 'automatic-schema-quarantine'
+      ) {
+        writeFileSync(
+          `${targetPath}-journal`,
+          Buffer.from('hostile-rfc64-journal-evidence\0\u0000\u0001', 'utf8'),
+        );
+      }
     },
   });
   await openForFault(dataDirectory);
