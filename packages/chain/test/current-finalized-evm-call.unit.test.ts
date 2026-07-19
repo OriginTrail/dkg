@@ -11,6 +11,7 @@ import {
   CONTROL_EIP1271_GAS_LIMIT_V1,
   CONTROL_EIP1271_MAX_ATTEMPTS_V1,
   CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
   CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
   CurrentFinalizedEvmCallErrorV1,
@@ -27,6 +28,8 @@ const CHAIN_A = '20430' as ChainIdV1;
 const CHAIN_B = '100' as ChainIdV1;
 const TO = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
 const BLOCK_HASH = `0x${'22'.repeat(32)}`;
+const OBJECT_DIGEST = `${'33'.repeat(32)}`;
+const CANONICAL_CALL_DATA = `0x1626ba7e${OBJECT_DIGEST}${'0'.repeat(62)}40${'0'.repeat(63)}1aa${'0'.repeat(62)}`;
 const RESULT_A = Object.freeze({
   chainId: CHAIN_A,
   blockNumber: '123',
@@ -54,6 +57,21 @@ describe('RFC-64 current-finalized EVM call router', () => {
     expect(replacementAdapter).not.toHaveBeenCalled();
     expect(Object.isFrozen(router)).toBe(true);
     expect(Object.isFrozen(firstAdapter.mock.calls[0]![0])).toBe(true);
+  });
+
+  it('snapshots request data before the deferred adapter invocation', async () => {
+    const adapter = vi.fn(async () => RESULT_A);
+    const router = createCurrentFinalizedEvmCallRouterV1([{ chainId: CHAIN_A, adapter }]);
+    const mutable = request() as { -readonly [K in keyof CurrentFinalizedEvmCallRequestV1]: CurrentFinalizedEvmCallRequestV1[K] };
+
+    const result = router(mutable);
+    mutable.chainId = CHAIN_B;
+    mutable.data = `0x${'00'.repeat(100)}`;
+    await expect(result).resolves.toBe(RESULT_A);
+    expect(adapter.mock.calls[0]![0]).toMatchObject({
+      chainId: CHAIN_A,
+      data: CANONICAL_CALL_DATA,
+    });
   });
 
   it('rejects duplicate, non-canonical, sparse, accessor, and hostile registrations', () => {
@@ -108,6 +126,7 @@ describe('RFC-64 current-finalized EVM call router', () => {
     ['from', '0x2222222222222222222222222222222222222222'],
     ['gasLimit', CONTROL_EIP1271_GAS_LIMIT_V1 + 1n],
     ['maxReturnBytes', CONTROL_EIP1271_MAX_RETURN_BYTES_V1 + 1],
+    ['maxRpcResponseBytes', CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 + 1],
     ['attemptTimeoutMs', CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 + 1],
     ['maxAttempts', CONTROL_EIP1271_MAX_ATTEMPTS_V1 + 1],
     ['endpointAttemptPolicy', 'retry-same-peer-endpoint'],
@@ -132,6 +151,10 @@ describe('RFC-64 current-finalized EVM call router', () => {
       request({ chainId: '020430' as ChainIdV1 }),
       request({ to: '0xABC' as EvmAddressV1 }),
       request({ data: '0xABC' }),
+      request({ data: '0x1234' }),
+      request({ data: CANONICAL_CALL_DATA.replace('1626ba7e', 'ffffffff') }),
+      request({ data: `${CANONICAL_CALL_DATA}00` }),
+      request({ data: `${CANONICAL_CALL_DATA.slice(0, -2)}01` }),
       request({ signal: {} as AbortSignal }),
       { ...request(), rpcUrl: 'https://peer.invalid' },
       { ...request(), blockTag: 'latest' },
@@ -139,6 +162,27 @@ describe('RFC-64 current-finalized EVM call router', () => {
       await expect(router(malformed as CurrentFinalizedEvmCallRequestV1))
         .rejects.toMatchObject({ code: 'rpc-unavailable' });
     }
+
+    const accessor = { ...request() } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'data', {
+      enumerable: true,
+      get() {
+        throw new Error('must not execute');
+      },
+    });
+    await expect(router(accessor as unknown as CurrentFinalizedEvmCallRequestV1))
+      .rejects.toMatchObject({ code: 'rpc-unavailable' });
+
+    const symbol = { ...request(), [Symbol('peer-url')]: 'https://peer.invalid' };
+    await expect(router(symbol as CurrentFinalizedEvmCallRequestV1))
+      .rejects.toMatchObject({ code: 'rpc-unavailable' });
+
+    const hostile = new Proxy(request(), {
+      ownKeys() {
+        throw new CurrentFinalizedEvmCallErrorV1('revert', 'forged');
+      },
+    });
+    await expect(router(hostile)).rejects.toMatchObject({ code: 'rpc-unavailable' });
     expect(adapter).not.toHaveBeenCalled();
   });
 
@@ -151,7 +195,7 @@ describe('RFC-64 current-finalized EVM call router', () => {
     const active = Array.from({ length: 4 }, () => router(request()));
     await Promise.resolve();
     expect(adapter).toHaveBeenCalledTimes(4);
-    await expect(router(request())).rejects.toMatchObject({ code: 'resource-limit' });
+    await expect(router(request())).rejects.toMatchObject({ code: 'concurrency-saturated' });
     expect(adapter).toHaveBeenCalledTimes(4);
 
     pending[0]!.resolve(RESULT_A);
@@ -179,7 +223,7 @@ describe('RFC-64 current-finalized EVM call router', () => {
     await Promise.resolve();
 
     controller.abort();
-    await expect(router(request())).rejects.toMatchObject({ code: 'resource-limit' });
+    await expect(router(request())).rejects.toMatchObject({ code: 'concurrency-saturated' });
     expect(adapter).toHaveBeenCalledTimes(4);
 
     pending[0]!.resolve(RESULT_A);
@@ -209,9 +253,9 @@ describe('RFC-64 current-finalized EVM call router', () => {
     await Promise.resolve();
     expect(adapterA).toHaveBeenCalledTimes(4);
     expect(adapterB).toHaveBeenCalledTimes(4);
-    await expect(router(request())).rejects.toMatchObject({ code: 'resource-limit' });
+    await expect(router(request())).rejects.toMatchObject({ code: 'concurrency-saturated' });
     await expect(router(request({ chainId: CHAIN_B })))
-      .rejects.toMatchObject({ code: 'resource-limit' });
+      .rejects.toMatchObject({ code: 'concurrency-saturated' });
 
     pendingA.forEach((item) => item.resolve(RESULT_A));
     pendingB.forEach((item) => item.resolve({ ...RESULT_A, chainId: CHAIN_B }));
@@ -264,9 +308,10 @@ function request(
     chainId: CHAIN_A,
     to: TO,
     from: CONTROL_EIP1271_CALL_FROM_V1,
-    data: '0x1234',
+    data: CANONICAL_CALL_DATA,
     gasLimit: CONTROL_EIP1271_GAS_LIMIT_V1,
     maxReturnBytes: CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+    maxRpcResponseBytes: CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
     attemptTimeoutMs: CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
     maxAttempts: CONTROL_EIP1271_MAX_ATTEMPTS_V1,
     endpointAttemptPolicy: CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
