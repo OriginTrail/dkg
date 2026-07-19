@@ -72,6 +72,11 @@ export interface VerifiedTransferredCatalogBundleSnapshotV1 {
   readonly bundleBytes: Uint8Array;
 }
 
+export type VerifiedTransferredCatalogBundleMetadataV1 = Omit<
+  VerifiedTransferredCatalogBundleSnapshotV1,
+  'bundleBytes'
+>;
+
 export type TransferredCatalogBundleErrorCode =
   | 'transferred-bundle-head'
   | 'transferred-bundle-row'
@@ -315,7 +320,7 @@ export function readVerifiedTransferredCatalogBundleV1(
   row: AuthorCatalogRowV1,
   deployment: CatalogSealDeploymentProfileV1,
 ): VerifiedTransferredCatalogBundleSnapshotV1 {
-  assertVerifiedTransferredCatalogBundleForInputsV1(
+  const metadata = readVerifiedTransferredCatalogBundleMetadataV1(
     value,
     signedHead,
     row,
@@ -323,9 +328,51 @@ export function readVerifiedTransferredCatalogBundleV1(
   );
   const state = VERIFIED_TRANSFERRED_CATALOG_BUNDLES_V1.get(value as object)!;
   return Object.freeze({
-    ...state.snapshot,
+    ...metadata,
     bundleBytes: new Uint8Array(state.bundleBytes),
   });
+}
+
+/**
+ * Read only immutable scalar/capability metadata without copying a potentially
+ * one-gibibyte bundle. Exact input rebinding remains mandatory.
+ */
+export function readVerifiedTransferredCatalogBundleMetadataV1(
+  value: unknown,
+  signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+  row: AuthorCatalogRowV1,
+  deployment: CatalogSealDeploymentProfileV1,
+): VerifiedTransferredCatalogBundleMetadataV1 {
+  assertVerifiedTransferredCatalogBundleForInputsV1(
+    value,
+    signedHead,
+    row,
+    deployment,
+  );
+  const state = VERIFIED_TRANSFERRED_CATALOG_BUNDLES_V1.get(value as object)!;
+  return Object.freeze({ ...state.snapshot });
+}
+
+/**
+ * Return only the canonical projection component as a fresh caller-owned copy.
+ * This avoids copying the seal and framing bytes when the semantic projection
+ * verifier consumes a large, already-verified transfer.
+ */
+export function readVerifiedTransferredCatalogProjectionBytesV1(
+  value: unknown,
+  signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+  row: AuthorCatalogRowV1,
+  deployment: CatalogSealDeploymentProfileV1,
+): Uint8Array {
+  assertVerifiedTransferredCatalogBundleForInputsV1(
+    value,
+    signedHead,
+    row,
+    deployment,
+  );
+  const state = VERIFIED_TRANSFERRED_CATALOG_BUNDLES_V1.get(value as object)!;
+  const decoded = decodeOpaqueKaBundleV1(state.bundleBytes);
+  return new Uint8Array(decoded.projectionBytes);
 }
 
 function snapshotTransferredBundleInputs(
