@@ -429,5 +429,16 @@ describe('Track-2 control-object envelopes', () => {
     expect(() => parseCanonicalControlSignatureVariant(uppercaseSignature)).toThrow(
       /lowercase bytes/,
     );
+    // Exact-key contract: an extra field in canonical (sorted) position passes
+    // canonicalization but must be rejected by the exact-key check.
+    const withExtraField = `${EOA_CANONICAL_SIGNATURE_VARIANT.slice(0, -1)},"unknown":"metadata"}`;
+    expect(() => parseCanonicalControlSignatureVariant(withExtraField)).toThrow(
+      /unknown or missing fields/,
+    );
+    // Variant parser limits: maxDepth 1 rejects nesting, and the 16 KiB byte cap
+    // rejects an over-cap canonical input before materialization.
+    expect(() => parseCanonicalControlSignatureVariant('{"a":{"b":1}}')).toThrow(/nesting/);
+    const oversizedVariant = `{"a":"${'x'.repeat(16 * 1024)}"}`;
+    expect(() => parseCanonicalControlSignatureVariant(oversizedVariant)).toThrow();
   });
 });
