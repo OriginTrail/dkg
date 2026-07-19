@@ -35,6 +35,7 @@ import {
 } from '../src/rfc64/control-object-store-v1.js';
 import { putRfc64ExactBytesV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
 
 const PRIVATE_KEY = `0x${'42'.repeat(32)}`;
 const wallet = new ethers.Wallet(PRIVATE_KEY);
@@ -403,6 +404,11 @@ describe('RFC-64 durable control-object store v1', () => {
     await writeFile(wrongPath, await readFile(paths.signature), {
       mode: RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
     });
+    applyRfc64OwnerOnlyPermissionsSyncV1(
+      wrongPath,
+      RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
+      false,
+    );
     const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
 
     await expect(store.getVerifiedObject({
