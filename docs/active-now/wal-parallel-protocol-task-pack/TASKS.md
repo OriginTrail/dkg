@@ -94,15 +94,17 @@ operator-visible results.
 
 ---
 
-## WAL-001 — Close RFC implementation-freeze decisions and publish conformance vectors
+## WAL-001 — Apply the protocol-v1 freeze and publish conformance vectors
 
 **Focused RFC context:** Sections 4–9, 12–17, 22–24.
 
 ### Objective
 
-Resolve every item in the RFC implementation-freeze checklist before multiple
-implementations encode incompatible assumptions. The result must be a normative
-wire/convergence contract, not additional prose ambiguity.
+Apply every resolution in RFC v0.6 Section 22 before production implementations
+encode incompatible assumptions. The result must be an executable normative
+wire/convergence contract, not additional prose ambiguity. The conformance
+harness is TypeScript-only; this task does not add Go or another implementation
+language.
 
 ### Scope and deliverables
 
@@ -175,6 +177,9 @@ wire/convergence contract, not additional prose ambiguity.
 - Publish byte fixtures for CBOR tuples, signatures, IDs, set commitments,
   rateless IBLT symbols/peeling, object ranges, encryption, snapshots, reducer
   cases, and cutover objects in the spec and code repos.
+- Mirror the exact normative schema/vector files from the spec task-pack context;
+  generated copies must compare byte-for-byte so dependent tasks cannot consume
+  a locally reinterpreted protocol.
 
 ### Acceptance area
 
@@ -205,19 +210,20 @@ wire/convergence contract, not additional prose ambiguity.
 - [ ] Documentation explicitly states that changing one payload byte produces a
       new whole-object identity and that v1 does not promise cross-object range
       deduplication or pre-completion content verification.
-- [ ] All ten RFC implementation-freeze items have an explicit normative answer
-      merged or approved in `dkgv10-spec`; none remains implicit in code.
-- [ ] At least two independent test implementations consume the same fixtures
+- [ ] All ten former RFC implementation-freeze items have the explicit normative
+      v0.6 answer merged or approved in `dkgv10-spec`; none remains implicit in code.
+- [ ] At least two independently written TypeScript test implementations consume the same fixtures
       and produce byte-identical encodings, IDs, roots, proofs, and reducer
-      digests.
+      digests; no new implementation language is introduced for conformance.
 - [ ] Valid and invalid vectors cover empty, boundary, duplicate, reordered,
       truncated, oversized, cross-view, stale-authority, and downgrade cases.
 - [ ] The finality rule proves that an author-supplied value cannot weaken
       network/chain policy.
 - [ ] The tier-movement schema proves that a public VM response discloses no
       private SWM identifier, graph name, epoch, count, or causal shape.
-- [ ] The task-pack RFC system-context file, its source commit, and checksum are
-      refreshed after the normative RFC change before dependent tasks proceed.
+- [ ] The task-pack RFC, schema, and vector system-context files, source commit,
+      and checksum are refreshed after the normative RFC change before dependent
+      tasks proceed.
 
 ---
 

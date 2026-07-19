@@ -136,7 +136,7 @@ Source:
 | Rebuild source                | Inventory plus graph providers and snapshots                  | Latest catalogs plus graph providers                                            | Complete WAL objects and signed snapshot WAL objects                                     |
 | Steady-state equal cost       | One curator head vector; then no lane fetch                   | One curator head vector; then no catalog fetch                                  | One curator head vector plus equal set roots; cacheable                                  |
 | Authority cutover             | Parallel convergence rollout                                  | Track-2 replacement after tactical baseline                                     | Full-fleet shadow run followed by one signed network-wide hard cutover                    |
-| A/B baseline                  | Unmodified v10.0.8                                            | Track 2 compared with tactical Track 1                                          | The authoritative arm at shadow-run time; retain comparable v10.0.8 and Track-1 receipts |
+| Comparison evidence           | Existing behavior is failure characterization, not a correctness baseline | Track 1/2 receipts are informative comparators                                  | Independent semantic oracle, protocol vectors, and measurable RFC gates define success   |
 
 ## 3. Where the designs agree
 
@@ -446,9 +446,10 @@ The WAL RFC should normatively import these PR #144 decisions:
     handling.
 12. Lost-nudge, author-crash, out-of-order-commit, private authorization,
     removed-member, and VM-substitution fault tests.
-13. Correctness plus resource A/B acceptance, with the baseline stated
-    explicitly: Revision 3.2 uses unmodified v10.0.8, while proposed Revision-4
-    Track 2 uses the tactical Track-1 result.
+13. Correctness plus resource acceptance against an independent semantic
+    oracle, frozen protocol vectors, and explicit measurable targets. Current
+    sync and Track-1/Track-2 runs are failure characterization or informative
+    comparators, not correctness baselines.
 14. Retirement of superseded paths as a gate rather than a later cleanup wish.
 
 ## 11. What to replace
@@ -489,13 +490,14 @@ gate aborts the maintenance window back to legacy authority. After activation,
 rollback requires another coordinated maintenance operation and a deterministic
 projection export from WAL.
 
-If PR #144 section 12 Track 1 lands first, it becomes the honest tactical
-baseline. If the proposed Revision-4 Track-2 implementation lands first, it may
+If PR #144 section 12 Track 1 lands first, it becomes a useful tactical
+comparator. If the proposed Revision-4 Track-2 implementation lands first, it may
 serve as the authoritative legacy arm and its guarded SPARQL activation can
 become the first RDF adapter materializer. Its semantic catalog must not become
 a second permanent replication truth after the WAL cutover. The WAL A/B run
 must record which arm was authoritative and preserve comparable v10.0.8 and
-Track-1 receipts where available.
+Track-1 receipts where available, while judging correctness only against the
+independent semantic oracle and frozen WAL vectors.
 
 ## 13. Decision matrix
 
@@ -504,15 +506,15 @@ Track-1 receipts where available.
 | Fix current observed graph delivery with minimum protocol work     | PR #144 section 12 Track 1 | Tactical bug fixes; no new convergence protocol.                    |
 | Remove SQLite/Oxigraph dual-authority in the current inventory RFC | PR #144 Revision 4         | One semantic store commit is simpler than cross-store coordination. |
 | Make sync independent of RDF and triplestore behavior              | WAL byte-set proposal      | Only immutable bytes and proofs cross the protocol boundary.        |
-| Support resumable large-object transfer and exact byte parity      | WAL byte-set proposal      | Blob ranges and byte hashes are normative.                          |
+| Support resumable large-object transfer and exact byte parity      | WAL byte-set proposal      | Whole-object ranges and final object hashes are normative.          |
 | Define deterministic concurrent SPARQL update behavior             | WAL RDF adapter            | Explicit causal merge/conflict/resolution model.                    |
-| Deliver quickly without committing to the final architecture       | Parallel run               | Keep current path authoritative while measuring both proposals.     |
+| Deliver quickly without committing to the final architecture       | Parallel run               | Keep current path authoritative while applying independent gates.   |
 
 ## 14. Recommendation
 
 Proceed with the parallel WAL run, not a direct replacement release.
 
-Use PR #144 as the control-invariant source and black-box acceptance baseline,
+Use PR #144 as a control-invariant source and reuse its black-box harness,
 but adopt the WAL proposal as the target protocol boundary. Specifically:
 
 1. Keep the signed roster, per-author checkpoints, curator freshness vector,
@@ -523,8 +525,8 @@ but adopt the WAL proposal as the target protocol boundary. Specifically:
 3. Implement the RDF/SPARQL reducer and guarded materializer as the first
    adapter.
 4. Run byte reconciliation and shadow projection beside the current path.
-5. Close OT-RFC-65's implementation-freeze checklist, then require byte-set
-   equality, RDF projection equality, conflict determinism, crash replay,
+5. Consume OT-RFC-65's frozen protocol-v1 schema and vectors, then require
+   byte-set equality, RDF projection equality, conflict determinism, crash replay,
    private security, backfill, and resource gates across the complete fleet.
 6. Promote WAL authority with one signed network-wide cutover, not a
    per-collection mixed-authority phase.
