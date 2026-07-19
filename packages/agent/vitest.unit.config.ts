@@ -107,6 +107,7 @@ export default defineConfig({
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/rfc64-inventory-v1-scalars.test.ts",
       "test/rfc64-inventory-v1-lifecycle.test.ts",
+      "test/rfc64-catalog-row-authorship.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
