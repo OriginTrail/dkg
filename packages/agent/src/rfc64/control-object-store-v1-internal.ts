@@ -146,8 +146,8 @@ export interface Rfc64ControlObjectStoreV1 {
   close(): Promise<void>;
 }
 
-/** Open only with lifecycle authority minted by the leased inventory owner. */
-export async function openRfc64ControlObjectStoreForOwnedInventoryV1(
+/** Open only with package-internal authority backed by the live persistence lease. */
+export async function openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
   ownership: Rfc64PersistenceRootOwnershipV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
   const rfc64RootPath = ownership.assertHeldAndGetRootPathV1();

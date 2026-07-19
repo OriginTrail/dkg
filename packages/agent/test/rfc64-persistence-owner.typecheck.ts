@@ -1,6 +1,6 @@
 import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import type { Rfc64InventoryV1Foundation } from '../src/rfc64/inventory-v1/index.js';
-import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from '../src/rfc64/control-object-store-v1-internal.js';
+import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from '../src/rfc64/control-object-store-v1-internal.js';
 
 declare const persistence: Rfc64PersistenceV1;
 declare const ownedInventory: Rfc64InventoryV1Foundation;
@@ -17,9 +17,9 @@ persistence.inventory.purgeNextStartupStaleCandidateBatch();
 
 // @ts-expect-error public inventory foundations do not expose sibling-resource authority
 ownedInventory.controlObjectStoreOwnership;
-await openRfc64ControlObjectStoreForOwnedInventoryV1(
+await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
   // @ts-expect-error an inventory object is not the package-internal ownership capability
   ownedInventory,
 );
 // @ts-expect-error a raw filesystem path cannot bypass inventory lease ownership
-await openRfc64ControlObjectStoreForOwnedInventoryV1('/tmp/rfc64-sync');
+await openRfc64ControlObjectStoreForOwnedPersistenceRootV1('/tmp/rfc64-sync');

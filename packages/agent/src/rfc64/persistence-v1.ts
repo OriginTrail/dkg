@@ -8,7 +8,7 @@ import {
   type Rfc64ControlObjectOperationsV1,
   type Rfc64ControlObjectStoreV1,
 } from './control-object-store-v1.js';
-import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from './control-object-store-v1-internal.js';
+import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from './control-object-store-v1-internal.js';
 import { resolveRfc64PersistenceRootV1 } from './persistence-layout-v1.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from './persistence-root-ownership-v1-internal.js';
 
@@ -117,7 +117,7 @@ export async function openRfc64PersistenceV1(
       if (batch.done) break;
       await yieldAfterPurgeBatch();
     }
-    const controlObjectStore = await openRfc64ControlObjectStoreForOwnedInventoryV1(
+    const controlObjectStore = await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
       getRfc64PersistenceRootOwnershipForInventoryV1(inventory),
     );
     return new OwnedRfc64PersistenceV1(rootPath, inventory, controlObjectStore);

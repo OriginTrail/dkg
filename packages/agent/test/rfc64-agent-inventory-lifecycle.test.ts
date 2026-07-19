@@ -24,7 +24,7 @@ import {
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
-import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from '../src/rfc64/control-object-store-v1-internal.js';
+import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from '../src/rfc64/control-object-store-v1-internal.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
@@ -333,7 +333,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     const ownership = getRfc64PersistenceRootOwnershipForInventoryV1(inventory);
     inventory.close();
 
-    await expect(openRfc64ControlObjectStoreForOwnedInventoryV1(ownership))
+    await expect(openRfc64ControlObjectStoreForOwnedPersistenceRootV1(ownership))
       .rejects.toMatchObject({ code: 'database-closed' });
   });
 
