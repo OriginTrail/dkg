@@ -321,7 +321,7 @@ function assertUnsignedControlEnvelopeFields(
       throw new Error('Control-object type is outside the canonical string bounds');
     }
   }
-  if (/[ -]/u.test(envelope.objectType)) {
+  if (/[\u0000-\u001f\u007f]/u.test(envelope.objectType)) {
     throw new Error('Control-object type is outside the canonical string bounds');
   }
   if (!CONTROL_OBJECT_SIGNATURE_SUITES.includes(envelope.signatureSuite)) {
