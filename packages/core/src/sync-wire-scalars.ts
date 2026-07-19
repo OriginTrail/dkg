@@ -36,8 +36,7 @@ export type EvmAddressV1 = string & {
 };
 
 export const MAX_DECIMAL_U64 = 18_446_744_073_709_551_615n;
-export const MAX_DECIMAL_U256 =
-  115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
+export const MAX_DECIMAL_U256 = (1n << 256n) - 1n;
 
 const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;

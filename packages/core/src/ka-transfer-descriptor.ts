@@ -128,10 +128,30 @@ export function canonicalizeKaTransferDescriptorV1(
   descriptor: KaTransferDescriptorV1,
 ): string {
   assertKaTransferDescriptorV1(descriptor);
-  return canonicalizeJson(descriptor as unknown as CanonicalJsonValue, {
+  return canonicalizeJson(toCanonicalKaTransferDescriptorV1(descriptor), {
     maxBytes: MAX_KA_TRANSFER_DESCRIPTOR_BYTES_V1,
     maxDepth: MAX_KA_TRANSFER_DESCRIPTOR_DEPTH_V1,
   });
+}
+
+/**
+ * Project a validated descriptor into an explicitly typed canonical JSON object.
+ * Listing every field keeps the descriptor/JSON boundary explicit so a future
+ * non-JSON field is a compile error here instead of an `unknown` cast escape.
+ */
+function toCanonicalKaTransferDescriptorV1(
+  descriptor: KaTransferDescriptorV1,
+): CanonicalJsonValue {
+  return {
+    codec: descriptor.codec,
+    projectionId: descriptor.projectionId,
+    projectionDigest: descriptor.projectionDigest,
+    byteLength: descriptor.byteLength,
+    chunkSize: descriptor.chunkSize,
+    chunkCount: descriptor.chunkCount,
+    blobDigest: descriptor.blobDigest,
+    chunkTreeRoot: descriptor.chunkTreeRoot,
+  };
 }
 
 /** Return the exact bounded RFC 8785 JCS descriptor bytes. */
