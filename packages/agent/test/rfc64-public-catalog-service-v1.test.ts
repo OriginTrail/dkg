@@ -15,6 +15,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import type { Rfc64ControlObjectOperationsV1 } from '../src/rfc64/control-object-store-v1.js';
+import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-policy-v1.js';
+import {
+  deriveRfc64PublicOpenCatalogScopeV1,
+  type Rfc64PublicOpenCatalogScopeFieldsV1,
+} from '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
   Rfc64PublicCatalogServiceV1,
@@ -709,5 +714,155 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       failed: 1,
     });
     await service.close();
+  });
+});
+
+describe('RFC-64 public/open root-scope derivation is shared by both resolution paths', () => {
+  const ACCEPTED_POLICY = buildOpenOwnerContextGraphPolicyV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ownerAddress: AUTHOR,
+  });
+  const OTHER_AUTHOR = OTHER_WALLET.address.toLowerCase() as EvmAddressV1;
+  const OTHER_CONTEXT_GRAPH_ID =
+    '0x9999999999999999999999999999999999999999/other-lane' as const;
+
+  /** The five scope fields an announcement and a current-head query share. */
+  function namedLane(overrides: Record<string, unknown> = {}) {
+    return Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      ...overrides,
+    }) as unknown as Rfc64PublicOpenCatalogScopeFieldsV1;
+  }
+
+  /** The same lane wearing announcement clothing: extra fields must not matter. */
+  function announcementLane(overrides: Record<string, unknown> = {}) {
+    return Object.freeze({
+      kind: 'rfc64-author-catalog-head-availability-v1',
+      ...namedLane(overrides),
+      catalogVersion: '0',
+      policyDigest: `0x${'66'.repeat(32)}`,
+      catalogHeadObjectDigest: `0x${'44'.repeat(32)}`,
+      signatureVariantDigest: `0x${'77'.repeat(32)}`,
+    }) as unknown as Rfc64PublicOpenCatalogScopeFieldsV1;
+  }
+
+  function discoveryService() {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: {
+        ...controlObjects(),
+        // Required by the current-head discovery transport; this lane never
+        // reaches an object read, so a null reader is sufficient.
+        getVerifiedObjectByDigest: vi.fn(async () => null),
+      } as never,
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      transportTimeoutMs: 4_000,
+    });
+    service.start();
+    acceptPolicy(service);
+    return service;
+  }
+
+  // Mismatches expressed on the named lane. Both resolution paths must reject
+  // every one of them, which is what stops discovery from drifting into a
+  // second, weaker policy model.
+  const LANE_MISMATCHES: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['a foreign networkId', { networkId: 'otp:2160' }],
+    ['a foreign contextGraphId', { contextGraphId: OTHER_CONTEXT_GRAPH_ID }],
+    ['a foreign authorAddress', { authorAddress: OTHER_AUTHOR }],
+    ['a mismatched catalogEra', { catalogEra: '1' }],
+    ['a non-root subGraphName', { subGraphName: 'not-the-root-lane' }],
+  ];
+
+  it.each(LANE_MISMATCHES)(
+    'rejects %s on the announcement path and the current-head path alike',
+    async (_label, overrides) => {
+      expect(() => deriveRfc64PublicOpenCatalogScopeV1(
+        announcementLane(overrides),
+        ACCEPTED_POLICY,
+      )).toThrow();
+
+      const service = discoveryService();
+      try {
+        await expect(service.discoverCurrentCatalogHead({
+          remotePeerId: 'test-peer',
+          scope: namedLane(overrides) as never,
+        })).rejects.toThrow();
+      } finally {
+        await service.close();
+      }
+    },
+  );
+
+  // Policy-side faults. The accepted policy itself is degraded rather than the
+  // named lane, proving the shared boundary rejects on the policy half too.
+  const POLICY_MISMATCHES: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['a non-open accessPolicy', { accessPolicy: 1 }],
+    ['a registered-governance source', {
+      source: { kind: 'registered', ownerAddress: AUTHOR },
+    }],
+    ['a non-null governanceChainId', { governanceChainId: '20430' }],
+    ['a non-null governanceContractAddress', {
+      governanceContractAddress: '0x8888888888888888888888888888888888888888',
+    }],
+    ['a non-null ownershipTransitionDigest', {
+      ownershipTransitionDigest: `0x${'ab'.repeat(32)}`,
+    }],
+    ['a foreign owner address', {
+      source: { kind: 'owner-signed-unregistered', ownerAddress: OTHER_AUTHOR },
+    }],
+  ];
+
+  it.each(POLICY_MISMATCHES)(
+    'rejects %s for the announcement shape and the query shape alike',
+    (_label, overrides) => {
+      const degraded = { ...ACCEPTED_POLICY, ...overrides } as typeof ACCEPTED_POLICY;
+      expect(() => deriveRfc64PublicOpenCatalogScopeV1(announcementLane(), degraded)).toThrow();
+      expect(() => deriveRfc64PublicOpenCatalogScopeV1(namedLane(), degraded)).toThrow();
+    },
+  );
+
+  it('derives one identical AuthorCatalogScopeV1 from either input shape', () => {
+    const fromAnnouncement = deriveRfc64PublicOpenCatalogScopeV1(
+      announcementLane(),
+      ACCEPTED_POLICY,
+    );
+    const fromQuery = deriveRfc64PublicOpenCatalogScopeV1(namedLane(), ACCEPTED_POLICY);
+
+    expect(fromAnnouncement).toEqual(fromQuery);
+    expect(fromAnnouncement).toEqual({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    });
+    expect(Object.isFrozen(fromAnnouncement)).toBe(true);
+    expect(Object.isFrozen(fromQuery)).toBe(true);
+  });
+
+  it('accepts the matching lane through the real current-head service wiring', async () => {
+    const service = discoveryService();
+    try {
+      // Derivation succeeds, so the call proceeds past the policy boundary and
+      // on to the provider, which answers not-found. Resolving null rather than
+      // throwing is what distinguishes an accepted lane from a rejected one.
+      await expect(service.discoverCurrentCatalogHead({
+        remotePeerId: 'test-peer',
+        scope: namedLane() as never,
+      })).resolves.toBeNull();
+    } finally {
+      await service.close();
+    }
   });
 });

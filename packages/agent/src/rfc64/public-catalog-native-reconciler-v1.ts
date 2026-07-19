@@ -10,11 +10,17 @@
  */
 
 import {
+  assertAuthorCatalogScopeV1,
   computeAuthorCatalogScopeDigestV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
+  type ContextGraphIdV1,
   type CountV1,
   type ContextGraphPolicyV1,
+  type DecimalU64V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
+  type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 
 import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
@@ -55,32 +61,51 @@ export interface Rfc64PublicOpenCatalogNativeReconcilerOptionsV1 {
 }
 
 /**
+ * The scope fields a public/open root-catalog lane is named by, shared by a head
+ * announcement and a current-head discovery query. Both carry these exact five
+ * fields; everything else on either record is transport or authentication
+ * context, not semantic catalog identity.
+ */
+export interface Rfc64PublicOpenCatalogScopeFieldsV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
+}
+
+/**
  * Derive the one fixed Gate-1 public/open scope from accepted local policy and
- * require the announcement to name that exact owner/network/CG/era/root lane.
+ * require the named lane to be that exact owner/network/CG/era/root lane.
  * Policy and signature-variant digests are transport/authentication context,
  * not semantic catalog identity, and therefore do not participate.
+ *
+ * This is the single canonical public/open root-scope derivation. Announcement
+ * resolution and current-head-query resolution both delegate here so discovery
+ * cannot drift into a second policy model; callers layer their own additional
+ * bindings (an announcement also pins the accepted policy generation) on top.
  */
 export function deriveRfc64PublicOpenCatalogScopeV1(
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  named: Rfc64PublicOpenCatalogScopeFieldsV1,
   acceptedPolicy: ContextGraphPolicyV1,
 ): AuthorCatalogScopeV1 {
   if (
     acceptedPolicy.accessPolicy !== 0
     || acceptedPolicy.source.kind !== 'owner-signed-unregistered'
-    || acceptedPolicy.networkId !== announcement.networkId
-    || acceptedPolicy.contextGraphId !== announcement.contextGraphId
+    || acceptedPolicy.networkId !== named.networkId
+    || acceptedPolicy.contextGraphId !== named.contextGraphId
     || acceptedPolicy.governanceChainId !== null
     || acceptedPolicy.governanceContractAddress !== null
     || acceptedPolicy.ownershipTransitionDigest !== null
-    || acceptedPolicy.era !== announcement.catalogEra
-    || announcement.subGraphName !== null
-    || acceptedPolicy.source.ownerAddress !== announcement.authorAddress
+    || acceptedPolicy.era !== named.catalogEra
+    || named.subGraphName !== null
+    || acceptedPolicy.source.ownerAddress !== named.authorAddress
   ) {
     throw new Error(
-      'RFC-64 Gate 1 announcement is not bound to the accepted null-governance owner policy',
+      'RFC-64 Gate 1 lane is not bound to the accepted null-governance owner policy',
     );
   }
-  return Object.freeze({
+  const scope = Object.freeze({
     networkId: acceptedPolicy.networkId,
     contextGraphId: acceptedPolicy.contextGraphId,
     governanceChainId: acceptedPolicy.governanceChainId,
@@ -91,6 +116,8 @@ export function deriveRfc64PublicOpenCatalogScopeV1(
     era: acceptedPolicy.era,
     bucketCount: '1' as CountV1,
   });
+  assertAuthorCatalogScopeV1(scope);
+  return scope;
 }
 
 export class Rfc64PublicOpenCatalogNativeReconcilerV1
