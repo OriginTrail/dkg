@@ -24,6 +24,7 @@ import {
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+import { openRfc64ControlObjectStoreForOwnedInventoryV1 } from '../src/rfc64/control-object-store-v1-internal.js';
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
@@ -136,7 +137,7 @@ function candidateLoadCount(dataDirectory: string): number {
 
 function minimalStartedAgent(
   order: string[],
-  inventoryClose: () => void,
+  inventoryClose: () => void | Promise<void>,
 ): any {
   const agent = syntheticAgent();
   Object.assign(agent, {
@@ -156,7 +157,7 @@ function minimalStartedAgent(
     rfc64PersistenceV1: {
       close: () => {
         order.push('control-store');
-        inventoryClose();
+        return inventoryClose();
       },
     },
     store: { close: vi.fn(async () => { order.push('store'); }) },
@@ -321,6 +322,16 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     replacement.close();
   });
 
+  it('invalidates sibling-resource ownership capability when inventory closes', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const inventory = await openInventoryV1(dataDirectory);
+    const ownership = inventory.controlObjectStoreOwnership;
+    inventory.close();
+
+    await expect(openRfc64ControlObjectStoreForOwnedInventoryV1(ownership))
+      .rejects.toMatchObject({ code: 'database-closed' });
+  });
+
   it('fails startup before node.start when inventory acquisition or recovery fails', async () => {
     const failure = new Error('inventory unavailable');
     const nodeStart = vi.fn(async () => {});
@@ -438,10 +449,43 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(agent.started).toBe(false);
   });
 
-  it('finishes store teardown but rejects shutdown when inventory close fails', async () => {
+  it('keeps shutdown active and the triple store open until persistence drain settles', async () => {
+    const order: string[] = [];
+    const drain = deferred();
+    const persistenceClose = vi.fn(async () => {
+      await drain.promise;
+      order.push('inventory');
+    });
+    const agent = minimalStartedAgent(order, persistenceClose);
+
+    const stop = agent.stop();
+    let settled = false;
+    void stop.finally(() => { settled = true; });
+    await vi.waitFor(() => expect(persistenceClose).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(order).toEqual(['node', 'sync-worker', 'control-store']);
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    expect(settled).toBe(false);
+
+    drain.resolve();
+    await expect(stop).resolves.toBeUndefined();
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
+    expect(agent.started).toBe(false);
+  });
+
+  it('finishes store teardown but rejects shutdown when asynchronous persistence close fails', async () => {
     const order: string[] = [];
     const failure = new Error('inventory close failed');
-    const agent = minimalStartedAgent(order, () => {
+    const agent = minimalStartedAgent(order, async () => {
+      await Promise.resolve();
       order.push('inventory');
       throw failure;
     });

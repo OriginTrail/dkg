@@ -5,9 +5,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import {
   RFC64_SECURE_DIRECTORY_MODE_V1,
   RFC64_SECURE_FILE_MODE_V1,
-  applyRfc64OwnerOnlyPermissionsSyncV1,
-  assertRfc64FilesystemOwnerSyncV1,
-  assertRfc64OwnerOnlyPermissionsSyncV1,
+  applyRfc64OwnerOnlyPermissionsV1,
+  assertRfc64FilesystemOwnerV1,
+  assertRfc64OwnerOnlyPermissionsV1,
   fsyncRfc64DirectoryV1,
   rfc64RegularFileFsyncOpenFlagsV1,
   rfc64RegularFileReadOpenFlagsV1,
@@ -94,7 +94,7 @@ export async function assertRfc64ExistingDirectoryV1(
     if (entry.isSymbolicLink() || !entry.isDirectory()) {
       fail('unsafe-path', `${label} must be a non-symlink directory`);
     }
-    assertSecureAccess(
+    await assertSecureAccess(
       path,
       RFC64_SECURE_DIRECTORY_MODE_V1,
       { entryKind: 'directory', access: policy.access },
@@ -325,7 +325,7 @@ async function readRfc64OptionalBoundedBytesV1(
     if (tail.bytesRead !== 0) {
       fail('corrupt', `${label} grew during its bounded read`);
     }
-    assertSecureAccess(
+    await assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
       { entryKind: 'file', access: 'owner-only' },
@@ -399,7 +399,7 @@ async function assertExistingRegularFile(
     if (entry.isSymbolicLink() || !entry.isFile()) {
       fail('unsafe-path', `${label} must be a regular non-symlink file`);
     }
-    assertSecureAccess(
+    await assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
       { entryKind: 'file', access: policy.access },
@@ -414,7 +414,7 @@ async function assertExistingRegularFile(
 async function chmodSecure(path: string, mode: number, label: string): Promise<void> {
   try {
     const entry = await lstat(path);
-    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, {
+    await applyRfc64OwnerOnlyPermissionsV1(path, mode, {
       entryKind: entry.isDirectory() ? 'directory' : 'file',
     });
   } catch (cause) {
@@ -423,19 +423,19 @@ async function chmodSecure(path: string, mode: number, label: string): Promise<v
   }
 }
 
-function assertSecureAccess(
+async function assertSecureAccess(
   path: string,
   mode: number,
   policy: Rfc64SecureAccessPolicyV1,
   label: string,
-): void {
+): Promise<void> {
   try {
     if (policy.access === 'owner-only') {
-      assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, {
+      await assertRfc64OwnerOnlyPermissionsV1(path, mode, {
         entryKind: policy.entryKind,
       });
     } else {
-      assertRfc64FilesystemOwnerSyncV1(path);
+      await assertRfc64FilesystemOwnerV1(path);
     }
   } catch (cause) {
     fail(
@@ -462,7 +462,7 @@ async function fsyncRegularFile(path: string, label: string): Promise<void> {
     if (!stat.isFile()) {
       fail('unsafe-path', `${label} fsync target is not a regular file`);
     }
-    assertSecureAccess(
+    await assertSecureAccess(
       path,
       RFC64_SECURE_FILE_MODE_V1,
       { entryKind: 'file', access: 'owner-only' },

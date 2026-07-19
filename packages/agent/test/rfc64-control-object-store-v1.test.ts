@@ -184,6 +184,19 @@ function pathsFor(
 }
 
 describe('RFC-64 durable control-object store v1', () => {
+  it('rechecks NODE_ENV when the source-level test opener is invoked', async () => {
+    const opener = createRfc64ControlObjectStoreTestOpenerV1();
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await expect(opener(await temporaryDataDirectory())).rejects.toMatchObject({
+        code: 'control-store-input',
+      });
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
   it('durably splits unsigned object bytes from a detached signature and reverifies reads', async () => {
     const dataDir = await temporaryDataDirectory();
     const store = await openRfc64ControlObjectStoreV1(dataDir);

@@ -36,6 +36,9 @@ import {
   resolveRfc64ControlObjectStorePathV1,
   resolveRfc64PersistenceRootV1,
 } from './persistence-layout-v1.js';
+import type {
+  Rfc64InventoryOwnedRootCapabilityV1,
+} from './inventory-v1/open.js';
 
 export { RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH };
 export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -147,13 +150,11 @@ export interface Rfc64ControlObjectStoreV1 {
   close(): Promise<void>;
 }
 
-/**
- * Open after the RFC-64 inventory foundation has secured rfc64-sync and owns
- * its single-process lease. This cache deliberately does not mint that lease.
- */
-export async function openRfc64ControlObjectStoreAtOwnedRootV1(
-  rfc64RootPath: string,
+/** Open only with lifecycle authority minted by the leased inventory owner. */
+export async function openRfc64ControlObjectStoreForOwnedInventoryV1(
+  ownership: Rfc64InventoryOwnedRootCapabilityV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
+  const rfc64RootPath = ownership.assertOwnedAndGetRootPathV1();
   return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, PRODUCTION_LIFECYCLE);
 }
 
@@ -386,12 +387,21 @@ export async function openRfc64ControlObjectStoreForTestV1(
   dataDirInput: string,
   lifecycle: Rfc64ControlObjectStoreLifecycleV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
+  assertRfc64ControlObjectStoreTestEnvironmentV1();
   if (!Object.isFrozen(lifecycle)) {
     fail('control-store-input', 'control object store lifecycle adapter must be immutable');
   }
   if (typeof dataDirInput !== 'string' || dataDirInput.length === 0) {
     fail('control-store-input', 'dataDir must be a non-empty path');
   }
+  const guardedLifecycle = Object.freeze({
+    boundary: async (
+      boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1,
+    ): Promise<void> => {
+      assertRfc64ControlObjectStoreTestEnvironmentV1();
+      await lifecycle.boundary(boundary);
+    },
+  });
   const dataDir = resolve(dataDirInput);
   const rfc64RootPath = resolveRfc64PersistenceRootV1(dataDir);
   await mapDurableFileErrors(async () => {
@@ -400,9 +410,18 @@ export async function openRfc64ControlObjectStoreForTestV1(
       'DKG data directory',
       { access: 'owner' },
     );
-    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, lifecycle);
+    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, guardedLifecycle);
   });
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, lifecycle);
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, guardedLifecycle);
+}
+
+function assertRfc64ControlObjectStoreTestEnvironmentV1(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    fail(
+      'control-store-input',
+      'control store test opener is available only under NODE_ENV=test',
+    );
+  }
 }
 
 async function openRfc64ControlObjectStoreAtRootV1(
