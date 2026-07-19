@@ -66,6 +66,7 @@
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
     "test:devnet:storage-ack-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts",
     "test:devnet:rfc64-evidence": "vitest run --config devnet/_bootstrap/vitest.evidence.config.ts",
+    "typecheck:devnet:rfc64-evidence": "tsc --project devnet/_bootstrap/tsconfig.evidence.json",
     "test:devnet:v10-rs-prune": "vitest run --config devnet/v10-rs-prune/vitest.config.ts",
     "test:devnet:v10-rs-wallet-rotation": "vitest run --config devnet/v10-rs-wallet-rotation/vitest.config.ts",
     "test:devnet:v10-rs-wallet-rotation:required": "DKG_REQUIRE_RS_ROTATION=1 DKG_RS_ROT_WINDOW=900000 vitest run --config devnet/v10-rs-wallet-rotation/vitest.config.ts",

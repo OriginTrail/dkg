@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import {
   chmodSync,
   existsSync,
@@ -12,10 +13,15 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
+  RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
+  RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
+  RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64EvidenceMismatchError,
   Rfc64EvidenceValidationError,
   assertRfc64SemanticSnapshotsEqual,
@@ -202,6 +208,44 @@ describe('RFC-64 semantic snapshot evidence', () => {
       (snapshot as unknown as { kaCount: number }).kaCount = 99;
     }).toThrow(TypeError);
   });
+
+  it('rejects snapshot accessors, proxies, and custom arrays before comparison', async () => {
+    const snapshot = await createRfc64SemanticSnapshot([]);
+    let accessorReads = 0;
+    const accessorSnapshot = { ...snapshot };
+    Object.defineProperty(accessorSnapshot, 'knowledgeAssets', {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return accessorReads % 6 === 0
+          ? [{
+              ual: 'not-a-ual',
+              quadCount: 99,
+              semanticNQuadsSha256: `sha256:${'0'.repeat(64)}`,
+            }]
+          : [];
+      },
+    });
+
+    expect(() => compareRfc64SemanticSnapshots(
+      accessorSnapshot as Rfc64SemanticSnapshotV1,
+      accessorSnapshot as Rfc64SemanticSnapshotV1,
+    )).toThrow(/must not be an accessor property/);
+    expect(accessorReads).toBe(0);
+
+    expect(() => validateRfc64SemanticSnapshot(
+      new Proxy({ ...snapshot }, {}) as Rfc64SemanticSnapshotV1,
+    )).toThrow(/must not be a proxy/);
+
+    const customAssets = [...snapshot.knowledgeAssets] as Rfc64SemanticSnapshotV1[
+      'knowledgeAssets'
+    ] & { marker?: boolean };
+    customAssets.marker = true;
+    expect(() => validateRfc64SemanticSnapshot({
+      ...snapshot,
+      knowledgeAssets: customAssets,
+    })).toThrow(/custom array property/);
+  });
 });
 
 describe('RFC-64 devnet run artifact', () => {
@@ -375,6 +419,25 @@ describe('RFC-64 devnet run artifact', () => {
       completedAt: '2026-07-19T10:00:01.000Z',
       durationMs: 1_000,
     });
+
+    for (const impossible of [
+      '2026-02-30T12:00:00Z',
+      '2025-02-29T12:00:00Z',
+      '2026-13-01T12:00:00Z',
+      '2026-01-01T24:00:00Z',
+      '2026-01-01T12:00:00-00:00',
+    ]) {
+      expect(() => createRfc64DevnetEvidence({
+        gate: 'gate-1',
+        observer: 'receiver',
+        sourcePeerId: 'source',
+        startedAt: impossible,
+        completedAt: '2026-03-02T12:00:01Z',
+        attemptCount: 1,
+        expected: snapshot,
+        observed: snapshot,
+      })).toThrow(/must be a valid, representable RFC 3339 timestamp/);
+    }
   });
 
   it('writes byte-identical stable JSON independent of object insertion order', () => {
@@ -396,8 +459,19 @@ describe('RFC-64 devnet run artifact', () => {
     );
     expect(firstBytes.toString('utf8')).toBe(stableJsonStringify(firstValue));
     expect(firstBytes.at(-1)).toBe(0x0a);
-    expect(statSync(firstPath).mode & 0o777).toBe(0o600);
     expect(readdirSync(join(directory, 'nested'))).toEqual(['first.json']);
+    if (process.platform === 'win32') {
+      expect(first).toMatchObject({
+        namespaceDurability: RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
+        accessPolicy: RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
+      });
+    } else {
+      expect(statSync(firstPath).mode & 0o777).toBe(0o600);
+      expect(first).toMatchObject({
+        namespaceDurability: RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
+        accessPolicy: RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
+      });
+    }
   });
 
   it('rejects lossy JSON values', () => {
@@ -449,7 +523,7 @@ describe('RFC-64 devnet run artifact', () => {
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
   });
 
-  it('atomically replaces regular targets as 0600 without temp remnants', () => {
+  it('atomically replaces regular targets under the platform access policy', () => {
     const directory = createTemporaryDirectory();
     const target = join(directory, 'artifact.json');
     writeFileSync(target, 'old', { mode: 0o644 });
@@ -458,25 +532,76 @@ describe('RFC-64 devnet run artifact', () => {
     writeStableJsonArtifact(target, { generation: 2 });
 
     expect(readFileSync(target, 'utf8')).toBe('{\n  "generation": 2\n}\n');
-    expect(statSync(target).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+    }
     expect(readdirSync(directory)).toEqual(['artifact.json']);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'persists every newly created directory entry through its parent',
+    () => {
+      const directory = createTemporaryDirectory();
+      const target = join(directory, 'first', 'second', 'artifact.json');
+      const originalFsync = fs.fsyncSync;
+      let fileFsyncs = 0;
+      let directoryFsyncs = 0;
+      fs.fsyncSync = (descriptor) => {
+        if (fs.fstatSync(descriptor).isDirectory()) directoryFsyncs += 1;
+        else fileFsyncs += 1;
+        originalFsync(descriptor);
+      };
+      syncBuiltinESMExports();
+      try {
+        writeStableJsonArtifact(target, { durable: true });
+      } finally {
+        fs.fsyncSync = originalFsync;
+        syncBuiltinESMExports();
+      }
+
+      expect(fileFsyncs).toBe(1);
+      expect(directoryFsyncs).toBe(3);
+    },
+  );
+
+  it('declares the weaker Windows namespace and inherited-ACL policy', () => {
+    const directory = createTemporaryDirectory();
+    const target = join(directory, 'windows-policy.json');
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    try {
+      const written = writeStableJsonArtifact(target, { platform: 'windows' });
+      expect(written).toMatchObject({
+        namespaceDurability: RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
+        accessPolicy: RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
+      });
+      expect(readFileSync(target, 'utf8'))
+        .toBe(stableJsonStringify({ platform: 'windows' }));
+    } finally {
+      platform.mockRestore();
+    }
   });
 
   it('rejects symlinked targets and parent topology without following them', () => {
     const directory = createTemporaryDirectory();
     const realTarget = join(directory, 'real.json');
     const linkedTarget = join(directory, 'linked.json');
-    writeFileSync(realTarget, 'sentinel', { mode: 0o600 });
-    symlinkSync(realTarget, linkedTarget);
+    if (process.platform !== 'win32') {
+      writeFileSync(realTarget, 'sentinel', { mode: 0o600 });
+      symlinkSync(realTarget, linkedTarget);
 
-    expect(() => writeStableJsonArtifact(linkedTarget, { unsafe: true }))
-      .toThrow(/target must not be a symbolic link/);
-    expect(readFileSync(realTarget, 'utf8')).toBe('sentinel');
+      expect(() => writeStableJsonArtifact(linkedTarget, { unsafe: true }))
+        .toThrow(/target must not be a symbolic link/);
+      expect(readFileSync(realTarget, 'utf8')).toBe('sentinel');
+    }
 
     const realDirectory = join(directory, 'real-directory');
     const linkedDirectory = join(directory, 'linked-directory');
     mkdirSync(realDirectory, { mode: 0o700 });
-    symlinkSync(realDirectory, linkedDirectory, 'dir');
+    symlinkSync(
+      realDirectory,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
     expect(() => writeStableJsonArtifact(
       join(linkedDirectory, 'escaped.json'),

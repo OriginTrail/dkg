@@ -9,7 +9,8 @@
   },
   "scripts": {
     "test:smoke": "vitest run --config vitest.config.ts",
-    "test:rfc64-evidence": "vitest run --config vitest.evidence.config.ts"
+    "test:rfc64-evidence": "vitest run --config vitest.evidence.config.ts",
+    "typecheck:rfc64-evidence": "tsc --project tsconfig.evidence.json"
   },
   "dependencies": {
     "ethers": "^6.16.0",

@@ -34,16 +34,24 @@ produce a passing comparison.
 Created and validated snapshots are defensively copied and deeply frozen. Run
 evidence closes over its own frozen expected/observed copies, so later caller
 mutation cannot change a previously derived `passed` result. String timestamps
-must carry `Z` or an explicit UTC offset and are emitted in canonical UTC form.
+must carry `Z` or an explicit UTC offset, contain a real Gregorian calendar
+instant, and are emitted in canonical UTC form. Snapshot validation rejects
+accessors, proxies, sparse/custom arrays, and custom containers before capture.
 
 The run artifact adds the stable gate/observer label, selected source peer,
 canonical ISO timing and duration, attempt/retry/failure details, expected and
 observed snapshots, and the derived comparison. `passed` is derived from the
 comparison and terminal failure; a caller cannot manually force it to `true`.
-Artifact publication uses a same-directory exclusive 0600 temporary file,
-fsyncs its contents, atomically renames it, verifies the published bytes/mode,
-and fsyncs the containing directory. Existing symlink targets and symlinked or
-changing directory topology are rejected.
+Artifact publication uses a same-directory exclusive temporary file, fsyncs
+its contents, atomically renames it, and verifies the published bytes. POSIX
+publication enforces mode 0600 and fsyncs the containing directory. Every
+directory created for a nested artifact path is made durable through a
+parent-directory fsync before it is used. Existing symlink targets and
+symlinked or changing directory topology are rejected. On Windows, Node cannot
+fsync a directory through its ordinary filesystem API and POSIX mode bits do
+not prove ACL isolation, so the returned publication metadata explicitly
+reports `file-flush-rename-no-directory-flush` and `windows-inherited-acl`
+instead of claiming the stronger POSIX policies.
 
 ## Harness use
 
@@ -77,4 +85,5 @@ Run the focused no-devnet verification with:
 
 ```sh
 pnpm test:devnet:rfc64-evidence
+pnpm typecheck:devnet:rfc64-evidence
 ```

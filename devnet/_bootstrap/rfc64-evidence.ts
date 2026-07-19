@@ -31,6 +31,7 @@ import {
   resolve,
   sep,
 } from 'node:path';
+import { types as utilTypes } from 'node:util';
 import rdfCanonize from 'rdf-canonize';
 import { parseDeterministicKnowledgeAssetUal } from '../../packages/core/src/ka-content-scope.js';
 
@@ -42,8 +43,17 @@ export const RFC64_DEVNET_EVIDENCE_SCHEMA =
 const SEMANTIC_MANIFEST_DOMAIN =
   'rfc64-semantic-nquads-manifest/v1\n';
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
-const TIMEZONE_QUALIFIED_ISO_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+const RFC3339_INSTANT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/u;
+
+export const RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY =
+  'file-fsync-rename-directory-fsync' as const;
+export const RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY =
+  'file-flush-rename-no-directory-flush' as const;
+export const RFC64_ARTIFACT_POSIX_ACCESS_POLICY =
+  'posix-owner-read-write-mode-0600' as const;
+export const RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY =
+  'windows-inherited-acl' as const;
 
 export type Sha256Digest = `sha256:${string}`;
 
@@ -159,6 +169,14 @@ export interface Rfc64DevnetEvidenceV1 {
 export interface WrittenStableJsonArtifact {
   readonly byteLength: number;
   readonly sha256: Sha256Digest;
+  /** Windows Node.js cannot flush directory handles through fsync. */
+  readonly namespaceDurability:
+    | typeof RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY
+    | typeof RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY;
+  /** POSIX mode bits are not presented as an ACL guarantee on Windows. */
+  readonly accessPolicy:
+    | typeof RFC64_ARTIFACT_POSIX_ACCESS_POLICY
+    | typeof RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY;
 }
 
 export class Rfc64EvidenceValidationError extends Error {
@@ -431,22 +449,30 @@ export function validateRfc64SemanticSnapshot(
   if (!snapshot || typeof snapshot !== 'object') {
     throw new Rfc64EvidenceValidationError('snapshot must be an object');
   }
-  if (snapshot.schemaVersion !== RFC64_SEMANTIC_SNAPSHOT_SCHEMA) {
+  // Capture each own data property exactly once before validation. This keeps
+  // accessors, proxies, sparse/custom arrays, and other exotic containers from
+  // changing the value between a successful check and the frozen result.
+  const captured = stableJsonValue(
+    snapshot,
+    'snapshot',
+    new Set(),
+  ) as unknown as Rfc64SemanticSnapshotV1;
+  if (captured.schemaVersion !== RFC64_SEMANTIC_SNAPSHOT_SCHEMA) {
     throw new Rfc64EvidenceValidationError(
-      `Unsupported semantic snapshot schema: ${String(snapshot.schemaVersion)}`,
+      `Unsupported semantic snapshot schema: ${String(captured.schemaVersion)}`,
     );
   }
-  const kaCount = assertNonNegativeSafeInteger(snapshot.kaCount, 'snapshot.kaCount');
+  const kaCount = assertNonNegativeSafeInteger(captured.kaCount, 'snapshot.kaCount');
   const quadCount = assertNonNegativeSafeInteger(
-    snapshot.quadCount,
+    captured.quadCount,
     'snapshot.quadCount',
   );
-  assertDigest(snapshot.ualsSha256, 'snapshot.ualsSha256');
+  assertDigest(captured.ualsSha256, 'snapshot.ualsSha256');
   assertDigest(
-    snapshot.semanticNQuadsSha256,
+    captured.semanticNQuadsSha256,
     'snapshot.semanticNQuadsSha256',
   );
-  if (!Array.isArray(snapshot.knowledgeAssets)) {
+  if (!Array.isArray(captured.knowledgeAssets)) {
     throw new Rfc64EvidenceValidationError(
       'snapshot.knowledgeAssets must be an array',
     );
@@ -454,7 +480,7 @@ export function validateRfc64SemanticSnapshot(
 
   let previousUal: string | null = null;
   let actualQuadCount = 0;
-  for (const [index, asset] of snapshot.knowledgeAssets.entries()) {
+  for (const [index, asset] of captured.knowledgeAssets.entries()) {
     if (!asset || typeof asset !== 'object') {
       throw new Rfc64EvidenceValidationError(
         `snapshot.knowledgeAssets[${index}] must be an object`,
@@ -482,9 +508,9 @@ export function validateRfc64SemanticSnapshot(
     );
   }
 
-  if (kaCount !== snapshot.knowledgeAssets.length) {
+  if (kaCount !== captured.knowledgeAssets.length) {
     throw new Rfc64EvidenceValidationError(
-      `snapshot.kaCount ${kaCount} does not equal knowledgeAssets.length ${snapshot.knowledgeAssets.length}`,
+      `snapshot.kaCount ${kaCount} does not equal knowledgeAssets.length ${captured.knowledgeAssets.length}`,
     );
   }
   if (quadCount !== actualQuadCount) {
@@ -492,19 +518,19 @@ export function validateRfc64SemanticSnapshot(
       `snapshot.quadCount ${quadCount} does not equal per-KA total ${actualQuadCount}`,
     );
   }
-  const actualUalsDigest = ualsDigest(snapshot.knowledgeAssets);
-  if (snapshot.ualsSha256 !== actualUalsDigest) {
+  const actualUalsDigest = ualsDigest(captured.knowledgeAssets);
+  if (captured.ualsSha256 !== actualUalsDigest) {
     throw new Rfc64EvidenceValidationError(
-      `snapshot.ualsSha256 ${snapshot.ualsSha256} does not equal computed ${actualUalsDigest}`,
+      `snapshot.ualsSha256 ${captured.ualsSha256} does not equal computed ${actualUalsDigest}`,
     );
   }
-  const actualSemanticDigest = semanticManifestDigest(snapshot.knowledgeAssets);
-  if (snapshot.semanticNQuadsSha256 !== actualSemanticDigest) {
+  const actualSemanticDigest = semanticManifestDigest(captured.knowledgeAssets);
+  if (captured.semanticNQuadsSha256 !== actualSemanticDigest) {
     throw new Rfc64EvidenceValidationError(
-      `snapshot.semanticNQuadsSha256 ${snapshot.semanticNQuadsSha256} does not equal computed ${actualSemanticDigest}`,
+      `snapshot.semanticNQuadsSha256 ${captured.semanticNQuadsSha256} does not equal computed ${actualSemanticDigest}`,
     );
   }
-  return closeSemanticSnapshot(snapshot);
+  return closeSemanticSnapshot(captured);
 }
 
 /** Compare two validated snapshots and return a stable, granular diff. */
@@ -592,14 +618,51 @@ function canonicalFailure(value: Rfc64FailureV1, label: string): Rfc64FailureV1 
   });
 }
 
+function isGregorianLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function gregorianMonthLength(year: number, month: number): number {
+  if (month === 2) return isGregorianLeapYear(year) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
 function canonicalInstant(value: Date | string, label: string): {
   readonly epochMs: number;
   readonly iso: string;
 } {
-  if (typeof value === 'string' && !TIMEZONE_QUALIFIED_ISO_RE.test(value)) {
-    throw new Rfc64EvidenceValidationError(
-      `${label} must be an ISO timestamp with Z or an explicit UTC offset`,
-    );
+  if (typeof value === 'string') {
+    const match = RFC3339_INSTANT_RE.exec(value);
+    if (match === null) {
+      throw new Rfc64EvidenceValidationError(
+        `${label} must be an ISO timestamp with Z or an explicit UTC offset`,
+      );
+    }
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
+    const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
+    const unknownLocalOffset = match[8] === '-00:00';
+    if (
+      month < 1
+      || month > 12
+      || day < 1
+      || day > gregorianMonthLength(year, month)
+      || hour > 23
+      || minute > 59
+      || second > 59
+      || offsetHour > 23
+      || offsetMinute > 59
+      || unknownLocalOffset
+    ) {
+      throw new Rfc64EvidenceValidationError(
+        `${label} must be a valid, representable RFC 3339 timestamp`,
+      );
+    }
   }
   const date = value instanceof Date ? value : new Date(value);
   const epochMs = date.getTime();
@@ -710,6 +773,13 @@ export function createRfc64DevnetEvidence(
 }
 
 function stableJsonValue(value: unknown, path: string, ancestors: Set<object>): unknown {
+  if (
+    value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && utilTypes.isProxy(value)
+  ) {
+    throw new Rfc64EvidenceValidationError(`${path} must not be a proxy`);
+  }
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
   }
@@ -855,15 +925,22 @@ function ensureArtifactDirectoryTopology(
   for (const component of components) {
     current = join(current, component);
     let stat = lstatOptional(current);
+    let created = false;
     if (stat === null) {
       try {
         mkdirSync(current, { mode: 0o700 });
+        created = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       stat = lstatSync(current);
     }
     assertDirectory(current, stat);
+    if (created) {
+      // Persist the new directory entry before relying on it as the parent of
+      // another directory or of the artifact itself.
+      fsyncArtifactDirectory(dirname(current), entries);
+    }
     entries.push({ path: current, dev: stat.dev, ino: stat.ino });
   }
   return Object.freeze(entries.map((entry) => Object.freeze(entry)));
@@ -913,7 +990,7 @@ function verifyPublishedArtifact(target: string, expectedJson: string): void {
         `published artifact is not a regular file: ${target}`,
       );
     }
-    if ((stat.mode & 0o777) !== 0o600) {
+    if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) {
       throw new Rfc64EvidenceValidationError(
         `published artifact mode must be 0600, got 0${(stat.mode & 0o777).toString(8)}`,
       );
@@ -932,7 +1009,17 @@ function fsyncArtifactDirectory(
   directory: string,
   topology: readonly DirectoryTopologyEntry[],
 ): void {
+  // Node/libuv opens this directory with read access, but Windows implements
+  // fsync with FlushFileBuffers, which requires a writable handle. Report the
+  // weaker namespace policy instead of publishing successfully and then
+  // throwing a false failure from an unsupported durability operation.
+  if (process.platform === 'win32') return;
   const expected = topology[topology.length - 1]!;
+  if (expected.path !== directory) {
+    throw new Rfc64EvidenceValidationError(
+      `artifact directory barrier does not match checked topology: ${directory}`,
+    );
+  }
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
   const directoryOnly = fsConstants.O_DIRECTORY ?? 0;
   const fd = openSync(
@@ -970,9 +1057,10 @@ function cleanupTemporaryArtifact(
 }
 
 /**
- * Atomically publish byte-stable JSON through a same-directory 0600 temporary
- * file, fsync the file and containing directory, and reject symlinked or
- * changing path topology throughout the operation.
+ * Atomically publish byte-stable JSON through a same-directory temporary file.
+ * POSIX publication enforces mode 0600 and directory-fsync namespace barriers;
+ * Windows flushes the file and reports rename-only namespace durability plus
+ * inherited ACL protection. Both policies reject symlinked/changing topology.
  */
 export function writeStableJsonArtifact(
   path: string,
@@ -1012,7 +1100,7 @@ export function writeStableJsonArtifact(
         `temporary artifact is not a regular file: ${temporaryPath}`,
       );
     }
-    fchmodSync(temporaryFd, 0o600);
+    if (process.platform !== 'win32') fchmodSync(temporaryFd, 0o600);
     writeFileSync(temporaryFd, json, { encoding: 'utf8' });
     fsyncSync(temporaryFd);
     closeSync(temporaryFd);
@@ -1041,5 +1129,11 @@ export function writeStableJsonArtifact(
   return {
     byteLength: Buffer.byteLength(json, 'utf8'),
     sha256: sha256Text(json),
+    namespaceDurability: process.platform === 'win32'
+      ? RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY
+      : RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
+    accessPolicy: process.platform === 'win32'
+      ? RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY
+      : RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
   };
 }
