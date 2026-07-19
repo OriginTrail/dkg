@@ -277,7 +277,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
 
     expect(fixture.receiverHeadFetch).toHaveBeenCalledTimes(3);
-    expect(fixture.receiverObjectFetch).toHaveBeenCalledTimes(5);
+    expect(fixture.receiverObjectFetch).toHaveBeenCalledTimes(8);
     expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
     for (const fetch of [
       fixture.receiverHeadFetch,
@@ -868,8 +868,8 @@ async function buildDirectCatalogIssuerDelegation(options: {
       contextGraphId: options.contextGraphId ?? CONTEXT_GRAPH_ID,
       effectiveAt: options.effectiveAt ?? '1773899999000',
       expiresAt: options.expiresAt ?? '1774000000000',
-      governanceChainId: '20430',
-      governanceContractAddress: GOVERNANCE,
+      governanceChainId: null,
+      governanceContractAddress: null,
       networkId: NETWORK_ID,
       ownershipTransitionDigest: null,
       previousDelegationDigest: null,
