@@ -658,7 +658,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     const committedHeader = readFileSync(path).subarray(0, 100);
     expect(committedHeader.subarray(0, 16).toString('binary')).toBe('SQLite format 3\u0000');
     expect(committedHeader.readUInt32BE(68)).toBe(INVENTORY_V1_APPLICATION_ID);
-    expect(committedHeader.readUInt32BE(60)).toBe(1);
+    expect(committedHeader.readUInt32BE(60)).toBe(INVENTORY_V1_USER_VERSION);
     if (process.platform !== 'win32') {
       expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
       expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -1664,7 +1664,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       PRAGMA journal_mode = WAL;
       CREATE TABLE owned_data (value TEXT);
       PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
-      PRAGMA user_version = 1;
+      PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};
     `);
     seed.close();
     const holder = new DatabaseSync(path);
