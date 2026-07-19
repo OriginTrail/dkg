@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./harness.ts"
+    ".": "./harness.ts",
+    "./rfc64-evidence": "./rfc64-evidence.ts"
   },
   "scripts": {
-    "test:smoke": "vitest run --config vitest.config.ts"
+    "test:smoke": "vitest run --config vitest.config.ts",
+    "test:rfc64-evidence": "vitest run --config vitest.evidence.config.ts"
   },
   "dependencies": {
     "ethers": "^6.16.0"
