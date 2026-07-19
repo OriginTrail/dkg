@@ -18,6 +18,7 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeControlObjectDigestHex,
   computeKaChunkTreeRootV1,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
   encodeOpaqueKaBundleV1,
   type AuthorCatalogRowV1,
@@ -36,7 +37,7 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -78,6 +79,7 @@ const KA_NUMBER = 7n;
 const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
 const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
 const SECOND_KA_NUMBER = 8n;
+const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
 const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
 const PROJECTION =
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
@@ -320,6 +322,196 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       inventoryRowCount: '2',
     });
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('converges a valid two-to-one successor by removing the omitted SWM projection and seal before CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
+    const observed = fixture.createCasObservedReceiver();
+
+    const evidence = await fixture.synchronizeAny(
+      fixture.removalAnnouncement,
+      observed.receiver,
+    );
+    if (!('catalogRowDigest' in evidence)) throw new Error('one-row removal returned non-one-row evidence');
+    const removedSwmGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    const removedSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: 'gate-2-object' as never,
+    });
+    expect(evidence).toMatchObject({
+      catalogHeadDigest: fixture.removalSuccessor.head.objectDigest,
+      inventoryRowCount: 1,
+      removedRowCount: 1,
+      removedRows: [{
+        kaId: SECOND_KA_ID,
+        swmGraph: removedSwmGraph,
+        sealMetaGraph: removedSeal.metaGraph,
+        sealSubject: removedSeal.subject,
+      }],
+      kaUal: UAL,
+      appliedHeadStatus: 'applied',
+    });
+    expect(Object.isFrozen(evidence.removedRows)).toBe(true);
+    await expect(fixture.receiverStore.hasGraph(removedSwmGraph)).resolves.toBe(false);
+    await expect(fixture.receiverStore.hasGraph(
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
+    )).resolves.toBe(true);
+    const removedSealRows = await fixture.receiverStore.query(
+      `SELECT ?p ?o WHERE { GRAPH <${removedSeal.metaGraph}> { `
+        + `<${removedSeal.subject}> ?p ?o } }`,
+    );
+    expect(removedSealRows).toEqual({ type: 'bindings', bindings: [] });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.removalSuccessor.head.objectDigest,
+      inventoryRowCount: '1',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('verifies a removal target completely before an omitted predecessor row can be mutated', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
+    const omittedSwmGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    const fetchKaBundle: Rfc64PublicCatalogNativeTransportV1['fetchKaBundle'] =
+      async (...args) => {
+        const bundle = await fixture.receiverBundleFetch(...args);
+        if (bundle === null) return null;
+        const forged = bundle.slice();
+        forged[forged.length - 1] ^= 0x01;
+        return forged;
+      };
+    const observed = fixture.createCasObservedReceiver({
+      fetchCatalogObject: fixture.receiverObjectFetch,
+      fetchKaBundle,
+    });
+
+    await expect(fixture.synchronizeAny(
+      fixture.removalAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(true);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.multiAssetSuccessor.head.objectDigest);
+  }, 30_000);
+
+  it('never removes projection or seal state owned by another catalog author scope', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
+    const foreignAuthor = '0x9999999999999999999999999999999999999999' as EvmAddressV1;
+    const foreignGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${foreignAuthor}/${SECOND_KA_NUMBER}`;
+    const foreignSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: foreignAuthor,
+      assertionCoordinate: 'foreign-object' as never,
+    });
+    await fixture.receiverStore.insert([
+      {
+        subject: 'https://example.org/foreign',
+        predicate: 'https://schema.org/name',
+        object: '"Foreign"',
+        graph: foreignGraph,
+      },
+      {
+        subject: foreignSeal.subject,
+        predicate: 'https://example.org/foreignSeal',
+        object: '"owned elsewhere"',
+        graph: foreignSeal.metaGraph,
+      },
+    ]);
+
+    await fixture.synchronizeAny(fixture.removalAnnouncement);
+
+    await expect(fixture.receiverStore.hasGraph(foreignGraph)).resolves.toBe(true);
+    const foreignSealRows = await fixture.receiverStore.query(
+      `SELECT ?p ?o WHERE { GRAPH <${foreignSeal.metaGraph}> { `
+        + `<${foreignSeal.subject}> ?p ?o } }`,
+    );
+    expect(foreignSealRows).toMatchObject({
+      type: 'bindings',
+      bindings: [{
+        p: 'https://example.org/foreignSeal',
+        o: '"owned elsewhere"',
+      }],
+    });
+  }, 30_000);
+
+  it('withholds the head CAS after an indeterminate removal and converges on a new receiver instance', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
+    const omittedSwmGraph =
+      `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    let injectAfterCommittedRemoval = true;
+    const faultStore = new Proxy(fixture.receiverStore, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            await target.replaceGraphAndSubject!(...args);
+            if (args[1].length === 0 && injectAfterCommittedRemoval) {
+              injectAfterCommittedRemoval = false;
+              throw new Error('injected indeterminate post-commit removal failure');
+            }
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const failed = fixture.createCasObservedReceiver(undefined, faultStore);
+
+    await expect(fixture.synchronizeAny(
+      fixture.removalAnnouncement,
+      failed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-activation' });
+    expect(failed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.multiAssetSuccessor.head.objectDigest);
+    await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(false);
+
+    const restartedReceiver = fixture.createReceiver(fixture.receiverPersistence.inventory);
+    const repaired = await fixture.synchronizeAny(
+      fixture.removalAnnouncement,
+      restartedReceiver,
+    );
+    expect(repaired).toMatchObject({
+      catalogHeadDigest: fixture.removalSuccessor.head.objectDigest,
+      removedRowCount: 1,
+      appliedHeadStatus: 'applied',
+    });
+    await expect(fixture.receiverStore.hasGraph(omittedSwmGraph)).resolves.toBe(false);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.removalSuccessor.head.objectDigest,
+      inventoryRowCount: '1',
+    });
   }, 30_000);
 
   it('verifies all multi-asset bundles before staging, SWM mutation, or applied-head CAS', async () => {
@@ -842,6 +1034,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900001002' as never,
     signer,
   });
+  const removalSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: multiAssetSuccessor.head,
+    previousDirectoryPath: multiAssetSuccessor.directoryPath,
+    previousBucket: multiAssetSuccessor.bucket,
+    selectedBucketId: '0' as never,
+    nextRows: [rowBundle.row],
+    issuedAt: '1773900001003' as never,
+    signer,
+  });
   const governedSuccessor = await produceSparseAuthorCatalogSuccessorV1({
     previousHead: governedGenesis.head,
     previousDirectoryPath: governedGenesis.directoryPath,
@@ -887,6 +1088,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
       ...multiAssetSuccessor.stagedObjects,
+      ...removalSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -914,6 +1116,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       ...invalidGenesis.stagedObjects,
       ...successor.stagedObjects,
       ...multiAssetSuccessor.stagedObjects,
+      ...removalSuccessor.stagedObjects,
       ...governedSuccessor.stagedObjects,
       ...competingSuccessor.stagedObjects,
       crossLaneHead,
@@ -945,6 +1148,9 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const multiAssetHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === multiAssetSuccessor.head.objectDigest,
   );
+  const removalHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === removalSuccessor.head.objectDigest,
+  );
   const governedGenesisHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === governedGenesis.head.objectDigest,
   );
@@ -969,6 +1175,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   if (headKeys === undefined) throw new Error('successor head was not staged');
   if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
   if (multiAssetHeadKeys === undefined) throw new Error('multi-asset successor head was not staged');
+  if (removalHeadKeys === undefined) throw new Error('removal successor head was not staged');
   if (governedGenesisHeadKeys === undefined) throw new Error('governed genesis head was not staged');
   if (governedSuccessorHeadKeys === undefined) throw new Error('governed successor head was not staged');
   if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
@@ -1049,6 +1256,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     catalogHeadObjectDigest: multiAssetHeadKeys.objectDigest,
     signatureVariantDigest: multiAssetHeadKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const removalAnnouncement = Object.freeze({
+    ...announcement,
+    catalogVersion: removalSuccessor.head.payload.version,
+    catalogHeadObjectDigest: removalHeadKeys.objectDigest,
+    signatureVariantDigest: removalHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
   const competingAnnouncement = Object.freeze({
     ...announcement,
     catalogHeadObjectDigest: competingHeadKeys.objectDigest,
@@ -1103,7 +1316,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     >,
     controlObjects: Pick<
       Rfc64PersistenceV1['controlObjects'],
-      'stageVerifiedObjects'
+      'stageVerifiedObjects' | 'getVerifiedObjectByDigest'
     > = receiverPersistence.controlObjects,
     contentTransport: Pick<
       Rfc64PublicCatalogNativeTransportV1,
@@ -1112,17 +1325,18 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       fetchCatalogObject: receiverObjectFetch,
       fetchKaBundle: receiverBundleFetch,
     },
+    store: TripleStore = receiverStore,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
     controlObjects,
     inventory,
-    store: receiverStore,
+    store,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<
     Rfc64PublicCatalogNativeTransportV1,
     'fetchCatalogObject' | 'fetchKaBundle'
-  >) => {
+  >, store: TripleStore = receiverStore) => {
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
         receiverPersistence.inventory,
@@ -1133,6 +1347,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
         receiverPersistence.controlObjects,
       ),
     );
+    const getVerifiedObjectByDigest =
+      receiverPersistence.controlObjects.getVerifiedObjectByDigest.bind(
+        receiverPersistence.controlObjects,
+      );
     return Object.freeze({
       compareAndSwapAppliedCatalogHeadV1,
       stageVerifiedObjects,
@@ -1142,7 +1360,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
             receiverPersistence.inventory,
           ),
         compareAndSwapAppliedCatalogHeadV1,
-      }, { stageVerifiedObjects }, contentTransport),
+      }, { stageVerifiedObjects, getVerifiedObjectByDigest }, contentTransport, store),
     });
   };
   const receiver = createReceiver(receiverPersistence.inventory);
@@ -1170,6 +1388,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     missingDelegationAnnouncement,
     multiAssetAnnouncement,
     multiAssetSuccessor,
+    removalAnnouncement,
+    removalSuccessor,
     receiverDirectory: receiverOpened.directory,
     receiverHeadFetch,
     receiverObjectFetch,
