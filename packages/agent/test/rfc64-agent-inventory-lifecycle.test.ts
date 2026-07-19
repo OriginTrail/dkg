@@ -33,8 +33,7 @@ function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
-    rfc64InventoryV1: undefined,
-    rfc64ControlObjectStoreV1: undefined,
+    rfc64PersistenceV1: undefined,
   });
   return agent;
 }
@@ -111,8 +110,12 @@ function minimalStartedAgent(
     router: { closePooling: vi.fn(async () => {}) },
     node: { stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
-    rfc64InventoryV1: { close: inventoryClose },
-    rfc64ControlObjectStoreV1: { close: () => { order.push('control-store'); } },
+    rfc64PersistenceV1: {
+      close: () => {
+        order.push('control-store');
+        inventoryClose();
+      },
+    },
     store: { close: vi.fn(async () => { order.push('store'); }) },
     log: { warn: vi.fn() },
   });
@@ -200,8 +203,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await agent.prepareRfc64InventoryV1();
     await agent.prepareRfc64InventoryV1();
 
-    expect(agent.rfc64InventoryV1).toBeUndefined();
-    expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
   });
@@ -214,12 +216,12 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     agent.yieldRfc64InventoryV1StartupBatch = yieldBatch;
 
     await agent.prepareRfc64InventoryV1();
-    const ownedFoundation = agent.rfc64InventoryV1;
-    const ownedControlObjectStore = agent.rfc64ControlObjectStoreV1;
+    const ownedPersistence = agent.rfc64PersistenceV1;
+    const ownedFoundation = ownedPersistence.inventory;
+    const ownedControlObjectStore = ownedPersistence.controlObjectStore;
     await agent.prepareRfc64InventoryV1();
 
-    expect(agent.rfc64InventoryV1).toBe(ownedFoundation);
-    expect(agent.rfc64ControlObjectStoreV1).toBe(ownedControlObjectStore);
+    expect(agent.rfc64PersistenceV1).toBe(ownedPersistence);
     expect(ownedFoundation.databasePath).toBe(
       join(dataDirectory, INVENTORY_V1_RELATIVE_PATH),
     );
@@ -230,8 +232,8 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     );
 
     agent.closeRfc64InventoryV1();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
-    expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(ownedPersistence.closed).toBe(true);
     expect(ownedControlObjectStore.closed).toBe(true);
     expect(candidateLoadCount(dataDirectory)).toBe(0);
     expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
@@ -274,8 +276,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
       await expect(agent.prepareRfc64InventoryV1())
         .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
-      expect(agent.rfc64InventoryV1).toBeUndefined();
-      expect(agent.rfc64ControlObjectStoreV1).toBeUndefined();
+      expect(agent.rfc64PersistenceV1).toBeUndefined();
 
       const replacement = await openInventoryV1(dataDirectory);
       replacement.close();
@@ -290,7 +291,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       started: false,
       coreHostRecordingGeneration: 0,
       prepareRfc64InventoryV1: vi.fn(async () => {
-        agent.rfc64InventoryV1 = { close };
+        agent.rfc64PersistenceV1 = { close };
       }),
       node: { start: vi.fn(async () => { throw failure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
@@ -298,7 +299,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     await expect(agent.start()).rejects.toBe(failure);
     expect(close).toHaveBeenCalledOnce();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
 
@@ -312,7 +313,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
     expect(inventoryClose).toHaveBeenCalledOnce();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
 
@@ -327,7 +328,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await expect(agent.stop()).rejects.toBe(failure);
 
     expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
     await expect(agent.stop()).resolves.toBeUndefined();
   });

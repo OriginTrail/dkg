@@ -7,6 +7,7 @@ on:
       - 'packages/agent/src/rfc64/inventory-v1/**'
       - 'packages/agent/src/rfc64/author-catalog-producer.ts'
       - 'packages/agent/src/rfc64/control-object-store-v1.ts'
+      - 'packages/agent/src/rfc64/persistence-v1.ts'
       - 'packages/agent/src/dkg-agent-base.ts'
       - 'packages/agent/src/index.ts'
       - 'packages/agent/test/rfc64-inventory-v1-*.test.ts'

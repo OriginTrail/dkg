@@ -211,7 +211,7 @@ interface PreparedStoredControlObjectV1 {
 
 class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closed = false;
-  #operationTail: Promise<void> = Promise.resolve();
+  readonly #fileWriteTails = new Map<string, Promise<void>>();
   readonly namespaceDurability = process.platform === 'win32'
     ? RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY
     : RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY;
@@ -230,7 +230,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   ): Promise<StageVerifiedControlObjectsResultV1> {
     this.requireOpen();
     const prepared = prepareStageBatch(input);
-    return this.enqueue(async () => {
+    return (async () => {
       this.requireOpen();
       const result = new Array<StagedVerifiedControlObjectV1>(prepared.length);
       for (let index = 0; index < prepared.length; index += 1) {
@@ -246,7 +246,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         namespaceDurability: this.namespaceDurability,
         objects: Object.freeze(result),
       });
-    });
+    })();
   }
 
   getVerifiedObject(
@@ -262,8 +262,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     if (typeof verifyIssuerSignature !== 'function') {
       fail('control-store-input', 'verifyIssuerSignature must be a function');
     }
-    return this.enqueue(async () => {
-      this.requireOpen();
+    return (async () => {
       const objectPath = this.objectPath(objectDigest);
       const signaturePath = this.signaturePath(objectDigest, signatureVariantDigest);
       const [unsignedBytes, variantBytes] = await Promise.all([
@@ -299,6 +298,9 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         fail('control-store-corrupt', 'stored control object is not canonical for its exact keys', cause);
       }
 
+      // The caller callback intentionally runs outside every file-key tail. It
+      // may compose this cache with another exact read without deadlocking the
+      // write that produced the snapshot above.
       let issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
       try {
         issuerSignature = await verifyIssuerSignature(envelope);
@@ -308,7 +310,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         fail('control-store-verification', 'stored control object signature verification failed', cause);
       }
       return Object.freeze({ envelope, issuerSignature });
-    });
+    })();
   }
 
   close(): void {
@@ -317,15 +319,13 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
 
   private async stagePrepared(item: PreparedStoredControlObjectV1): Promise<void> {
     const objectPath = this.objectPath(item.objectDigest);
-    await ensureSecureDirectory(dirname(objectPath), this.rootPath, this.io);
-    await stageExactFile(objectPath, item.unsignedBytes, 'object', this.io);
+    await this.stageFileByKey(objectPath, item.unsignedBytes, 'object');
 
     const signaturePath = this.signaturePath(
       item.objectDigest,
       item.signatureVariantDigest,
     );
-    await ensureSecureDirectory(dirname(signaturePath), this.rootPath, this.io);
-    await stageExactFile(signaturePath, item.signatureVariantBytes, 'signature', this.io);
+    await this.stageFileByKey(signaturePath, item.signatureVariantBytes, 'signature');
   }
 
   private objectPath(objectDigest: Digest32V1): string {
@@ -353,9 +353,27 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     );
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.#operationTail.then(operation, operation);
-    this.#operationTail = run.then(() => undefined, () => undefined);
+  private stageFileByKey(
+    targetPath: string,
+    bytes: Uint8Array,
+    kind: 'object' | 'signature',
+  ): Promise<void> {
+    const previous = this.#fileWriteTails.get(targetPath) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      this.requireOpen();
+      await ensureSecureDirectory(dirname(targetPath), this.rootPath, this.io);
+      await stageExactFile(targetPath, bytes, kind, this.io);
+    }, async () => {
+      this.requireOpen();
+      await ensureSecureDirectory(dirname(targetPath), this.rootPath, this.io);
+      await stageExactFile(targetPath, bytes, kind, this.io);
+    });
+    this.#fileWriteTails.set(targetPath, run);
+    void run.finally(() => {
+      if (this.#fileWriteTails.get(targetPath) === run) {
+        this.#fileWriteTails.delete(targetPath);
+      }
+    }).catch(() => undefined);
     return run;
   }
 

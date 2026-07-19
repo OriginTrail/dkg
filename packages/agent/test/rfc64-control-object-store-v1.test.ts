@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   computeControlObjectDigestHex,
@@ -223,6 +223,8 @@ describe('RFC-64 durable control-object store v1', () => {
       'directory.mode-secured',
       'directory.self-fsynced',
       'directory.parent-fsynced',
+      'object.existing-fsynced',
+      'object.existing-parent-fsynced',
       'directory.created',
       'directory.mode-secured',
       'directory.self-fsynced',
@@ -232,8 +234,6 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.temp-fsynced',
       'signature.renamed',
       'signature.parent-fsynced',
-      'object.existing-fsynced',
-      'object.existing-parent-fsynced',
       'signature.existing-fsynced',
       'signature.existing-parent-fsynced',
     ]);
@@ -245,6 +245,24 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.existing-fsynced',
       'signature.existing-parent-fsynced',
     ]);
+  });
+
+  it('allows independent digest keys to stage concurrently without a store-wide queue', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const [first, second] = await Promise.all([signedFixture('2a'), signedFixture('2b')]);
+
+    const [firstResult, secondResult] = await Promise.all([
+      store.stageVerifiedObjects([first]),
+      store.stageVerifiedObjects([second]),
+    ]);
+
+    expect(firstResult.objects[0].objectDigest).toBe(first.envelope.objectDigest);
+    expect(secondResult.objects[0].objectDigest).toBe(second.envelope.objectDigest);
+    await expect(Promise.all([
+      readFile(pathsFor(dataDir, first.envelope).object),
+      readFile(pathsFor(dataDir, second.envelope).object),
+    ])).resolves.toHaveLength(2);
   });
 
   it('requires an unforgeable signature proof bound to the exact envelope before I/O', async () => {
@@ -313,6 +331,57 @@ describe('RFC-64 durable control-object store v1', () => {
       signatureVariantDigest: paths.signatureDigest,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     })).rejects.toMatchObject({ code: 'control-store-corrupt' });
+    await expect(store.stageVerifiedObjects([fixture]))
+      .rejects.toMatchObject({ code: 'control-store-corrupt' });
+    expect(await readFile(paths.signature, 'utf8')).toBe('{}');
+  });
+
+  it('rejects a canonical signature variant stored under a different exact key', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const fixture = await signedFixture('6b');
+    await store.stageVerifiedObjects([fixture]);
+    const paths = pathsFor(dataDir, fixture.envelope);
+    const wrongVariant = `0x${'34'.repeat(32)}` as Digest32V1;
+    const wrongPath = join(dirname(paths.signature), `${wrongVariant.slice(2)}.jcs`);
+    await writeFile(wrongPath, await readFile(paths.signature), {
+      mode: RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
+    });
+    const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
+
+    await expect(store.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: wrongVariant,
+      verifyIssuerSignature,
+    })).rejects.toMatchObject({ code: 'control-store-corrupt' });
+    expect(verifyIssuerSignature).not.toHaveBeenCalled();
+  });
+
+  it('lets an issuer verifier re-enter the same store without deadlocking', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const fixture = await signedFixture('6c');
+    await store.stageVerifiedObjects([fixture]);
+    const paths = pathsFor(dataDir, fixture.envelope);
+    const missing = `0x${'12'.repeat(32)}` as Digest32V1;
+    const missingVariant = `0x${'56'.repeat(32)}` as Digest32V1;
+    const verifyIssuerSignature = vi.fn(async (envelope: SignedControlEnvelopeV1) => {
+      await expect(store.getVerifiedObject({
+        objectDigest: missing,
+        signatureVariantDigest: missingVariant,
+        verifyIssuerSignature: async () => {
+          throw new Error('cache-miss verifier must not run');
+        },
+      })).resolves.toBeNull();
+      return verifyControlEnvelopeIssuerSignatureV1(envelope);
+    });
+
+    await expect(store.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: paths.signatureDigest,
+      verifyIssuerSignature,
+    })).resolves.toMatchObject({ envelope: fixture.envelope });
+    expect(verifyIssuerSignature).toHaveBeenCalledOnce();
   });
 
   it('cleans an unrenamed temp after a pre-visibility fault and converges on retry', async () => {
