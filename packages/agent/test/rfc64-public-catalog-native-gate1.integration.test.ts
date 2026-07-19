@@ -63,7 +63,6 @@ const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/native-gate-1' as ContextGraphIdV1;
-const GOVERNANCE = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const POLICY_DIGEST = `0x${'75'.repeat(32)}` as Digest32V1;
 const DELEGATION_DIGEST = `0x${'76'.repeat(32)}` as Digest32V1;
@@ -233,6 +232,40 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
   }, 30_000);
 
+  it('threads one AbortSignal and timeout through every head, object, and bundle fetch path', async () => {
+    const fixture = await setupLiveReceiver();
+    const signal = new AbortController().signal;
+
+    await fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      fixture.receiver,
+      signal,
+    );
+    await fixture.synchronize(
+      fixture.announcement,
+      fixture.receiver,
+      signal,
+    );
+    await fixture.synchronizeAny(
+      fixture.announcement,
+      fixture.receiver,
+      signal,
+    );
+
+    expect(fixture.receiverHeadFetch).toHaveBeenCalledTimes(3);
+    expect(fixture.receiverObjectFetch).toHaveBeenCalledTimes(5);
+    expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
+    for (const fetch of [
+      fixture.receiverHeadFetch,
+      fixture.receiverObjectFetch,
+      fixture.receiverBundleFetch,
+    ]) {
+      for (const call of fetch.mock.calls) {
+        expect(call.at(-1)).toEqual({ timeoutMs: 10_000, signal });
+      }
+    }
+  }, 30_000);
+
   it('retries genesis idempotently after verified staging wins but its CAS crashes', async () => {
     const fixture = await setupLiveReceiver();
     const crashGapReceiver = fixture.createReceiver({
@@ -379,8 +412,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const scope = {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: '20430',
-    governanceContractAddress: GOVERNANCE,
+    governanceChainId: null,
+    governanceContractAddress: null,
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
@@ -543,6 +576,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, genesisAnnouncement);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, announcement);
   expect(receivedAnnouncements).toEqual([genesisAnnouncement, announcement]);
+  const receiverHeadFetch = vi.fn(
+    receiverHeadTransport.fetchCatalogHead.bind(receiverHeadTransport),
+  );
+  const receiverObjectFetch = vi.fn(
+    receiverNativeTransport.fetchCatalogObject.bind(receiverNativeTransport),
+  );
+  const receiverBundleFetch = vi.fn(
+    receiverNativeTransport.fetchKaBundle.bind(receiverNativeTransport),
+  );
   const createReceiver = (
     inventory: Pick<
       Rfc64PersistenceV1['inventory'],
@@ -550,8 +592,11 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     >,
     controlObjects = receiverPersistence.controlObjects,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
-    headTransport: receiverHeadTransport,
-    contentTransport: receiverNativeTransport,
+    headTransport: { fetchCatalogHead: receiverHeadFetch },
+    contentTransport: {
+      fetchCatalogObject: receiverObjectFetch,
+      fetchKaBundle: receiverBundleFetch,
+    },
     controlObjects,
     inventory,
     store: receiverStore,
@@ -566,7 +611,11 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     genesis,
     genesisAnnouncement,
     invalidGenesisAnnouncement,
+    receiver,
+    receiverBundleFetch,
     receiverDirectory: receiverOpened.directory,
+    receiverHeadFetch,
+    receiverObjectFetch,
     receiverPersistence,
     receiverStore,
     rowBundle,
@@ -575,18 +624,32 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     bootstrap: (
       selectedAnnouncement = genesisAnnouncement,
       selectedReceiver = receiver,
+      signal?: AbortSignal,
     ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
       authorNode.peerId,
       selectedAnnouncement,
       DEPLOYMENT,
+      signal,
     ),
     synchronize: (
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
+      signal?: AbortSignal,
     ) => selectedReceiver.synchronizeOnePublicOpenRow(
       authorNode.peerId,
       selectedAnnouncement,
       DEPLOYMENT,
+      signal,
+    ),
+    synchronizeAny: (
+      selectedAnnouncement = announcement,
+      selectedReceiver = receiver,
+      signal?: AbortSignal,
+    ) => selectedReceiver.synchronizePublicOpenCatalog(
+      authorNode.peerId,
+      selectedAnnouncement,
+      DEPLOYMENT,
+      signal,
     ),
   };
 }

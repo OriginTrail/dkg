@@ -75,8 +75,13 @@ const UTF8_ENCODER = new TextEncoder();
 const APPLIED_INVENTORY_DIGEST_DOMAIN_V1 = 'dkg-rfc64-applied-inventory-v1\n';
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
-  readonly headTransport: Rfc64PublicCatalogTransportV1;
-  readonly contentTransport: Rfc64PublicCatalogNativeTransportV1;
+  /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
+  readonly headTransport: Pick<Rfc64PublicCatalogTransportV1, 'fetchCatalogHead'>;
+  /** Fetch-only capability; lifecycle ownership remains with the catalog service. */
+  readonly contentTransport: Pick<
+    Rfc64PublicCatalogNativeTransportV1,
+    'fetchCatalogObject' | 'fetchKaBundle'
+  >;
   readonly controlObjects: Pick<Rfc64ControlObjectOperationsV1, 'stageVerifiedObjects'>;
   readonly inventory: Pick<
     Rfc64InventoryV1OperationsV1,
@@ -143,6 +148,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     if (
       typeof options?.headTransport?.fetchCatalogHead !== 'function'
       || typeof options?.contentTransport?.fetchCatalogObject !== 'function'
+      || typeof options?.contentTransport?.fetchKaBundle !== 'function'
       || typeof options.controlObjects?.stageVerifiedObjects !== 'function'
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
@@ -161,6 +167,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
+    signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     return this.withScopeSerialization(
       catalogScopeLockKey(announcement),
@@ -170,6 +177,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           announcement,
           deployment,
           'successor',
+          signal,
         );
         if (evidence.inventoryRowCount !== 1) {
           fail('catalog-native-receiver-slice', 'one-row synchronization returned genesis evidence');
@@ -188,6 +196,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
+    signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
     return this.withScopeSerialization(
       catalogScopeLockKey(announcement),
@@ -196,6 +205,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         announcement,
         deployment,
         'any',
+        signal,
       ),
     );
   }
@@ -205,6 +215,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
+    signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
     return this.withScopeSerialization(
       catalogScopeLockKey(announcement),
@@ -214,6 +225,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           announcement,
           deployment,
           'genesis',
+          signal,
         );
         if (evidence.inventoryRowCount !== 0) {
           fail('catalog-native-receiver-slice', 'genesis bootstrap returned successor evidence');
@@ -228,11 +240,13 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
     expected: 'any' | 'genesis' | 'successor',
+    signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
+    throwIfAborted(signal);
     const fetchedHead = await this.options.headTransport.fetchCatalogHead(
       remotePeerId,
       announcement,
-      { timeoutMs: this.#timeoutMs },
+      { timeoutMs: this.#timeoutMs, signal },
     );
     if (fetchedHead === null) {
       fail('catalog-native-receiver-not-found', 'announced catalog head was not found');
@@ -243,6 +257,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         remotePeerId,
         announcement,
         fetchedHead,
+        signal,
       );
     }
     if (expected === 'successor' && claimsGenesisHistory(head)) {
@@ -253,6 +268,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       announcement,
       deployment,
       fetchedHead,
+      signal,
     );
   }
 
@@ -260,6 +276,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     fetchedHead: FetchedRfc64PublicCatalogHeadV1,
+    signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
     const head = fetchedHead.envelope;
     assertEmptyGenesisHead(head);
@@ -284,7 +301,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
         targetObjectDigest: head.payload.directoryRootDigest,
       },
-      { timeoutMs: this.#timeoutMs },
+      { timeoutMs: this.#timeoutMs, signal },
     );
     if (fetchedDirectory === null) {
       fail('catalog-native-receiver-not-found', 'genesis directory root was not found');
@@ -379,6 +396,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
     fetchedHead: FetchedRfc64PublicCatalogHeadV1,
+    signal: AbortSignal | undefined,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     const head = fetchedHead.envelope;
     assertFirstSliceHead(head);
@@ -400,7 +418,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
         targetObjectDigest: head.payload.directoryRootDigest,
       },
-      { timeoutMs: this.#timeoutMs },
+      { timeoutMs: this.#timeoutMs, signal },
     );
     if (fetchedDirectory === null) {
       fail('catalog-native-receiver-not-found', 'successor directory root was not found');
@@ -440,7 +458,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         targetObjectType: AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
         targetObjectDigest: descriptor.bucketDigest,
       },
-      { timeoutMs: this.#timeoutMs },
+      { timeoutMs: this.#timeoutMs, signal },
     );
     if (fetchedBucket === null) {
       fail('catalog-native-receiver-not-found', 'successor catalog bucket was not found');
@@ -480,7 +498,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         blobDigest: row.transfer.blobDigest,
         byteLength: row.transfer.byteLength as never,
       },
-      { timeoutMs: this.#timeoutMs },
+      { timeoutMs: this.#timeoutMs, signal },
     );
     if (bundle === null) {
       fail('catalog-native-receiver-not-found', 'catalog row KA bundle was not found');
@@ -977,4 +995,8 @@ function fail(
     message,
     cause === undefined ? {} : { cause },
   );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason;
 }
