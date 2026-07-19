@@ -605,6 +605,47 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(store.close()).resolves.toBeUndefined();
   });
 
+  it('drains every sibling write in a failed batch before close resolves', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const entered = deferred();
+    const release = deferred();
+    let pauseEnabled = false;
+    let paused = false;
+    const store = await createRfc64ControlObjectStoreTestOpenerV1({
+      boundary: async (boundary) => {
+        if (pauseEnabled && boundary === 'object.temp-written' && !paused) {
+          paused = true;
+          entered.resolve();
+          await release.promise;
+        }
+      },
+    })(dataDir);
+    const corrupt = await signedFixture('failed-batch-corrupt');
+    const slow = await signedFixture('failed-batch-slow');
+    await store.stageVerifiedObjects([corrupt]);
+    await writeFile(pathsFor(dataDir, corrupt.envelope).object, '{}');
+    pauseEnabled = true;
+
+    let stageSettled = false;
+    const stage = store.stageVerifiedObjects([corrupt, slow]);
+    void stage.finally(() => { stageSettled = true; }).catch(() => undefined);
+    await entered.promise;
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(stageSettled).toBe(false);
+
+    let closeSettled = false;
+    const close = store.close().then(() => { closeSettled = true; });
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(closeSettled).toBe(false);
+
+    release.resolve();
+    await expect(stage).rejects.toMatchObject({ code: 'control-store-corrupt' });
+    await expect(close).resolves.toBeUndefined();
+    expect(closeSettled).toBe(true);
+    await expect(readFile(pathsFor(dataDir, slow.envelope).object)).resolves.not.toHaveLength(0);
+    await expect(readFile(pathsFor(dataDir, slow.envelope).signature)).resolves.not.toHaveLength(0);
+  });
+
   it('drains an admitted verified read before close can release ownership', async () => {
     const dataDir = await temporaryDataDirectory();
     const store = await openRfc64ControlObjectStoreV1(dataDir);

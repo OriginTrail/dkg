@@ -189,13 +189,13 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     this.requireOpen();
     const prepared = prepareStageBatch(input);
     const operation = (async () => {
-      const result = await Promise.all(prepared.map(async (item) => {
+      const result = await settleAllOrThrowV1(prepared.map(async (item) => {
         await this.stagePrepared(item);
         return Object.freeze({
           objectDigest: item.objectDigest,
           signatureVariantDigest: item.signatureVariantDigest,
         });
-      }));
+      }), 'RFC-64 control-object batch staging failed');
       return Object.freeze({
         durable: true as const,
         namespaceDurability: this.namespaceDurability,
@@ -224,19 +224,20 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
         objectDigest,
         signatureVariantDigest,
       );
-      const [unsignedBytes, variantBytes] = await mapDurableFileErrors(async () =>
-        Promise.all([
+      const [unsignedBytes, variantBytes] = await settleAllOrThrowV1([
+        mapDurableFileErrors(async () =>
           this.#durableFiles.readOptionalBoundedBytes({
             relativePath: objectPath,
             maxBytes: MAX_CONTROL_OBJECT_BYTES,
             label: 'control object',
-          }),
+          })),
+        mapDurableFileErrors(async () =>
           this.#durableFiles.readOptionalBoundedBytes({
             relativePath: signaturePath,
             maxBytes: MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
             label: 'control signature variant',
-          }),
-        ]));
+          })),
+      ], 'RFC-64 control-object cache reads failed');
       if (unsignedBytes === null || variantBytes === null) return null;
 
       let envelope: SignedControlEnvelopeV1;
@@ -361,6 +362,23 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     }).catch(() => undefined);
     return operation;
   }
+}
+
+async function settleAllOrThrowV1<T>(
+  operations: readonly Promise<T>[],
+  aggregateMessage: string,
+): Promise<T[]> {
+  const outcomes = await Promise.allSettled(operations);
+  const failures = outcomes.flatMap((outcome) =>
+    outcome.status === 'rejected' ? [outcome.reason] : []);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, aggregateMessage);
+  return outcomes.map((outcome) => {
+    if (outcome.status === 'rejected') {
+      throw new TypeError('settled RFC-64 operation lost its recorded failure');
+    }
+    return outcome.value;
+  });
 }
 
 /** @internal Used only by the package-local test support module. */
