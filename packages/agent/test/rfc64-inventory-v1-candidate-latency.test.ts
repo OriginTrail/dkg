@@ -7,24 +7,31 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
+  AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
   KA_TRANSFER_PROJECTION_V1,
   assertAuthorCatalogRowV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   computeAuthorCatalogBucketObjectDigestV1,
+  computeAuthorCatalogDirectoryNodeObjectDigestV1,
   computeAuthorCatalogHeadObjectDigestV1,
   computeAuthorCatalogScopeDigestV1,
   deriveAuthorCatalogScopeFromHeadV1,
+  verifyAuthorCatalogDirectoryPathV1,
+  type AuthorCatalogBucketDescriptorV1,
   type AuthorCatalogBucketV1,
+  type AuthorCatalogDirectoryNodeV1,
   type AuthorCatalogHeadV1,
   type AuthorCatalogRowV1,
   type ByteLengthV1,
   type CountV1,
   type Digest32V1,
+  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
@@ -548,8 +555,8 @@ function latencyCandidateLoad(
     signature: LATENCY_SIGNATURE,
   } as SignedControlEnvelopeV1;
   assertSignedAuthorCatalogHeadEnvelopeV1(head);
-  const signedHead = head as SignedAuthorCatalogHeadEnvelopeV1;
-  const scope = deriveAuthorCatalogScopeFromHeadV1(signedHead.payload);
+  const headTemplate = head as SignedAuthorCatalogHeadEnvelopeV1;
+  const scope = deriveAuthorCatalogScopeFromHeadV1(headTemplate.payload);
   const rows = Array.from({ length: rowCount }, (_, index): AuthorCatalogRowV1 => {
     const row = {
       kaId: ((BigInt(LATENCY_AUTHOR) << 96n) | BigInt(index + 1)).toString(),
@@ -592,17 +599,56 @@ function latencyCandidateLoad(
     signature: LATENCY_SIGNATURE,
   } as SignedControlEnvelopeV1;
   assertSignedAuthorCatalogBucketEnvelopeV1(bucket);
+  const descriptor = {
+    bucketId: '0',
+    rowCount: String(rowCount) as CountV1,
+    byteLength: String(
+      canonicalizeAuthorCatalogBucketPayloadBytesV1(bucketPayload).byteLength,
+    ) as ByteLengthV1,
+    bucketDigest: bucket.objectDigest as Digest32V1,
+  } satisfies AuthorCatalogBucketDescriptorV1;
+  const directoryPayload: AuthorCatalogDirectoryNodeV1 = {
+    catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+    entries: [descriptor],
+    era: scope.era,
+    firstBucketId: '0',
+    level: '0',
+  };
+  const unsignedDirectory = {
+    issuer: LATENCY_ISSUER,
+    objectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+    payload: directoryPayload,
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as unknown as UnsignedControlEnvelopeV1;
+  const signedDirectory = {
+    ...unsignedDirectory,
+    objectDigest: computeAuthorCatalogDirectoryNodeObjectDigestV1(unsignedDirectory, '1'),
+    signature: LATENCY_SIGNATURE,
+  } as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(signedDirectory, '1');
+  const directory = signedDirectory as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+  const unsignedBoundHead = {
+    issuer: headTemplate.issuer,
+    objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    payload: {
+      ...headTemplate.payload,
+      directoryRootDigest: directory.objectDigest,
+    },
+    signatureEvidence: headTemplate.signatureEvidence,
+    signatureSuite: headTemplate.signatureSuite,
+  } as UnsignedControlEnvelopeV1;
+  const boundHead = {
+    ...unsignedBoundHead,
+    objectDigest: computeAuthorCatalogHeadObjectDigestV1(unsignedBoundHead),
+    signature: headTemplate.signature,
+  } as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogHeadEnvelopeV1(boundHead);
+  const signedHead = boundHead as SignedAuthorCatalogHeadEnvelopeV1;
   return {
     session,
     head: signedHead,
-    descriptor: {
-      bucketId: '0',
-      rowCount: String(rowCount) as CountV1,
-      byteLength: String(
-        canonicalizeAuthorCatalogBucketPayloadBytesV1(bucketPayload).byteLength,
-      ) as ByteLengthV1,
-      bucketDigest: bucket.objectDigest as Digest32V1,
-    },
+    directoryPath: verifyAuthorCatalogDirectoryPathV1(signedHead, [directory], '0'),
     bucket,
   };
 }

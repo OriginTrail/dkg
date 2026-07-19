@@ -23,6 +23,7 @@ import {
   computeAuthorCatalogScopeDigestV1,
   deriveAuthorCatalogScopeFromHeadV1,
   parseCanonicalDecimalU64,
+  readVerifiedAuthorCatalogBucketDescriptorV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type ByteLengthV1,
@@ -34,6 +35,7 @@ import {
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
+  type VerifiedAuthorCatalogDirectoryPathV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -58,7 +60,6 @@ declare const CANDIDATE_SESSION_BRAND: unique symbol;
 declare const CANDIDATE_LOAD_KEY_BRAND: unique symbol;
 declare const CANDIDATE_ROWS_TRAVERSAL_BRAND: unique symbol;
 declare const CANDIDATE_DIFF_TRAVERSAL_BRAND: unique symbol;
-declare const VERIFIED_CANDIDATE_BUCKET_DESCRIPTOR_BRAND: unique symbol;
 
 /** Opaque, adapter-local session. No raw session bytes are exposed or accepted. */
 export interface CandidateSessionV1 {
@@ -78,27 +79,11 @@ export interface CandidateBucketDiffTraversalV1 {
   readonly [CANDIDATE_DIFF_TRAVERSAL_BRAND]: true;
 }
 
-/**
- * Exact selected leaf descriptor returned by the core directory-path verifier.
- * The network layer remains responsible for signature authority and path proof;
- * this adapter redundantly rechecks every deterministic descriptor/bucket bind.
- */
-export interface VerifiedCandidateBucketDescriptorV1 {
-  /**
-   * This capability is minted only by the canonical directory-path verifier.
-   * Candidate SQL deliberately has no structural-only factory for it.
-   */
-  readonly [VERIFIED_CANDIDATE_BUCKET_DESCRIPTOR_BRAND]: true;
-  readonly bucketId: DecimalU64V1;
-  readonly rowCount: CountV1;
-  readonly byteLength: ByteLengthV1;
-  readonly bucketDigest: Digest32V1;
-}
-
 export interface VerifiedCandidateBucketLoadV1 {
   readonly session: CandidateSessionV1;
   readonly head: SignedAuthorCatalogHeadEnvelopeV1;
-  readonly descriptor: VerifiedCandidateBucketDescriptorV1;
+  /** Exact process-local core proof for the selected descriptor under `head`. */
+  readonly directoryPath: VerifiedAuthorCatalogDirectoryPathV1;
   readonly bucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
 }
 
@@ -751,7 +736,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   private encodeAndVerifyLoadUnchecked(
     load: VerifiedCandidateBucketLoadV1,
   ): EncodedCandidateLoadV1 {
-    const loadRecord = exactPlainRecord(load, ['bucket', 'descriptor', 'head', 'session'], 'load');
+    const loadRecord = exactPlainRecord(
+      load,
+      ['bucket', 'directoryPath', 'head', 'session'],
+      'load',
+    );
     const sessionHandle = loadRecord.session as CandidateSessionV1;
     const session = this.requireSession(sessionHandle);
     assertSignedAuthorCatalogHeadEnvelopeV1(
@@ -761,7 +750,10 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
     const headDigest = head.objectDigest as Digest32V1;
     const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-    const descriptor = verifyDescriptor(loadRecord.descriptor);
+    const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(
+      loadRecord.directoryPath,
+      head,
+    );
     if (BigInt(descriptor.bucketId) >= BigInt(scope.bucketCount)) {
       invalidLoad('descriptor bucketId is outside the head bucket domain');
     }
@@ -1485,27 +1477,6 @@ class LatencyBudgetSignal extends Error {
     this.name = 'LatencyBudgetSignal';
     this.callCompleted = options.callCompleted ?? false;
   }
-}
-
-function verifyDescriptor(value: unknown): VerifiedCandidateBucketDescriptorV1 {
-  const descriptor = exactPlainRecord(
-    value,
-    ['bucketDigest', 'bucketId', 'byteLength', 'rowCount'],
-    'descriptor',
-  );
-  const bucketId = canonicalU64(descriptor.bucketId, 'bucketId');
-  const rowCount = canonicalU64(descriptor.rowCount, 'rowCount');
-  const byteLength = canonicalU64(descriptor.byteLength, 'byteLength');
-  const bucketDigest = descriptor.bucketDigest;
-  if (typeof bucketDigest !== 'string' || !/^0x[0-9a-f]{64}$/.test(bucketDigest)) {
-    invalidLoad('descriptor bucketDigest must be a canonical Digest32V1');
-  }
-  return {
-    bucketId,
-    rowCount,
-    byteLength,
-    bucketDigest: bucketDigest as Digest32V1,
-  } as VerifiedCandidateBucketDescriptorV1;
 }
 
 function extractCandidateLoadSession(load: unknown): CandidateSessionV1 {
