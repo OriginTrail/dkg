@@ -357,10 +357,22 @@ whole-object verification, and crash durability.
   address its full canonical bytes; and `ids` is strict unsigned lexical order.
   Range progress, provider identity, temporary paths, deletion, quarantine,
   RDF, and SPARQL do not appear in this abstract contract.
-- Implement final content paths keyed only by `WalObjectId`, quota-controlled
-  temporary files, local range-progress metadata, overlap/reorder handling,
-  restart resume, final ID/signature/canonicality verification, fsync/atomic
-  rename, parent-directory fsync, and orphan cleanup.
+- Implement scalable local packed segments keyed through a SQLite B-tree from
+  `WalObjectId` to local segment/offset/length. Segment IDs, record headers,
+  offsets, index rows, and pages are never synchronization atoms or wire data.
+  Admission must verify complete canonical bytes before append, fsync segment
+  bytes before index commit, truncate unindexed crash tails on restart, rotate
+  bounded segments, and retain the simple file-per-object backend only as a
+  reference implementation.
+- Freeze the local packed format as a 32-byte `DKGWSEG1` header (schema `u32`,
+  reserved bytes, segment ID `u64`, reserved bytes), followed by 48-byte
+  `DKGWREC1` record headers (`WalObjectId[32]`, canonical length `u64`) and the
+  unchanged canonical object bytes. Integers are unsigned big-endian. Keep the
+  mutable object/offset catalog in SQLite rather than rewriting a shared
+  segment header on every append.
+- Implement quota-controlled temporary files, local range-progress metadata,
+  overlap/reorder handling, restart resume, final ID/signature/canonicality
+  verification, fsync/atomic commit, and orphan cleanup.
 - Stream ranges directly to temporary storage; memory usage must remain bounded
   independently of total WAL-object size.
 - Enforce negotiated total length, offset arithmetic, maximum range, staged
@@ -395,6 +407,15 @@ whole-object verification, and crash durability.
       `BlobId`, content-addressed range/chunk, or independent payload fetch path.
 - [x] Concurrent providers cannot substitute bytes or cause two objects to
       occupy the same final path.
+- [x] Packed-store restart tests prove an index row never points beyond durable
+      segment bytes; unindexed tails are truncated; missing/corrupt segment,
+      record-header, index, schema, and path state fails closed; and concurrent
+      duplicate admission creates one index row and one physical record.
+- [x] A fresh-process packed-store benchmark covers `N = 10^4`, `10^5`,
+      `10^6`, and `10^7`; separates synthetic index-cardinality preparation
+      from genuine verified admission; and reports ordered `ids`, hit/miss
+      `has`, verified full/ranged reads, verified/idempotent `put`, 8 MiB
+      throughput, CPU, RSS, and p50/p95/p99 latency.
 
 ---
 

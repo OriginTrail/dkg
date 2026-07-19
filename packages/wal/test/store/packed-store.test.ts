@@ -317,4 +317,110 @@ describe('PackedWalObjectStore', () => {
     expect(db.prepare('SELECT record_count FROM segments').get()).toEqual({ record_count: 1 });
     db.close();
   });
+
+  it('fails closed at index, initial-segment, rotation, and append drift boundaries', async () => {
+    const base = await root('remaining-boundaries');
+
+    const invalidDatabase = join(base, 'invalid-database');
+    await mkdir(invalidDatabase);
+    await writeFile(join(invalidDatabase, 'objects.sqlite'), Uint8Array.of(1, 2, 3));
+    expect(() => store({ root: invalidDatabase })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_IO' }));
+
+    const directoryIndex = join(base, 'directory-index');
+    await mkdir(join(directoryIndex, 'objects.sqlite'), { recursive: true });
+    expect(() => store({ root: directoryIndex })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_PATH_UNSAFE' }));
+
+    expect(() => store({ root: '/dev/null' })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_PATH_UNSAFE' }));
+    expect(() => store({ root: `/${'x'.repeat(5_000)}` })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_IO' }));
+
+    const closedQueries = store({ root: join(base, 'closed-queries') });
+    const internal = closedQueries as unknown as { closed: boolean; database: Database.Database };
+    closedQueries.close();
+    internal.closed = false;
+    await code(closedQueries.has(fixture().id), 'WAL_STORE_IO');
+    await iterableCode(closedQueries.read(fixture().id), 'WAL_STORE_IO');
+    await expect(ids(closedQueries.ids())).rejects.toMatchObject({ code: 'WAL_STORE_IO' });
+    internal.closed = true;
+
+    const insertFailure = join(base, 'insert-failure');
+    let value = store({ root: insertFailure });
+    close(value);
+    let database = new Database(join(insertFailure, 'objects.sqlite'));
+    database.exec(`
+      DELETE FROM objects;
+      DELETE FROM segments;
+      CREATE TRIGGER reject_segment BEFORE INSERT ON segments
+      BEGIN SELECT RAISE(ABORT, 'reject segment'); END;
+    `);
+    database.close();
+    expect(() => store({ root: insertFailure })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_IO' }));
+    expect(await readdir(join(insertFailure, 'segments'))).toEqual([]);
+
+    const drift = join(base, 'drift');
+    value = store({ root: drift });
+    await appendFile(segment(drift), Uint8Array.of(1));
+    await code(value.put(fixture().id, chunks(fixture().bytes)), 'WAL_STORE_CORRUPT');
+    expect((await stat(segment(drift))).size).toBe(32);
+
+    const rotation = join(base, 'rotation');
+    let rejectRotated = false;
+    const rotating = store({
+      root: rotation,
+      segmentTargetBytes: 550,
+      durabilityHook: point => {
+        if (rejectRotated && point === 'segment-file-synced') throw new Error('reject rotated segment');
+      },
+    });
+    await rotating.put(fixture().id, chunks(fixture().bytes));
+    rejectRotated = true;
+    await code(rotating.put(fixture('second').id, chunks(fixture('second').bytes)), 'WAL_STORE_IO');
+    expect(await readdir(join(rotation, 'segments'))).toEqual(['0000000000000000.pack']);
+
+    const privateStore = value as unknown as {
+      createSegmentFile(id: number): void;
+      segmentPath(id: number): string;
+    };
+    expect(() => privateStore.createSegmentFile(-1)).toThrowError(expect.objectContaining({ code: 'WAL_STORE_CORRUPT' }));
+    expect(() => privateStore.segmentPath(-1)).toThrowError(expect.objectContaining({ code: 'WAL_STORE_CORRUPT' }));
+  });
+
+  it('rejects unsafe staging/segment orphans and multiple active segments', async () => {
+    const base = await root('unsafe-recovery');
+
+    const segmentRoot = join(base, 'segment-orphan');
+    let value = store({ root: segmentRoot });
+    close(value);
+    await symlink('/dev/null', segment(segmentRoot, 99));
+    expect(() => store({ root: segmentRoot })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_PATH_UNSAFE' }));
+
+    const unrelatedStagingRoot = join(base, 'unrelated-staging');
+    value = store({ root: unrelatedStagingRoot });
+    close(value);
+    await writeFile(join(unrelatedStagingRoot, 'staging', 'unrelated-file'), Uint8Array.of(1));
+    value = store({ root: unrelatedStagingRoot });
+    expect([...await readFile(join(unrelatedStagingRoot, 'staging', 'unrelated-file'))]).toEqual([1]);
+    close(value);
+
+    const stagingRoot = join(base, 'staging-orphan');
+    value = store({ root: stagingRoot });
+    close(value);
+    await symlink('/dev/null', join(
+      stagingRoot,
+      'staging',
+      `.${'a'.repeat(64)}.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.tmp`,
+    ));
+    expect(() => store({ root: stagingRoot })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_PATH_UNSAFE' }));
+
+    const activeRoot = join(base, 'active');
+    value = store({ root: activeRoot });
+    close(value);
+    const second = await readFile(segment(activeRoot));
+    new DataView(second.buffer, second.byteOffset, second.byteLength).setBigUint64(16, 1n, false);
+    await writeFile(segment(activeRoot, 1), second);
+    const database = new Database(join(activeRoot, 'objects.sqlite'));
+    database.exec('DROP INDEX one_active_segment');
+    database.prepare('INSERT INTO segments VALUES (1, 32, 0, 0)').run();
+    database.close();
+    expect(() => store({ root: activeRoot })).toThrowError(expect.objectContaining({ code: 'WAL_STORE_CORRUPT' }));
+  });
 });

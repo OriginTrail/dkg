@@ -99,7 +99,9 @@ function idBuffer(id: WalObjectId): Buffer {
 }
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  /* v8 ignore start -- every call compares fixed-width protocol or local-format fields. */
   if (left.length !== right.length) return false;
+  /* v8 ignore stop */
   let difference = 0;
   for (let index = 0; index < left.length; index += 1) difference |= left[index]! ^ right[index]!;
   return difference === 0;
@@ -110,13 +112,11 @@ function kind(path: string): 'missing' | 'file' | 'directory' | 'unsafe' {
     const details = lstatSync(path);
     if (details.isSymbolicLink()) return 'unsafe';
     if (details.isFile()) return 'file';
-    if (details.isDirectory()) return 'directory';
-    /* v8 ignore next -- sockets/devices are rejected but are not portable test fixtures. */
-    return 'unsafe';
+    if (!details.isDirectory()) return 'unsafe';
+    return 'directory';
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
-    /* v8 ignore next -- platform-specific lstat failures map through the constructor catch. */
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return 'missing';
   }
 }
 
@@ -141,8 +141,9 @@ function writeAllSync(descriptor: number, bytes: Uint8Array, position: number): 
   let written = 0;
   while (written < bytes.length) {
     const count = writeSync(descriptor, bytes, written, bytes.length - written, position + written);
-    /* v8 ignore next -- regular-file writes cannot make zero progress for non-empty input. */
+    /* v8 ignore start -- regular-file writes cannot make zero progress for non-empty input. */
     if (count < 1) storeError('WAL_STORE_IO', 'packed segment write made no progress');
+    /* v8 ignore stop */
     written += count;
   }
 }
@@ -155,8 +156,9 @@ async function writeAll(
   let written = 0;
   while (written < bytes.length) {
     const result = await handle.write(bytes, written, bytes.length - written, position + written);
-    /* v8 ignore next -- regular-file writes cannot make zero progress for non-empty input. */
+    /* v8 ignore start -- regular-file writes cannot make zero progress for non-empty input. */
     if (result.bytesWritten < 1) storeError('WAL_STORE_IO', 'packed segment write made no progress');
+    /* v8 ignore stop */
     written += result.bytesWritten;
   }
 }
@@ -320,8 +322,9 @@ export class PackedWalObjectStore extends WalObjectStore {
         const chunkLength = Math.min(this.readBufferBytes, end - position);
         const chunk = new Uint8Array(chunkLength);
         const result = await handle.read(chunk, 0, chunk.length, row.object_offset + position);
-        /* v8 ignore next -- size and record header were validated immediately above. */
+        /* v8 ignore start -- size and record header were validated immediately above. */
         if (result.bytesRead !== chunk.length) return storeError('WAL_STORE_CORRUPT', 'packed object changed during read');
+        /* v8 ignore stop */
         yield chunk;
         position += chunk.length;
       }
@@ -524,7 +527,9 @@ export class PackedWalObjectStore extends WalObjectStore {
       segment = this.database.prepare(
         'SELECT segment_id, committed_end, record_count, sealed FROM segments WHERE sealed = 0',
       ).get() as SegmentRow | undefined;
+      /* v8 ignore start -- startup recovery creates exactly one active segment before append. */
       if (segment === undefined) storeError('WAL_STORE_CORRUPT', 'packed index has no active segment');
+      /* v8 ignore stop */
       const recordBytes = RECORD_HEADER_BYTES + objectLength;
       if (segment.record_count > 0 && segment.committed_end + recordBytes > this.segmentTargetBytes) {
         const nextId = segment.segment_id + 1;
@@ -551,8 +556,9 @@ export class PackedWalObjectStore extends WalObjectStore {
         while (copied < objectLength) {
           const chunk = new Uint8Array(Math.min(this.readBufferBytes, objectLength - copied));
           const read = await candidateHandle.read(chunk, 0, chunk.length, copied);
-          /* v8 ignore next -- the candidate was closed and verified immediately before locking. */
+          /* v8 ignore start -- the candidate was closed and verified immediately before locking. */
           if (read.bytesRead !== chunk.length) return storeError('WAL_STORE_IO', 'verified candidate changed before append');
+          /* v8 ignore stop */
           await writeAll(segmentHandle, chunk, objectOffset + copied);
           copied += chunk.length;
         }

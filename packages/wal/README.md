@@ -53,7 +53,7 @@ Every non-legacy runtime is confined below `<DKG_HOME>/wal-v1/`:
 
 ```text
 wal-v1/
-  objects/         content-addressed complete WalObjectV1 bytes
+  objects/         complete WalObjectV1 storage (packed index/segments)
   range-staging/   incomplete range-transfer state
   quarantine/      rejected or unresolved objects
   shadow-rdf/      non-authoritative adapter projection
@@ -136,12 +136,65 @@ abstract class WalObjectStore {
 }
 ```
 
-`FileWalObjectStore` streams candidate bytes to an object-local temporary file,
-fsyncs it, verifies the exact canonical tuple and EIP-191 signature, recomputes
-the domain-separated complete `WalObjectId`, atomically renames it to
-`objects/<first-byte>/<remaining-id>.wal`, and fsyncs the parent directory.
-Only then does `has()` return true. Reads address the full canonical object—not
-the inline payload—and `ids()` yields strict unsigned lexical ID order.
+`PackedWalObjectStore` is the scalable local implementation. It stores many
+complete canonical objects in append-only segment files and maintains a SQLite
+B-tree from `WalObjectId` to `(segmentId, objectOffset, objectLength)`. Segment
+IDs, record headers, offsets, index rows, and SQLite pages are local storage
+details: none is signed, advertised, reconciled, or transferred.
+
+The local binary layout is fixed-width and integer-only. Multi-byte integers
+are unsigned big-endian:
+
+| Structure | Offset | Bytes | Value |
+|---|---:|---:|---|
+| `PackedSegmentHeaderV1` | 0 | 8 | ASCII `DKGWSEG1` (magic plus format version) |
+| | 8 | 4 | schema version `1` |
+| | 12 | 4 | reserved zero bytes |
+| | 16 | 8 | local segment ID |
+| | 24 | 8 | reserved zero bytes |
+| `PackedRecordHeaderV1` | 0 | 8 | ASCII `DKGWREC1` (magic plus format version) |
+| | 8 | 32 | complete `WalObjectId` |
+| | 40 | 8 | canonical object byte length |
+| record body | 48 | length | unchanged canonical `WalObjectV1` bytes |
+
+The segment header intentionally does not contain a growing object/offset
+catalog: appending an object would otherwise require rewriting shared header
+pages and introducing a second commit protocol. SQLite is the authoritative
+local catalog, and its B-tree pages supply ordered IDs and bounded point
+lookups. The per-record header independently binds the indexed ID and length to
+the bytes found at that offset.
+
+Admission streams into a bounded candidate file, verifies canonicality,
+signature, writer, and complete-object ID, appends and fsyncs the segment, then
+commits the index row in SQLite `WAL` mode with `synchronous=FULL`. The ordering
+guarantees that an index row never references unflushed bytes. A crash before
+the index commit leaves an unindexed tail, which restart truncates to the last
+committed boundary. Segments rotate at a configured target size; an object
+larger than the target receives its own segment without being split into a new
+protocol atom.
+
+`has()` is an indexed point lookup, `read()` validates the local record header
+and performs bounded positional reads, and `ids()` is a strict byte-ordered
+index cursor. `FileWalObjectStore` remains available as a simple/reference
+backend, but it creates one filesystem file per object and is not the scalable
+default for million-object deployments.
+
+```mermaid
+sequenceDiagram
+    participant A as Adapter or range finalizer
+    participant C as Candidate file
+    participant P as Active packed segment
+    participant I as SQLite object index
+    A->>C: Stream complete canonical WalObjectV1
+    C->>C: fsync and verify canonical bytes, signature, writer, WalObjectId
+    A->>P: Append local record header and unchanged object bytes
+    P->>P: fsync segment
+    A->>I: BEGIN IMMEDIATE; insert ID to segment/offset/length
+    I->>I: COMMIT with WAL and synchronous FULL
+    I-->>A: Object visible to has/read/ids
+    Note over P,I: Crash before commit leaves only an unindexed tail
+    A->>P: Restart truncates tail to indexed committed_end
+```
 
 The range receiver is package-internal. It stores bounded range files and local
 JSON restart metadata under `range-staging/`; those files are not protocol
@@ -164,7 +217,7 @@ sequenceDiagram
     R->>T: Stream-assemble complete canonical WalObjectV1 bytes
     R->>S: put(expected WalObjectId, byte stream)
     S->>S: Verify canonicality, signature, and whole-object ID
-    S->>S: fsync temporary, atomic rename, fsync parent
+    S->>S: Verify, append/fsync segment, commit indexed offset
     S-->>R: Complete object visible
     R->>T: Remove staging and fsync staging root
 ```
@@ -282,6 +335,7 @@ pnpm --filter @origintrail-official/dkg-wal test:fixtures
 pnpm --filter @origintrail-official/dkg-wal test:conformance
 pnpm --filter @origintrail-official/dkg-wal-v1-conformance verify
 pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:matrix
+pnpm --filter @origintrail-official/dkg-wal benchmark:store:matrix
 ```
 
 The executable source has 100% statement, branch, function, and line coverage.
@@ -326,3 +380,35 @@ pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation -- --sizes=
 
 Timing comparisons require comparable hardware, runtime, power, and thermal
 conditions. Symbol and byte counts are fully deterministic across machines.
+
+## Packed object-store benchmark
+
+`benchmarks/store-baseline.json` tracks `N = 10K, 100K, 1M, 10M` SQLite-index
+cardinalities, each in a fresh process. Cardinality setup is reported as
+`inventoryPreparationMs` and excluded from measured `totalMs`.
+
+The setup uses benchmark-only index aliases to measure B-tree cardinality
+without pretending to admit ten million copies of one object. All `put`,
+`read`, large-object, and transfer-assembly measurements use genuine canonical,
+signature-verified objects. Alias IDs are enumerated and used for `has()` only;
+the record-header binding prevents reading them as content.
+
+The Apple M3, 16 GiB, Node 24.11.1 baseline is:
+
+| Indexed IDs | Ordered `ids()` | `has` hit p95 | Verified `put` p95 | 8 MiB verified `put` | Max RSS |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 9.5 ms | 0.0057 ms | 14.1 ms | 27.4 MiB/s | 225 MiB |
+| 100,000 | 97.6 ms | 0.0060 ms | 13.8 ms | 27.7 MiB/s | 234 MiB |
+| 1,000,000 | 936.7 ms | 0.0073 ms | 15.0 ms | 27.5 MiB/s | 235 MiB |
+| 10,000,000 | 10.24 s | 0.1129 ms | 18.8 ms | 27.4 MiB/s | 240 MiB |
+
+`ids()` is necessarily O(N) because it emits every ID; the baseline shows
+approximately linear index-cursor scaling. Point lookups, verified admissions,
+and large-object throughput remain separate measurements. The range-assembly
+result is also separately labelled because it belongs to transfer staging, not
+to the four-method `WalObjectStore` abstraction.
+
+Use `benchmark:store` for 10K/100K, `benchmark:store:matrix` for the complete
+matrix, `benchmark:store:rotated` for three rotated repetitions,
+`benchmark:store:check` for the full regression gate, and
+`benchmark:store:check:quick` for 10K/100K.
