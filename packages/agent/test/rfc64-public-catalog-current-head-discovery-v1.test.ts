@@ -26,6 +26,10 @@ import {
   type Rfc64PublicCatalogCurrentHeadQueryV1,
 } from '../src/rfc64/public-catalog-current-head-discovery-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  encodeRfc64PublicCatalogHeadAnnouncementV1,
+} from '../src/rfc64/public-catalog-transport-v1.js';
+import {
   Rfc64PublicCatalogServiceV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
 import {
@@ -144,6 +148,86 @@ function discoveryScope() {
     authorAddress: AUTHOR,
     catalogEra: '0',
   }) as const;
+}
+
+const OTHER_CONTEXT_GRAPH_ID =
+  '0x2222222222222222222222222222222222222222/gate-3-discovery-other' as const;
+const POLICY_DIGEST = `0x${'71'.repeat(32)}` as Digest32V1;
+const OPEN_AUTHORIZATION = Object.freeze({
+  accessPolicy: 0 as const,
+  policyDigest: POLICY_DIGEST,
+});
+
+function currentHeadQuery(): Rfc64PublicCatalogCurrentHeadQueryV1 {
+  return Object.freeze({
+    kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+    ...discoveryScope(),
+    policyDigest: POLICY_DIGEST,
+  }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+}
+
+/**
+ * Produce a real signed head envelope without staging it. These regressions
+ * inject provider state directly so the only variable is the security check
+ * under test.
+ */
+async function produceHead(
+  scope = catalogScope(),
+  issuedAt: TimestampMsV1 = '1773900000000' as TimestampMsV1,
+) {
+  const produced = await produceEmptyAuthorCatalogGenesisV1({
+    scope,
+    catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+    issuedAt,
+    signer: {
+      issuer: AUTHOR,
+      signDigest: (digest) => AUTHOR_WALLET.signMessage(digest),
+    },
+  });
+  return produced.head;
+}
+
+/** Mint a genuine verifier proof so binding checks are reached, not mint checks. */
+async function verifiedRecord(envelope: Awaited<ReturnType<typeof produceHead>>) {
+  return {
+    envelope,
+    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+  };
+}
+
+type InboundHandler = (
+  data: Uint8Array,
+  peerId: { toString(): string },
+  options: { signal?: AbortSignal },
+) => Promise<Uint8Array>;
+
+/**
+ * A transport-level router double. Captures the inbound handler so the provider
+ * path can be driven directly, which keeps the outbound requester-side
+ * `assertAnnouncementMatchesQuery` net out of provider-side regressions.
+ */
+function fakeRouter(send?: (bytes: Uint8Array) => Promise<Uint8Array>) {
+  let handler: InboundHandler | undefined;
+  const sendMock = vi.fn(async (
+    _peerId: string,
+    _protocol: string,
+    bytes: Uint8Array,
+  ) => (send === undefined
+    ? Uint8Array.of(0)
+    : await send(bytes)));
+  const router = {
+    register(_protocol: string, registered: InboundHandler) {
+      handler = registered;
+    },
+    unregister() {},
+    send: sendMock,
+  } as unknown as ProtocolRouter;
+  return {
+    router,
+    send: sendMock,
+    invoke: async (data: Uint8Array, signal?: AbortSignal) =>
+      await handler!(data, { toString: () => 'test-peer' }, { signal }),
+  };
 }
 
 describe('RFC-64 public catalog current-head discovery v1', () => {
@@ -499,6 +583,161 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     )).rejects.toBe(reason);
     expect(authorizeOpenCatalogOperation).not.toHaveBeenCalled();
     expect(readCurrentAppliedCatalogHeadDigest).not.toHaveBeenCalled();
+    transport.stop();
+  });
+
+  it('rejects a current pointer resolving to a verified head for a different scope', async () => {
+    // The pointer names a real, correctly signed, exactly-digest-matching head.
+    // Only its scope differs, so the rejection must come from the head/query
+    // binding check rather than from the digest or signature checks.
+    const otherHead = await produceHead(catalogScope(OTHER_CONTEXT_GRAPH_ID));
+    const record = await verifiedRecord(otherHead);
+    const getVerifiedObjectByDigest = vi.fn(async () => record);
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async () =>
+      otherHead.objectDigest as Digest32V1);
+    const { router, invoke } = fakeRouter();
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest },
+      readCurrentAppliedCatalogHeadDigest,
+      authorizeOpenCatalogOperation: vi.fn(async () => OPEN_AUTHORIZATION),
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+
+    await expect(invoke(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(currentHeadQuery()),
+    )).rejects.toMatchObject({ code: 'catalog-discovery-object-mismatch' });
+    expect(getVerifiedObjectByDigest).toHaveBeenCalledTimes(1);
+    transport.stop();
+  });
+
+  it('rejects a head paired with an issuer proof minted for a different envelope', async () => {
+    // The envelope matches the query exactly, so the head/query binding check
+    // passes and the rejection can only come from the exact issuer-proof
+    // binding. The proof is genuinely minted, so the verifier-mint guard passes
+    // too and the failure lands on the binding comparison.
+    const head = await produceHead();
+    const otherHead = await produceHead(catalogScope(OTHER_CONTEXT_GRAPH_ID));
+    expect(head.objectDigest).not.toBe(otherHead.objectDigest);
+    const foreignProof = (await verifiedRecord(otherHead)).issuerSignature;
+    const getVerifiedObjectByDigest = vi.fn(async () => ({
+      envelope: head,
+      issuerSignature: foreignProof,
+    }));
+    const { router, invoke } = fakeRouter();
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => head.objectDigest as Digest32V1),
+      authorizeOpenCatalogOperation: vi.fn(async () => OPEN_AUTHORIZATION),
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+
+    await expect(invoke(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(currentHeadQuery()),
+    )).rejects.toMatchObject({ code: 'catalog-discovery-signature' });
+    transport.stop();
+  });
+
+  it('denies outbound discovery when accepted policy is revoked across the send await', async () => {
+    // Authorization is open before the send and denied after it. A not-found
+    // response isolates the post-await recheck: it runs before the null return,
+    // so dropping it yields a resolved null instead of a policy rejection.
+    const authorizeOpenCatalogOperation = vi.fn()
+      .mockResolvedValueOnce(OPEN_AUTHORIZATION)
+      .mockResolvedValue(null);
+    const { router, send } = fakeRouter(async () => Uint8Array.of(0));
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+
+    await expect(transport.discoverCurrentCatalogHead('test-peer', currentHeadQuery()))
+      .rejects.toMatchObject({ code: 'catalog-discovery-policy-denied' });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    const [pre, post] = authorizeOpenCatalogOperation.mock.calls;
+    expect(pre[0]).toMatchObject({ operation: 'current-head-discovery-outbound' });
+    expect(post[0]).toMatchObject({ operation: 'current-head-discovery-outbound' });
+    transport.stop();
+  });
+
+  it('withholds a found announcement when policy is revoked across the send await', async () => {
+    // The stronger leak case: the provider returns a fully query-matching
+    // announcement, so the requester-side announcement/query net cannot mask a
+    // missing post-await policy recheck.
+    const head = await produceHead();
+    const announcement = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0',
+      catalogVersion: '0',
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: head.objectDigest as Digest32V1,
+      signatureVariantDigest: computeControlSignatureVariantDigestHex(
+        head.objectDigest,
+        head.signature,
+      ) as Digest32V1,
+    });
+    const encodedAnnouncement = encodeRfc64PublicCatalogHeadAnnouncementV1(announcement);
+    const foundResponse = new Uint8Array(encodedAnnouncement.byteLength + 1);
+    foundResponse[0] = 1;
+    foundResponse.set(encodedAnnouncement, 1);
+    const authorizeOpenCatalogOperation = vi.fn()
+      .mockResolvedValueOnce(OPEN_AUTHORIZATION)
+      .mockResolvedValue(null);
+    const { router } = fakeRouter(async () => foundResponse);
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+
+    await expect(transport.discoverCurrentCatalogHead('test-peer', currentHeadQuery()))
+      .rejects.toMatchObject({ code: 'catalog-discovery-policy-denied' });
+    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    transport.stop();
+  });
+
+  it('denies inbound discovery when accepted policy is revoked across the state read', async () => {
+    // A stable applied pointer keeps the snapshot loop to a single attempt, so
+    // the open-then-denied sequence lands exactly on the post-read recheck. The
+    // head is valid and scope-matching, making the authorization flip the only
+    // injected fault: without the recheck the provider serves FOUND.
+    const head = await produceHead();
+    const record = await verifiedRecord(head);
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async () =>
+      head.objectDigest as Digest32V1);
+    const authorizeOpenCatalogOperation = vi.fn()
+      .mockResolvedValueOnce(OPEN_AUTHORIZATION)
+      .mockResolvedValue(null);
+    const { router, invoke } = fakeRouter();
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => record) },
+      readCurrentAppliedCatalogHeadDigest,
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+
+    const response = await invoke(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(currentHeadQuery()),
+    );
+
+    expect(response).toEqual(Uint8Array.of(2));
+    expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
+    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    for (const [input] of authorizeOpenCatalogOperation.mock.calls) {
+      expect(input).toMatchObject({ operation: 'current-head-discovery-inbound' });
+    }
     transport.stop();
   });
 });
