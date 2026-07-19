@@ -427,9 +427,9 @@ async function execute(): Promise<void> {
           'real DKGAgent production APIs only; no fixture adapter or synthesized product evidence',
       },
       fixture: {
-        forged,
-        positive,
-        repairSuccessor: repair,
+        forged: structuredClone(forged),
+        positive: structuredClone(positive),
+        repairSuccessor: structuredClone(repair),
       },
       gate: 'OT-RFC-64 Gate 1 harness contract',
       gateEvaluation: {
@@ -444,8 +444,8 @@ async function execute(): Promise<void> {
         forgedAuthor: {
           activationAfter: positive.activatedQuadCount,
           activationBefore: positive.activatedQuadCount,
-          appliedHeadAfter: appliedAfterForged,
-          appliedHeadBefore: positiveApplied,
+          appliedHeadAfter: structuredClone(appliedAfterForged),
+          appliedHeadBefore: structuredClone(positiveApplied),
           attemptedCatalogHeadDigest: forged.attemptedCatalogHeadDigest,
           failureCode: forged.expectedFailureCode,
           recoveredAuthorAddress: forged.recoveredAuthorAddress,
@@ -453,9 +453,9 @@ async function execute(): Promise<void> {
           testedByPeerId: receiverReady.peerId,
         },
         positiveSync: {
-          appliedReadBack: positiveApplied,
+          appliedReadBack: structuredClone(positiveApplied),
           controlObjectsVerified: positiveControlObjectCount,
-          exact: positive,
+          exact: structuredClone(positive),
           receivedByPeerId: receiverReady.peerId,
           semanticPostRead: semanticReadBackFromTransfer(positive),
           servedByPeerId: authorReady.peerId,
@@ -463,7 +463,7 @@ async function execute(): Promise<void> {
         restartRepair: {
           crashExit: receiverCrashExit,
           gap: {
-            appliedBeforeCrash: positiveApplied,
+            appliedBeforeCrash: structuredClone(positiveApplied),
             repairIntentDurable: false,
             semanticBeforeCrash: semanticReadBackFromTransfer(positive),
             target: appliedReadBackFromTransfer(repair),
