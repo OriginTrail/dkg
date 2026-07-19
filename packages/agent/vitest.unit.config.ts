@@ -134,6 +134,7 @@ export default defineConfig({
       "test/rfc64-persistent-catalog-provider-v1.test.ts",
       "test/rfc64-public-catalog-successor-producer-v1.test.ts",
       "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
+      "test/rfc64-catalog-access-policy-v1.test.ts",
       "test/rfc64-policy-cell-v1.test.ts",
     ],
     testTimeout: 60_000,
