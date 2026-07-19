@@ -43,7 +43,8 @@ The preserved raw schema requires production-returned evidence for:
 - exact successor head, catalog-row, bundle, public-content, UAL, and SWM graph;
 - one inventory row and exact activated triple count;
 - durable applied-head and exact semantic post-read;
-- forged author-transfer rejection with no activation or applied head;
+- forged author-transfer rejection with the positive activation and applied head
+  exactly unchanged;
 - a real `SIGKILL`, restart with the same peer identity and durable directory,
   explicit reannouncement, and exact replay without duplicate activation.
 

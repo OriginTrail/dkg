@@ -16,7 +16,9 @@ const COMMIT_PATTERN = /^[0-9a-f]{40,64}$/u;
 const DIGEST_PATTERN = /^0x[0-9a-f]{64}$/u;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/u;
 const DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/u;
-const UAL_PATTERN = /^did:dkg:[^/]+\/0x[0-9a-f]{40}\/(0|[1-9][0-9]*)$/u;
+const UAL_PATTERN = /^did:dkg:[^/]+\/(0x[0-9a-f]{40})\/(0|[1-9][0-9]*)$/u;
+const SWM_GRAPH_PATTERN =
+  /^did:dkg:context-graph:.+\/_shared_memory\/(0x[0-9a-f]{40})\/(0|[1-9][0-9]*)$/u;
 const PRODUCTION_REASON =
   'two real DKGAgent processes completed production publish, announce, synchronize, authorization-negative, SIGKILL, restart, reannounce, and exact readback';
 const PRODUCTION_REPLACEMENT_CONTRACT =
@@ -148,7 +150,7 @@ function verifyRuntimeEvidence(value: unknown): {
   exact(forged.catalogAuthorAddress, positive.authorAddress, '$.fixture.forged.catalogAuthorAddress');
   exact(
     forged.expectedFailureCode,
-    'catalog-native-receiver-transfer',
+    'catalog-native-receiver-authorization',
     '$.fixture.forged.expectedFailureCode',
   );
   if (forged.recoveredAuthorAddress === forged.catalogAuthorAddress) {
@@ -216,7 +218,8 @@ function verifyTransfer(value: unknown, path: string): Gate1TransferEvidence {
   ]);
   const authorAddress = address(transfer.authorAddress, `${path}.authorAddress`);
   const kaUal = matchString(transfer.kaUal, UAL_PATTERN, `${path}.kaUal`);
-  if (!kaUal.includes(`/${authorAddress}/`)) fail(`${path}.kaUal`, 'must name the catalog author');
+  const ualMatch = UAL_PATTERN.exec(kaUal)!;
+  if (ualMatch[1] !== authorAddress) fail(`${path}.kaUal`, 'must name the catalog author');
   const activatedQuadCount = positiveSafeInteger(transfer.activatedQuadCount, `${path}.activatedQuadCount`);
   const result: Gate1TransferEvidence = {
     activatedQuadCount,
@@ -236,7 +239,11 @@ function verifyTransfer(value: unknown, path: string): Gate1TransferEvidence {
     kaUal,
     swmGraph: boundedString(transfer.swmGraph, `${path}.swmGraph`),
   };
-  if (!result.swmGraph.includes(authorAddress)) fail(`${path}.swmGraph`, 'must name the catalog author');
+  const swmMatch = SWM_GRAPH_PATTERN.exec(result.swmGraph);
+  if (swmMatch === null) fail(`${path}.swmGraph`, 'must use the production shared-memory graph form');
+  if (swmMatch[1] !== authorAddress || swmMatch[2] !== ualMatch[2]) {
+    fail(`${path}.swmGraph`, 'must name the same catalog author and KA number as the UAL');
+  }
   return result;
 }
 
@@ -299,7 +306,7 @@ function verifyPhases(
     'positiveSync',
     'restartRepair',
   ]);
-  verifyForgedAuthor(phases.forgedAuthor, peers, runtime.forged);
+  verifyForgedAuthor(phases.forgedAuthor, peers, runtime.forged, runtime.positive);
   verifyPositiveSync(phases.positiveSync, peers, runtime.positive);
   verifyRestartRepair(phases.restartRepair, peers, runtime.positive, runtime.repair);
 }
@@ -308,6 +315,7 @@ function verifyForgedAuthor(
   value: unknown,
   peers: { author: string; receiver: string },
   forged: Gate1ForgedEvidence,
+  positive: Gate1TransferEvidence,
 ): void {
   const phase = closedRecord(value, '$.phases.forgedAuthor', [
     'activationAfter',
@@ -322,10 +330,26 @@ function verifyForgedAuthor(
   ]);
   exact(phase.servedByPeerId, peers.author, '$.phases.forgedAuthor.servedByPeerId');
   exact(phase.testedByPeerId, peers.receiver, '$.phases.forgedAuthor.testedByPeerId');
-  exact(phase.activationBefore, 0, '$.phases.forgedAuthor.activationBefore');
-  exact(phase.activationAfter, 0, '$.phases.forgedAuthor.activationAfter');
-  exact(phase.appliedHeadBefore, null, '$.phases.forgedAuthor.appliedHeadBefore');
-  exact(phase.appliedHeadAfter, null, '$.phases.forgedAuthor.appliedHeadAfter');
+  exact(
+    phase.activationBefore,
+    positive.activatedQuadCount,
+    '$.phases.forgedAuthor.activationBefore',
+  );
+  exact(
+    phase.activationAfter,
+    positive.activatedQuadCount,
+    '$.phases.forgedAuthor.activationAfter',
+  );
+  exactJson(
+    phase.appliedHeadBefore,
+    appliedReadBackFromTransfer(positive),
+    '$.phases.forgedAuthor.appliedHeadBefore',
+  );
+  exactJson(
+    phase.appliedHeadAfter,
+    appliedReadBackFromTransfer(positive),
+    '$.phases.forgedAuthor.appliedHeadAfter',
+  );
   exact(phase.attemptedCatalogHeadDigest, forged.attemptedCatalogHeadDigest, '$.phases.forgedAuthor.attemptedCatalogHeadDigest');
   exact(phase.failureCode, forged.expectedFailureCode, '$.phases.forgedAuthor.failureCode');
   exact(phase.recoveredAuthorAddress, forged.recoveredAuthorAddress, '$.phases.forgedAuthor.recoveredAuthorAddress');

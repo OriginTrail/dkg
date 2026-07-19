@@ -138,17 +138,17 @@ test('requires exact durable and semantic readback after positive synchronizatio
   reject(semantic, /positiveSync\.semanticPostRead/);
 });
 
-test('requires forged transfer rejection to leave zero activation and no applied head', () => {
+test('requires forged transfer rejection to leave the positive state exactly unchanged', () => {
   const activated = goldenArtifact();
-  activated.phases.forgedAuthor.activationAfter = 1;
+  activated.phases.forgedAuthor.activationAfter = 3;
   reject(activated, /forgedAuthor\.activationAfter/);
 
   const applied = goldenArtifact();
-  applied.phases.forgedAuthor.appliedHeadAfter = appliedReadBackFromTransfer(POSITIVE);
+  (applied.phases.forgedAuthor as unknown as Record<string, unknown>).appliedHeadAfter = null;
   reject(applied, /forgedAuthor\.appliedHeadAfter/);
 
   const wrongFailure = goldenArtifact();
-  wrongFailure.fixture.forged.expectedFailureCode = 'catalog-successor-producer-binding';
+  wrongFailure.fixture.forged.expectedFailureCode = 'catalog-native-receiver-transfer';
   reject(wrongFailure, /fixture\.forged\.expectedFailureCode/);
 });
 
@@ -188,7 +188,7 @@ function buildGoldenArtifact() {
   const forged = {
     attemptedCatalogHeadDigest: digest('9'),
     catalogAuthorAddress: AUTHOR,
-    expectedFailureCode: 'catalog-native-receiver-transfer',
+    expectedFailureCode: 'catalog-native-receiver-authorization',
     recoveredAuthorAddress: ATTACKER,
   };
   return {
@@ -216,10 +216,10 @@ function buildGoldenArtifact() {
     invocation: 'pnpm test:gate1:rfc64-public-open-harness',
     phases: {
       forgedAuthor: {
-        activationAfter: 0,
-        activationBefore: 0,
-        appliedHeadAfter: null as unknown,
-        appliedHeadBefore: null as unknown,
+        activationAfter: POSITIVE.activatedQuadCount,
+        activationBefore: POSITIVE.activatedQuadCount,
+        appliedHeadAfter: structuredClone(appliedReadBackFromTransfer(POSITIVE)),
+        appliedHeadBefore: structuredClone(appliedReadBackFromTransfer(POSITIVE)),
         attemptedCatalogHeadDigest: forged.attemptedCatalogHeadDigest,
         failureCode: forged.expectedFailureCode,
         recoveredAuthorAddress: forged.recoveredAuthorAddress,
@@ -325,7 +325,8 @@ function transfer(input: { head: string; previous: string; version: string }): G
     },
     inventoryRowCount: 1,
     kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
-    swmGraph: `did:dkg:swm:0x${'bb'.repeat(20)}/gate-1/${AUTHOR}/7`,
+    swmGraph:
+      `did:dkg:context-graph:0x${'bb'.repeat(20)}/gate-1/_shared_memory/${AUTHOR}/7`,
   };
 }
 

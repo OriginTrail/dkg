@@ -24,7 +24,9 @@ const transfer: Gate1TransferEvidence = {
   },
   inventoryRowCount: 1,
   kaUal: `did:dkg:otp:20430/0x${'11'.repeat(20)}/7`,
-  swmGraph: `did:dkg:swm:0x${'88'.repeat(20)}/gate-1/0x${'11'.repeat(20)}/7`,
+  swmGraph:
+    `did:dkg:context-graph:0x${'88'.repeat(20)}/gate-1/_shared_memory/`
+      + `0x${'11'.repeat(20)}/7`,
 };
 
 test('the six-operation adapter boundary remains exact and product-facing', () => {
