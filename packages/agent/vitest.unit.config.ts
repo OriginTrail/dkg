@@ -112,6 +112,7 @@ export default defineConfig({
       "test/rfc64-inventory-v1-candidate-latency.test.ts",
       "test/rfc64-inventory-v1-candidate-faults.test.ts",
       "test/rfc64-candidate-transfer-admission.test.ts",
+      "test/rfc64-catalog-row-authorship.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
