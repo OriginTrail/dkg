@@ -1,5 +1,9 @@
+import { createRequire } from 'node:module';
+
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const require = createRequire(import.meta.url);
+const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const legacyCatalogProducer = await import(
   '@origintrail-official/dkg-agent/dist/rfc64/author-catalog-producer.js'
 );
@@ -9,6 +13,9 @@ const legacyInventory = await import(
 
 if (typeof root.DKGAgent !== 'function' || typeof legacyAgent.DKGAgent !== 'function') {
   throw new Error('published agent entry points did not expose DKGAgent');
+}
+if (packageManifest.name !== '@origintrail-official/dkg-agent') {
+  throw new Error('historical package.json subpath no longer resolves');
 }
 if (
   typeof legacyCatalogProducer.produceEmptyAuthorCatalogGenesisV1 !== 'function'
