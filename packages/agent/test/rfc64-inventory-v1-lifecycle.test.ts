@@ -1049,9 +1049,11 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
         u64be(0n),
         Buffer.alloc(32),
       );
-      expect(plan.map((row) => String(row.detail)).join('\n')).toMatch(
-        /USING COVERING INDEX rfc64_candidate_bucket_rows_by_bucket_v1 \(session_id=\? AND catalog_scope_digest=\? AND author_address=\? AND target_catalog_head_digest=\? AND bucket_id_u64be=\? AND ka_id_u256be>\?\)/,
+      const planDetail = plan.map((row) => String(row.detail)).join('\n');
+      expect(planDetail).toMatch(
+        /USING PRIMARY KEY \(session_id=\? AND catalog_scope_digest=\? AND author_address=\? AND target_catalog_head_digest=\? AND bucket_id_u64be=\? AND ka_id_u256be>\?\)/,
       );
+      expect(planDetail).not.toMatch(/SCAN|USE TEMP B-TREE/);
     } finally {
       database.close();
     }
