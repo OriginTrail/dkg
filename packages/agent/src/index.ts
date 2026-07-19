@@ -14,6 +14,7 @@ export {
   type WorkspaceEncryptionKeyEntry,
   type KeystoreEntry,
 } from './agent-keystore.js';
+export * from './authenticated-agent-peer-binding-resolver-v1.js';
 export {
   buildAgentProfile,
   canonicalAgentDidSubject,

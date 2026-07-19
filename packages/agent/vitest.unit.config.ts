@@ -93,6 +93,7 @@ export default defineConfig({
       "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
+      "test/authenticated-agent-peer-binding-resolver-v1.test.ts",
       "test/network-identity-proof.test.ts",
       "test/network-admission-probe-retry.test.ts",
       "test/network-admission.test.ts",
