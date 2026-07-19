@@ -1,0 +1,388 @@
+export const WAL_PROTOCOL_V1 = 1n;
+
+export const WAL_V1_DOMAINS = Object.freeze({
+  namespaceId: 'dkg-wal-namespace-v1\0',
+  collectionId: 'dkg-wal-collection-v1\0',
+  walObjectSignature: 'dkg-wal-object-sign-v1\0',
+  walObjectId: 'dkg-wal-object-v1\0',
+  checkpointSignature: 'dkg-wal-checkpoint-sign-v1\0',
+  checkpointId: 'dkg-wal-checkpoint-v1\0',
+  membershipSignature: 'dkg-wal-membership-sign-v1\0',
+  membershipId: 'dkg-wal-membership-v1\0',
+  vectorSignature: 'dkg-wal-vector-sign-v1\0',
+  vectorId: 'dkg-wal-vector-v1\0',
+  cutoverSignature: 'dkg-wal-cutover-sign-v1\0',
+  cutoverId: 'dkg-wal-cutover-v1\0',
+  authoritySignature: 'dkg-wal-authority-sign-v1\0',
+  authorityId: 'dkg-wal-authority-v1\0',
+  receiptSignature: 'dkg-wal-receipt-sign-v1\0',
+  receiptId: 'dkg-wal-receipt-v1\0',
+  bootstrapSignature: 'dkg-wal-bootstrap-sign-v1\0',
+  bootstrapId: 'dkg-wal-bootstrap-v1\0',
+  rollbackRecoverySignature: 'dkg-wal-rollback-recovery-sign-v1\0',
+  rollbackRecoveryId: 'dkg-wal-rollback-recovery-v1\0',
+  logicalKey: 'dkg-rdf-logical-key-v1\0',
+  touchedKey: 'dkg-rdf-touched-key-v1\0',
+  rdfState: 'dkg-rdf-state-v1\0',
+  reducerHeads: 'dkg-rdf-head-set-v1\0',
+  reducerConflict: 'dkg-rdf-conflict-v1\0',
+  payloadAssociatedData: 'dkg-wal-payload-ad-v1\0',
+  moveTierCommitment: 'dkg-wal-move-tier-v1\0',
+  setEmpty: 'dkg-wal-set-empty-v1\0',
+  setLeaf: 'dkg-wal-set-leaf-v1\0',
+  setBranch: 'dkg-wal-set-branch-v1\0',
+  ibltSeed: 'dkg-wal-iblt-seed-v1\0',
+  ibltMap: 'dkg-wal-iblt-map-v1\0',
+  ibltChecksum: 'dkg-wal-iblt-check-v1\0',
+});
+
+export type WalV1DomainName = keyof typeof WAL_V1_DOMAINS;
+
+export const WAL_V1_ENUMS = Object.freeze({
+  tier: Object.freeze({ SWM: 0, VM: 1 }),
+  visibility: Object.freeze({ PUBLIC: 0, PRIVATE: 1 }),
+  publishMode: Object.freeze({ OPEN: 0, CURATED: 1 }),
+  payloadKind: Object.freeze({
+    DKG_MUTATION: 0,
+    RDF_POLICY: 1,
+    SNAPSHOT_MANIFEST: 2,
+    LEGACY_GENESIS: 3,
+    COLLECTION_VECTOR_MANIFEST: 4,
+    CUTOVER_COHORT_MANIFEST: 5,
+    MOVE_TIER_SOURCE: 6,
+    MOVE_TIER_TARGET: 7,
+  }),
+  codec: Object.freeze({ DETERMINISTIC_CBOR: 0, CANONICAL_NQUADS: 1, OPAQUE_BYTES: 2 }),
+  encryptionAlgorithm: Object.freeze({ AES_256_GCM: 0 }),
+  mutationOperation: Object.freeze({
+    PUT: 0,
+    PATCH: 1,
+    DELETE: 2,
+    RESOLVE: 3,
+    SNAPSHOT: 4,
+    MOVE_TIER_SOURCE: 5,
+    MOVE_TIER_TARGET: 6,
+    LEGACY_GENESIS: 7,
+  }),
+  mutationMode: Object.freeze({ REPLACE: 0, PATCH: 1 }),
+  authorityScope: Object.freeze({ CURATOR: 0, NETWORK: 1 }),
+  errorCode: Object.freeze({
+    UNSUPPORTED_VERSION: 0,
+    UNAUTHORIZED: 1,
+    STALE_HEAD: 2,
+    INVALID_RANGE: 3,
+    RESOURCE_LIMIT: 4,
+    CANCELLED: 5,
+    INTERNAL_UNAVAILABLE: 6,
+    NON_CANONICAL: 7,
+    INVALID_PROOF: 8,
+  }),
+});
+
+export type WalV1EnumName = keyof typeof WAL_V1_ENUMS;
+
+export interface ProtocolTupleSchema {
+  readonly fields: readonly string[];
+  readonly fieldTypes: readonly string[];
+  readonly signed?: 'single' | 'threshold';
+  readonly signerField?: number;
+  readonly identityDomain?: WalV1DomainName;
+  readonly signatureDomain?: WalV1DomainName;
+  readonly enumFields?: Readonly<Record<number, WalV1EnumName>>;
+}
+
+function tuple<
+  const Fields extends readonly string[],
+  const FieldTypes extends readonly string[],
+  const Options extends Omit<ProtocolTupleSchema, 'fields' | 'fieldTypes'> = Record<never, never>,
+>(
+  fields: Fields,
+  fieldTypes: FieldTypes,
+  options: Options = {} as Options,
+) {
+  const frozenOptions = 'enumFields' in options && options.enumFields !== undefined
+    ? { ...options, enumFields: Object.freeze({ ...options.enumFields }) }
+    : options;
+  return Object.freeze({
+    fields: Object.freeze([...fields]) as unknown as Fields,
+    fieldTypes: Object.freeze([...fieldTypes]) as unknown as FieldTypes,
+    ...frozenOptions,
+  });
+}
+
+export const PROTOCOL_TUPLES = Object.freeze({
+  ReplicationCollectionKeyV1: tuple(
+    ['networkId', 'contextGraphId', 'subGraphNameOrNull', 'visibility'],
+    ['nfc-tstr', 'nfc-tstr', 'nfc-tstr|null', 'u8-enum'],
+    { enumFields: { 3: 'visibility' } },
+  ),
+  ReplicationViewKeyV1: tuple(
+    ['networkId', 'contextGraphId', 'subGraphNameOrNull', 'tier', 'visibility', 'policyEpoch', 'keyEpochOrNull'],
+    ['nfc-tstr', 'nfc-tstr', 'nfc-tstr|null', 'u8-enum', 'u8-enum', 'u64', 'u64|null'],
+    { enumFields: { 3: 'tier', 4: 'visibility' } },
+  ),
+  WalObjectV1: tuple(
+    ['version', 'namespaceId', 'writerId', 'writerEpoch', 'sequence', 'previousObjectIdOrNull', 'payloadBytes', 'signature'],
+    ['literal-1', 'bytes32', 'address20', 'u64', 'u64', 'bytes32|null', 'bstr', 'signature65'],
+    { signed: 'single', signerField: 2, identityDomain: 'walObjectId', signatureDomain: 'walObjectSignature' },
+  ),
+  DkgPayloadEnvelopeV1: tuple(
+    ['version', 'payloadKind', 'codec', 'mediaType', 'encryptionOrNull', 'contentBytes'],
+    ['literal-1', 'u16-enum', 'u16-enum', 'nfc-tstr', 'EncryptionDescriptorV1|null', 'bstr'],
+    { enumFields: { 1: 'payloadKind', 2: 'codec' } },
+  ),
+  EncryptionDescriptorV1: tuple(
+    ['algorithm', 'keyEpoch', 'nonce', 'associatedDataDigest'],
+    ['u16-enum', 'u64', 'bytes12', 'bytes32'],
+    { enumFields: { 0: 'encryptionAlgorithm' } },
+  ),
+  DkgMutationV1: tuple(
+    ['version', 'operation', 'logicalKey', 'parents', 'baseHeads', 'policyObjectId', 'rdfMutationOrNull', 'chainBindingOrNull', 'nonConsensusTimestampMsOrNull'],
+    ['literal-1', 'u16-enum', 'bytes32', 'sorted-unique<bytes32>', 'sorted-unique<bytes32>', 'bytes32', 'RdfMutationV1|null', 'ChainBindingV1|null', 'u64|null'],
+    { enumFields: { 1: 'mutationOperation' } },
+  ),
+  RdfMutationV1: tuple(
+    ['version', 'mode', 'baseStateDigest', 'resultStateDigest', 'replaceGraphs', 'replaceSubjects', 'deleteNQuadsBytes', 'insertNQuadsBytes', 'touchedKeys', 'sourceSparqlAuditBytesOrNull'],
+    ['literal-1', 'u8-enum', 'bytes32', 'bytes32', 'sorted-unique<GraphReplacementV1>', 'sorted-unique<SubjectReplacementV1>', 'bstr', 'bstr', 'sorted-unique<bytes32>', 'bstr|null'],
+    { enumFields: { 1: 'mutationMode' } },
+  ),
+  GraphReplacementV1: tuple(
+    ['graphIri', 'canonicalNQuadsBytes', 'quadCount'],
+    ['nfc-tstr', 'bstr', 'u64'],
+  ),
+  SubjectReplacementV1: tuple(
+    ['graphIri', 'subjectIri', 'canonicalNQuadsBytes', 'quadCount'],
+    ['nfc-tstr', 'nfc-tstr', 'bstr', 'u64'],
+  ),
+  ChainBindingV1: tuple(
+    ['chainId', 'contextGraphOnChainId', 'kaId', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
+    ['u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16', 'u32'],
+  ),
+  AuthorCheckpointV1: tuple(
+    ['version', 'namespaceId', 'writerId', 'writerEpoch', 'checkpointNumber', 'setCommitmentVersion', 'objectSetRoot', 'objectCount', 'maxSequence', 'previousCheckpointIdOrNull', 'baselineSnapshotObjectIdOrNull', 'compactionFloor', 'signature'],
+    ['literal-1', 'bytes32', 'address20', 'u64', 'u64', 'literal-1', 'bytes32', 'u64', 'u64', 'bytes32|null', 'bytes32|null', 'u64', 'signature65'],
+    { signed: 'single', signerField: 2, identityDomain: 'checkpointId', signatureDomain: 'checkpointSignature' },
+  ),
+  SignatureEntryV1: tuple(['signerAddress', 'signature'], ['address20', 'signature65']),
+  AuthoritySetV1: tuple(
+    ['version', 'scope', 'networkId', 'authorityEpoch', 'threshold', 'signerAddresses', 'notBeforeMs', 'expiresAtMs', 'previousAuthoritySetIdOrNull', 'emergencyRevocationIds', 'signatures'],
+    ['literal-1', 'u8-enum', 'nfc-tstr', 'u64', 'u16', 'sorted-unique<address20>', 'u64', 'u64', 'bytes32|null', 'sorted-unique<bytes32>', 'sorted-unique<SignatureEntryV1>'],
+    {
+      signed: 'threshold',
+      identityDomain: 'authorityId',
+      signatureDomain: 'authoritySignature',
+      enumFields: { 1: 'authorityScope' },
+    },
+  ),
+  MembershipCheckpointV1: tuple(
+    ['version', 'collectionId', 'checkpointNumber', 'policyEpoch', 'publishMode', 'writerIds', 'memberAgentAddresses', 'allowedPeerIds', 'activeNamespaceIds', 'rdfPolicyObjectId', 'previousMembershipCheckpointIdOrNull', 'issuedAtMs', 'authoritySetId', 'signatures'],
+    ['literal-1', 'bytes32', 'u64', 'u64', 'u8-enum', 'sorted-unique<address20>', 'sorted-unique<address20>', 'sorted-unique<bstr>', 'sorted-unique<bytes32>', 'bytes32', 'bytes32|null', 'u64', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    {
+      signed: 'threshold',
+      identityDomain: 'membershipId',
+      signatureDomain: 'membershipSignature',
+      enumFields: { 4: 'publishMode' },
+    },
+  ),
+  ExpectedNamespaceV1: tuple(
+    ['namespaceId', 'writerCheckpoints'],
+    ['bytes32', 'sorted-unique<WriterCheckpointV1>'],
+  ),
+  WriterCheckpointV1: tuple(['writerId', 'checkpointId'], ['address20', 'bytes32']),
+  CollectionHeadVectorV1: tuple(
+    ['version', 'collectionId', 'membershipCheckpointId', 'expectedNamespaces', 'vectorEpoch', 'vectorNumber', 'previousVectorIdOrNull', 'issuedAtMs', 'expiresAtMs', 'finalizedChainFrontierOrNull', 'authoritySetId', 'signatures'],
+    ['literal-1', 'bytes32', 'bytes32', 'sorted-unique<ExpectedNamespaceV1>', 'u64', 'u64', 'bytes32|null', 'u64', 'u64', 'ChainFrontierV1|null', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    { signed: 'threshold', identityDomain: 'vectorId', signatureDomain: 'vectorSignature' },
+  ),
+  ChainFrontierV1: tuple(['chainId', 'blockNumber', 'blockHash'], ['u64', 'u64', 'bytes32']),
+  NetworkWalCutoverV1: tuple(
+    ['version', 'networkId', 'walProtocolVersion', 'rdfAdapterVersion', 'requiredNodeVersion', 'collectionVectorManifestObjectId', 'cohortManifestObjectId', 'cutoverEpoch', 'activation', 'legacySyncDisabled', 'authoritySetId', 'signatures'],
+    ['literal-1', 'nfc-tstr', 'u16', 'u16', 'nfc-tstr', 'bytes32', 'bytes32', 'u64', 'ActivationFrontierV1', 'true', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    { signed: 'threshold', identityDomain: 'cutoverId', signatureDomain: 'cutoverSignature' },
+  ),
+  ActivationFrontierV1: tuple(
+    ['minimumBlockByChain', 'notBeforeMs'],
+    ['sorted-unique<ChainFrontierV1>', 'u64'],
+  ),
+  RequestContextV1: tuple(
+    ['issuedAtMs', 'requesterPeerId', 'targetPeerId', 'namespaceId', 'requesterAgentAddressOrNull', 'identityProofOrNull', 'privateViewProofOrNull'],
+    ['u64', 'bstr', 'bstr', 'bytes32', 'address20|null', 'IdentityProofV1|null', 'PrivateViewProofV1|null'],
+  ),
+  IdentityProofV1: tuple(
+    ['agentAddress', 'peerId', 'notBeforeMs', 'expiresAtMs', 'nonce', 'signature'],
+    ['address20', 'bstr', 'u64', 'u64', 'bytes16', 'signature65'],
+  ),
+  PrivateViewProofV1: tuple(
+    ['membershipCheckpointId', 'memberAgentAddress', 'transportPeerId', 'delegationOrNull'],
+    ['bytes32', 'address20', 'bstr', 'PeerDelegationV1|null'],
+  ),
+  PeerDelegationV1: tuple(
+    ['collectionId', 'memberAgentAddress', 'delegatePeerId', 'notBeforeMs', 'expiresAtMs', 'nonce', 'signature'],
+    ['bytes32', 'address20', 'bstr', 'u64', 'u64', 'bytes16', 'signature65'],
+  ),
+  FrameV1: tuple(
+    ['protocolVersion', 'messageType', 'requestId', 'body'],
+    ['literal-1', 'u16', 'bytes16', 'tuple'],
+  ),
+  AuthenticatedRequestV1: tuple(['context', 'request'], ['RequestContextV1', 'tuple']),
+  CapabilitiesV1: tuple(
+    ['protocolVersions', 'adapterVersions', 'maximumControlFrameBytes', 'maximumSymbolsPerResponse', 'maximumFallbackIdsPerPage', 'maximumObjectRangeBytes', 'maximumWalObjectBytes', 'maximumConcurrentRanges'],
+    ['sorted-unique<u16>', 'sorted-unique<u16>', 'u64', 'u64', 'u64', 'u64', 'u64', 'u64'],
+  ),
+  GetHeadV1: tuple(['writerId', 'writerEpochOrNull'], ['address20', 'u64|null']),
+  GetVectorV1: tuple(['collectionId'], ['bytes32']),
+  GetCheckpointV1: tuple(['checkpointId'], ['bytes32']),
+  AnnounceHeadV1: tuple(['checkpointId'], ['bytes32']),
+  CancelV1: tuple(['cancelledRequestId'], ['bytes16']),
+  GetReconciliationSymbolsV1: tuple(
+    ['headId', 'reconciliationSeed', 'firstSymbolIndex', 'symbolCount'],
+    ['bytes32', 'bytes32', 'u64', 'u32'],
+  ),
+  ReconciliationSymbolsV1: tuple(
+    ['headId', 'reconciliationSeed', 'firstSymbolIndex', 'symbols'],
+    ['bytes32', 'bytes32', 'u64', 'array<ReconciliationSymbolV1>'],
+  ),
+  ReconciliationSymbolV1: tuple(
+    ['symbolIndex', 'count', 'idXor', 'checksumXor'],
+    ['u64', 'i64', 'bytes32', 'bytes32'],
+  ),
+  GetObjectIdsV1: tuple(
+    ['headId', 'startAfterOrNull', 'limit'],
+    ['bytes32', 'bytes32|null', 'u32'],
+  ),
+  ObjectIdsPageV1: tuple(
+    ['headId', 'startAfterOrNull', 'ids', 'nextStartAfterOrNull', 'done'],
+    ['bytes32', 'bytes32|null', 'strictly-sorted-unique<bytes32>', 'bytes32|null', 'bool'],
+  ),
+  GetWalObjectRangeV1: tuple(
+    ['walObjectId', 'offset', 'maximumLength'],
+    ['bytes32', 'u64', 'u32'],
+  ),
+  WalObjectRangeV1: tuple(
+    ['walObjectId', 'totalObjectLength', 'offset', 'bytes'],
+    ['bytes32', 'u64', 'u64', 'bstr'],
+  ),
+  ErrorV1: tuple(
+    ['code', 'retryAfterMsOrNull', 'detailCodeOrNull'],
+    ['u16-enum', 'u64|null', 'u16|null'],
+    { enumFields: { 0: 'errorCode' } },
+  ),
+  SnapshotManifestV1: tuple(
+    ['version', 'namespaceId', 'writerId', 'newWriterEpoch', 'coveredWriterEpoch', 'coveredCheckpointId', 'coveredObjectSetRoot', 'coveredObjectCount', 'compactionFloor', 'entries', 'conflicts', 'policyObjectId', 'adapterVersion', 'chainFrontierOrNull'],
+    ['literal-1', 'bytes32', 'address20', 'u64', 'u64', 'bytes32', 'bytes32', 'u64', 'u64', 'sorted-unique<SnapshotEntryV1>', 'sorted-unique<SnapshotConflictV1>', 'bytes32', 'u16', 'ChainFrontierV1|null'],
+  ),
+  SnapshotEntryV1: tuple(
+    ['logicalKey', 'activeHeadIds', 'stateDigest', 'canonicalGraphBytes'],
+    ['bytes32', 'sorted-unique<bytes32>', 'bytes32', 'bstr'],
+  ),
+  SnapshotConflictV1: tuple(
+    ['logicalKey', 'externalHeadIds', 'commonBaseHeadIds', 'conflictDigest'],
+    ['bytes32', 'sorted-unique<bytes32>', 'sorted-unique<bytes32>', 'bytes32'],
+  ),
+  SnapshotCustodyReceiptV1: tuple(
+    ['version', 'snapshotObjectId', 'custodianAgentAddress', 'custodianPeerId', 'membershipCheckpointId', 'notBeforeMs', 'expiresAtMs', 'nonce', 'signature'],
+    ['literal-1', 'bytes32', 'address20', 'bstr', 'bytes32', 'u64', 'u64', 'bytes16', 'signature65'],
+    { signed: 'single', signerField: 2, identityDomain: 'receiptId', signatureDomain: 'receiptSignature' },
+  ),
+  LegacyGenesisV1: tuple(
+    ['version', 'collectionId', 'namespaceId', 'sourceStateDigest', 'canonicalGraphBytes', 'provenanceStatus', 'migrationPolicyObjectId', 'barrierVectorId', 'createdAtMs'],
+    ['literal-1', 'bytes32', 'bytes32', 'bytes32', 'bstr', 'literal-0', 'bytes32', 'bytes32', 'u64'],
+  ),
+  SetMembershipProofV1: tuple(
+    ['version', 'walObjectId', 'leafPrefixNibbleLength', 'leafIds', 'path'],
+    ['literal-1', 'bytes32', 'u8', 'strictly-sorted-unique<bytes32>', 'array<SetProofLevelV1>'],
+  ),
+  SetProofLevelV1: tuple(
+    ['parentPrefixNibbleLength', 'childBitmap', 'childNibble', 'siblings'],
+    ['u8', 'u16', 'u8', 'strictly-sorted-unique<SetProofSiblingV1>'],
+  ),
+  SetProofSiblingV1: tuple(
+    ['nibble', 'childCount', 'childHash'],
+    ['u8', 'u64', 'bytes32'],
+  ),
+  MoveTierSourceV1: tuple(
+    ['version', 'transitionNonce', 'transitionCommitment', 'targetNamespaceId', 'targetWalObjectId', 'sourceHeads', 'sourceStateDigest', 'sourceResultDigest'],
+    ['literal-1', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'sorted-unique<bytes32>', 'bytes32', 'bytes32'],
+  ),
+  MoveTierTargetV1: tuple(
+    ['version', 'transitionCommitment', 'targetMutation'],
+    ['literal-1', 'bytes32', 'RdfMutationV1'],
+  ),
+  TierTransitionReceiptV1: tuple(
+    ['version', 'transitionCommitment', 'targetNamespaceId', 'targetWalObjectId', 'policyObjectId', 'curatorVectorId', 'expiresAtMs', 'authoritySetId', 'signatures'],
+    ['literal-1', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'u64', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    { signed: 'threshold', identityDomain: 'receiptId', signatureDomain: 'receiptSignature' },
+  ),
+  ProviderEntryV1: tuple(
+    ['peerId', 'agentAddress', 'endpoints', 'namespaceIds'],
+    ['bstr', 'address20', 'sorted-unique<nfc-tstr>', 'sorted-unique<bytes32>'],
+  ),
+  ProviderBootstrapManifestV1: tuple(
+    ['version', 'networkId', 'collectionId', 'authorityEpoch', 'providers', 'notBeforeMs', 'expiresAtMs', 'previousManifestIdOrNull', 'authoritySetId', 'signatures'],
+    ['literal-1', 'nfc-tstr', 'bytes32', 'u64', 'sorted-unique<ProviderEntryV1>', 'u64', 'u64', 'bytes32|null', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    { signed: 'threshold', identityDomain: 'bootstrapId', signatureDomain: 'bootstrapSignature' },
+  ),
+  PrivateBootstrapTicketV1: tuple(
+    ['version', 'collectionId', 'memberAgentAddress', 'membershipCheckpointId', 'providerManifestId', 'notBeforeMs', 'expiresAtMs', 'nonce', 'ciphertext'],
+    ['literal-1', 'bytes32', 'address20', 'bytes32', 'bytes32', 'u64', 'u64', 'bytes12', 'bstr'],
+  ),
+  RollbackRecoveryV1: tuple(
+    ['version', 'networkId', 'collectionId', 'minimumVectorEpoch', 'minimumVectorNumber', 'minimumVectorId', 'recoveryNonce', 'issuedAtMs', 'authoritySetId', 'signatures'],
+    ['literal-1', 'nfc-tstr', 'bytes32', 'u64', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'sorted-unique<SignatureEntryV1>'],
+    { signed: 'threshold', identityDomain: 'rollbackRecoveryId', signatureDomain: 'rollbackRecoverySignature' },
+  ),
+  CutoverCohortManifestV1: tuple(
+    ['version', 'networkId', 'cutoverEpoch', 'requiredNodes', 'activeAuthors', 'decommissionedPeerIds', 'minimumBootstrapVectorIds', 'createdAtMs'],
+    ['literal-1', 'nfc-tstr', 'u64', 'sorted-unique<RequiredNodeV1>', 'sorted-unique<ActiveAuthorV1>', 'sorted-unique<bstr>', 'sorted-unique<bytes32>', 'u64'],
+  ),
+  RequiredNodeV1: tuple(['peerId', 'agentAddress'], ['bstr', 'address20']),
+  ActiveAuthorV1: tuple(
+    ['namespaceId', 'writerId', 'writerEpoch', 'checkpointId'],
+    ['bytes32', 'address20', 'u64', 'bytes32'],
+  ),
+});
+
+export type ProtocolTupleName = keyof typeof PROTOCOL_TUPLES;
+
+type ProtocolField<Type extends string> =
+  Type extends `${infer Inner}|null` ? ProtocolField<Inner> | null
+    : Type extends `sorted-unique<${infer Inner}>` | `strictly-sorted-unique<${infer Inner}>` | `array<${infer Inner}>`
+      ? readonly ProtocolField<Inner>[]
+      : Type extends 'literal-1' ? 1n
+        : Type extends 'literal-0' ? 0n
+          : Type extends 'true' ? true
+            : Type extends 'u8' | 'u16' | 'u32' | 'u64' | 'i64' | 'u8-enum' | 'u16-enum' ? bigint
+              : Type extends `bytes${number}` | 'address20' | 'signature65' | 'bstr' ? Uint8Array
+                : Type extends 'nfc-tstr' ? string
+                  : Type extends 'bool' ? boolean
+                    : Type extends 'tuple' ? readonly CborProtocolValue[]
+                      : Type extends ProtocolTupleName ? ProtocolTuple<Type>
+                        : never;
+
+type ProtocolFields<FieldTypes extends readonly string[]> =
+  FieldTypes extends readonly [infer Head extends string, ...infer Tail extends readonly string[]]
+    ? readonly [ProtocolField<Head>, ...ProtocolFields<Tail>]
+    : readonly [];
+
+export type ProtocolTuple<Name extends ProtocolTupleName> =
+  ProtocolFields<(typeof PROTOCOL_TUPLES)[Name]['fieldTypes']>;
+
+export type CborProtocolValue =
+  | null
+  | boolean
+  | bigint
+  | string
+  | Uint8Array
+  | readonly CborProtocolValue[];
+
+export type SignedProtocolTupleName = {
+  [Name in ProtocolTupleName]: (typeof PROTOCOL_TUPLES)[Name] extends { signed: string } ? Name : never;
+}[ProtocolTupleName];
+
+export type SingleSignedProtocolTupleName = {
+  [Name in ProtocolTupleName]: (typeof PROTOCOL_TUPLES)[Name] extends { signed: 'single' } ? Name : never;
+}[ProtocolTupleName];
+
+export type ThresholdSignedProtocolTupleName = {
+  [Name in ProtocolTupleName]: (typeof PROTOCOL_TUPLES)[Name] extends { signed: 'threshold' } ? Name : never;
+}[ProtocolTupleName];

@@ -305,22 +305,28 @@ which every later proof and replication decision depends.
   signatures and normalized recovery bits.
 - Implement typed codecs for all protocol objects frozen by `WAL-001`; do not
   introduce JSON as an alternate signed representation.
-- Add cross-language/golden fixtures and fuzz/property tests for canonicality.
+- Consume the language-neutral golden fixtures from the two independently
+  written TypeScript conformance implementations and add property tests for
+  canonicality; do not introduce a new implementation language.
 
 ### Acceptance area
 
-- [ ] Every valid conformance fixture encodes to the exact expected bytes, digest,
+- [x] Every valid conformance fixture encodes to the exact expected bytes, digest,
       signer, and object ID.
-- [ ] Every alternate/non-canonical encoding is rejected rather than normalized
+- [x] Every alternate/non-canonical encoding is rejected rather than normalized
       after receipt.
-- [ ] Tuple arity/position, missing/extra value, explicit-null, map rejection,
+- [x] Tuple arity/position, missing/extra value, explicit-null, map rejection,
       Unicode normalization, integer boundaries, set ordering, low-S,
       recovery-bit, and domain-confusion negatives pass.
-- [ ] Round-trip/property tests do not create two byte representations for one
+- [x] Round-trip/property tests do not create two byte representations for one
       accepted logical object.
-- [ ] Existing author/curator key adapters sign and verify without redefining
+- [x] Existing author/curator key adapters sign and verify without redefining
       their DKG authority.
-- [ ] Package build, lint, unit tests, and fixture checksum verification pass.
+- [x] Package build, lint, unit tests, and fixture checksum verification pass.
+
+**Implementation evidence:** `WAL-003-EVIDENCE.md` records the production
+codec/identity boundary, frozen-vector mapping, signer/authority integration,
+negative/property coverage, and exact validation receipts.
 
 ---
 

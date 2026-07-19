@@ -68,6 +68,61 @@ or transfer worker and registers no network protocol; those are subsequent
 tasks. The scaffold only makes lifecycle, isolation, authority, and operator
 visibility enforceable before that work begins.
 
+## Canonical protocol identities
+
+WAL-003 implements the production byte and identity layer exported as
+`@origintrail-official/dkg-wal/protocol`. Every frozen protocol object is an
+exact-arity RFC 8949 deterministic-CBOR tuple. Decoding rejects non-shortest
+integers, indefinite forms, maps, tags, floats, invalid or non-NFC UTF-8,
+missing/extra positions, invalid fixed widths, and unsorted or duplicate
+set-like arrays. JSON is not a signed, hashed, or wire representation.
+
+The durable synchronization atom has exactly one version-1 shape:
+
+```text
+WalObjectV1 = [
+  version,
+  namespaceId,
+  writerId,
+  writerEpoch,
+  sequence,
+  previousObjectIdOrNull,
+  payloadBytes,
+  signature
+]
+```
+
+`payloadBytes` is opaque and inline. It has no payload/blob/chunk identity and
+is never decoded by the generic WAL layer. Changing one payload byte changes
+the signature input and therefore the complete signed `WalObjectId`.
+
+```mermaid
+sequenceDiagram
+    participant A as DKG adapter
+    participant C as Canonical WAL codec
+    participant S as Existing signer
+    participant V as Receiving verifier
+    A->>C: Seven-position unsigned tuple + opaque payloadBytes
+    C->>C: Validate exact schema and encode canonical CBOR
+    C->>C: BLAKE3(signature domain || unsigned bytes)
+    C->>S: signMessage(32-byte digest)
+    S-->>C: Recoverable EIP-191 secp256k1 signature
+    C->>C: Verify low-S, recovery bit, and writer address
+    C->>C: Encode complete eight-position tuple
+    C->>C: BLAKE3(object-ID domain || complete signed bytes)
+    C-->>A: Complete bytes + WalObjectId
+    A->>V: Complete bytes
+    V->>V: Decode canonically, recover signer, recompute whole-object ID
+    V-->>A: Verified atom or stable WAL error
+```
+
+The signer boundary accepts Ethers-style `getAddress()` signers, the repository
+publisher shape with an `address` property, and the EVM adapter's
+`getSignerAddress()` plus compact `{r, vs}` result. Threshold verification
+receives the current authorized signer set and threshold from its caller. This
+module recovers and checks signatures; it does not select, rotate, weaken, or
+redefine DKG authority.
+
 ## IBLT sequence
 
 ```mermaid
@@ -159,6 +214,8 @@ pnpm --filter @origintrail-official/dkg-wal test:types
 pnpm --filter @origintrail-official/dkg-wal test:coverage
 pnpm --filter @origintrail-official/dkg-wal test:e2e
 pnpm --filter @origintrail-official/dkg-wal test:stress
+pnpm --filter @origintrail-official/dkg-wal test:fixtures
+pnpm --filter @origintrail-official/dkg-wal test:conformance
 pnpm --filter @origintrail-official/dkg-wal-v1-conformance verify
 pnpm --filter @origintrail-official/dkg-wal benchmark:reconciliation:matrix
 ```
