@@ -618,6 +618,29 @@ describe('resumable whole-object ranges', () => {
     expect(await receiver.accept({ walObjectId: first.id, totalObjectLength: total, offset: total, bytes: new Uint8Array() })).toBe('duplicate');
     await receiver.accept({ walObjectId: first.id, totalObjectLength: total, offset: 0n, bytes: first.bytes });
     await expect(receiver.finalize(first.id, total)).resolves.toBeUndefined();
+
+    const base = await temporaryRoot('eof-restart-finalize');
+    const store = new FileWalObjectStore({ root: join(base, 'objects') });
+    const controller = new AbortController();
+    const interrupted = new FileWalObjectRangeReceiver({
+      stagingRoot: join(base, 'ranges'),
+      store,
+      durabilityHook: point => { if (point === 'progress-metadata-committed') controller.abort(); },
+    });
+    await expectCode(interrupted.accept({
+      walObjectId: first.id,
+      totalObjectLength: total,
+      offset: 0n,
+      bytes: first.bytes,
+    }, controller.signal), 'WAL_STAGE_CANCELLED');
+    const restarted = new FileWalObjectRangeReceiver({ stagingRoot: join(base, 'ranges'), store });
+    expect(await restarted.accept({
+      walObjectId: first.id,
+      totalObjectLength: total,
+      offset: total,
+      bytes: new Uint8Array(),
+    })).toBe('complete');
+    expect(await collect(store.read(first.id))).toEqual(first.bytes);
   });
 
   it('cancels, cleans stale staging, rejects malformed metadata, and removes poisoned complete objects', async () => {
