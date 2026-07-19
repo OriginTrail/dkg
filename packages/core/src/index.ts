@@ -13,7 +13,6 @@ export * from './sparql-operation.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
-export * from './canonical-json.js';
 export * from './event-bus.js';
 export {
   Logger,
