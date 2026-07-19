@@ -224,20 +224,24 @@ function canonicalUal(rawUal: string): string {
 }
 
 function nquadsInputText(input: string | readonly string[]): string {
-  if (typeof input === 'string') return input;
-  if (!Array.isArray(input)) {
+  const captured = stableJsonValue(input, 'semanticNQuads', new Set());
+  if (typeof captured === 'string') return captured;
+  if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(
       'semanticNQuads must be a string or an array of strings',
     );
   }
-  for (const [index, fragment] of input.entries()) {
+  const fragments = new Array<string>(captured.length);
+  for (let index = 0; index < captured.length; index += 1) {
+    const fragment = captured[index];
     if (typeof fragment !== 'string') {
       throw new Rfc64EvidenceValidationError(
         `semanticNQuads[${index}] must be a string`,
       );
     }
+    fragments[index] = fragment;
   }
-  return input.join('\n');
+  return fragments.join('\n');
 }
 
 const DEFAULT_GRAPH_TERM = Object.freeze({
@@ -382,24 +386,41 @@ function closeComparison(
 export async function createRfc64SemanticSnapshot(
   observations: readonly Rfc64KnowledgeAssetObservation[],
 ): Promise<Rfc64SemanticSnapshotV1> {
-  if (!Array.isArray(observations)) {
+  // Capture the complete caller-owned tree before doing any asynchronous work.
+  // The capture reads data descriptors once, rejects proxies/accessors and
+  // exotic containers, and gives the rest of this function ordinary arrays it
+  // owns. In particular, never dispatch through a caller-provided `map` method.
+  const captured = stableJsonValue(
+    observations,
+    'observations',
+    new Set(),
+  );
+  if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError('observations must be an array');
   }
 
-  const assets = await Promise.all(observations.map(async (observation, index) => {
+  const pendingAssets: Promise<Rfc64KnowledgeAssetEvidenceV1>[] = [];
+  for (let index = 0; index < captured.length; index += 1) {
+    const observation = captured[index];
     if (!observation || typeof observation !== 'object') {
       throw new Rfc64EvidenceValidationError(
         `observations[${index}] must be an object`,
       );
     }
-    const ual = canonicalUal(observation.ual);
-    const nquads = await canonicalizeSemanticNQuads(observation.semanticNQuads);
-    return {
-      ual,
-      quadCount: nquads.quadCount,
-      semanticNQuadsSha256: nquads.sha256,
-    } satisfies Rfc64KnowledgeAssetEvidenceV1;
-  }));
+    const record = observation as Record<string, unknown>;
+    pendingAssets[index] = (async () => {
+      const ual = canonicalUal(record.ual as string);
+      const nquads = await canonicalizeSemanticNQuads(
+        record.semanticNQuads as string | readonly string[],
+      );
+      return {
+        ual,
+        quadCount: nquads.quadCount,
+        semanticNQuadsSha256: nquads.sha256,
+      } satisfies Rfc64KnowledgeAssetEvidenceV1;
+    })();
+  }
+  const assets = await Promise.all(pendingAssets);
 
   assets.sort((left, right) => compareText(left.ual, right.ual));
   for (let index = 1; index < assets.length; index += 1) {
@@ -604,6 +625,58 @@ function requiredLabel(value: unknown, label: string): string {
   return value.trim();
 }
 
+/**
+ * Capture an API input record without recursively interpreting its values.
+ * Dates need specialized handling, while snapshots and failure records are
+ * captured by their own validators. Every own field is nevertheless resolved
+ * from one data descriptor before any field-level validation starts.
+ */
+function capturePlainDataRecord(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (
+    value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && utilTypes.isProxy(value)
+  ) {
+    throw new Rfc64EvidenceValidationError(`${label} must not be a proxy`);
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Rfc64EvidenceValidationError(`${label} must be an object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Rfc64EvidenceValidationError(
+      `${label} must be a plain data object`,
+    );
+  }
+  const source = value as Record<string, unknown>;
+  const ownKeys = Reflect.ownKeys(source);
+  if (ownKeys.some((key) => typeof key === 'symbol')) {
+    throw new Rfc64EvidenceValidationError(`${label} must not contain symbol keys`);
+  }
+  const captured: Record<string, unknown> = Object.create(null) as Record<
+    string,
+    unknown
+  >;
+  for (const key of (ownKeys as string[]).sort(compareText)) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key)!;
+    if (!('value' in descriptor)) {
+      throw new Rfc64EvidenceValidationError(
+        `${label}.${key} must not be an accessor property`,
+      );
+    }
+    if (!descriptor.enumerable) {
+      throw new Rfc64EvidenceValidationError(
+        `${label}.${key} must not be a hidden non-enumerable property`,
+      );
+    }
+    captured[key] = descriptor.value;
+  }
+  return captured;
+}
+
 function captureFailureRecord(
   value: Rfc64FailureV1,
   label: string,
@@ -643,10 +716,11 @@ function gregorianMonthLength(year: number, month: number): number {
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
-function canonicalInstant(value: Date | string, label: string): {
+function canonicalInstant(value: unknown, label: string): {
   readonly epochMs: number;
   readonly iso: string;
 } {
+  let epochMs: number;
   if (typeof value === 'string') {
     const match = RFC3339_INSTANT_RE.exec(value);
     if (match === null) {
@@ -681,13 +755,25 @@ function canonicalInstant(value: Date | string, label: string): {
         `${label} must be a valid, representable RFC 3339 timestamp`,
       );
     }
+    epochMs = Date.prototype.getTime.call(new Date(value));
+  } else {
+    if (
+      value === null
+      || typeof value !== 'object'
+      || utilTypes.isProxy(value)
+      || !utilTypes.isDate(value)
+    ) {
+      throw new Rfc64EvidenceValidationError(
+        `${label} must be a primitive timestamp string or a non-proxy Date`,
+      );
+    }
+    // Ignore subclass overrides and read only the genuine Date internal slot.
+    epochMs = Date.prototype.getTime.call(value);
   }
-  const date = value instanceof Date ? value : new Date(value);
-  const epochMs = date.getTime();
-  if (!Number.isFinite(epochMs)) {
+  if (!Number.isFinite(epochMs) || !Number.isInteger(epochMs)) {
     throw new Rfc64EvidenceValidationError(`${label} must be a valid timestamp`);
   }
-  return { epochMs, iso: date.toISOString() };
+  return { epochMs, iso: new Date(epochMs).toISOString() };
 }
 
 /**
@@ -697,43 +783,67 @@ function canonicalInstant(value: Date | string, label: string): {
 export function createRfc64DevnetEvidence(
   input: Rfc64DevnetEvidenceInput,
 ): Rfc64DevnetEvidenceV1 {
-  const gate = requiredLabel(input.gate, 'gate');
-  const observer = requiredLabel(input.observer, 'observer');
-  const sourcePeerId = input.sourcePeerId === null
+  const capturedInput = capturePlainDataRecord(input, 'input');
+  const gate = requiredLabel(capturedInput.gate, 'gate');
+  const observer = requiredLabel(capturedInput.observer, 'observer');
+  const sourcePeerIdInput = capturedInput.sourcePeerId;
+  const sourcePeerId = sourcePeerIdInput === null
     ? null
-    : requiredLabel(input.sourcePeerId, 'sourcePeerId');
-  const startedAt = canonicalInstant(input.startedAt, 'startedAt');
-  const completedAt = canonicalInstant(input.completedAt, 'completedAt');
+    : requiredLabel(sourcePeerIdInput, 'sourcePeerId');
+  const startedAt = canonicalInstant(capturedInput.startedAt, 'startedAt');
+  const completedAt = canonicalInstant(capturedInput.completedAt, 'completedAt');
   if (completedAt.epochMs < startedAt.epochMs) {
     throw new Rfc64EvidenceValidationError(
       'completedAt must not be before startedAt',
     );
   }
+  const durationMs = completedAt.epochMs - startedAt.epochMs;
+  if (!Number.isSafeInteger(durationMs)) {
+    throw new Rfc64EvidenceValidationError(
+      'timing.durationMs must be a non-negative safe integer',
+    );
+  }
   const attemptCount = assertNonNegativeSafeInteger(
-    input.attemptCount,
+    capturedInput.attemptCount,
     'attemptCount',
   );
   if (attemptCount < 1) {
     throw new Rfc64EvidenceValidationError('attemptCount must be at least 1');
   }
 
-  const expected = validateRfc64SemanticSnapshot(input.expected);
-  const observed = input.observed === null
+  const expected = validateRfc64SemanticSnapshot(
+    capturedInput.expected as Rfc64SemanticSnapshotV1,
+  );
+  const observedInput = capturedInput.observed;
+  const observed = observedInput === null
     ? null
-    : validateRfc64SemanticSnapshot(input.observed);
-  const terminalFailureInput = input.terminalFailure;
+    : validateRfc64SemanticSnapshot(observedInput as Rfc64SemanticSnapshotV1);
+  const terminalFailureInput = capturedInput.terminalFailure;
   const terminalFailure = terminalFailureInput == null
     ? null
-    : canonicalFailure(terminalFailureInput, 'terminalFailure');
-  if (input.observed === null && terminalFailure === null) {
+    : canonicalFailure(terminalFailureInput as Rfc64FailureV1, 'terminalFailure');
+  if (observedInput === null && terminalFailure === null) {
     throw new Rfc64EvidenceValidationError(
       'a missing observed snapshot requires terminalFailure evidence',
     );
   }
 
-  const failures = (input.retryFailures ?? []).map((failure, index) => {
+  const capturedRetryFailures = stableJsonValue(
+    capturedInput.retryFailures ?? [],
+    'retryFailures',
+    new Set(),
+  );
+  if (!Array.isArray(capturedRetryFailures)) {
+    throw new Rfc64EvidenceValidationError('retryFailures must be an array');
+  }
+  const failures: Rfc64RetryFailureV1[] = [];
+  for (let index = 0; index < capturedRetryFailures.length; index += 1) {
     const label = `retryFailures[${index}]`;
-    const captured = captureFailureRecord(failure, label);
+    const failure = capturedRetryFailures[index];
+    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) {
+      throw new Rfc64EvidenceValidationError(`${label} must be an object`);
+    }
+    const captured = failure as Record<string, unknown>;
     const canonical = canonicalFailureFromCaptured(captured, label);
     const attempt = assertNonNegativeSafeInteger(
       captured.attempt,
@@ -744,8 +854,12 @@ export function createRfc64DevnetEvidence(
         `retryFailures[${index}].attempt must be between 1 and attemptCount - 1`,
       );
     }
-    return Object.freeze({ attempt, ...canonical }) satisfies Rfc64RetryFailureV1;
-  }).sort((left, right) => left.attempt - right.attempt);
+    failures[index] = Object.freeze({
+      attempt,
+      ...canonical,
+    }) satisfies Rfc64RetryFailureV1;
+  }
+  failures.sort((left, right) => left.attempt - right.attempt);
   for (let index = 1; index < failures.length; index += 1) {
     if (failures[index - 1]!.attempt === failures[index]!.attempt) {
       throw new Rfc64EvidenceValidationError(
@@ -778,7 +892,7 @@ export function createRfc64DevnetEvidence(
     timing: Object.freeze({
       startedAt: startedAt.iso,
       completedAt: completedAt.iso,
-      durationMs: completedAt.epochMs - startedAt.epochMs,
+      durationMs,
     }),
     attempts: Object.freeze({
       total: attemptCount,
@@ -1082,7 +1196,11 @@ function cleanupTemporaryArtifact(
  * Atomically publish byte-stable JSON through a same-directory temporary file.
  * POSIX publication enforces mode 0600 and directory-fsync namespace barriers;
  * Windows flushes the file and reports rename-only namespace durability plus
- * inherited ACL protection. Both policies reject symlinked/changing topology.
+ * inherited ACL protection. The caller must keep the parent directory topology
+ * trusted and static for the duration of this call: Node exposes no portable
+ * directory-handle-relative rename/open API with which to close path TOCTOU.
+ * The checks below reject pre-existing symlinks and detect many concurrent
+ * changes, but a post-rename error can still leave publication side effects.
  */
 export function writeStableJsonArtifact(
   path: string,

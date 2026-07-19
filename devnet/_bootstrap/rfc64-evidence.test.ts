@@ -32,6 +32,8 @@ import {
   stableJsonStringify,
   validateRfc64SemanticSnapshot,
   writeStableJsonArtifact,
+  type Rfc64DevnetEvidenceInput,
+  type Rfc64KnowledgeAssetObservation,
   type Rfc64SemanticSnapshotV1,
 } from './rfc64-evidence.js';
 
@@ -150,6 +152,90 @@ describe('RFC-64 semantic snapshot evidence', () => {
         semanticNQuads: '',
       },
     ])).rejects.toThrow(/Duplicate canonical Knowledge Asset UAL/);
+  });
+
+  it('rejects hostile observation containers before invoking caller code', async () => {
+    let customMapCalls = 0;
+    const customObservations = [{
+      ual: 'not-a-ual',
+      semanticNQuads: 'not N-Quads',
+    }];
+    Object.defineProperty(customObservations, 'map', {
+      configurable: true,
+      enumerable: true,
+      value: () => {
+        customMapCalls += 1;
+        return [];
+      },
+    });
+    await expect(createRfc64SemanticSnapshot(customObservations))
+      .rejects.toThrow(/custom array property "map"/);
+    expect(customMapCalls).toBe(0);
+
+    const sparseObservations = new Array(1) as Rfc64KnowledgeAssetObservation[];
+    await expect(createRfc64SemanticSnapshot(sparseObservations))
+      .rejects.toThrow(/sparse array/);
+
+    const customPrototypeObservations = [{
+      ual: UAL_A,
+      semanticNQuads: '',
+    }];
+    Object.setPrototypeOf(
+      customPrototypeObservations,
+      Object.create(Array.prototype),
+    );
+    await expect(createRfc64SemanticSnapshot(customPrototypeObservations))
+      .rejects.toThrow(/custom array prototype/);
+
+    let proxyReads = 0;
+    const proxiedObservations = new Proxy([{
+      ual: UAL_A,
+      semanticNQuads: '',
+    }], {
+      get(target, property, receiver) {
+        proxyReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    await expect(createRfc64SemanticSnapshot(proxiedObservations))
+      .rejects.toThrow(/observations must not be a proxy/);
+    expect(proxyReads).toBe(0);
+
+    let ualReads = 0;
+    const accessorObservation = { semanticNQuads: '' } as {
+      ual: string;
+      semanticNQuads: string;
+    };
+    Object.defineProperty(accessorObservation, 'ual', {
+      enumerable: true,
+      get: () => {
+        ualReads += 1;
+        return UAL_A;
+      },
+    });
+    await expect(createRfc64SemanticSnapshot([accessorObservation]))
+      .rejects.toThrow(/observations\[0\]\.ual must not be an accessor property/);
+    expect(ualReads).toBe(0);
+  });
+
+  it('captures N-Quads fragment arrays once without reading accessors', async () => {
+    let fragmentReads = 0;
+    const fragments: string[] = [];
+    Object.defineProperty(fragments, '0', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        fragmentReads += 1;
+        return fragmentReads === 1
+          ? '<urn:a> <urn:p> <urn:checked> .'
+          : '<urn:b> <urn:p> <urn:hashed> .';
+      },
+    });
+    fragments.length = 1;
+
+    await expect(canonicalizeSemanticNQuads(fragments))
+      .rejects.toThrow(/semanticNQuads\[0\] must be an enumerable data property/);
+    expect(fragmentReads).toBe(0);
   });
 
   it('rejects malformed N-Quads instead of hashing unchecked text', async () => {
@@ -391,6 +477,73 @@ describe('RFC-64 devnet run artifact', () => {
     })).toThrow(/one failure for each of the 1 retried attempts/);
   });
 
+  it('captures the run record and retry array once before field validation', async () => {
+    const snapshot = await createRfc64SemanticSnapshot([]);
+    const baseInput = {
+      gate: 'gate-1',
+      observer: 'receiver',
+      sourcePeerId: 'source',
+      startedAt: '2026-07-19T12:00:00Z',
+      completedAt: '2026-07-19T12:00:01Z',
+      attemptCount: 1,
+      expected: snapshot,
+    };
+
+    let observedReads = 0;
+    const accessorInput = { ...baseInput } as Rfc64DevnetEvidenceInput;
+    Object.defineProperty(accessorInput, 'observed', {
+      enumerable: true,
+      get: () => {
+        observedReads += 1;
+        return observedReads === 1 ? null : snapshot;
+      },
+    });
+    expect(() => createRfc64DevnetEvidence(accessorInput))
+      .toThrow(/input\.observed must not be an accessor property/);
+    expect(observedReads).toBe(0);
+
+    let proxyReads = 0;
+    const proxiedInput = new Proxy({ ...baseInput, observed: snapshot }, {
+      get(target, property, receiver) {
+        proxyReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => createRfc64DevnetEvidence(proxiedInput))
+      .toThrow(/input must not be a proxy/);
+    expect(proxyReads).toBe(0);
+
+    const customPrototypeInput = Object.assign(
+      Object.create({ inherited: true }) as Rfc64DevnetEvidenceInput,
+      { ...baseInput, observed: snapshot },
+    );
+    expect(() => createRfc64DevnetEvidence(customPrototypeInput))
+      .toThrow(/input must be a plain data object/);
+
+    let retryMapCalls = 0;
+    const retryFailures = [{
+      attempt: 1,
+      code: 'TRANSIENT',
+      message: 'retry',
+      retryable: true,
+    }];
+    Object.defineProperty(retryFailures, 'map', {
+      configurable: true,
+      enumerable: true,
+      value: () => {
+        retryMapCalls += 1;
+        return [];
+      },
+    });
+    expect(() => createRfc64DevnetEvidence({
+      ...baseInput,
+      attemptCount: 2,
+      retryFailures,
+      observed: snapshot,
+    })).toThrow(/retryFailures must not contain custom array property "map"/);
+    expect(retryMapCalls).toBe(0);
+  });
+
   it('rejects accessor and proxy failure records before reading their fields', async () => {
     const snapshot = await createRfc64SemanticSnapshot([]);
     let retryableReads = 0;
@@ -499,6 +652,57 @@ describe('RFC-64 devnet run artifact', () => {
         observed: snapshot,
       })).toThrow(/must be a valid, representable RFC 3339 timestamp/);
     }
+  });
+
+  it('normalizes genuine Dates intrinsically and rejects non-Date or unsafe timing', async () => {
+    const snapshot = await createRfc64SemanticSnapshot([]);
+    const baseInput = {
+      gate: 'gate-1',
+      observer: 'receiver',
+      sourcePeerId: 'source',
+      attemptCount: 1,
+      expected: snapshot,
+      observed: snapshot,
+    };
+
+    expect(() => createRfc64DevnetEvidence({
+      ...baseInput,
+      startedAt: 0 as unknown as string,
+      completedAt: 1_000 as unknown as string,
+    })).toThrow(/primitive timestamp string or a non-proxy Date/);
+
+    class HostileDate extends Date {
+      override getTime(): number {
+        return 0;
+      }
+
+      override toISOString(): string {
+        return 'not-an-ISO-instant';
+      }
+    }
+    const subclassEvidence = createRfc64DevnetEvidence({
+      ...baseInput,
+      startedAt: new HostileDate('2026-07-19T12:00:00.000Z'),
+      completedAt: new HostileDate('2026-07-19T12:00:01.000Z'),
+    });
+    expect(subclassEvidence.timing).toEqual({
+      startedAt: '2026-07-19T12:00:00.000Z',
+      completedAt: '2026-07-19T12:00:01.000Z',
+      durationMs: 1_000,
+    });
+
+    const proxiedDate = new Proxy(new Date('2026-07-19T12:00:00Z'), {});
+    expect(() => createRfc64DevnetEvidence({
+      ...baseInput,
+      startedAt: proxiedDate,
+      completedAt: new Date('2026-07-19T12:00:01Z'),
+    })).toThrow(/primitive timestamp string or a non-proxy Date/);
+
+    expect(() => createRfc64DevnetEvidence({
+      ...baseInput,
+      startedAt: new Date(-8_640_000_000_000_000 + 1),
+      completedAt: new Date(8_640_000_000_000_000),
+    })).toThrow(/timing\.durationMs must be a non-negative safe integer/);
   });
 
   it('writes byte-identical stable JSON independent of object insertion order', () => {
@@ -661,6 +865,39 @@ describe('RFC-64 devnet run artifact', () => {
       expect(injectedMissing).toBe(true);
       expect(fileFsyncs).toBe(1);
       expect(directoryFsyncs).toBe(2);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'detects a parent swap after rename while preserving the possible side effect',
+    () => {
+      const directory = createTemporaryDirectory();
+      const checkedDirectory = join(directory, 'checked');
+      const movedDirectory = join(directory, 'moved');
+      const target = join(checkedDirectory, 'artifact.json');
+      mkdirSync(checkedDirectory, { mode: 0o700 });
+      const originalRename = fs.renameSync;
+      let injectedSwap = false;
+      fs.renameSync = ((source, destination) => {
+        if (!injectedSwap && String(destination) === target) {
+          injectedSwap = true;
+          originalRename(checkedDirectory, movedDirectory);
+          symlinkSync(movedDirectory, checkedDirectory, 'dir');
+        }
+        originalRename(source, destination);
+      }) as typeof fs.renameSync;
+      syncBuiltinESMExports();
+      try {
+        expect(() => writeStableJsonArtifact(target, { generation: 1 }))
+          .toThrow(/directory topology contains a symbolic link/);
+      } finally {
+        fs.renameSync = originalRename;
+        syncBuiltinESMExports();
+      }
+
+      expect(injectedSwap).toBe(true);
+      expect(readFileSync(join(movedDirectory, 'artifact.json'), 'utf8'))
+        .toBe(stableJsonStringify({ generation: 1 }));
     },
   );
 

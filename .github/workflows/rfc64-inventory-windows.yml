@@ -1,6 +1,30 @@
 name: RFC-64 inventory Windows gate
 
 on:
+  push:
+    branches:
+      - integration/rfc64-devnet
+    paths:
+      - '.github/workflows/rfc64-inventory-windows.yml'
+      - 'devnet/_bootstrap/package.json'
+      - 'devnet/_bootstrap/rdf-canonize.d.ts'
+      - 'devnet/_bootstrap/rfc64-evidence*'
+      - 'devnet/_bootstrap/tsconfig.evidence.json'
+      - 'devnet/_bootstrap/vitest.evidence.config.ts'
+      - 'package.json'
+      - 'packages/agent/src/rfc64/inventory-v1/**'
+      - 'packages/agent/src/rfc64/author-catalog-producer.ts'
+      - 'packages/agent/test/rfc64-inventory-v1-*.test.ts'
+      - 'packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts'
+      - 'packages/agent/test/rfc64-author-catalog-producer.test.ts'
+      - 'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts'
+      - 'packages/agent/test/fixtures/rfc64-agent-inventory-lifecycle-child.ts'
+      - 'packages/agent/vitest.unit.config.ts'
+      - 'packages/agent/package.json'
+      - 'packages/core/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
   pull_request:
     paths:
       - '.github/workflows/rfc64-inventory-windows.yml'

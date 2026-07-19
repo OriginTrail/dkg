@@ -33,11 +33,15 @@ produce a passing comparison.
 
 Created and validated snapshots are defensively copied and deeply frozen. Run
 evidence closes over its own frozen expected/observed copies, so later caller
-mutation cannot change a previously derived `passed` result. String timestamps
-must carry `Z` or an explicit UTC offset, contain a real Gregorian calendar
-instant, use at most millisecond fractional precision, and are emitted in
-canonical UTC form. Snapshot and failure-record validation reject
-accessors, proxies, sparse/custom arrays, and custom containers before capture.
+mutation cannot change a previously derived `passed` result. Public constructors
+capture caller-owned records and arrays exactly once through data descriptors;
+proxies, accessors, sparse/custom arrays, and custom containers are rejected
+before caller code can affect validation. String timestamps must carry `Z` or an
+explicit UTC offset, contain a real Gregorian calendar instant, and use at most
+millisecond fractional precision. Timestamp inputs are exactly primitive strings
+or genuine non-proxy `Date` objects. Dates are read through the intrinsic
+`Date.prototype.getTime` and normalized through a fresh `Date`; durations must be
+non-negative safe integers. Emitted timestamps use canonical UTC form.
 
 The run artifact adds the stable gate/observer label, selected source peer,
 canonical ISO timing and duration, attempt/retry/failure details, expected and
@@ -47,12 +51,17 @@ Artifact publication uses a same-directory exclusive temporary file, fsyncs
 its contents, atomically renames it, and verifies the published bytes. POSIX
 publication enforces mode 0600 and fsyncs the containing directory. Every
 directory created for a nested artifact path is made durable through a
-parent-directory fsync before it is used. Existing symlink targets and
-symlinked or changing directory topology are rejected. On Windows, Node cannot
-fsync a directory through its ordinary filesystem API and POSIX mode bits do
-not prove ACL isolation, so the returned publication metadata explicitly
-reports `file-flush-rename-no-directory-flush` and `windows-inherited-acl`
-instead of claiming the stronger POSIX policies.
+parent-directory fsync before it is used. The caller must provide a trusted,
+static parent-directory topology for the full call. Node has no portable
+directory-handle-relative `openat`/`renameat` surface, so path checks cannot
+prevent a cooperating process from changing a parent between validation and
+rename. Initial checks reject existing symlinks and post-operation checks provide
+best-effort detection, but an error raised after rename can leave publication
+side effects in the changed topology. On Windows, Node cannot fsync a directory
+through its ordinary filesystem API and POSIX mode bits do not prove ACL
+isolation, so the returned publication metadata explicitly reports
+`file-flush-rename-no-directory-flush` and `windows-inherited-acl` instead of
+claiming the stronger POSIX policies.
 
 ## Harness use
 
