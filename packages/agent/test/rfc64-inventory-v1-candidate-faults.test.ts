@@ -98,6 +98,9 @@ describe('RFC-64 SQL-1 candidate crash and static fault matrix', () => {
     );
     expect(candidateSource).not.toMatch(/(?:PR\s*#?\s*1780|#1780)/i);
     expect(candidateSource).not.toMatch(/\b(?:isComplete|promoteToApplied|markApplied)\b/);
+    expect(candidateSource).not.toMatch(/\bVerifiedCandidateBucketDescriptorV1\b/);
+    expect(candidateSource).not.toMatch(/\bfunction\s+verifyDescriptor\b/);
+    expect(candidateSource).toMatch(/\breadVerifiedAuthorCatalogBucketDescriptorV1\b/);
     expect(Object.getOwnPropertyNames(CandidateInventoryV1.prototype)).not.toEqual(
       expect.arrayContaining(['isComplete', 'promoteToApplied', 'markApplied']),
     );

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
+  AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   KA_TRANSFER_CHUNK_SIZE_V1,
   KA_TRANSFER_CODEC_V1,
@@ -18,14 +19,19 @@ import {
   ZERO_DIGEST32_V1,
   assertAuthorCatalogRowV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   catalogKeyToBucketIdV1,
   computeAuthorCatalogBucketObjectDigestV1,
+  computeAuthorCatalogDirectoryNodeObjectDigestV1,
   computeAuthorCatalogHeadObjectDigestV1,
   computeAuthorCatalogScopeDigestV1,
   deriveAuthorCatalogScopeFromHeadV1,
+  verifyAuthorCatalogDirectoryPathV1,
+  type AuthorCatalogBucketDescriptorV1,
   type AuthorCatalogBucketV1,
+  type AuthorCatalogDirectoryNodeV1,
   type AuthorCatalogHeadV1,
   type AuthorCatalogRowV1,
   type ByteLengthV1,
@@ -34,9 +40,11 @@ import {
   type Digest32V1,
   type KaIdV1,
   type SignedAuthorCatalogBucketEnvelopeV1,
+  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
+  type VerifiedAuthorCatalogDirectoryPathV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -365,13 +373,21 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     try {
       inventory.purgeNextStartupStaleCandidateBatch();
       const session = inventory.createCandidateSession();
-      const head = makeHead('1', '34');
-      inventory.putVerifiedCandidateBucket(
-        makeNonEmptyLoad(session, head, [makeRow(1n, 'original')]),
+      const head = makeHead('2', '34', '2');
+      const [original, conflict] = makeBoundNonEmptyLoads(session, head, [
+        {
+          bucketId: '0',
+          rows: [rowForBucket('0', '2', 1n, 'same-coordinate')],
+        },
+        {
+          bucketId: '1',
+          rows: [rowForBucket('1', '2', 2n, 'same-coordinate')],
+        },
+      ]);
+      inventory.putVerifiedCandidateBucket(original);
+      expect(() => inventory.putVerifiedCandidateBucket(conflict)).toThrowError(
+        expect.objectContaining({ code: 'candidate-conflict' }),
       );
-      expect(() => inventory.putVerifiedCandidateBucket(
-        makeNonEmptyLoad(session, head, [makeRow(2n, 'conflict')]),
-      )).toThrowError(expect.objectContaining({ code: 'candidate-conflict' }));
 
       failNextCommit = true;
       expect(inventory.discardCandidateSessionBatch(session)).toEqual({
@@ -699,10 +715,18 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
   it('poisons a conflicting session and permits only bounded discard until terminal empty', async () => {
     const inventory = await readyInventory();
     const session = inventory.createCandidateSession();
-    const head = makeHead('1', '3');
-    const original = makeNonEmptyLoad(session, head, [makeRow(1n, 'original')]);
+    const head = makeHead('2', '3', '2');
+    const [original, mutation] = makeBoundNonEmptyLoads(session, head, [
+      {
+        bucketId: '0',
+        rows: [rowForBucket('0', '2', 1n, 'same-coordinate')],
+      },
+      {
+        bucketId: '1',
+        rows: [rowForBucket('1', '2', 2n, 'same-coordinate')],
+      },
+    ]);
     const loaded = inventory.putVerifiedCandidateBucket(original);
-    const mutation = makeNonEmptyLoad(session, head, [makeRow(2n, 'mutation')]);
 
     expect(() => inventory.putVerifiedCandidateBucket(mutation)).toThrowError(
       expect.objectContaining({ code: 'candidate-conflict' }),
@@ -732,12 +756,14 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     const head = makeHead('2', '4', '2');
     const bucket0Row = rowForBucket('0', '2', 1n, 'same-coordinate');
     const bucket1Row = rowForBucket('1', '2', 2n, 'same-coordinate');
-    const first = inventory.putVerifiedCandidateBucket(
-      makeNonEmptyLoad(session, head, [bucket0Row], '0'),
+    const [bucket0, bucket1] = makeBoundNonEmptyLoads(session, head, [
+      { bucketId: '0', rows: [bucket0Row] },
+      { bucketId: '1', rows: [bucket1Row] },
+    ]);
+    const first = inventory.putVerifiedCandidateBucket(bucket0);
+    expect(() => inventory.putVerifiedCandidateBucket(bucket1)).toThrowError(
+      expect.objectContaining({ code: 'candidate-conflict' }),
     );
-    expect(() => inventory.putVerifiedCandidateBucket(
-      makeNonEmptyLoad(session, head, [bucket1Row], '1'),
-    )).toThrowError(expect.objectContaining({ code: 'candidate-conflict' }));
     expect(() => inventory.getCandidateBucket(first.loadKey)).toThrowError(
       expect.objectContaining({ code: 'candidate-session-poisoned' }),
     );
@@ -747,28 +773,42 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     const inventory = await readyInventory();
     const oldSession = inventory.createCandidateSession();
     const poisonedSession = inventory.createCandidateSession();
-    const oldHead = makeHead('1', '40');
-    const newHead = makeHead('1', '41');
+    const oldHead = makeHead('1', '40', '2');
+    const newHead = makeHead('2', '41', '2');
     const oldLoad = inventory.putVerifiedCandidateBucket(
-      makeNonEmptyLoad(oldSession, oldHead, [makeRow(1n, 'old')]),
+      makeNonEmptyLoad(
+        oldSession,
+        oldHead,
+        [rowForBucket('0', '2', 1n, 'old')],
+        '0',
+      ),
     );
-    const newLoadInput = makeNonEmptyLoad(
+    const [newLoadInput, conflictingLoadInput] = makeBoundNonEmptyLoads(
       poisonedSession,
       newHead,
-      [makeRow(2n, 'new')],
+      [
+        {
+          bucketId: '0',
+          rows: [rowForBucket('0', '2', 2n, 'same-coordinate')],
+        },
+        {
+          bucketId: '1',
+          rows: [rowForBucket('1', '2', 3n, 'same-coordinate')],
+        },
+      ],
     );
     const newLoad = inventory.putVerifiedCandidateBucket(newLoadInput);
     const rows = inventory.beginCandidateBucketRows(newLoad.loadKey);
     const diff = inventory.beginCandidateBucketDiff(oldLoad.loadKey, newLoad.loadKey);
 
-    expect(() => inventory.putVerifiedCandidateBucket(
-      makeNonEmptyLoad(poisonedSession, newHead, [makeRow(3n, 'conflict')]),
-    )).toThrowError(expect.objectContaining({ code: 'candidate-conflict' }));
+    expect(() => inventory.putVerifiedCandidateBucket(conflictingLoadInput)).toThrowError(
+      expect.objectContaining({ code: 'candidate-conflict' }),
+    );
 
     expect(() => inventory.putVerifiedCandidateBucket({
       session: poisonedSession,
       head: null,
-      descriptor: null,
+      directoryPath: null,
       bucket: null,
     } as unknown as VerifiedCandidateBucketLoadV1)).toThrowError(
       expect.objectContaining({ code: 'candidate-session-poisoned' }),
@@ -960,7 +1000,7 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
     });
   }
 
-  it('rejects raw capabilities, clean-session discard, invalid pages, and descriptor mismatch', async () => {
+  it('rejects forged, cloned, serialized, wrong-head, and wrong-bucket directory proofs', async () => {
     const inventory = await readyInventory();
     const session = inventory.createCandidateSession();
     expect(() => inventory.discardCandidateSessionBatch(session)).toThrowError(
@@ -971,22 +1011,49 @@ describe('RFC-64 SQL-1 verified candidate buckets', () => {
       session: Object.freeze({}) as CandidateSessionV1,
     })).toThrowError(expect.objectContaining({ code: 'candidate-invalid-session' }));
 
-    const head = makeHead('1', '10');
-    const invalid = makeNonEmptyLoad(session, head, [makeRow(1n, 'fixture')]);
-    expect(() => inventory.putVerifiedCandidateBucket({
-      ...invalid,
-      descriptor: { ...invalid.descriptor, byteLength: '1' },
-    } as VerifiedCandidateBucketLoadV1)).toThrowError(
-      expect.objectContaining({ code: 'candidate-invalid-load' }),
+    const head = makeHead('2', '10', '2');
+    const [bucket0, bucket1] = makeBoundNonEmptyLoads(session, head, [
+      { bucketId: '0', rows: [rowForBucket('0', '2', 1n, 'bucket-zero')] },
+      { bucketId: '1', rows: [rowForBucket('1', '2', 2n, 'bucket-one')] },
+    ]);
+    const invalidDirectoryProofs: readonly [string, unknown][] = [
+      ['forged/cast object', Object.freeze(Object.create(null))],
+      ['spread clone', { ...bucket0.directoryPath }],
+      ['JSON roundtrip', JSON.parse(JSON.stringify(bucket0.directoryPath))],
+      ['serialized token', JSON.stringify(bucket0.directoryPath)],
+    ];
+    for (const [label, directoryPath] of invalidDirectoryProofs) {
+      expect(
+        () => inventory.putVerifiedCandidateBucket({
+          ...bucket0,
+          directoryPath,
+        } as VerifiedCandidateBucketLoadV1),
+        label,
+      ).toThrowError(expect.objectContaining({ code: 'candidate-invalid-load' }));
+    }
+
+    const otherHeadLoad = makeNonEmptyLoad(
+      session,
+      makeHead('1', '11'),
+      [makeRow(3n, 'other-head')],
     );
+    expect(() => inventory.putVerifiedCandidateBucket({
+      ...bucket0,
+      head: otherHeadLoad.head,
+    })).toThrowError(expect.objectContaining({ code: 'candidate-invalid-load' }));
+    expect(() => inventory.putVerifiedCandidateBucket({
+      ...bucket0,
+      directoryPath: bucket1.directoryPath,
+    })).toThrowError(expect.objectContaining({ code: 'candidate-invalid-load' }));
+
     const unboundRow = {
       ...makeRow(1n, 'fixture'),
       kaId: '1',
     } as AuthorCatalogRowV1;
     expect(() => inventory.putVerifiedCandidateBucket(
-      makeNonEmptyLoad(session, head, [unboundRow]),
+      makeNonEmptyLoad(session, makeHead('1', '12'), [unboundRow]),
     )).toThrowError(expect.objectContaining({ code: 'candidate-invalid-load' }));
-    const loaded = inventory.putVerifiedCandidateBucket(invalid);
+    const loaded = inventory.putVerifiedCandidateBucket(bucket0);
     const traversal = inventory.beginCandidateBucketRows(loaded.loadKey);
     expect(() => inventory.pageCandidateBucketRows(traversal, null, 0)).toThrowError(
       expect.objectContaining({ code: 'candidate-invalid-load' }),
@@ -1100,12 +1167,81 @@ function rowForBucket(
 
 function makeNonEmptyLoad(
   session: CandidateSessionV1,
-  head: SignedAuthorCatalogHeadEnvelopeV1,
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
   rows: readonly AuthorCatalogRowV1[],
   bucketId = '0',
   validate = true,
 ): VerifiedCandidateBucketLoadV1 {
-  const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
+  const fixture = makeSignedBucketFixture(headTemplate, rows, bucketId, validate);
+  const { head, directoryPath } = bindHeadToSelectedDescriptor(
+    headTemplate,
+    fixture.descriptor,
+  );
+  return {
+    session,
+    head,
+    directoryPath,
+    bucket: fixture.bucket,
+  };
+}
+
+function makeBoundNonEmptyLoads(
+  session: CandidateSessionV1,
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
+  specifications: readonly {
+    readonly bucketId: string;
+    readonly rows: readonly AuthorCatalogRowV1[];
+    readonly validate?: boolean;
+  }[],
+): readonly VerifiedCandidateBucketLoadV1[] {
+  const bucketCount = Number(BigInt(headTemplate.payload.bucketCount));
+  const descriptors = Array.from(
+    { length: bucketCount },
+    (_, bucketId) => emptyDescriptor(bucketId),
+  );
+  const fixtures = specifications.map((specification) => makeSignedBucketFixture(
+    headTemplate,
+    specification.rows,
+    specification.bucketId,
+    specification.validate ?? true,
+  ));
+  const occupied = new Set<number>();
+  let totalRows = 0n;
+  for (const fixture of fixtures) {
+    const bucketId = Number(BigInt(fixture.descriptor.bucketId));
+    if (bucketId < 0 || bucketId >= bucketCount || occupied.has(bucketId)) {
+      throw new Error('invalid or duplicate bound bucket fixture');
+    }
+    occupied.add(bucketId);
+    descriptors[bucketId] = fixture.descriptor;
+    totalRows += BigInt(fixture.descriptor.rowCount);
+  }
+  if (totalRows !== BigInt(headTemplate.payload.totalRows)) {
+    throw new Error('bound bucket fixture rows do not equal head totalRows');
+  }
+  const bindings = fixtures.map((fixture) => bindHeadToDirectory(
+    headTemplate,
+    descriptors,
+    fixture.descriptor.bucketId,
+  ));
+  return fixtures.map((fixture, index) => ({
+    session,
+    head: bindings[0].head,
+    directoryPath: bindings[index].directoryPath,
+    bucket: fixture.bucket,
+  }));
+}
+
+function makeSignedBucketFixture(
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
+  rows: readonly AuthorCatalogRowV1[],
+  bucketId: string,
+  validate: boolean,
+): {
+  readonly bucket: SignedAuthorCatalogBucketEnvelopeV1;
+  readonly descriptor: AuthorCatalogBucketDescriptorV1;
+} {
+  const scope = deriveAuthorCatalogScopeFromHeadV1(headTemplate.payload);
   const payload: AuthorCatalogBucketV1 = {
     catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
     era: scope.era,
@@ -1128,36 +1264,147 @@ function makeNonEmptyLoad(
     signature: SIGNATURE,
   } as SignedControlEnvelopeV1;
   if (validate) assertSignedAuthorCatalogBucketEnvelopeV1(bucket);
+  const descriptor = {
+    bucketId: bucketId as DecimalU64V1,
+    rowCount: String(rows.length) as CountV1,
+    byteLength: (validate
+      ? String(canonicalizeAuthorCatalogBucketPayloadBytesV1(payload).byteLength)
+      : '1') as ByteLengthV1,
+    bucketDigest: bucket.objectDigest as Digest32V1,
+  } satisfies AuthorCatalogBucketDescriptorV1;
   return {
-    session,
-    head,
-    descriptor: {
-      bucketId: bucketId as DecimalU64V1,
-      rowCount: String(rows.length) as CountV1,
-      byteLength: (validate
-        ? String(canonicalizeAuthorCatalogBucketPayloadBytesV1(payload).byteLength)
-        : '1') as ByteLengthV1,
-      bucketDigest: bucket.objectDigest as Digest32V1,
-    },
-    bucket,
+    bucket: bucket as SignedAuthorCatalogBucketEnvelopeV1,
+    descriptor,
   };
 }
 
 function makeEmptyLoad(
   session: CandidateSessionV1,
-  head: SignedAuthorCatalogHeadEnvelopeV1,
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
   bucketId: string,
 ): VerifiedCandidateBucketLoadV1 {
+  const { head, directoryPath } = bindHeadToSelectedDescriptor(headTemplate, {
+    bucketId: bucketId as DecimalU64V1,
+    rowCount: '0' as CountV1,
+    byteLength: '0' as ByteLengthV1,
+    bucketDigest: ZERO_DIGEST32_V1,
+  });
   return {
     session,
     head,
-    descriptor: {
-      bucketId: bucketId as DecimalU64V1,
-      rowCount: '0' as CountV1,
-      byteLength: '0' as ByteLengthV1,
-      bucketDigest: ZERO_DIGEST32_V1,
-    },
+    directoryPath,
     bucket: null,
+  };
+}
+
+function bindHeadToSelectedDescriptor(
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
+  selected: AuthorCatalogBucketDescriptorV1,
+): {
+  readonly head: SignedAuthorCatalogHeadEnvelopeV1;
+  readonly directoryPath: VerifiedAuthorCatalogDirectoryPathV1;
+} {
+  const bucketCount = Number(BigInt(headTemplate.payload.bucketCount));
+  const selectedBucket = Number(BigInt(selected.bucketId));
+  const totalRows = BigInt(headTemplate.payload.totalRows);
+  const selectedRows = BigInt(selected.rowCount);
+  if (selectedBucket < 0 || selectedBucket >= bucketCount || selectedRows > totalRows) {
+    throw new Error('invalid selected descriptor fixture');
+  }
+  let remainingRows = totalRows - selectedRows;
+  const descriptors = Array.from({ length: bucketCount }, (_, index) => {
+    if (index === selectedBucket) return selected;
+    if (remainingRows > 0n) {
+      const rowCount = remainingRows;
+      remainingRows = 0n;
+      return placeholderDescriptor(index, rowCount);
+    }
+    return emptyDescriptor(index);
+  });
+  if (remainingRows !== 0n) throw new Error('unable to allocate fixture directory rows');
+  return bindHeadToDirectory(headTemplate, descriptors, selected.bucketId);
+}
+
+function bindHeadToDirectory(
+  headTemplate: SignedAuthorCatalogHeadEnvelopeV1,
+  descriptors: readonly AuthorCatalogBucketDescriptorV1[],
+  selectedBucketId: DecimalU64V1,
+): {
+  readonly head: SignedAuthorCatalogHeadEnvelopeV1;
+  readonly directoryPath: VerifiedAuthorCatalogDirectoryPathV1;
+} {
+  const scope = deriveAuthorCatalogScopeFromHeadV1(headTemplate.payload);
+  const node: AuthorCatalogDirectoryNodeV1 = {
+    catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+    entries: descriptors,
+    era: scope.era,
+    firstBucketId: '0',
+    level: '0',
+  };
+  const unsignedDirectory = {
+    issuer: ISSUER,
+    objectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+    payload: node,
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as UnsignedControlEnvelopeV1;
+  const signedDirectory = {
+    ...unsignedDirectory,
+    objectDigest: computeAuthorCatalogDirectoryNodeObjectDigestV1(
+      unsignedDirectory,
+      scope.bucketCount,
+    ),
+    signature: SIGNATURE,
+  } as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(signedDirectory, scope.bucketCount);
+  const directory = signedDirectory as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+  const unsignedHead = {
+    issuer: headTemplate.issuer,
+    objectType: AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+    payload: {
+      ...headTemplate.payload,
+      directoryRootDigest: directory.objectDigest,
+    },
+    signatureEvidence: headTemplate.signatureEvidence,
+    signatureSuite: headTemplate.signatureSuite,
+  } as UnsignedControlEnvelopeV1;
+  const signedHead = {
+    ...unsignedHead,
+    objectDigest: computeAuthorCatalogHeadObjectDigestV1(unsignedHead),
+    signature: headTemplate.signature,
+  } as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogHeadEnvelopeV1(signedHead);
+  const head = signedHead as SignedAuthorCatalogHeadEnvelopeV1;
+  return {
+    head,
+    directoryPath: verifyAuthorCatalogDirectoryPathV1(
+      head,
+      [directory],
+      selectedBucketId,
+    ),
+  };
+}
+
+function emptyDescriptor(bucketId: number): AuthorCatalogBucketDescriptorV1 {
+  return {
+    bucketDigest: ZERO_DIGEST32_V1,
+    bucketId: String(bucketId) as DecimalU64V1,
+    byteLength: '0',
+    rowCount: '0',
+  };
+}
+
+function placeholderDescriptor(
+  bucketId: number,
+  rowCount: bigint,
+): AuthorCatalogBucketDescriptorV1 {
+  if (rowCount < 1n || rowCount > 1024n) throw new Error('invalid placeholder row count');
+  const byte = (0x80 + bucketId).toString(16).padStart(2, '0');
+  return {
+    bucketDigest: `0x${byte.repeat(32)}` as Digest32V1,
+    bucketId: String(bucketId) as DecimalU64V1,
+    byteLength: '1',
+    rowCount: rowCount.toString() as CountV1,
   };
 }
 
