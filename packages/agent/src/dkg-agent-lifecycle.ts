@@ -935,7 +935,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // OT-RFC-64: persistent inventory ownership and the complete bounded
     // startup purge precede node.start(), protocol registration, and every
     // network consumer. No dataDir intentionally leaves the feature dormant.
-    await this.prepareRfc64InventoryV1();
+    await this.prepareRfc64PersistenceV1();
     try {
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
@@ -952,7 +952,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       await this.node.start();
     } catch (cause) {
       try {
-        this.closeRfc64InventoryV1();
+        await this.closeRfc64PersistenceV1();
       } catch (closeCause) {
         throw new AggregateError(
           [cause, closeCause],

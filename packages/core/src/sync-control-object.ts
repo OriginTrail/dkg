@@ -224,6 +224,33 @@ export function assertControlSignatureVariantDigest(
   }
 }
 
+/** Return the exact bounded canonical bytes of a detached signature variant. */
+export function canonicalizeControlSignatureVariantBytes(
+  variant: ControlObjectSignatureVariantV1,
+): Uint8Array {
+  if (!isPlainRecord(variant)) {
+    throw new Error('Control signature variant must be a plain JSON object');
+  }
+  assertExactKeys(
+    variant,
+    ['objectDigest', 'signature', 'signatureVariantDigest'],
+    'control signature variant',
+  );
+  assertControlSignatureVariantDigest(
+    variant.objectDigest,
+    variant.signature,
+    variant.signatureVariantDigest,
+  );
+  return canonicalizeJsonBytes({
+    objectDigest: variant.objectDigest,
+    signature: variant.signature,
+    signatureVariantDigest: variant.signatureVariantDigest,
+  }, {
+    maxBytes: MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
+    maxDepth: 1,
+  });
+}
+
 /** Strictly decode the normalized detached-signature record defined by RFC-64. */
 export function parseCanonicalControlSignatureVariant(
   input: string | Uint8Array,
@@ -237,21 +264,76 @@ export function parseCanonicalControlSignatureVariant(
     ),
     maxDepth: Math.min(options.maxDepth ?? 1, 1),
   });
-  if (!isPlainRecord(parsed)) {
-    throw new Error('Control signature variant must be a plain JSON object');
-  }
-  assertExactKeys(
-    parsed,
-    ['objectDigest', 'signature', 'signatureVariantDigest'],
-    'control signature variant',
-  );
   const variant = parsed as unknown as ControlObjectSignatureVariantV1;
-  assertControlSignatureVariantDigest(
-    variant.objectDigest,
-    variant.signature,
-    variant.signatureVariantDigest,
-  );
+  canonicalizeControlSignatureVariantBytes(variant);
   return variant;
+}
+
+export interface SplitCanonicalSignedControlEnvelopeV1 {
+  readonly envelope: SignedControlEnvelopeV1;
+  readonly unsignedEnvelope: UnsignedControlEnvelopeV1;
+  readonly signatureVariant: ControlObjectSignatureVariantV1;
+  readonly unsignedEnvelopeBytes: Uint8Array;
+  readonly signatureVariantBytes: Uint8Array;
+}
+
+/**
+ * Snapshot one signed envelope into the exact immutable records used by the
+ * RFC-64 digest-addressed cache. This is the sole schema-aware split boundary.
+ */
+export function splitCanonicalSignedControlEnvelopeV1(
+  input: SignedControlEnvelopeV1,
+): SplitCanonicalSignedControlEnvelopeV1 {
+  const envelope = parseCanonicalSignedControlEnvelope(
+    canonicalizeSignedControlEnvelopeBytes(input),
+  );
+  const unsignedEnvelope = extractUnsignedEnvelope(envelope);
+  const signatureVariantDigest = computeControlSignatureVariantDigestHex(
+    envelope.objectDigest,
+    envelope.signature,
+  );
+  const signatureVariant: ControlObjectSignatureVariantV1 = {
+    objectDigest: envelope.objectDigest,
+    signature: envelope.signature,
+    signatureVariantDigest,
+  };
+  return Object.freeze({
+    envelope,
+    unsignedEnvelope,
+    signatureVariant,
+    unsignedEnvelopeBytes: canonicalizeUnsignedControlEnvelopeBytes(unsignedEnvelope),
+    signatureVariantBytes: canonicalizeControlSignatureVariantBytes(signatureVariant),
+  });
+}
+
+/**
+ * Recombine exact cache records only when both records are canonical for the
+ * requested digest keys. Signed-envelope validation re-computes objectDigest.
+ */
+export function recombineCanonicalSignedControlEnvelopeV1(
+  unsignedEnvelopeInput: string | Uint8Array,
+  signatureVariantInput: string | Uint8Array,
+  expectedObjectDigest: string,
+  expectedSignatureVariantDigest: string,
+): SignedControlEnvelopeV1 {
+  assertCanonicalDigest(expectedObjectDigest, 'expectedObjectDigest');
+  assertCanonicalDigest(
+    expectedSignatureVariantDigest,
+    'expectedSignatureVariantDigest',
+  );
+  const unsignedEnvelope = parseCanonicalUnsignedControlEnvelope(unsignedEnvelopeInput);
+  const signatureVariant = parseCanonicalControlSignatureVariant(signatureVariantInput);
+  if (
+    signatureVariant.objectDigest !== expectedObjectDigest
+    || signatureVariant.signatureVariantDigest !== expectedSignatureVariantDigest
+  ) {
+    throw new Error('Control-object cache records do not match the requested digest keys');
+  }
+  return parseCanonicalSignedControlEnvelope(canonicalizeSignedControlEnvelopeBytes({
+    ...unsignedEnvelope,
+    objectDigest: expectedObjectDigest,
+    signature: signatureVariant.signature,
+  }));
 }
 
 function bytesToLowerHex(bytes: Uint8Array): string {

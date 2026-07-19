@@ -12,9 +12,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
-  openInventoryV1,
-  type Rfc64InventoryV1Foundation,
-} from './rfc64/inventory-v1/index.js';
+  openRfc64PersistenceV1,
+  type Rfc64PersistenceV1,
+} from './rfc64/persistence-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -988,11 +988,10 @@ export class DKGAgentBase {
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
   /**
-   * OT-RFC-64 durable inventory ownership. Persistent agents hold exactly one
-   * production foundation for their data directory; agents without dataDir
-   * are deliberately dormant and never substitute an in-memory inventory.
+   * One OT-RFC-64 persistence owner for the inventory lease and every resource
+   * protected by it. Agents without dataDir remain deliberately dormant.
    */
-  protected rfc64InventoryV1?: Rfc64InventoryV1Foundation;
+  protected rfc64PersistenceV1?: Rfc64PersistenceV1;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
@@ -1565,31 +1564,14 @@ export class DKGAgentBase {
   }
 
   /**
-   * Acquire the RFC-64 inventory and finish bounded stale-candidate cleanup
-   * before any network consumer can observe or mutate inventory state.
+   * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
+   * open the inherited-owner control-object tree before network consumers.
    */
-  protected async prepareRfc64InventoryV1(): Promise<void> {
-    if (!this.config.dataDir || this.rfc64InventoryV1 !== undefined) return;
-
-    const inventory = await openInventoryV1(this.config.dataDir);
-    try {
-      for (;;) {
-        const batch = inventory.purgeNextStartupStaleCandidateBatch();
-        if (batch.done) break;
-        await this.yieldRfc64InventoryV1StartupBatch();
-      }
-    } catch (cause) {
-      try {
-        inventory.close();
-      } catch (closeCause) {
-        throw new AggregateError(
-          [cause, closeCause],
-          'RFC-64 inventory startup purge and cleanup both failed',
-        );
-      }
-      throw cause;
-    }
-    this.rfc64InventoryV1 = inventory;
+  protected async prepareRfc64PersistenceV1(): Promise<void> {
+    if (!this.config.dataDir || this.rfc64PersistenceV1 !== undefined) return;
+    this.rfc64PersistenceV1 = await openRfc64PersistenceV1(this.config.dataDir, {
+      yieldAfterPurgeBatch: () => this.yieldRfc64InventoryV1StartupBatch(),
+    });
   }
 
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
@@ -1598,13 +1580,13 @@ export class DKGAgentBase {
   }
 
   /**
-   * Relinquish the single inventory foundation. Clear the local reference
-   * before closing so a fail-stop close error cannot be retried accidentally.
+   * Relinquish the control store and single inventory foundation. Clear local
+   * references before closing so fail-stop cleanup cannot be retried.
    */
-  protected closeRfc64InventoryV1(): void {
-    const inventory = this.rfc64InventoryV1;
-    this.rfc64InventoryV1 = undefined;
-    inventory?.close();
+  protected async closeRfc64PersistenceV1(): Promise<void> {
+    const persistence = this.rfc64PersistenceV1;
+    this.rfc64PersistenceV1 = undefined;
+    await persistence?.close();
   }
 
   /**

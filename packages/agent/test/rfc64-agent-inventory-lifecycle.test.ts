@@ -1,9 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  computeControlObjectDigestHex,
+  type Digest32V1,
+  type SignedControlEnvelopeV1,
+  type UnsignedControlEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -11,6 +19,16 @@ import {
   INVENTORY_V1_RELATIVE_PATH,
   openInventoryV1,
 } from '../src/rfc64/inventory-v1/index.js';
+import {
+  RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+  type StageVerifiedControlObjectV1,
+} from '../src/rfc64/control-object-store-v1.js';
+import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from '../src/rfc64/control-object-store-v1-internal.js';
+import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
+import {
+  RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
+} from '../src/rfc64/persistence-layout-v1.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -18,6 +36,7 @@ const CHILD_FIXTURE = resolve(
   import.meta.dirname,
   'fixtures/rfc64-agent-inventory-lifecycle-child.ts',
 );
+const CONTROL_STORE_WALLET = new ethers.Wallet(`0x${'52'.repeat(32)}`);
 
 function temporaryDataDirectory(): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-agent-')));
@@ -29,9 +48,39 @@ function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
-    rfc64InventoryV1: undefined,
+    rfc64PersistenceV1: undefined,
   });
   return agent;
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolvePromiseInput) => {
+    resolvePromise = resolvePromiseInput;
+  });
+  return { promise, resolve: () => resolvePromise?.() };
+}
+
+async function signedControlObjectFixture(
+  sequence: string,
+): Promise<StageVerifiedControlObjectV1> {
+  const unsigned = {
+    issuer: CONTROL_STORE_WALLET.address.toLowerCase(),
+    objectType: 'dkg-rfc64-persistence-lifecycle-test-v1',
+    payload: { sequence },
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } satisfies UnsignedControlEnvelopeV1;
+  const objectDigest = computeControlObjectDigestHex(unsigned);
+  const envelope = {
+    ...unsigned,
+    objectDigest,
+    signature: await CONTROL_STORE_WALLET.signMessage(ethers.getBytes(objectDigest)),
+  } as SignedControlEnvelopeV1;
+  return {
+    envelope,
+    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+  };
 }
 
 function u64be(value: bigint): Buffer {
@@ -89,7 +138,7 @@ function candidateLoadCount(dataDirectory: string): number {
 
 function minimalStartedAgent(
   order: string[],
-  inventoryClose: () => void,
+  inventoryClose: () => void | Promise<void>,
 ): any {
   const agent = syntheticAgent();
   Object.assign(agent, {
@@ -106,7 +155,12 @@ function minimalStartedAgent(
     router: { closePooling: vi.fn(async () => {}) },
     node: { stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
-    rfc64InventoryV1: { close: inventoryClose },
+    rfc64PersistenceV1: {
+      close: () => {
+        order.push('control-store');
+        return inventoryClose();
+      },
+    },
     store: { close: vi.fn(async () => { order.push('store'); }) },
     log: { warn: vi.fn() },
   });
@@ -191,12 +245,12 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
   it('stays dormant without dataDir and performs no in-memory fallback', async () => {
     const agent = syntheticAgent();
 
-    await agent.prepareRfc64InventoryV1();
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
+    await agent.prepareRfc64PersistenceV1();
 
-    expect(agent.rfc64InventoryV1).toBeUndefined();
-    expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
-    expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
   });
 
   it('owns one persistent foundation and purges every stale candidate in bounded yielding batches', async () => {
@@ -206,21 +260,81 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     const yieldBatch = vi.fn(async () => {});
     agent.yieldRfc64InventoryV1StartupBatch = yieldBatch;
 
-    await agent.prepareRfc64InventoryV1();
-    const ownedFoundation = agent.rfc64InventoryV1;
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
+    const ownedPersistence = agent.rfc64PersistenceV1;
+    const inventory = ownedPersistence.inventory;
+    const controlObjects = ownedPersistence.controlObjects;
+    await agent.prepareRfc64PersistenceV1();
 
-    expect(agent.rfc64InventoryV1).toBe(ownedFoundation);
-    expect(ownedFoundation.databasePath).toBe(
-      join(dataDirectory, INVENTORY_V1_RELATIVE_PATH),
+    expect(agent.rfc64PersistenceV1).toBe(ownedPersistence);
+    expect(ownedPersistence.rootPath).toBe(
+      join(dataDirectory, RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1),
     );
+    expect(realpathSync(join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH)))
+      .toBe(join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH));
     expect(yieldBatch).toHaveBeenCalledTimes(3);
-    expect(() => ownedFoundation.createCandidateSession()).not.toThrow();
+    expect(() => inventory.createCandidateSession()).not.toThrow();
+    expect(Object.isFrozen(controlObjects)).toBe(true);
+    expect(controlObjects).not.toHaveProperty('rootPath');
+    expect(controlObjects).not.toHaveProperty('closed');
+    expect(controlObjects).not.toHaveProperty('close');
+    expect(Object.isFrozen(inventory)).toBe(true);
+    expect(inventory).not.toHaveProperty('databasePath');
+    expect(inventory).not.toHaveProperty('closed');
+    expect(inventory).not.toHaveProperty('close');
 
-    agent.closeRfc64InventoryV1();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    await agent.closeRfc64PersistenceV1();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(ownedPersistence.closed).toBe(true);
     expect(candidateLoadCount(dataDirectory)).toBe(0);
-    expect(() => agent.closeRfc64InventoryV1()).not.toThrow();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
+  });
+
+  it('retains the inventory lease until the control store drain settles', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const agent = syntheticAgent(dataDirectory);
+    await agent.prepareRfc64PersistenceV1();
+    const persistence = agent.rfc64PersistenceV1;
+    const fixture = await signedControlObjectFixture('lease-read-drain');
+    const staged = await persistence.controlObjects.stageVerifiedObjects([fixture]);
+    const entered = deferred();
+    const release = deferred();
+    const read = persistence.controlObjects.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: staged.objects[0].signatureVariantDigest,
+      verifyIssuerSignature: async (envelope) => {
+        entered.resolve();
+        await release.promise;
+        return verifyControlEnvelopeIssuerSignatureV1(envelope);
+      },
+    });
+    await entered.promise;
+
+    const close = agent.closeRfc64PersistenceV1();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(persistence.closed).toBe(true);
+    for (const operation of Object.values(persistence.inventory)) {
+      expect(() => (operation as (...arguments_: unknown[]) => unknown)())
+        .toThrow('RFC-64 persistence owner is closed');
+    }
+    await expect(openInventoryV1(dataDirectory))
+      .rejects.toMatchObject({ code: 'database-busy' });
+
+    release.resolve();
+    await expect(read).resolves.toMatchObject({ envelope: fixture.envelope });
+    await expect(close).resolves.toBeUndefined();
+    const replacement = await openInventoryV1(dataDirectory);
+    replacement.close();
+  });
+
+  it('invalidates package-internal persistence-root ownership when inventory closes', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const inventory = await openInventoryV1(dataDirectory);
+    const ownership = getRfc64PersistenceRootOwnershipForInventoryV1(inventory);
+    inventory.close();
+
+    await expect(openRfc64ControlObjectStoreForOwnedPersistenceRootV1(ownership))
+      .rejects.toMatchObject({ code: 'database-closed' });
   });
 
   it('fails startup before node.start when inventory acquisition or recovery fails', async () => {
@@ -230,7 +344,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
-      prepareRfc64InventoryV1: vi.fn(async () => { throw failure; }),
+      prepareRfc64PersistenceV1: vi.fn(async () => { throw failure; }),
       node: { start: nodeStart },
       log: { info: vi.fn(), warn: vi.fn() },
     });
@@ -240,23 +354,89 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(agent.started).toBe(false);
   });
 
-  it('releases an acquired inventory when node startup fails', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'releases inventory ownership when control-store topology is unsafe',
+    async () => {
+      const dataDirectory = temporaryDataDirectory();
+      const outside = temporaryDataDirectory();
+      const initialPersistence = await openRfc64PersistenceV1(dataDirectory, {
+        yieldAfterPurgeBatch: async () => {},
+      });
+      await initialPersistence.close();
+      const objectsPath = join(
+        dataDirectory,
+        RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+        'objects',
+      );
+      rmSync(objectsPath, { recursive: true, force: true });
+      symlinkSync(outside, objectsPath, 'dir');
+      const agent = syntheticAgent(dataDirectory);
+
+      await expect(agent.prepareRfc64PersistenceV1())
+        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+      expect(agent.rfc64PersistenceV1).toBeUndefined();
+
+      const replacement = await openInventoryV1(dataDirectory);
+      replacement.close();
+    },
+  );
+
+  it('awaits asynchronous persistence cleanup before rejecting node startup', async () => {
     const failure = new Error('node start failed');
-    const close = vi.fn();
+    const cleanup = deferred();
+    const close = vi.fn(() => cleanup.promise);
     const agent = syntheticAgent();
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
-      prepareRfc64InventoryV1: vi.fn(async () => {
-        agent.rfc64InventoryV1 = { close };
+      prepareRfc64PersistenceV1: vi.fn(async () => {
+        agent.rfc64PersistenceV1 = { close };
       }),
       node: { start: vi.fn(async () => { throw failure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
     });
 
-    await expect(agent.start()).rejects.toBe(failure);
+    const start = agent.start();
+    let settled = false;
+    void start.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+
+    cleanup.resolve();
+    await expect(start).rejects.toBe(failure);
     expect(close).toHaveBeenCalledOnce();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.started).toBe(false);
+  });
+
+  it('aggregates asynchronous persistence cleanup failure with node startup failure', async () => {
+    const startupFailure = new Error('node start failed');
+    const cleanupFailure = new Error('persistence cleanup failed');
+    const close = vi.fn(async () => { throw cleanupFailure; });
+    const agent = syntheticAgent();
+    Object.assign(agent, {
+      started: false,
+      coreHostRecordingGeneration: 0,
+      prepareRfc64PersistenceV1: vi.fn(async () => {
+        agent.rfc64PersistenceV1 = { close };
+      }),
+      node: { start: vi.fn(async () => { throw startupFailure; }) },
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    const rejection = await agent.start().catch((cause: unknown) => cause);
+    expect(rejection).toBeInstanceOf(AggregateError);
+    expect((rejection as AggregateError).errors).toEqual([
+      startupFailure,
+      cleanupFailure,
+    ]);
+    expect(close).toHaveBeenCalledOnce();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
 
@@ -268,24 +448,57 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await agent.stop();
     await agent.stop();
 
-    expect(order).toEqual(['node', 'sync-worker', 'inventory', 'store']);
+    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
     expect(inventoryClose).toHaveBeenCalledOnce();
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
 
-  it('finishes store teardown but rejects shutdown when inventory close fails', async () => {
+  it('keeps shutdown active and the triple store open until persistence drain settles', async () => {
+    const order: string[] = [];
+    const drain = deferred();
+    const persistenceClose = vi.fn(async () => {
+      await drain.promise;
+      order.push('inventory');
+    });
+    const agent = minimalStartedAgent(order, persistenceClose);
+
+    const stop = agent.stop();
+    let settled = false;
+    void stop.finally(() => { settled = true; });
+    await vi.waitFor(() => expect(persistenceClose).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(order).toEqual(['node', 'sync-worker', 'control-store']);
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    expect(settled).toBe(false);
+
+    drain.resolve();
+    await expect(stop).resolves.toBeUndefined();
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
+    expect(agent.started).toBe(false);
+  });
+
+  it('finishes store teardown but rejects shutdown when asynchronous persistence close fails', async () => {
     const order: string[] = [];
     const failure = new Error('inventory close failed');
-    const agent = minimalStartedAgent(order, () => {
+    const agent = minimalStartedAgent(order, async () => {
+      await Promise.resolve();
       order.push('inventory');
       throw failure;
     });
 
     await expect(agent.stop()).rejects.toBe(failure);
 
-    expect(order).toEqual(['node', 'sync-worker', 'inventory', 'store']);
-    expect(agent.rfc64InventoryV1).toBeUndefined();
+    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
     await expect(agent.stop()).resolves.toBeUndefined();
   });

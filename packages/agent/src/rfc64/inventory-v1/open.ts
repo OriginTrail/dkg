@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   existsSync,
   fstatSync,
@@ -24,16 +23,25 @@ import {
   sep,
 } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TextDecoder } from 'node:util';
+import {
+  applyRfc64OwnerOnlyPermissionsSyncV1,
+  assertRfc64FilesystemOwnerSyncV1,
+  fsyncRfc64DirectorySyncV1,
+  rfc64RegularFileFsyncOpenFlagsV1,
+} from '../secure-filesystem-policy-v1.js';
+import {
+  resolveRfc64InventoryDatabasePathV1,
+  resolveRfc64PersistenceRootV1,
+} from '../persistence-layout-v1.js';
+import { registerRfc64PersistenceRootOwnershipV1 } from '../persistence-root-ownership-v1-internal.js';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
   INVENTORY_V1_DDL,
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
-  INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
   normalizeInventoryV1SchemaSql,
@@ -223,7 +231,7 @@ async function openInventoryV1WithLifecycleAdapter(
   }
   const sqlite = await loadSqliteModule();
   const resolvedDataDir = resolve(dataDir);
-  const databasePath = resolve(resolvedDataDir, INVENTORY_V1_RELATIVE_PATH);
+  const databasePath = resolveRfc64InventoryDatabasePathV1(resolvedDataDir);
   let lease: InventoryV1Lease | null = null;
   try {
     if (pathEntryExists(recoveryMarkerPath(databasePath))) {
@@ -244,7 +252,14 @@ async function openInventoryV1WithLifecycleAdapter(
     lease = await acquireInventoryLease(sqlite, databasePath);
     finishPendingQuarantine(sqlite, databasePath, lifecycle);
     const database = openOrRebuildOwnedDatabase(sqlite, databasePath, lifecycle);
-    return new InventoryV1Foundation(sqlite, databasePath, database, lease, lifecycle);
+    return new InventoryV1Foundation(
+      sqlite,
+      databasePath,
+      resolveRfc64PersistenceRootV1(resolvedDataDir),
+      database,
+      lease,
+      lifecycle,
+    );
   } catch (cause) {
     if (cause instanceof InventoryV1TargetCloseError && lease !== null) {
       retainInventoryFailStop(lease, cause);
@@ -265,10 +280,10 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
-
   constructor(
     private readonly sqlite: SqliteModuleV1,
     readonly databasePath: string,
+    rfc64RootPath: string,
     database: DatabaseSyncV1,
     lease: InventoryV1Lease,
     private readonly lifecycle: InventoryV1LifecycleAdapter,
@@ -276,6 +291,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#database = database;
     this.#candidate = this.createCandidateInventory(database);
     this.#lease = lease;
+    registerRfc64PersistenceRootOwnershipV1(
+      this,
+      rfc64RootPath,
+      () => { this.requireOpen(); },
+    );
   }
 
   get closed(): boolean {
@@ -634,7 +654,7 @@ async function acquireInventoryLease(
       await waitForCommittedRacingLease(path);
     }
   }
-  applySecurePermissions(path, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(path, INVENTORY_V1_FILE_MODE, 'file');
 
   let database: DatabaseSyncV1 | null = null;
   let transactionOpen = false;
@@ -1324,7 +1344,7 @@ function prepareSecureDirectory(dataDirectory: string, directoryPath: string): v
     }
     currentDirectory = nextDirectory;
   }
-  applySecurePermissions(directoryPath, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(directoryPath, INVENTORY_V1_DIRECTORY_MODE, 'directory');
 }
 
 function preflightExistingRecoveryMarker(
@@ -1365,66 +1385,16 @@ function preflightExistingRecoveryMarker(
 function createSecureEmptyFile(databasePath: string): void {
   const descriptor = openSync(databasePath, 'wx', INVENTORY_V1_FILE_MODE);
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, 'file');
 }
 
 function tightenOwnedFileMode(databasePath: string): void {
-  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(databasePath, INVENTORY_V1_FILE_MODE, 'file');
 }
 
 function assertFilesystemOwner(path: string): void {
-  if (process.platform === 'win32') {
-    const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$userSid = $identity.User
-$defaultOwnerSid = $identity.Owner
-$target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
-$acl = if ([System.IO.Directory]::Exists($target)) {
-  [System.IO.Directory]::GetAccessControl(
-    $target,
-    [System.Security.AccessControl.AccessControlSections]::Owner
-  )
-} else {
-  [System.IO.File]::GetAccessControl(
-    $target,
-    [System.Security.AccessControl.AccessControlSections]::Owner
-  )
-}
-$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
-if (
-  $owner.Value -ne $userSid.Value -and
-  $owner.Value -ne $defaultOwnerSid.Value
-) {
-  [Console]::Error.WriteLine(
-    "owner SID $($owner.Value) is neither token user $($userSid.Value) nor token default owner $($defaultOwnerSid.Value)"
-  )
-  exit 40
-}
-`;
-    const result = spawnSync(
-      'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      {
-        encoding: 'utf8',
-        windowsHide: true,
-        env: { ...process.env, DKG_RFC64_ACL_PATH: path },
-      },
-    );
-    if (result.error !== undefined || result.status !== 0) {
-      throw new InventoryV1OpenError(
-        'database-io',
-        `inventory path is not owned by the current Windows identity: ${path}`,
-        { cause: result.error ?? new Error(result.stderr.trim() || `PowerShell exited ${result.status}`) },
-      );
-    }
-    return;
-  }
   try {
-    const processUid = process.getuid?.();
-    if (processUid !== undefined && statSync(path).uid !== processUid) {
-      throw new Error('filesystem entry is not owned by the current process uid');
-    }
+    assertRfc64FilesystemOwnerSyncV1(path);
   } catch (cause) {
     throw new InventoryV1OpenError(
       'database-io',
@@ -1443,88 +1413,18 @@ function assertOwnedUnitOwners(databasePath: string): void {
   }
 }
 
-function applySecurePermissions(path: string, mode: number, directory: boolean): void {
+function applySecurePermissions(
+  path: string,
+  mode: number,
+  entryKind: 'file' | 'directory',
+): void {
   // Never let chmod or Set-Acl turn a foreign existing entry into an owned one.
   // Newly created entries are also checked because they must already be owned
   // by this process before their permissions are tightened.
-  assertFilesystemOwner(path);
-  if (process.platform === 'win32') {
-    applyWindowsOwnerOnlyAcl(path, directory);
-    return;
-  }
   try {
-    chmodSync(path, mode);
-    const stat = statSync(path);
-    const processUid = process.getuid?.();
-    if (processUid !== undefined && stat.uid !== processUid) {
-      throw new Error(`path owner uid ${stat.uid} does not match process uid ${processUid}`);
-    }
-    if ((stat.mode & 0o777) !== mode) {
-      throw new Error(`path mode ${(stat.mode & 0o777).toString(8)} does not match ${mode.toString(8)}`);
-    }
+    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, { entryKind });
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to set secure permissions on ${path}`, { cause });
-  }
-}
-
-function applyWindowsOwnerOnlyAcl(path: string, directory: boolean): void {
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$target = $env:DKG_RFC64_ACL_PATH
-$isDirectory = [System.Convert]::ToBoolean($env:DKG_RFC64_ACL_DIRECTORY)
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = if ($isDirectory) {
-  [System.Security.AccessControl.DirectorySecurity]::new()
-} else {
-  [System.Security.AccessControl.FileSecurity]::new()
-}
-$acl.SetOwner($sid)
-$acl.SetAccessRuleProtection($true, $false)
-$inheritance = if ($isDirectory) {
-  [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-} else {
-  [System.Security.AccessControl.InheritanceFlags]::None
-}
-$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-  $sid,
-  [System.Security.AccessControl.FileSystemRights]::FullControl,
-  $inheritance,
-  [System.Security.AccessControl.PropagationFlags]::None,
-  [System.Security.AccessControl.AccessControlType]::Allow
-)
-$acl.AddAccessRule($rule)
-if ($isDirectory) {
-  [System.IO.Directory]::SetAccessControl($target, $acl)
-  $verified = [System.IO.Directory]::GetAccessControl($target)
-} else {
-  [System.IO.File]::SetAccessControl($target, $acl)
-  $verified = [System.IO.File]::GetAccessControl($target)
-}
-$rules = @($verified.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-if (-not $verified.AreAccessRulesProtected -or $rules.Count -ne 1) { exit 41 }
-if ($rules[0].IdentityReference.Value -ne $sid.Value) { exit 42 }
-if ($rules[0].AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { exit 43 }
-if (($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { exit 44 }
-`;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      windowsHide: true,
-      env: {
-        ...process.env,
-        DKG_RFC64_ACL_PATH: path,
-        DKG_RFC64_ACL_DIRECTORY: String(directory),
-      },
-    },
-  );
-  if (result.error !== undefined || result.status !== 0) {
-    throw new InventoryV1OpenError(
-      'database-io',
-      `failed to establish owner-only Windows ACL on ${path}`,
-      { cause: result.error ?? new Error(result.stderr.trim() || `PowerShell exited ${result.status}`) },
-    );
   }
 }
 
@@ -1594,7 +1494,7 @@ function fsyncRegularFile(path: string, label: string): void {
     // opened for read-only access with EPERM. The entry is already an owned
     // regular file; opening r+ grants the required handle access without
     // changing bytes, while POSIX retains its narrower read-only descriptor.
-    descriptor = openSync(path, process.platform === 'win32' ? 'r+' : 'r');
+    descriptor = openSync(path, rfc64RegularFileFsyncOpenFlagsV1());
     fsyncSync(descriptor);
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to fsync ${label}`, { cause });
@@ -1689,14 +1589,14 @@ function beginQuarantine(
     mkdirSync(quarantineRoot, { mode: INVENTORY_V1_DIRECTORY_MODE });
   }
   assertOwnedDirectory(quarantineRoot, 'inventory quarantine directory');
-  applySecurePermissions(quarantineRoot, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(quarantineRoot, INVENTORY_V1_DIRECTORY_MODE, 'directory');
   fsyncDirectory(inventoryDirectory);
   lifecycle.boundary('begin.inventory-directory.fsync-after-quarantine-root');
   const suffix = `${Date.now()}-${randomBytes(8).toString('hex')}`;
   const quarantineDirectory = join(quarantineRoot, `inventory-v1-${suffix}`);
   mkdirSync(quarantineDirectory, { mode: INVENTORY_V1_DIRECTORY_MODE });
   assertOwnedDirectory(quarantineDirectory, 'inventory quarantine generation');
-  applySecurePermissions(quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, true);
+  applySecurePermissions(quarantineDirectory, INVENTORY_V1_DIRECTORY_MODE, 'directory');
   assertSameFilesystem(inventoryDirectory, quarantineDirectory, 'inventory quarantine generation');
   for (const member of members) {
     const source = recoverySourcePath(databasePath, member);
@@ -1715,7 +1615,7 @@ function beginQuarantine(
   const marker: RecoveryMarkerV1 = { version: 1, quarantineDirectory, members };
   writeFileSync(markerPath, JSON.stringify(marker), { encoding: 'utf8', flag: 'wx', mode: INVENTORY_V1_FILE_MODE });
   lifecycle.boundary('begin.marker.write');
-  applySecurePermissions(markerPath, INVENTORY_V1_FILE_MODE, false);
+  applySecurePermissions(markerPath, INVENTORY_V1_FILE_MODE, 'file');
   fsyncRegularFile(markerPath, 'inventory recovery marker');
   lifecycle.boundary('begin.marker.file-fsync');
   fsyncDirectory(inventoryDirectory);
@@ -2265,9 +2165,7 @@ function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdenti
 }
 
 function fsyncDirectory(path: string): void {
-  if (process.platform === 'win32') return;
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  fsyncRfc64DirectorySyncV1(path);
 }
 
 function assertString(value: unknown, label: string): string {

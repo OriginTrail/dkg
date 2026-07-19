@@ -244,6 +244,69 @@ export interface Rfc64InventoryV1CandidateApi {
   deleteCandidateBucket(loadKey: CandidateBucketLoadKeyV1): void;
 }
 
+/** Candidate operations safe to share without inventory lifecycle ownership. */
+export type Rfc64InventoryV1OperationsV1 = Pick<
+  Rfc64InventoryV1CandidateApi,
+  | 'createCandidateSession'
+  | 'putVerifiedCandidateBucket'
+  | 'getCandidateBucket'
+  | 'beginCandidateBucketRows'
+  | 'beginCandidateBucketDiff'
+  | 'pageCandidateBucketRows'
+  | 'pageCandidateBucketAddedOrChanged'
+  | 'pageCandidateBucketRemoved'
+  | 'readVerifiedCandidateCatalogRow'
+  | 'verifyCandidateCatalogPrecommitV1'
+  | 'closeCandidateTraversal'
+  | 'discardCandidateSessionBatch'
+  | 'deleteCandidateBucket'
+>;
+
+/**
+ * Build the canonical non-owning candidate view next to the API that owns it.
+ * The aggregate persistence lifecycle supplies only its close fence; it does
+ * not duplicate the inventory operation surface or receive purge/close
+ * authority.
+ * @internal
+ */
+export function createRfc64InventoryOperationsViewV1(
+  inventory: Rfc64InventoryV1CandidateApi,
+  requireOwnerOpen: () => void,
+): Rfc64InventoryV1OperationsV1 {
+  const fence = <TArguments extends unknown[], TResult>(
+    operation: (...arguments_: TArguments) => TResult,
+  ): ((...arguments_: TArguments) => TResult) =>
+    (...arguments_: TArguments): TResult => {
+      requireOwnerOpen();
+      return operation(...arguments_);
+    };
+  return Object.freeze({
+    createCandidateSession: fence(inventory.createCandidateSession.bind(inventory)),
+    putVerifiedCandidateBucket: fence(inventory.putVerifiedCandidateBucket.bind(inventory)),
+    getCandidateBucket: fence(inventory.getCandidateBucket.bind(inventory)),
+    beginCandidateBucketRows: fence(inventory.beginCandidateBucketRows.bind(inventory)),
+    beginCandidateBucketDiff: fence(inventory.beginCandidateBucketDiff.bind(inventory)),
+    pageCandidateBucketRows: fence(inventory.pageCandidateBucketRows.bind(inventory)),
+    pageCandidateBucketAddedOrChanged: fence(
+      inventory.pageCandidateBucketAddedOrChanged.bind(inventory),
+    ),
+    pageCandidateBucketRemoved: fence(
+      inventory.pageCandidateBucketRemoved.bind(inventory),
+    ),
+    readVerifiedCandidateCatalogRow: fence(
+      inventory.readVerifiedCandidateCatalogRow.bind(inventory),
+    ),
+    verifyCandidateCatalogPrecommitV1: fence(
+      inventory.verifyCandidateCatalogPrecommitV1.bind(inventory),
+    ),
+    closeCandidateTraversal: fence(inventory.closeCandidateTraversal.bind(inventory)),
+    discardCandidateSessionBatch: fence(
+      inventory.discardCandidateSessionBatch.bind(inventory),
+    ),
+    deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
+  });
+}
+
 interface SessionContextV1 {
   readonly scopeHex: string;
   readonly authorHex: string;
