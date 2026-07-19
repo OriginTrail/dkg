@@ -7,6 +7,7 @@ import {
   assertCanonicalDecimalU64,
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
+  assertCanonicalHexBytes,
   assertCanonicalKaId,
   assertCanonicalTimestampMs,
   parseCanonicalDecimalU256,
@@ -64,5 +65,12 @@ describe('RFC-64 sync wire scalar profile', () => {
       /lowercase 20-byte/,
     );
     expect(() => assertCanonicalEvmAddress(`0x${'00'.repeat(20)}`)).toThrow(/zero address/);
+  });
+
+  it('accepts canonical empty bytes only when the declared range permits zero', () => {
+    expect(() => assertCanonicalHexBytes('0x', 'payload', 0, 0)).not.toThrow();
+    expect(() => assertCanonicalHexBytes('0x', 'payload', 1, 1)).toThrow(/1 lowercase bytes/);
+    expect(() => assertCanonicalHexBytes('0x0', 'payload', 0, 1)).toThrow(/lowercase bytes/);
+    expect(() => assertCanonicalHexBytes('0xAA', 'payload', 0, 1)).toThrow(/lowercase bytes/);
   });
 });
