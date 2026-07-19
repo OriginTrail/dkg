@@ -29,9 +29,15 @@ const blockedRfc64Modules = [
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
+  'open-catalog-policy-v1.js',
   'persistence-layout-v1.js',
   'persistence-root-ownership-v1-internal.js',
   'persistence-v1.js',
+  'public-catalog-native-receiver-v1.js',
+  'public-catalog-native-transport-v1.js',
+  'public-catalog-receiver-v1.js',
+  'public-catalog-service-v1.js',
+  'public-catalog-transport-v1.js',
   'secure-filesystem-policy-v1.js',
 ];
 const packageExports = packageManifest.exports;
