@@ -208,12 +208,12 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
   it('stays dormant without dataDir and performs no in-memory fallback', async () => {
     const agent = syntheticAgent();
 
-    await agent.prepareRfc64InventoryV1();
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
+    await agent.prepareRfc64PersistenceV1();
 
     expect(agent.rfc64PersistenceV1).toBeUndefined();
-    await expect(agent.closeRfc64InventoryV1()).resolves.toBeUndefined();
-    await expect(agent.closeRfc64InventoryV1()).resolves.toBeUndefined();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
   });
 
   it('owns one persistent foundation and purges every stale candidate in bounded yielding batches', async () => {
@@ -223,11 +223,11 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     const yieldBatch = vi.fn(async () => {});
     agent.yieldRfc64InventoryV1StartupBatch = yieldBatch;
 
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
     const ownedPersistence = agent.rfc64PersistenceV1;
     const ownedFoundation = ownedPersistence.inventory;
     const ownedControlObjectStore = ownedPersistence.controlObjectStore;
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
 
     expect(agent.rfc64PersistenceV1).toBe(ownedPersistence);
     expect(ownedFoundation.databasePath).toBe(
@@ -239,18 +239,18 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       join(dataDirectory, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH),
     );
 
-    await agent.closeRfc64InventoryV1();
+    await agent.closeRfc64PersistenceV1();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(ownedPersistence.closed).toBe(true);
     expect(ownedControlObjectStore.closed).toBe(true);
     expect(candidateLoadCount(dataDirectory)).toBe(0);
-    await expect(agent.closeRfc64InventoryV1()).resolves.toBeUndefined();
+    await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
   });
 
   it('retains the inventory lease until the control store drain settles', async () => {
     const dataDirectory = temporaryDataDirectory();
     const agent = syntheticAgent(dataDirectory);
-    await agent.prepareRfc64InventoryV1();
+    await agent.prepareRfc64PersistenceV1();
     const persistence = agent.rfc64PersistenceV1;
     const inventory = persistence.inventory;
     const controlStore = persistence.controlObjectStore;
@@ -263,7 +263,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       await actualClose();
     });
 
-    const close = agent.closeRfc64InventoryV1();
+    const close = agent.closeRfc64PersistenceV1();
     await entered.promise;
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(persistence.closed).toBe(true);
@@ -281,7 +281,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
-      prepareRfc64InventoryV1: vi.fn(async () => { throw failure; }),
+      prepareRfc64PersistenceV1: vi.fn(async () => { throw failure; }),
       node: { start: nodeStart },
       log: { info: vi.fn(), warn: vi.fn() },
     });
@@ -309,7 +309,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       symlinkSync(outside, objectsPath, 'dir');
       const agent = syntheticAgent(dataDirectory);
 
-      await expect(agent.prepareRfc64InventoryV1())
+      await expect(agent.prepareRfc64PersistenceV1())
         .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
       expect(agent.rfc64PersistenceV1).toBeUndefined();
 
@@ -325,7 +325,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
-      prepareRfc64InventoryV1: vi.fn(async () => {
+      prepareRfc64PersistenceV1: vi.fn(async () => {
         agent.rfc64PersistenceV1 = { close };
       }),
       node: { start: vi.fn(async () => { throw failure; }) },

@@ -1567,7 +1567,7 @@ export class DKGAgentBase {
    * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
    * open the inherited-owner control-object tree before network consumers.
    */
-  protected async prepareRfc64InventoryV1(): Promise<void> {
+  protected async prepareRfc64PersistenceV1(): Promise<void> {
     if (!this.config.dataDir || this.rfc64PersistenceV1 !== undefined) return;
     this.rfc64PersistenceV1 = await openRfc64PersistenceV1(this.config.dataDir, {
       yieldAfterPurgeBatch: () => this.yieldRfc64InventoryV1StartupBatch(),
@@ -1583,7 +1583,7 @@ export class DKGAgentBase {
    * Relinquish the control store and single inventory foundation. Clear local
    * references before closing so fail-stop cleanup cannot be retried.
    */
-  protected async closeRfc64InventoryV1(): Promise<void> {
+  protected async closeRfc64PersistenceV1(): Promise<void> {
     const persistence = this.rfc64PersistenceV1;
     this.rfc64PersistenceV1 = undefined;
     await persistence?.close();

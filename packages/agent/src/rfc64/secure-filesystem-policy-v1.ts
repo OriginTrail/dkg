@@ -42,7 +42,7 @@ export function rfc64PosixModeMatchesV1(mode: number, expected: number): boolean
 
 export function assertRfc64FilesystemOwnerSyncV1(path: string): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    runWindowsAclPolicy(path, statSync(path).isDirectory(), 'owner');
+    assertWindowsFilesystemOwnerSync(path, statSync(path).isDirectory());
     return;
   }
   if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
@@ -56,7 +56,7 @@ export function assertRfc64OwnerOnlyPermissionsSyncV1(
   directory: boolean,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    runWindowsAclPolicy(path, directory, 'assert-owner-only');
+    assertWindowsOwnerOnlyPermissionsSync(path, directory);
     return;
   }
   const stat = statSync(path);
@@ -76,7 +76,7 @@ export function applyRfc64OwnerOnlyPermissionsSyncV1(
   directory: boolean,
 ): void {
   if (rfc64UsesWindowsFilesystemPolicyV1()) {
-    runWindowsAclPolicy(path, directory, 'apply-owner-only');
+    applyWindowsOwnerOnlyPermissionsSync(path, directory);
     return;
   }
   assertRfc64FilesystemOwnerSyncV1(path);
@@ -122,21 +122,13 @@ export function rfc64RegularFileReadOpenFlagsV1(): number {
     | (rfc64UsesWindowsFilesystemPolicyV1() ? 0 : constants.O_NOFOLLOW);
 }
 
-type WindowsAclPolicyActionV1 = 'owner' | 'assert-owner-only' | 'apply-owner-only';
-
-function runWindowsAclPolicy(
-  path: string,
-  directory: boolean,
-  action: WindowsAclPolicyActionV1,
-): void {
-  const script = String.raw`
+const WINDOWS_ACL_POWERSHELL_PRELUDE = String.raw`
 $ErrorActionPreference = 'Stop'
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $userSid = $identity.User
 $defaultOwnerSid = $identity.Owner
 $target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
 $isDirectory = [System.Convert]::ToBoolean($env:DKG_RFC64_ACL_DIRECTORY)
-$action = $env:DKG_RFC64_ACL_ACTION
 
 function Read-TargetAcl {
   if ($isDirectory) {
@@ -160,41 +152,10 @@ function Assert-CurrentOwner($acl) {
     throw "owner SID $($owner.Value) is not the current token owner"
   }
 }
+`;
 
-$acl = Read-TargetAcl
-Assert-CurrentOwner $acl
-
-if ($action -eq 'apply-owner-only') {
-  $acl = if ($isDirectory) {
-    [System.Security.AccessControl.DirectorySecurity]::new()
-  } else {
-    [System.Security.AccessControl.FileSecurity]::new()
-  }
-  $acl.SetOwner($userSid)
-  $acl.SetAccessRuleProtection($true, $false)
-  $inheritance = if ($isDirectory) {
-    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-  } else {
-    [System.Security.AccessControl.InheritanceFlags]::None
-  }
-  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-    $userSid,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $inheritance,
-    [System.Security.AccessControl.PropagationFlags]::None,
-    [System.Security.AccessControl.AccessControlType]::Allow
-  )
-  $acl.AddAccessRule($rule)
-  if ($isDirectory) {
-    [System.IO.Directory]::SetAccessControl($target, $acl)
-  } else {
-    [System.IO.File]::SetAccessControl($target, $acl)
-  }
-  $acl = Read-TargetAcl
-  Assert-CurrentOwner $acl
-}
-
-if ($action -ne 'owner') {
+const WINDOWS_OWNER_ONLY_ASSERTION = String.raw`
+function Assert-OwnerOnly($acl) {
   if (-not $acl.AreAccessRulesProtected) {
     throw 'RFC-64 owner-only ACL must disable inherited access rules'
   }
@@ -218,6 +179,77 @@ if ($action -ne 'owner') {
   }
 }
 `;
+
+function assertWindowsFilesystemOwnerSync(path: string, directory: boolean): void {
+  runWindowsAclOperation(
+    path,
+    directory,
+    'owner assertion',
+    `${WINDOWS_ACL_POWERSHELL_PRELUDE}
+$acl = Read-TargetAcl
+Assert-CurrentOwner $acl`,
+  );
+}
+
+function assertWindowsOwnerOnlyPermissionsSync(path: string, directory: boolean): void {
+  runWindowsAclOperation(
+    path,
+    directory,
+    'owner-only assertion',
+    `${WINDOWS_ACL_POWERSHELL_PRELUDE}
+${WINDOWS_OWNER_ONLY_ASSERTION}
+$acl = Read-TargetAcl
+Assert-CurrentOwner $acl
+Assert-OwnerOnly $acl`,
+  );
+}
+
+function applyWindowsOwnerOnlyPermissionsSync(path: string, directory: boolean): void {
+  runWindowsAclOperation(
+    path,
+    directory,
+    'owner-only application',
+    `${WINDOWS_ACL_POWERSHELL_PRELUDE}
+${WINDOWS_OWNER_ONLY_ASSERTION}
+$existingAcl = Read-TargetAcl
+Assert-CurrentOwner $existingAcl
+$acl = if ($isDirectory) {
+  [System.Security.AccessControl.DirectorySecurity]::new()
+} else {
+  [System.Security.AccessControl.FileSecurity]::new()
+}
+$acl.SetOwner($userSid)
+$acl.SetAccessRuleProtection($true, $false)
+$inheritance = if ($isDirectory) {
+  [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+} else {
+  [System.Security.AccessControl.InheritanceFlags]::None
+}
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+  $userSid,
+  [System.Security.AccessControl.FileSystemRights]::FullControl,
+  $inheritance,
+  [System.Security.AccessControl.PropagationFlags]::None,
+  [System.Security.AccessControl.AccessControlType]::Allow
+)
+$acl.AddAccessRule($rule)
+if ($isDirectory) {
+  [System.IO.Directory]::SetAccessControl($target, $acl)
+} else {
+  [System.IO.File]::SetAccessControl($target, $acl)
+}
+$acl = Read-TargetAcl
+Assert-CurrentOwner $acl
+Assert-OwnerOnly $acl`,
+  );
+}
+
+function runWindowsAclOperation(
+  path: string,
+  directory: boolean,
+  operation: string,
+  script: string,
+): void {
   const result = spawnSync(
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
@@ -226,7 +258,6 @@ if ($action -ne 'owner') {
       windowsHide: true,
       env: {
         ...process.env,
-        DKG_RFC64_ACL_ACTION: action,
         DKG_RFC64_ACL_DIRECTORY: String(directory),
         DKG_RFC64_ACL_PATH: path,
       },
@@ -234,7 +265,7 @@ if ($action -ne 'owner') {
   );
   if (result.error !== undefined || result.status !== 0) {
     throw new Error(
-      `RFC-64 Windows owner-only ACL policy failed for ${path}: ${
+      `RFC-64 Windows ACL ${operation} failed for ${path}: ${
         result.error?.message
           ?? (result.stderr.trim() || `PowerShell exited ${result.status}`)
       }`,

@@ -596,7 +596,7 @@ describe('RFC-64 durable control-object store v1', () => {
     expect(closeSettled).toBe(false);
 
     release.resolve();
-    await expect(stage).rejects.toMatchObject({ code: 'control-store-closed' });
+    await expect(stage).resolves.toMatchObject({ durable: true });
     await expect(close).resolves.toBeUndefined();
     expect(closeSettled).toBe(true);
     await expect(store.close()).resolves.toBeUndefined();
@@ -642,6 +642,13 @@ describe('RFC-64 durable control-object store v1', () => {
       .rejects.toMatchObject({ code: 'control-store-durability' });
     expect(await readFile(paths.object, 'utf8')).toContain('dkg-rfc64-control-store-test-v1');
     await expect(stat(paths.signature)).rejects.toMatchObject({ code: 'ENOENT' });
+    const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
+    await expect(store.getVerifiedObject({
+      objectDigest: fixture.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: paths.signatureDigest,
+      verifyIssuerSignature,
+    })).resolves.toBeNull();
+    expect(verifyIssuerSignature).not.toHaveBeenCalled();
     boundaries.length = 0;
     await expect(store.stageVerifiedObjects([fixture])).resolves.toMatchObject({ durable: true });
     expect(boundaries).toContain('object.existing-fsynced');
@@ -660,6 +667,33 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(openRfc64ControlObjectStoreV1(dataDir))
       .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects symlinked digest files before reading or verifying outside bytes',
+    async () => {
+      for (const target of ['object', 'signature'] as const) {
+        const dataDir = await temporaryDataDirectory();
+        const outside = await temporaryDataDirectory();
+        const store = await openRfc64ControlObjectStoreV1(dataDir);
+        const fixture = await signedFixture(`symlink-${target}`);
+        await store.stageVerifiedObjects([fixture]);
+        const paths = pathsFor(dataDir, fixture.envelope);
+        const targetPath = paths[target];
+        const outsideFile = join(outside, `${target}.jcs`);
+        await writeFile(outsideFile, '{"outside":true}');
+        await unlink(targetPath);
+        await symlink(outsideFile, targetPath, 'file');
+        const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
+
+        await expect(store.getVerifiedObject({
+          objectDigest: fixture.envelope.objectDigest as Digest32V1,
+          signatureVariantDigest: paths.signatureDigest,
+          verifyIssuerSignature,
+        })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+        expect(verifyIssuerSignature).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'rejects permissive existing files and directories instead of trusting or tightening them',

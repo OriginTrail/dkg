@@ -130,37 +130,60 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
     containmentRoot,
     io,
   );
+  const resolvedInput = { ...input, targetPath };
+  if (await reconcileRfc64ExistingImmutableV1(resolvedInput)) return;
+  const tempPath = await writeRfc64SecureTempFileV1(resolvedInput);
+  await publishRfc64NoReplaceV1(resolvedInput, tempPath);
+}
+
+interface ResolvedPutRfc64ExactBytesInputV1<TKind extends string>
+  extends PutRfc64ExactBytesInputV1<TKind> {
+  readonly targetPath: string;
+}
+
+async function reconcileRfc64ExistingImmutableV1<TKind extends string>(
+  input: ResolvedPutRfc64ExactBytesInputV1<TKind>,
+): Promise<boolean> {
+  const { containmentRoot, relativePath, bytes, maxBytes, label } = input;
   const existing = await readRfc64OptionalBoundedBytesV1({
     containmentRoot,
     relativePath,
     maxBytes,
     label,
   });
-  if (existing !== null) {
-    if (!bytesEqual(existing, bytes)) {
-      fail('corrupt', `${label} bytes differ for the same immutable key`);
-    }
-    // A prior attempt can fail after no-replace publication but before the
-    // parent-directory barrier. Re-establish both barriers before retry succeeds.
-    await fsyncRegularFile(targetPath, label);
-    await io.boundary(`${kind}.existing-fsynced`);
-    await fsyncDirectory(dirname(targetPath));
-    await io.boundary(`${kind}.existing-parent-fsynced`);
-    return;
+  if (existing === null) return false;
+  if (!bytesEqual(existing, bytes)) {
+    fail('corrupt', `${label} bytes differ for the same immutable key`);
   }
+  await completeRfc64ExistingFileDurabilityV1(input);
+  return true;
+}
 
+async function completeRfc64ExistingFileDurabilityV1<TKind extends string>(
+  input: ResolvedPutRfc64ExactBytesInputV1<TKind>,
+): Promise<void> {
+  const { targetPath, label, kind, io } = input;
+  // A prior attempt can fail after no-replace publication but before the
+  // parent-directory barrier. Re-establish both barriers before retry succeeds.
+  await fsyncRegularFile(targetPath, label);
+  await io.boundary(`${kind}.existing-fsynced`);
+  await fsyncDirectory(dirname(targetPath));
+  await io.boundary(`${kind}.existing-parent-fsynced`);
+}
+
+async function writeRfc64SecureTempFileV1<TKind extends string>(
+  input: ResolvedPutRfc64ExactBytesInputV1<TKind>,
+): Promise<string> {
+  const { targetPath, bytes, label, kind, io } = input;
   const suffix = io.randomSuffix();
   if (!/^[0-9a-f]{32}$/u.test(suffix)) {
     fail('input', 'durable file random suffix must be 16 lowercase hex bytes');
   }
   const tempPath = join(dirname(targetPath), `.${basename(targetPath)}.${suffix}.tmp`);
-  let createdTemp = false;
-  let tempPresent = false;
+  let complete = false;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
     handle = await open(tempPath, 'wx', RFC64_SECURE_FILE_MODE_V1);
-    createdTemp = true;
-    tempPresent = true;
     await handle.writeFile(bytes);
     await io.boundary(`${kind}.temp-written`);
     await chmodSecure(tempPath, RFC64_SECURE_FILE_MODE_V1, `${label} temp file`);
@@ -169,6 +192,24 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
     await io.boundary(`${kind}.temp-fsynced`);
     await handle.close();
     handle = null;
+    complete = true;
+    return tempPath;
+  } catch (cause) {
+    if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
+    return fail('durability', `failed to write durable ${label} temp bytes`, cause);
+  } finally {
+    if (handle !== null) await handle.close().catch(() => undefined);
+    if (!complete) await unlink(tempPath).catch(() => undefined);
+  }
+}
+
+async function publishRfc64NoReplaceV1<TKind extends string>(
+  input: ResolvedPutRfc64ExactBytesInputV1<TKind>,
+  tempPath: string,
+): Promise<void> {
+  const { targetPath, label, kind, io } = input;
+  let tempPresent = true;
+  try {
     try {
       // Hard-link publication creates the immutable key atomically and fails
       // with EEXIST instead of replacing a target won by another writer.
@@ -177,22 +218,9 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
       if (!isNodeError(cause, 'EEXIST')) throw cause;
       await unlink(tempPath);
       tempPresent = false;
-      const racedExisting = await readRfc64OptionalBoundedBytesV1({
-        containmentRoot,
-        relativePath,
-        maxBytes,
-        label,
-      });
-      if (racedExisting === null) {
+      if (!await reconcileRfc64ExistingImmutableV1(input)) {
         fail('durability', `${label} disappeared after a no-replace publish conflict`);
       }
-      if (!bytesEqual(racedExisting, bytes)) {
-        fail('corrupt', `${label} bytes differ for the same immutable key`);
-      }
-      await fsyncRegularFile(targetPath, label);
-      await io.boundary(`${kind}.existing-fsynced`);
-      await fsyncDirectory(dirname(targetPath));
-      await io.boundary(`${kind}.existing-parent-fsynced`);
       return;
     }
     await io.boundary(`${kind}.published-no-replace`);
@@ -204,10 +232,9 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
     await assertExistingRegularFile(targetPath, `${label} cache file`, true);
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
-    fail('durability', `failed to durably stage ${label} bytes`, cause);
+    fail('durability', `failed to publish durable ${label} bytes`, cause);
   } finally {
-    if (handle !== null) await handle.close().catch(() => undefined);
-    if (createdTemp && tempPresent) await unlink(tempPath).catch(() => undefined);
+    if (tempPresent) await unlink(tempPath).catch(() => undefined);
   }
 }
 
@@ -237,7 +264,7 @@ export async function readRfc64OptionalBoundedBytesV1(
     fail('io', `failed to inspect ${label}`, cause);
   }
 
-  await assertRfc64SecureDirectoryTreeV1(dirname(path), containmentRoot);
+  await assertRfc64ExistingSecureDirectoryTreeV1(dirname(path), containmentRoot);
 
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -277,7 +304,7 @@ export async function readRfc64OptionalBoundedBytesV1(
   return fail('io', `failed to complete bounded read of ${label}`);
 }
 
-async function assertRfc64SecureDirectoryTreeV1(
+async function assertRfc64ExistingSecureDirectoryTreeV1(
   target: string,
   containmentRoot: string,
 ): Promise<void> {

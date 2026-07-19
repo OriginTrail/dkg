@@ -1721,7 +1721,7 @@ export class DKGAgent extends DKGAgentBase {
     let inventoryCloseFailed = false;
     let inventoryCloseFailure: unknown;
     try {
-      await this.closeRfc64InventoryV1();
+      await this.closeRfc64PersistenceV1();
     } catch (error) {
       inventoryCloseFailed = true;
       inventoryCloseFailure = error;

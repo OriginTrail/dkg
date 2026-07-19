@@ -180,7 +180,6 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     this.requireOpen();
     const prepared = prepareStageBatch(input);
     const operation = (async () => {
-      this.requireOpen();
       const result = await Promise.all(prepared.map(async (item) => {
         await this.stagePrepared(item);
         return Object.freeze({
@@ -313,10 +312,8 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   ): Promise<void> {
     const previous = this.#fileWriteTails.get(relativePath) ?? Promise.resolve();
     const run = previous.then(async () => {
-      this.requireOpen();
       await this.putExactFile(relativePath, bytes, kind);
     }, async () => {
-      this.requireOpen();
       await this.putExactFile(relativePath, bytes, kind);
     });
     this.#fileWriteTails.set(relativePath, run);

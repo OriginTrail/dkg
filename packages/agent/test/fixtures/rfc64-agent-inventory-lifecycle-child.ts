@@ -14,7 +14,7 @@ Object.assign(agent, {
   rfc64InventoryV1: undefined,
 });
 
-await agent.prepareRfc64InventoryV1();
+await agent.prepareRfc64PersistenceV1();
 
 let terminating = false;
 process.once('SIGTERM', () => {
@@ -22,7 +22,7 @@ process.once('SIGTERM', () => {
   terminating = true;
   void (async () => {
     try {
-      await agent.closeRfc64InventoryV1();
+      await agent.closeRfc64PersistenceV1();
       process.stdout.write('CLOSED\n', () => process.exit(0));
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
