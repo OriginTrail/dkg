@@ -27,6 +27,12 @@ import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TextDecoder } from 'node:util';
+import {
+  fsyncRfc64DirectorySyncV1,
+  rfc64CurrentUserOwnsUidV1,
+  rfc64PosixModeMatchesV1,
+  rfc64RegularFileFsyncOpenFlagsV1,
+} from '../secure-filesystem-policy-v1.js';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
@@ -554,6 +560,19 @@ function reopenVerifiedOwnedDatabase(
       { cause },
     );
   }
+}
+
+/** @internal Proves that the exact live foundation owns the lease for dataDir. */
+export function inventoryV1OwnsDataDir(
+  inventory: unknown,
+  dataDir: string,
+): inventory is Rfc64InventoryV1Foundation {
+  return inventory instanceof InventoryV1Foundation
+    && !inventory.closed
+    && typeof dataDir === 'string'
+    && dataDir.length > 0
+    && inventory.databasePath
+      === resolve(resolve(dataDir), INVENTORY_V1_RELATIVE_PATH);
 }
 
 async function loadSqliteModule(): Promise<SqliteModuleV1> {
@@ -1421,8 +1440,7 @@ if (
     return;
   }
   try {
-    const processUid = process.getuid?.();
-    if (processUid !== undefined && statSync(path).uid !== processUid) {
+    if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
       throw new Error('filesystem entry is not owned by the current process uid');
     }
   } catch (cause) {
@@ -1455,11 +1473,10 @@ function applySecurePermissions(path: string, mode: number, directory: boolean):
   try {
     chmodSync(path, mode);
     const stat = statSync(path);
-    const processUid = process.getuid?.();
-    if (processUid !== undefined && stat.uid !== processUid) {
-      throw new Error(`path owner uid ${stat.uid} does not match process uid ${processUid}`);
+    if (!rfc64CurrentUserOwnsUidV1(stat.uid)) {
+      throw new Error(`path owner uid ${stat.uid} does not match the current process uid`);
     }
-    if ((stat.mode & 0o777) !== mode) {
+    if (!rfc64PosixModeMatchesV1(stat.mode, mode)) {
       throw new Error(`path mode ${(stat.mode & 0o777).toString(8)} does not match ${mode.toString(8)}`);
     }
   } catch (cause) {
@@ -1594,7 +1611,7 @@ function fsyncRegularFile(path: string, label: string): void {
     // opened for read-only access with EPERM. The entry is already an owned
     // regular file; opening r+ grants the required handle access without
     // changing bytes, while POSIX retains its narrower read-only descriptor.
-    descriptor = openSync(path, process.platform === 'win32' ? 'r+' : 'r');
+    descriptor = openSync(path, rfc64RegularFileFsyncOpenFlagsV1());
     fsyncSync(descriptor);
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to fsync ${label}`, { cause });
@@ -2265,9 +2282,7 @@ function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdenti
 }
 
 function fsyncDirectory(path: string): void {
-  if (process.platform === 'win32') return;
-  const descriptor = openSync(path, 'r');
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  fsyncRfc64DirectorySyncV1(path);
 }
 
 function assertString(value: unknown, label: string): string {

@@ -43,7 +43,6 @@ export {
   RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
   RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64ControlObjectStoreErrorV1,
-  openRfc64ControlObjectStoreV1,
   type GetVerifiedControlObjectInputV1,
   type Rfc64ControlObjectStoreErrorCodeV1,
   type Rfc64ControlObjectStoreNamespaceDurabilityV1,

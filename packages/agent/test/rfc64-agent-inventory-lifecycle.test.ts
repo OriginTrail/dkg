@@ -262,7 +262,10 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       const dataDirectory = temporaryDataDirectory();
       const outside = temporaryDataDirectory();
       const inventory = await openInventoryV1(dataDirectory);
-      const initialStore = await openRfc64ControlObjectStoreV1(dataDirectory);
+      const initialStore = await openRfc64ControlObjectStoreV1(
+        dataDirectory,
+        inventory,
+      );
       initialStore.close();
       inventory.close();
       const objectsPath = join(
@@ -282,6 +285,18 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       replacement.close();
     },
   );
+
+  it('requires the live inventory owner for the exact control-store dataDir', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const otherDataDirectory = temporaryDataDirectory();
+    const inventory = await openInventoryV1(dataDirectory);
+
+    await expect(openRfc64ControlObjectStoreV1(otherDataDirectory, inventory))
+      .rejects.toMatchObject({ code: 'control-store-input' });
+    inventory.close();
+    await expect(openRfc64ControlObjectStoreV1(dataDirectory, inventory))
+      .rejects.toMatchObject({ code: 'control-store-input' });
+  });
 
   it('releases an acquired inventory when node startup fails', async () => {
     const failure = new Error('node start failed');

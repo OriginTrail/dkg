@@ -74,7 +74,7 @@ export async function openRfc64PersistenceV1(
       if (batch.done) break;
       await yieldAfterPurgeBatch();
     }
-    const controlObjectStore = await openRfc64ControlObjectStoreV1(dataDir);
+    const controlObjectStore = await openRfc64ControlObjectStoreV1(dataDir, inventory);
     return new OwnedRfc64PersistenceV1(inventory, controlObjectStore);
   } catch (cause) {
     try {

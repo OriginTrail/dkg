@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -29,7 +29,6 @@ import {
   RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64ControlObjectStoreErrorV1,
   createRfc64ControlObjectStoreTestOpenerV1,
-  openRfc64ControlObjectStoreV1,
   type Rfc64ControlObjectStoreDurabilityBoundaryV1,
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
@@ -38,8 +37,15 @@ import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-
 const PRIVATE_KEY = `0x${'42'.repeat(32)}`;
 const wallet = new ethers.Wallet(PRIVATE_KEY);
 const ISSUER = wallet.address.toLowerCase() as EvmAddressV1;
+const openRfc64ControlObjectStoreV1 = createRfc64ControlObjectStoreTestOpenerV1();
 
 const temporaryDirectories: string[] = [];
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: () => resolvePromise?.() };
+}
 
 async function temporaryDataDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'dkg-rfc64-control-store-'));
@@ -209,7 +215,7 @@ describe('RFC-64 durable control-object store v1', () => {
       store.stageVerifiedObjects([fixture]),
       store.stageVerifiedObjects([fixture]),
     ]);
-    expect(boundaries).toEqual([
+    const expectedBoundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [
       'directory.created',
       'directory.mode-secured',
       'directory.self-fsynced',
@@ -236,7 +242,16 @@ describe('RFC-64 durable control-object store v1', () => {
       'signature.parent-fsynced',
       'signature.existing-fsynced',
       'signature.existing-parent-fsynced',
-    ]);
+    ];
+    expect([...boundaries].sort()).toEqual([...expectedBoundaries].sort());
+    expect(boundaries.indexOf('object.temp-written'))
+      .toBeLessThan(boundaries.indexOf('object.renamed'));
+    expect(boundaries.indexOf('object.renamed'))
+      .toBeLessThan(boundaries.indexOf('object.existing-fsynced'));
+    expect(boundaries.indexOf('signature.temp-written'))
+      .toBeLessThan(boundaries.indexOf('signature.renamed'));
+    expect(boundaries.indexOf('signature.renamed'))
+      .toBeLessThan(boundaries.indexOf('signature.existing-fsynced'));
     boundaries.length = 0;
     await store.stageVerifiedObjects([fixture]);
     expect(boundaries).toEqual([
@@ -336,10 +351,30 @@ describe('RFC-64 durable control-object store v1', () => {
     expect(await readFile(paths.signature, 'utf8')).toBe('{}');
   });
 
+  it('rejects canonical unsigned object bytes stored under another object digest key', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const [first, second] = await Promise.all([signedFixture('6a'), signedFixture('6b')]);
+    await store.stageVerifiedObjects([first, second]);
+    const firstPaths = pathsFor(dataDir, first.envelope);
+    const secondPaths = pathsFor(dataDir, second.envelope);
+    await writeFile(firstPaths.object, await readFile(secondPaths.object), {
+      mode: RFC64_CONTROL_OBJECT_STORE_FILE_MODE,
+    });
+    const verifyIssuerSignature = vi.fn(verifyControlEnvelopeIssuerSignatureV1);
+
+    await expect(store.getVerifiedObject({
+      objectDigest: first.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: firstPaths.signatureDigest,
+      verifyIssuerSignature,
+    })).rejects.toMatchObject({ code: 'control-store-corrupt' });
+    expect(verifyIssuerSignature).not.toHaveBeenCalled();
+  });
+
   it('rejects a canonical signature variant stored under a different exact key', async () => {
     const dataDir = await temporaryDataDirectory();
     const store = await openRfc64ControlObjectStoreV1(dataDir);
-    const fixture = await signedFixture('6b');
+    const fixture = await signedFixture('6c');
     await store.stageVerifiedObjects([fixture]);
     const paths = pathsFor(dataDir, fixture.envelope);
     const wrongVariant = `0x${'34'.repeat(32)}` as Digest32V1;
@@ -382,6 +417,44 @@ describe('RFC-64 durable control-object store v1', () => {
       verifyIssuerSignature,
     })).resolves.toMatchObject({ envelope: fixture.envelope });
     expect(verifyIssuerSignature).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a read-side issuer proof bound to a different verified envelope', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const [first, second] = await Promise.all([signedFixture('6d'), signedFixture('6e')]);
+    await store.stageVerifiedObjects([first]);
+    const paths = pathsFor(dataDir, first.envelope);
+
+    await expect(store.getVerifiedObject({
+      objectDigest: first.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: paths.signatureDigest,
+      verifyIssuerSignature: async () => second.issuerSignature,
+    })).rejects.toMatchObject({ code: 'control-store-verification' });
+  });
+
+  it('does not let a slow verifier block an unrelated immutable stage', async () => {
+    const dataDir = await temporaryDataDirectory();
+    const store = await openRfc64ControlObjectStoreV1(dataDir);
+    const [first, second] = await Promise.all([signedFixture('6f'), signedFixture('6g')]);
+    await store.stageVerifiedObjects([first]);
+    const firstPaths = pathsFor(dataDir, first.envelope);
+    const entered = deferred();
+    const release = deferred();
+    const slowRead = store.getVerifiedObject({
+      objectDigest: first.envelope.objectDigest as Digest32V1,
+      signatureVariantDigest: firstPaths.signatureDigest,
+      verifyIssuerSignature: async (envelope) => {
+        entered.resolve();
+        await release.promise;
+        return verifyControlEnvelopeIssuerSignatureV1(envelope);
+      },
+    });
+    await entered.promise;
+
+    await expect(store.stageVerifiedObjects([second])).resolves.toMatchObject({ durable: true });
+    release.resolve();
+    await expect(slowRead).resolves.toMatchObject({ envelope: first.envelope });
   });
 
   it('cleans an unrenamed temp after a pre-visibility fault and converges on retry', async () => {
@@ -442,6 +515,30 @@ describe('RFC-64 durable control-object store v1', () => {
     await expect(openRfc64ControlObjectStoreV1(dataDir))
       .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects permissive existing files and directories instead of trusting or tightening them',
+    async () => {
+      const dataDir = await temporaryDataDirectory();
+      const store = await openRfc64ControlObjectStoreV1(dataDir);
+      const fixture = await signedFixture('8b');
+      await store.stageVerifiedObjects([fixture]);
+      const paths = pathsFor(dataDir, fixture.envelope);
+
+      await chmod(paths.object, 0o644);
+      await expect(store.getVerifiedObject({
+        objectDigest: fixture.envelope.objectDigest as Digest32V1,
+        signatureVariantDigest: paths.signatureDigest,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+
+      await chmod(paths.object, RFC64_CONTROL_OBJECT_STORE_FILE_MODE);
+      await chmod(dirname(dirname(paths.object)), 0o755);
+      store.close();
+      await expect(openRfc64ControlObjectStoreV1(dataDir))
+        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+    },
+  );
 
   it('returns null for an exact cache miss without calling the verifier', async () => {
     const dataDir = await temporaryDataDirectory();

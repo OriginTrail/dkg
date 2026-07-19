@@ -1,8 +1,13 @@
+import {
+  RFC64_SECURE_DIRECTORY_MODE_V1,
+  RFC64_SECURE_FILE_MODE_V1,
+} from '../secure-filesystem-policy-v1.js';
+
 export const INVENTORY_V1_APPLICATION_ID = 0x444b3634;
 export const INVENTORY_V1_USER_VERSION = 1;
 export const INVENTORY_V1_RELATIVE_PATH = 'rfc64-sync/inventory-v1.sqlite3';
-export const INVENTORY_V1_DIRECTORY_MODE = 0o700;
-export const INVENTORY_V1_FILE_MODE = 0o600;
+export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
+export const INVENTORY_V1_FILE_MODE = RFC64_SECURE_FILE_MODE_V1;
 
 // SQL-1 stores protocol integers only as canonical fixed-width big-endian
 // BLOBs. Decode the bounded low hexadecimal suffix with SQLite core built-ins

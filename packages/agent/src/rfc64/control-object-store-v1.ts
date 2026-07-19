@@ -1,21 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { constants } from 'node:fs';
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  rename,
-  unlink,
-} from 'node:fs/promises';
-import {
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import {
   MAX_CONTROL_OBJECT_BYTES,
@@ -37,20 +21,39 @@ import {
   readVerifiedControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
+import {
+  inventoryV1OwnsDataDir,
+  type Rfc64InventoryV1Foundation,
+} from './inventory-v1/open.js';
+import {
+  Rfc64DurableFileErrorV1,
+  assertRfc64ExistingDirectoryV1,
+  ensureRfc64SecureDirectoryTreeV1,
+  putRfc64ExactBytesV1,
+  readRfc64OptionalBoundedBytesV1,
+  type Rfc64DurableFileBoundaryV1,
+  type Rfc64DurableFileIoV1,
+} from './durable-file-store-v1.js';
+import {
+  RFC64_POSIX_NAMESPACE_DURABILITY_V1,
+  RFC64_SECURE_DIRECTORY_MODE_V1,
+  RFC64_SECURE_FILE_MODE_V1,
+  RFC64_WINDOWS_NAMESPACE_DURABILITY_V1,
+  rfc64NamespaceDurabilityV1,
+  type Rfc64NamespaceDurabilityV1,
+} from './secure-filesystem-policy-v1.js';
 
 export const RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH =
   'rfc64-sync/control-objects-v1' as const;
-export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = 0o700;
-export const RFC64_CONTROL_OBJECT_STORE_FILE_MODE = 0o600;
+export const RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
+export const RFC64_CONTROL_OBJECT_STORE_FILE_MODE = RFC64_SECURE_FILE_MODE_V1;
 export const RFC64_CONTROL_OBJECT_STORE_MAX_STAGE_OBJECTS = 16;
 export const RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY =
-  'posix-atomic-rename-directory-fsync-v1' as const;
+  RFC64_POSIX_NAMESPACE_DURABILITY_V1;
 export const RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY =
-  'windows-file-flush-atomic-rename-v1' as const;
+  RFC64_WINDOWS_NAMESPACE_DURABILITY_V1;
 
-export type Rfc64ControlObjectStoreNamespaceDurabilityV1 =
-  | typeof RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY
-  | typeof RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY;
+export type Rfc64ControlObjectStoreNamespaceDurabilityV1 = Rfc64NamespaceDurabilityV1;
 
 const OBJECTS_DIRECTORY = 'objects';
 const SIGNATURES_DIRECTORY = 'signatures';
@@ -83,30 +86,13 @@ export class Rfc64ControlObjectStoreErrorV1 extends Error {
   }
 }
 
-export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
-  | 'directory.created'
-  | 'directory.mode-secured'
-  | 'directory.self-fsynced'
-  | 'directory.parent-fsynced'
-  | 'object.temp-written'
-  | 'object.temp-mode-secured'
-  | 'object.temp-fsynced'
-  | 'object.renamed'
-  | 'object.parent-fsynced'
-  | 'object.existing-fsynced'
-  | 'object.existing-parent-fsynced'
-  | 'signature.temp-written'
-  | 'signature.temp-mode-secured'
-  | 'signature.temp-fsynced'
-  | 'signature.renamed'
-  | 'signature.parent-fsynced'
-  | 'signature.existing-fsynced'
-  | 'signature.existing-parent-fsynced';
+type Rfc64ControlObjectStoreFileKindV1 = 'object' | 'signature';
 
-interface Rfc64ControlObjectStoreIoV1 {
-  readonly boundary: (boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1) => void;
-  readonly randomSuffix: () => string;
-}
+export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
+  Rfc64DurableFileBoundaryV1<Rfc64ControlObjectStoreFileKindV1>;
+
+interface Rfc64ControlObjectStoreIoV1
+  extends Rfc64DurableFileIoV1<Rfc64ControlObjectStoreFileKindV1> {}
 
 const PRODUCTION_IO = Object.freeze({
   boundary: (_boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1): void => {},
@@ -178,7 +164,14 @@ export type Rfc64ControlObjectStoreTestOpenerV1 = (
  */
 export async function openRfc64ControlObjectStoreV1(
   dataDir: string,
+  inventoryOwnership: Rfc64InventoryV1Foundation,
 ): Promise<Rfc64ControlObjectStoreV1> {
+  if (!inventoryV1OwnsDataDir(inventoryOwnership, dataDir)) {
+    fail(
+      'control-store-input',
+      'control object store requires the live inventory owner for the same dataDir',
+    );
+  }
   return openRfc64ControlObjectStoreWithIoV1(dataDir, PRODUCTION_IO);
 }
 
@@ -212,9 +205,7 @@ interface PreparedStoredControlObjectV1 {
 class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   #closed = false;
   readonly #fileWriteTails = new Map<string, Promise<void>>();
-  readonly namespaceDurability = process.platform === 'win32'
-    ? RFC64_CONTROL_OBJECT_STORE_WINDOWS_NAMESPACE_DURABILITY
-    : RFC64_CONTROL_OBJECT_STORE_POSIX_NAMESPACE_DURABILITY;
+  readonly namespaceDurability = rfc64NamespaceDurabilityV1();
 
   constructor(
     readonly rootPath: string,
@@ -232,15 +223,13 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     const prepared = prepareStageBatch(input);
     return (async () => {
       this.requireOpen();
-      const result = new Array<StagedVerifiedControlObjectV1>(prepared.length);
-      for (let index = 0; index < prepared.length; index += 1) {
-        const item = prepared[index];
+      const result = await Promise.all(prepared.map(async (item) => {
         await this.stagePrepared(item);
-        result[index] = Object.freeze({
+        return Object.freeze({
           objectDigest: item.objectDigest,
           signatureVariantDigest: item.signatureVariantDigest,
         });
-      }
+      }));
       return Object.freeze({
         durable: true as const,
         namespaceDurability: this.namespaceDurability,
@@ -265,14 +254,19 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     return (async () => {
       const objectPath = this.objectPath(objectDigest);
       const signaturePath = this.signaturePath(objectDigest, signatureVariantDigest);
-      const [unsignedBytes, variantBytes] = await Promise.all([
-        readOptionalBoundedFile(objectPath, MAX_CONTROL_OBJECT_BYTES, 'control object'),
-        readOptionalBoundedFile(
-          signaturePath,
-          MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
-          'control signature variant',
-        ),
-      ]);
+      const [unsignedBytes, variantBytes] = await mapDurableFileErrors(async () =>
+        Promise.all([
+          readRfc64OptionalBoundedBytesV1(
+            objectPath,
+            MAX_CONTROL_OBJECT_BYTES,
+            'control object',
+          ),
+          readRfc64OptionalBoundedBytesV1(
+            signaturePath,
+            MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
+            'control signature variant',
+          ),
+        ]));
       if (unsignedBytes === null || variantBytes === null) return null;
 
       let unsigned: UnsignedControlEnvelopeV1;
@@ -361,12 +355,10 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
     const previous = this.#fileWriteTails.get(targetPath) ?? Promise.resolve();
     const run = previous.then(async () => {
       this.requireOpen();
-      await ensureSecureDirectory(dirname(targetPath), this.rootPath, this.io);
-      await stageExactFile(targetPath, bytes, kind, this.io);
+      await this.putExactFile(targetPath, bytes, kind);
     }, async () => {
       this.requireOpen();
-      await ensureSecureDirectory(dirname(targetPath), this.rootPath, this.io);
-      await stageExactFile(targetPath, bytes, kind, this.io);
+      await this.putExactFile(targetPath, bytes, kind);
     });
     this.#fileWriteTails.set(targetPath, run);
     void run.finally(() => {
@@ -375,6 +367,30 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       }
     }).catch(() => undefined);
     return run;
+  }
+
+  private async putExactFile(
+    targetPath: string,
+    bytes: Uint8Array,
+    kind: Rfc64ControlObjectStoreFileKindV1,
+  ): Promise<void> {
+    await mapDurableFileErrors(async () => {
+      await ensureRfc64SecureDirectoryTreeV1(
+        dirname(targetPath),
+        this.rootPath,
+        this.io,
+      );
+      await putRfc64ExactBytesV1({
+        targetPath,
+        bytes,
+        maxBytes: kind === 'object'
+          ? MAX_CONTROL_OBJECT_BYTES
+          : MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
+        label: kind === 'object' ? 'control object' : 'control signature variant',
+        kind,
+        io: this.io,
+      });
+    });
   }
 
   private requireOpen(): void {
@@ -394,18 +410,20 @@ async function openRfc64ControlObjectStoreWithIoV1(
   }
   const dataDir = resolve(dataDirInput);
   const rootPath = resolve(dataDir, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH);
-  const relativeRoot = relative(dataDir, rootPath);
-  if (
-    relativeRoot === '..'
-    || relativeRoot.startsWith(`..${sep}`)
-    || isAbsolute(relativeRoot)
-  ) {
-    fail('control-store-unsafe-path', 'control object store must remain inside dataDir');
-  }
-  await assertExistingDirectory(dataDir, 'DKG data directory', false);
-  await ensureSecureDirectory(rootPath, dataDir, io);
-  await ensureSecureDirectory(join(rootPath, OBJECTS_DIRECTORY), rootPath, io);
-  await ensureSecureDirectory(join(rootPath, SIGNATURES_DIRECTORY), rootPath, io);
+  await mapDurableFileErrors(async () => {
+    await assertRfc64ExistingDirectoryV1(dataDir, 'DKG data directory', false);
+    await ensureRfc64SecureDirectoryTreeV1(rootPath, dataDir, io);
+    await ensureRfc64SecureDirectoryTreeV1(
+      join(rootPath, OBJECTS_DIRECTORY),
+      rootPath,
+      io,
+    );
+    await ensureRfc64SecureDirectoryTreeV1(
+      join(rootPath, SIGNATURES_DIRECTORY),
+      rootPath,
+      io,
+    );
+  });
   return new FileRfc64ControlObjectStoreV1(rootPath, io);
 }
 
@@ -495,276 +513,21 @@ function unsignedFromSigned(envelope: SignedControlEnvelopeV1): UnsignedControlE
   } as UnsignedControlEnvelopeV1;
 }
 
-async function ensureSecureDirectory(
-  target: string,
-  containmentRoot: string,
-  io: Rfc64ControlObjectStoreIoV1,
-): Promise<void> {
-  const resolvedTarget = resolve(target);
-  const resolvedRoot = resolve(containmentRoot);
-  const relativeTarget = relative(resolvedRoot, resolvedTarget);
-  if (
-    relativeTarget === '..'
-    || relativeTarget.startsWith(`..${sep}`)
-    || isAbsolute(relativeTarget)
-  ) {
-    fail('control-store-unsafe-path', 'control store directory escaped its containment root');
-  }
-
-  if (relativeTarget.length === 0) {
-    await assertExistingDirectory(resolvedTarget, 'control store directory', true);
-    return;
-  }
-  await assertExistingDirectory(resolvedRoot, 'control store containment root', false);
-  let current = resolvedRoot;
-  for (const component of relativeTarget.split(sep).filter(Boolean)) {
-    current = join(current, component);
-    let created = false;
-    try {
-      await mkdir(current, { mode: RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE });
-      created = true;
-      io.boundary('directory.created');
-    } catch (cause) {
-      if (!isNodeError(cause, 'EEXIST')) {
-        fail('control-store-io', `failed to create control store directory ${current}`, cause);
-      }
-    }
-    if (created) {
-      await chmodSecure(current, RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE, 'directory');
-      io.boundary('directory.mode-secured');
-      await fsyncDirectory(current);
-      io.boundary('directory.self-fsynced');
-      await fsyncDirectory(dirname(current));
-      io.boundary('directory.parent-fsynced');
-    }
-    await assertExistingDirectory(current, 'control store directory', true);
-  }
-}
-
-async function stageExactFile(
-  targetPath: string,
-  bytes: Uint8Array,
-  kind: 'object' | 'signature',
-  io: Rfc64ControlObjectStoreIoV1,
-): Promise<void> {
-  const existing = await readOptionalBoundedFile(
-    targetPath,
-    kind === 'object' ? MAX_CONTROL_OBJECT_BYTES : MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
-    `existing ${kind}`,
-  );
-  if (existing !== null) {
-    if (!bytesEqual(existing, bytes)) {
-      fail('control-store-corrupt', `existing ${kind} bytes differ for the same digest key`);
-    }
-    // A prior attempt can fail after rename but before the parent-directory
-    // barrier. Re-establish both barriers before an idempotent retry reports
-    // success; merely observing the exact bytes is not a durability proof.
-    await fsyncRegularFile(targetPath, `existing ${kind}`);
-    io.boundary(`${kind}.existing-fsynced`);
-    await fsyncDirectory(dirname(targetPath));
-    io.boundary(`${kind}.existing-parent-fsynced`);
-    return;
-  }
-
-  const suffix = io.randomSuffix();
-  if (!/^[0-9a-f]{32}$/u.test(suffix)) {
-    fail('control-store-input', 'control store random suffix must be 16 lowercase hex bytes');
-  }
-  const tempPath = join(dirname(targetPath), `.${suffix}.tmp`);
-  let renamed = false;
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
+async function mapDurableFileErrors<T>(operation: () => Promise<T>): Promise<T> {
   try {
-    handle = await open(tempPath, 'wx', RFC64_CONTROL_OBJECT_STORE_FILE_MODE);
-    await handle.writeFile(bytes);
-    io.boundary(`${kind}.temp-written`);
-    await chmodSecure(tempPath, RFC64_CONTROL_OBJECT_STORE_FILE_MODE, `${kind} temp file`);
-    io.boundary(`${kind}.temp-mode-secured`);
-    await handle.sync();
-    io.boundary(`${kind}.temp-fsynced`);
-    await handle.close();
-    handle = null;
-    await rename(tempPath, targetPath);
-    renamed = true;
-    io.boundary(`${kind}.renamed`);
-    await fsyncDirectory(dirname(targetPath));
-    io.boundary(`${kind}.parent-fsynced`);
-    await assertExistingRegularFile(targetPath, `${kind} cache file`, true);
+    return await operation();
   } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-durability', `failed to durably stage ${kind} bytes`, cause);
-  } finally {
-    if (handle !== null) await handle.close().catch(() => undefined);
-    if (!renamed) await unlink(tempPath).catch(() => undefined);
-  }
-}
-
-async function readOptionalBoundedFile(
-  path: string,
-  maxBytes: number,
-  label: string,
-): Promise<Uint8Array | null> {
-  try {
-    const entry = await lstat(path);
-    if (entry.isSymbolicLink() || !entry.isFile()) {
-      fail('control-store-unsafe-path', `${label} must be a regular non-symlink file`);
-    }
-  } catch (cause) {
-    if (isNodeError(cause, 'ENOENT')) return null;
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-io', `failed to inspect ${label}`, cause);
-  }
-
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    handle = await open(path, constants.O_RDONLY | noFollow);
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
-      fail('control-store-corrupt', `${label} is outside its bounded regular-file shape`);
-    }
-    const bytes = new Uint8Array(stat.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (read.bytesRead === 0) {
-        fail('control-store-corrupt', `${label} was truncated during its bounded read`);
-      }
-      offset += read.bytesRead;
-    }
-    const extra = new Uint8Array(1);
-    const tail = await handle.read(extra, 0, 1, offset);
-    if (tail.bytesRead !== 0) {
-      fail('control-store-corrupt', `${label} grew during its bounded read`);
-    }
-    assertOwner(stat.uid, label);
-    await assertFileMode(stat.mode, label);
-    return bytes;
-  } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-io', `failed to read ${label}`, cause);
-  } finally {
-    if (handle !== null) await handle.close().catch(() => undefined);
-  }
-  return fail('control-store-io', `failed to complete bounded read of ${label}`);
-}
-
-async function assertExistingDirectory(
-  path: string,
-  label: string,
-  requireSecureMode: boolean,
-): Promise<void> {
-  try {
-    const entry = await lstat(path);
-    if (entry.isSymbolicLink() || !entry.isDirectory()) {
-      fail('control-store-unsafe-path', `${label} must be a non-symlink directory`);
-    }
-    assertOwner(entry.uid, label);
-    if (requireSecureMode) await assertDirectoryMode(entry.mode, label);
-  } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-io', `failed to inspect ${label}`, cause);
-  }
-}
-
-async function assertExistingRegularFile(
-  path: string,
-  label: string,
-  requireSecureMode: boolean,
-): Promise<void> {
-  try {
-    const entry = await lstat(path);
-    if (entry.isSymbolicLink() || !entry.isFile()) {
-      fail('control-store-unsafe-path', `${label} must be a regular non-symlink file`);
-    }
-    assertOwner(entry.uid, label);
-    if (requireSecureMode) await assertFileMode(entry.mode, label);
-  } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-io', `failed to inspect ${label}`, cause);
-  }
-}
-
-async function chmodSecure(path: string, mode: number, label: string): Promise<void> {
-  try {
-    if (process.platform !== 'win32') await chmod(path, mode);
-    const entry = await lstat(path);
-    assertOwner(entry.uid, label);
-    if (process.platform !== 'win32' && (entry.mode & 0o777) !== mode) {
-      throw new Error(`${label} mode is ${(entry.mode & 0o777).toString(8)}, expected ${mode.toString(8)}`);
-    }
-  } catch (cause) {
-    fail('control-store-unsafe-path', `failed to secure ${label}`, cause);
-  }
-}
-
-async function assertDirectoryMode(mode: number, label: string): Promise<void> {
-  if (
-    process.platform !== 'win32'
-    && (mode & 0o777) !== RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE
-  ) {
-    fail('control-store-unsafe-path', `${label} must have owner-only mode 0700`);
-  }
-}
-
-async function assertFileMode(mode: number, label: string): Promise<void> {
-  if (
-    process.platform !== 'win32'
-    && (mode & 0o777) !== RFC64_CONTROL_OBJECT_STORE_FILE_MODE
-  ) {
-    fail('control-store-unsafe-path', `${label} must have owner-only mode 0600`);
-  }
-}
-
-function assertOwner(uid: number, label: string): void {
-  if (process.platform === 'win32') return;
-  const processUid = process.getuid?.();
-  if (processUid !== undefined && uid !== processUid) {
-    fail('control-store-unsafe-path', `${label} is not owned by the current process user`);
-  }
-}
-
-async function fsyncDirectory(path: string): Promise<void> {
-  // Match the inventory-v1 durability primitive: Node maps fsync to
-  // FlushFileBuffers on Windows, which rejects directory handles with EPERM.
-  // Regular files are still flushed before rename (and again on idempotent
-  // recovery); the directory barrier is available only on POSIX backends.
-  if (process.platform === 'win32') return;
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    handle = await open(path, constants.O_RDONLY);
-    const stat = await handle.stat();
-    if (!stat.isDirectory()) {
-      fail('control-store-unsafe-path', 'directory fsync target is not a directory');
-    }
-    await handle.sync();
-  } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-durability', `failed to fsync directory ${path}`, cause);
-  } finally {
-    if (handle !== null) await handle.close().catch(() => undefined);
-  }
-}
-
-async function fsyncRegularFile(path: string, label: string): Promise<void> {
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    // FlushFileBuffers requires a write-capable Windows handle. POSIX retains
-    // a read-only descriptor so an idempotent recovery never gains write access.
-    handle = await open(
-      path,
-      process.platform === 'win32' ? 'r+' : constants.O_RDONLY | noFollow,
-    );
-    const stat = await handle.stat();
-    if (!stat.isFile()) {
-      fail('control-store-unsafe-path', `${label} fsync target is not a regular file`);
-    }
-    await handle.sync();
-  } catch (cause) {
-    if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
-    fail('control-store-durability', `failed to fsync ${label}`, cause);
-  } finally {
-    if (handle !== null) await handle.close().catch(() => undefined);
+    if (!(cause instanceof Rfc64DurableFileErrorV1)) throw cause;
+    const code: Rfc64ControlObjectStoreErrorCodeV1 = cause.code === 'input'
+      ? 'control-store-input'
+      : cause.code === 'unsafe-path'
+        ? 'control-store-unsafe-path'
+        : cause.code === 'corrupt'
+          ? 'control-store-corrupt'
+          : cause.code === 'io'
+            ? 'control-store-io'
+            : 'control-store-durability';
+    return fail(code, cause.message, cause);
   }
 }
 
@@ -777,15 +540,6 @@ function snapshotDigest(value: string, label: string): Digest32V1 {
   return value as Digest32V1;
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  let different = 0;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    different |= left[index] ^ right[index];
-  }
-  return different === 0;
-}
-
 function deepFreezePlain<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
@@ -796,11 +550,6 @@ function deepFreezePlain<T>(value: T): T {
     deepFreezePlain((value as Record<string, unknown>)[key]);
   }
   return Object.freeze(value);
-}
-
-function isNodeError(cause: unknown, code: string): boolean {
-  return cause instanceof Error && 'code' in cause
-    && (cause as NodeJS.ErrnoException).code === code;
 }
 
 function fail(
