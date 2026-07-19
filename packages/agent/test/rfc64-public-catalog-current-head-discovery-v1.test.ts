@@ -20,6 +20,7 @@ import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-
 import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+  Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1,
   encodeRfc64PublicCatalogCurrentHeadQueryV1,
   parseRfc64PublicCatalogCurrentHeadQueryV1,
   type Rfc64PublicCatalogCurrentHeadQueryV1,
@@ -180,10 +181,21 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
 
     expect(RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1)
       .toBe('/dkg/catalog/1/author-head/current');
-    const result = await requester.discoverCurrentCatalogHead({
-      remotePeerId: providerNode.peerId,
+    let remotePeerIdReads = 0;
+    const discoveryInput = {
       scope: discoveryScope(),
+    } as {
+      remotePeerId: string;
+      scope: ReturnType<typeof discoveryScope>;
+    };
+    Object.defineProperty(discoveryInput, 'remotePeerId', {
+      enumerable: true,
+      get() {
+        remotePeerIdReads += 1;
+        return remotePeerIdReads === 1 ? providerNode.peerId : requesterNode.peerId;
+      },
     });
+    const result = await requester.discoverCurrentCatalogHead(discoveryInput);
 
     expect(result?.announcement).toEqual({
       kind: 'rfc64-author-catalog-head-availability-v1',
@@ -202,6 +214,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     });
     expect(result?.head.envelope).toEqual(head);
     expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
+    expect(remotePeerIdReads).toBe(1);
     for (const [scope] of readCurrentAppliedCatalogHeadDigest.mock.calls) {
       expect(scope).toEqual(catalogScope());
     }
@@ -406,5 +419,86 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const withUnknown = new TextEncoder().encode(JSON.stringify({ ...parsed, surprise: 'x' }));
     expect(() => parseRfc64PublicCatalogCurrentHeadQueryV1(withUnknown))
       .toThrow(/missing or unknown fields/);
+  });
+
+  it('snapshots switching Proxies and rejects accessors without invoking them', () => {
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+    const expected = encodeRfc64PublicCatalogCurrentHeadQueryV1(query);
+    let switchedReads = 0;
+    const switching = new Proxy({ ...query }, {
+      get(target, property, receiver) {
+        if (property === 'networkId') {
+          switchedReads += 1;
+          return switchedReads === 1 ? NETWORK_ID : '';
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(encodeRfc64PublicCatalogCurrentHeadQueryV1(switching)).toEqual(expected);
+    expect(switchedReads).toBe(0);
+
+    let accessorCalls = 0;
+    const accessorQuery = { ...query } as Record<string, unknown>;
+    Object.defineProperty(accessorQuery, 'networkId', {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        return NETWORK_ID;
+      },
+    });
+    expect(() => encodeRfc64PublicCatalogCurrentHeadQueryV1(
+      accessorQuery as unknown as Rfc64PublicCatalogCurrentHeadQueryV1,
+    )).toThrow(/enumerable data properties/);
+    expect(accessorCalls).toBe(0);
+  });
+
+  it('honors the router stream abort before authorization or applied-head work', async () => {
+    let handler: ((
+      data: Uint8Array,
+      peerId: { toString(): string },
+      options: { signal?: AbortSignal },
+    ) => Promise<Uint8Array>) | undefined;
+    const router = {
+      register(_protocol: string, registered: typeof handler) {
+        handler = registered;
+      },
+      unregister() {},
+    } as unknown as ProtocolRouter;
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
+    const authorizeOpenCatalogOperation = vi.fn(async () => ({
+      accessPolicy: 0 as const,
+      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+    }));
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: {
+        getVerifiedObjectByDigest: vi.fn(async () => null),
+      },
+      readCurrentAppliedCatalogHeadDigest,
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+    const controller = new AbortController();
+    const reason = new Error('test stream closed');
+    controller.abort(reason);
+
+    await expect(handler!(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(query),
+      { toString: () => 'test-peer' },
+      { signal: controller.signal },
+    )).rejects.toBe(reason);
+    expect(authorizeOpenCatalogOperation).not.toHaveBeenCalled();
+    expect(readCurrentAppliedCatalogHeadDigest).not.toHaveBeenCalled();
+    transport.stop();
   });
 });
