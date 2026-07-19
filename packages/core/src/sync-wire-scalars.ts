@@ -35,7 +35,7 @@ export type EvmAddressV1 = string & {
   readonly [EVM_ADDRESS_V1_BRAND]: true;
 };
 
-export const MAX_DECIMAL_U64 = 18_446_744_073_709_551_615n;
+export const MAX_DECIMAL_U64 = (1n << 64n) - 1n;
 export const MAX_DECIMAL_U256 = (1n << 256n) - 1n;
 
 const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
@@ -150,7 +150,8 @@ function parseCanonicalUnsignedDecimal(
   }
 
   // Bound both regex work and BigInt construction for hostile in-memory callers.
-  const maxDigits = width === 'u64' ? 20 : 78;
+  // Derive the digit cap from the domain bound so the two never desynchronize.
+  const maxDigits = max.toString().length;
   if (value.length > maxDigits) {
     throw new Error(`${label} is outside the ${width} range`);
   }

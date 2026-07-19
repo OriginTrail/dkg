@@ -5,10 +5,17 @@ import { describe, expect, it } from 'vitest';
 // module-level behavior tests stay green.
 import {
   MAX_KA_TRANSFER_BYTES_V1,
+  assertCanonicalChainId,
   assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
   assertCanonicalDigest,
+  assertCanonicalHexBytes,
+  assertCanonicalKaId,
+  assertCanonicalTimestampMs,
   assertKaTransferDescriptorV1,
   canonicalizeKaTransferDescriptorV1,
+  parseCanonicalDecimalU64,
+  parseCanonicalDecimalU256,
   parseCanonicalKaTransferDescriptorV1,
 } from '../src/index.js';
 
@@ -34,11 +41,26 @@ describe('RFC-64 transfer descriptor + wire scalars public package barrel', () =
     expect(parseCanonicalKaTransferDescriptorV1(VALID_MIN_CANONICAL)).toEqual(VALID_MIN);
   });
 
-  it('re-exports the canonical wire scalar validators from ../src/index.js', () => {
-    expect(typeof assertCanonicalDecimalU64).toBe('function');
-    expect(typeof assertCanonicalDigest).toBe('function');
+  it('re-exports the full canonical wire scalar API from ../src/index.js', () => {
+    // Export-surface check: every newly exposed scalar symbol must be present on
+    // the barrel, so dropping any from src/index.ts fails here.
+    for (const [name, fn] of [
+      ['assertCanonicalChainId', assertCanonicalChainId],
+      ['assertCanonicalDecimalU64', assertCanonicalDecimalU64],
+      ['assertCanonicalDecimalU256', assertCanonicalDecimalU256],
+      ['assertCanonicalDigest', assertCanonicalDigest],
+      ['assertCanonicalHexBytes', assertCanonicalHexBytes],
+      ['assertCanonicalKaId', assertCanonicalKaId],
+      ['assertCanonicalTimestampMs', assertCanonicalTimestampMs],
+      ['parseCanonicalDecimalU64', parseCanonicalDecimalU64],
+      ['parseCanonicalDecimalU256', parseCanonicalDecimalU256],
+    ] as const) {
+      expect(typeof fn, name).toBe('function');
+    }
+    // Representative behavior through the barrel.
     expect(() => assertCanonicalDecimalU64('16', 'byteLength')).not.toThrow();
     expect(() => assertCanonicalDecimalU64('01', 'byteLength')).toThrow();
+    expect(parseCanonicalDecimalU256('255', 'x')).toBe(255n);
     expect(() => assertCanonicalDigest(`0x${'11'.repeat(32)}`, 'digest')).not.toThrow();
     expect(() => assertCanonicalDigest(`0x${'GG'.repeat(32)}`, 'digest')).toThrow();
   });
