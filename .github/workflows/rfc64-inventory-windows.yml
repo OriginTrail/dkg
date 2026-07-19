@@ -83,6 +83,9 @@ jobs:
       - name: Test RFC-64 evidence harness
         run: pnpm test:devnet:rfc64-evidence
 
+      - name: Build agent dependency closure
+        run: pnpm --filter @origintrail-official/dkg-agent... run build
+
       - name: Strict-typecheck Gate 0 lifecycle harness
         run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
 
@@ -91,9 +94,6 @@ jobs:
         # fit below 10m; reserve additional time for the build and verifier.
         timeout-minutes: 20
         run: pnpm test:gate0:rfc64-persistence-lifecycle
-
-      - name: Build agent dependency closure
-        run: pnpm --filter @origintrail-official/dkg-agent... run build
 
       - name: Typecheck the lifecycle crash harness
         run: >-
