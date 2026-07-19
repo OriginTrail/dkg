@@ -306,6 +306,12 @@ importers:
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../../packages/agent
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../../packages/chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../../packages/storage

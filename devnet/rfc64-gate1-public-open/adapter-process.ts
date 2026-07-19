@@ -4,8 +4,25 @@ import process from 'node:process';
 import { createInterface } from 'node:readline';
 
 import { multiaddr } from '@multiformats/multiaddr';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  DKGAgent,
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  produceDirectAuthorCatalogIssuerDelegationV1,
+  produceEmptyAuthorCatalogGenesisV1,
+} from '@origintrail-official/dkg-agent';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  computeControlSignatureVariantDigestHex,
+  type AuthorCatalogScopeV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type SignedControlEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+import {
+  OxigraphStore,
+  quadsToNQuads,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 import {
@@ -30,6 +47,11 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
+const RFC64_GATE1_DEPLOYMENT = Object.freeze({
+  networkId: 'otp:20430',
+  assertedAtChainId: '20430',
+  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+});
 let agent: DKGAgent | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
@@ -97,6 +119,7 @@ async function boot(): Promise<void> {
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    rfc64CatalogDeploymentProfile: RFC64_GATE1_DEPLOYMENT as never,
   });
   agent = created;
   await created.start();
@@ -165,12 +188,24 @@ async function handle(command: Command): Promise<void> {
       }
       const method = requireGate1ProductMethod(currentAgent, command.command);
       const output = await method(forwarded);
-      emitOperationResult(command, output);
+      if (command.command === 'publishSuccessor') {
+        const result = plainRecord(output, 'publishSuccessor output');
+        const bundleDigest = requiredDigest(result.bundleDigest, 'publishSuccessor.bundleDigest');
+        const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
+        if (stagedBundle === null) {
+          throw new Error('published successor bundle is absent from durable product storage');
+        }
+        emitOperationResult(command, {
+          ...result,
+          stagedBundleByteLength: stagedBundle.byteLength,
+        });
+      } else {
+        emitOperationResult(command, output);
+      }
       return;
     }
     case 'announce':
-    case 'appliedHeadReadback':
-    case 'exactInventoryReadback': {
+    case 'appliedHeadReadback': {
       const requiredRole = command.command === 'announce' ? 'author' : 'receiver';
       requireRole(requiredRole);
       const method = requireGate1ProductMethod(
@@ -178,6 +213,83 @@ async function handle(command: Command): Promise<void> {
         command.command as Exclude<Gate1ProductionAdapterOperation, 'killRestart'>,
       );
       const output = await method(plainRecord(command.input, `${command.command} input`));
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'exactInventoryReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'exactInventoryReadback input');
+      const catalogHeadDigest = requiredDigest(
+        input.catalogHeadDigest,
+        'exactInventoryReadback.catalogHeadDigest',
+      );
+      const output = currentAgent.readRfc64PublicCatalogSynchronizationEvidenceV1(
+        catalogHeadDigest,
+      );
+      emitOperationResult(command, wireSynchronizationEvidence(output));
+      return;
+    }
+    case 'prepareForgedAuthorizationGenesis': {
+      requireRole('author');
+      const output = await prepareForgedAuthorizationGenesis(
+        currentAgent,
+        plainRecord(command.input, 'prepareForgedAuthorizationGenesis input'),
+      );
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'receiverStats': {
+      requireRole('receiver');
+      emitOperationResult(command, currentAgent.rfc64PublicCatalogStatsV1()?.receiver ?? null);
+      return;
+    }
+    case 'semanticGraphReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'semanticGraphReadback input');
+      const swmGraph = requiredString(input.swmGraph, 'semanticGraphReadback.swmGraph');
+      if (!/^did:dkg:context-graph:[A-Za-z0-9:._/-]+$/u.test(swmGraph)) {
+        throw new TypeError('semanticGraphReadback.swmGraph is not a safe production graph IRI');
+      }
+      const result = await currentAgent.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+        { source: 'rfc64-gate1-semantic-readback' },
+      );
+      if (result.type !== 'quads') {
+        throw new Error('semantic graph readback did not return quads');
+      }
+      const quads = [...result.quads]
+        .map((quad): Quad => ({ ...quad, graph: '' }))
+        .sort(compareQuad);
+      emitOperationResult(command, {
+        activatedQuadCount: quads.length,
+        projectionNQuads: `${quadsToNQuads(quads)}\n`,
+        swmGraph,
+      });
+      return;
+    }
+    case 'terminalFailureReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'terminalFailureReadback input');
+      const catalogHeadDigest = requiredDigest(
+        input.catalogHeadDigest,
+        'terminalFailureReadback.catalogHeadDigest',
+      );
+      const method = (currentAgent as unknown as Record<string, unknown>)[
+        'readRfc64PublicCatalogReconciliationFailureV1'
+      ];
+      if (typeof method !== 'function') {
+        throw new Error(
+          'missing read-only product API: '
+            + 'DKGAgent.readRfc64PublicCatalogReconciliationFailureV1('
+            + 'catalogHeadDigest: Digest32V1): '
+            + '{ catalogHeadDigest: Digest32V1; errorName: string; errorCode: '
+            + 'Rfc64PublicCatalogNativeReceiverErrorCodeV1 | null } | null',
+        );
+      }
+      const output = await (method as (digest: string) => unknown).call(
+        currentAgent,
+        catalogHeadDigest,
+      );
       emitOperationResult(command, output);
       return;
     }
@@ -199,6 +311,170 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
+}
+
+function compareQuad(left: Quad, right: Quad): number {
+  const leftKey = `${left.subject}\n${left.predicate}\n${left.object}\n${left.graph}`;
+  const rightKey = `${right.subject}\n${right.predicate}\n${right.object}\n${right.graph}`;
+  return leftKey.localeCompare(rightKey);
+}
+
+function wireSynchronizationEvidence(output: unknown): unknown {
+  if (output === null) return null;
+  const evidence = plainRecord(output, 'exact synchronization evidence');
+  if (evidence.inventoryRowCount !== 1) return evidence;
+  const authorship = plainRecord(evidence.authorship, 'synchronization authorship');
+  const path = authorship.directoryPathObjectDigests;
+  const variants = authorship.directoryPathSignatureVariantDigests;
+  if (!Array.isArray(path) || !Array.isArray(variants) || path.length !== variants.length) {
+    throw new Error('synchronization authorship path evidence is incomplete');
+  }
+  const { authorship: _authorship, ...wire } = evidence;
+  return Object.freeze({
+    ...wire,
+    verifiedControlObjectCount: 3 + path.length,
+  });
+}
+
+interface HarnessControlObjectPersistenceV1 {
+  readonly controlObjects: {
+    stageVerifiedObjects(input: readonly HarnessVerifiedControlObjectV1[]): Promise<{
+      readonly objects: ReadonlyArray<{
+        readonly objectDigest: Digest32V1;
+        readonly signatureVariantDigest: Digest32V1;
+      }>;
+    }>;
+  };
+}
+
+interface HarnessVerifiedControlObjectV1 {
+  readonly envelope: SignedControlEnvelopeV1;
+  readonly issuerSignature: Awaited<ReturnType<typeof verifyControlEnvelopeIssuerSignatureV1>>;
+}
+
+/**
+ * Harness-only adversarial setup. Both signatures are cryptographically valid,
+ * but the head claims the catalog author while naming an attacker-scoped
+ * direct-author delegation. The product receiver must reject that exact scope
+ * mismatch before activation or applied-head mutation.
+ */
+async function prepareForgedAuthorizationGenesis(
+  currentAgent: DKGAgent,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const networkId = requiredString(input.networkId, 'forged.networkId');
+  const contextGraphId = requiredString(input.contextGraphId, 'forged.contextGraphId');
+  const policyDigest = requiredDigest(input.policyDigest, 'forged.policyDigest');
+  const catalogAuthorPrivateKey = requiredString(
+    input.catalogAuthorPrivateKey,
+    'forged.catalogAuthorPrivateKey',
+  );
+  const attackerPrivateKey = requiredString(
+    input.attackerPrivateKey,
+    'forged.attackerPrivateKey',
+  );
+  const issuedAt = requiredString(input.issuedAt, 'forged.issuedAt');
+  const delegationEffectiveAt = requiredString(
+    input.delegationEffectiveAt,
+    'forged.delegationEffectiveAt',
+  );
+  const delegationExpiresAt = requiredString(
+    input.delegationExpiresAt,
+    'forged.delegationExpiresAt',
+  );
+  const catalogAuthor = new ethers.Wallet(catalogAuthorPrivateKey);
+  const attacker = new ethers.Wallet(attackerPrivateKey);
+  const catalogAuthorAddress = catalogAuthor.address.toLowerCase() as EvmAddressV1;
+  const recoveredAuthorAddress = attacker.address.toLowerCase() as EvmAddressV1;
+  const attackerScope = catalogScope(
+    networkId,
+    contextGraphId,
+    recoveredAuthorAddress,
+  );
+  const claimedCatalogScope = catalogScope(
+    networkId,
+    contextGraphId,
+    catalogAuthorAddress,
+  );
+  const forgedDelegation = await produceDirectAuthorCatalogIssuerDelegationV1({
+    scope: attackerScope,
+    signer: {
+      issuer: recoveredAuthorAddress,
+      signDigest: (digest) => attacker.signMessage(digest),
+    },
+    effectiveAt: delegationEffectiveAt as never,
+    expiresAt: delegationExpiresAt as never,
+    catalogHeadIssuedAt: issuedAt as never,
+  });
+  const forgedGenesis = await produceEmptyAuthorCatalogGenesisV1({
+    scope: claimedCatalogScope,
+    catalogIssuerDelegationDigest:
+      forgedDelegation.authorization.catalogIssuerDelegation.objectDigest as Digest32V1,
+    issuedAt: issuedAt as never,
+    signer: {
+      issuer: catalogAuthorAddress,
+      signDigest: (digest) => catalogAuthor.signMessage(digest),
+    },
+  });
+  const persistence = (
+    currentAgent as unknown as { rfc64PersistenceV1?: HarnessControlObjectPersistenceV1 }
+  ).rfc64PersistenceV1;
+  if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+  await persistence.controlObjects.stageVerifiedObjects([{
+    envelope: forgedDelegation.authorization.catalogIssuerDelegation,
+    issuerSignature: forgedDelegation.issuerSignature,
+  }]);
+  const verifiedObjects = await Promise.all(forgedGenesis.stagedObjects.map(async (envelope) => ({
+    envelope,
+    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
+  })));
+  const staged = await persistence.controlObjects.stageVerifiedObjects(verifiedObjects);
+  const head = forgedGenesis.head;
+  const headReceipt = staged.objects.find((entry) => entry.objectDigest === head.objectDigest);
+  if (
+    headReceipt === undefined
+    || headReceipt.signatureVariantDigest !== computeControlSignatureVariantDigestHex(
+      head.objectDigest,
+      head.signature,
+    )
+  ) {
+    throw new Error('forged authorization head did not receive an exact durable stage receipt');
+  }
+  return Object.freeze({
+    announcement: Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+      networkId: head.payload.networkId,
+      contextGraphId: head.payload.contextGraphId,
+      subGraphName: head.payload.subGraphName,
+      authorAddress: head.payload.authorAddress,
+      catalogEra: head.payload.era,
+      catalogVersion: head.payload.version,
+      policyDigest,
+      catalogHeadObjectDigest: headReceipt.objectDigest,
+      signatureVariantDigest: headReceipt.signatureVariantDigest,
+    }),
+    attemptedCatalogHeadDigest: headReceipt.objectDigest,
+    catalogAuthorAddress,
+    recoveredAuthorAddress,
+  });
+}
+
+function catalogScope(
+  networkId: string,
+  contextGraphId: string,
+  authorAddress: EvmAddressV1,
+): AuthorCatalogScopeV1 {
+  return Object.freeze({
+    networkId,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress,
+    era: '0',
+    bucketCount: '1',
+  }) as AuthorCatalogScopeV1;
 }
 
 function emitOperationResult(command: Command, output: unknown): void {
@@ -269,6 +545,13 @@ function requiredString(value: unknown, label: string): string {
     throw new TypeError(`${label} must be a bounded non-empty string`);
   }
   return value;
+}
+
+function requiredDigest(value: unknown, label: string): Digest32V1 {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/u.test(value)) {
+    throw new TypeError(`${label} must be a canonical digest`);
+  }
+  return value as Digest32V1;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

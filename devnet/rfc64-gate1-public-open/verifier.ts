@@ -157,42 +157,10 @@ function verifyRuntimeEvidence(value: unknown): {
     fail('$.fixture.forged.recoveredAuthorAddress', 'must differ from the catalog author');
   }
 
-  // The restart/replay successor is the same exact one-row inventory. A new
-  // head/version may advance, but no semantic row, bundle, UAL, count, or
-  // applied inventory commitment may change or duplicate.
-  const stableFields: ReadonlyArray<keyof Gate1TransferEvidence> = [
-    'activatedQuadCount',
-    'authorAddress',
-    'bundleByteLength',
-    'bundleDigest',
-    'catalogRowDigest',
-    'contentByteLength',
-    'contentDigest',
-    'inventoryRowCount',
-    'kaUal',
-    'swmGraph',
-  ];
-  for (const field of stableFields) {
-    exactJson(repair[field], positive[field], `$.fixture.repairSuccessor.${field}`);
-  }
-  exact(
-    repair.head.appliedInventoryDigest,
-    positive.head.appliedInventoryDigest,
-    '$.fixture.repairSuccessor.head.appliedInventoryDigest',
-  );
-  exact(
-    repair.head.previousCatalogHeadDigest,
-    positive.head.catalogHeadDigest,
-    '$.fixture.repairSuccessor.head.previousCatalogHeadDigest',
-  );
-  if (repair.head.catalogHeadDigest === positive.head.catalogHeadDigest) {
-    fail('$.fixture.repairSuccessor.head.catalogHeadDigest', 'must advance to a distinct head');
-  }
-  const positiveVersion = BigInt(positive.head.catalogVersion);
-  const repairVersion = BigInt(repair.head.catalogVersion);
-  if (repairVersion !== positiveVersion + 1n) {
-    fail('$.fixture.repairSuccessor.head.catalogVersion', 'must advance exactly one version');
-  }
+  // Restart recovery is an idempotent replay of the exact accepted successor,
+  // not a no-op catalog publication. Every head, row, bundle, semantic, and
+  // applied-inventory field must therefore remain byte-for-byte identical.
+  exactJson(repair, positive, '$.fixture.repairSuccessor');
   return { forged, positive, repair };
 }
 
@@ -386,10 +354,16 @@ function verifyRestartRepair(
     'crashExit',
     'gap',
     'readBack',
+    'reannouncementAcknowledgedByPeerId',
     'restartedReady',
     'successorServedByPeerId',
   ]);
   exact(phase.successorServedByPeerId, peers.author, '$.phases.restartRepair.successorServedByPeerId');
+  exact(
+    phase.reannouncementAcknowledgedByPeerId,
+    peers.receiver,
+    '$.phases.restartRepair.reannouncementAcknowledgedByPeerId',
+  );
   verifyExit(phase.crashExit, '$.phases.restartRepair.crashExit', null, 'SIGKILL');
   const gap = closedRecord(phase.gap, '$.phases.restartRepair.gap', [
     'appliedBeforeCrash',

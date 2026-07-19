@@ -4,8 +4,9 @@ This harness has a closed evidence schema and a real process boundary. It boots
 an author and receiver as separate `DKGAgent` OS processes, connects them over
 libp2p, derives the same open policy independently on both nodes, exercises the
 production RFC-64 catalog APIs, kills the receiver with `SIGKILL`, restarts it
-against the same durable directory, and requires explicit reannouncement plus
-idempotent replay.
+against the same durable directory, and requires explicit reannouncement of the
+exact accepted successor plus durable idempotent dedupe and exact unchanged SWM
+readback.
 
 There is no fixture adapter and no fallback product result. Missing methods,
 unexpected return shapes, failed process cleanup, stale artifacts, and any
@@ -29,13 +30,19 @@ The adapter currently maps those operations to:
 - `DKGAgent.readRfc64PublicCatalogSynchronizationEvidenceV1`
 - harness-owned `SIGKILL` and process replacement
 
-At combined base `591ff321e9cd88f91206d15a87c882873f005c37`, only
-genesis publication exists on `DKGAgent`; the other product methods are being
-assembled in the native-wiring lane. The harness therefore boots and connects
-real agents, then exits non-zero with the exact missing method list. It does not
-write a raw or verdict artifact on that base. A follow-up composition against
-the native-wiring commit completes the six-operation scenario and result
-mapping.
+The harness maps every positive and restart field from production publication,
+durable applied-head, synchronization-evidence, and staged-bundle readbacks. Its
+adversarial author process stages a cryptographically valid head whose claimed
+catalog author is bound to a different recovered direct-author delegation; the
+real receiver must reject that mismatch without changing the previously applied
+inventory or SWM projection.
+
+The negative remains fail-closed until the product exposes the terminal typed
+receiver result through
+`readRfc64PublicCatalogReconciliationFailureV1(catalogHeadDigest)`. Aggregate
+failure counters are insufficient evidence for the frozen authorization error
+code. Missing read-only observability prevents artifact publication but does not
+weaken or alter the verifier schema.
 
 The preserved raw schema requires production-returned evidence for:
 
@@ -48,10 +55,12 @@ The preserved raw schema requires production-returned evidence for:
 - a real `SIGKILL`, restart with the same peer identity and durable directory,
   explicit reannouncement, and exact replay without duplicate activation.
 
-The replay successor deliberately reuses the same row/content/bundle. Its head
-and version advance, while the product inventory digest remains equal because
-the digest commits to catalog scope plus row/content/seal/UAL/count—not head.
-No durable repair intent or automatic startup repair is claimed.
+The restart path deliberately reannounces the same accepted successor head. It
+does not invent a no-op catalog version: ordinary catalog publication correctly
+rejects an unchanged bucket. The durable applied head and exact SWM projection
+remain identical, the restarted receiver reports an already-applied dedupe, and
+the explicit announcement is acknowledged. No durable repair intent or
+automatic startup repair is claimed.
 
 Build the agent and dependencies, then run the complete generator and verifier:
 

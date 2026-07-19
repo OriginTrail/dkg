@@ -17,7 +17,7 @@ const HEAD = 'a'.repeat(40);
 const AUTHOR = `0x${'11'.repeat(20)}`;
 const ATTACKER = `0x${'aa'.repeat(20)}`;
 const POSITIVE = transfer({ head: '6', previous: '7', version: '1' });
-const REPAIR = transfer({ head: '8', previous: '6', version: '2' });
+const REPAIR = structuredClone(POSITIVE);
 
 test('accepts canonical production-shaped evidence with exact runtime continuity', () => {
   const result = verifyGate1ArtifactBytes(bytes(goldenArtifact()), HEAD);
@@ -102,24 +102,24 @@ test('requires replay to retain exact row, content, bundle, UAL, and counts', ()
       typeof artifact.fixture.repairSuccessor[field] === 'number'
         ? 3
         : digest(String(index + 1));
-    reject(artifact, new RegExp(`repairSuccessor\\.${field}`));
+    reject(artifact, /repairSuccessor/);
   }
 });
 
 test('requires the product inventory digest to remain equal for the exact replayed row', () => {
   const artifact = goldenArtifact();
   artifact.fixture.repairSuccessor.head.appliedInventoryDigest = digest('9');
-  reject(artifact, /repairSuccessor\.head\.appliedInventoryDigest/);
+  reject(artifact, /repairSuccessor/);
 });
 
-test('requires the repair head to advance one version from the positive head', () => {
-  const wrongPrevious = goldenArtifact();
-  wrongPrevious.fixture.repairSuccessor.head.previousCatalogHeadDigest = digest('9');
-  reject(wrongPrevious, /repairSuccessor\.head\.previousCatalogHeadDigest/);
+test('requires restart replay to retain the exact accepted head and version', () => {
+  const wrongHead = goldenArtifact();
+  wrongHead.fixture.repairSuccessor.head.catalogHeadDigest = digest('9');
+  reject(wrongHead, /repairSuccessor/);
 
-  const skippedVersion = goldenArtifact();
-  skippedVersion.fixture.repairSuccessor.head.catalogVersion = '3';
-  reject(skippedVersion, /repairSuccessor\.head\.catalogVersion/);
+  const changedVersion = goldenArtifact();
+  changedVersion.fixture.repairSuccessor.head.catalogVersion = '2';
+  reject(changedVersion, /repairSuccessor/);
 });
 
 test('requires the four receiver-verified control objects from product evidence', () => {
@@ -166,17 +166,20 @@ test('requires real SIGKILL followed by explicit replay, not fictional startup r
     repaired: true,
   };
   reject(inventedStartupRepair, /restartRepair\.restartedReady\.startupRepair/);
+
+  const wrongAck = goldenArtifact();
+  wrongAck.phases.restartRepair.reannouncementAcknowledgedByPeerId = 'peer-author-real';
+  reject(wrongAck, /restartRepair\.reannouncementAcknowledgedByPeerId/);
 });
 
 test('requires pre-crash continuity and exact post-reannounce replay readback', () => {
   const prematureSuccessor = goldenArtifact();
-  prematureSuccessor.phases.restartRepair.gap.semanticBeforeCrash =
-    semanticReadBackFromTransfer(REPAIR);
+  prematureSuccessor.phases.restartRepair.gap.semanticBeforeCrash.contentDigest = digest('9');
   reject(prematureSuccessor, /restartRepair\.gap\.semanticBeforeCrash/);
 
   const wrongApplied = goldenArtifact();
   wrongApplied.phases.restartRepair.readBack.appliedReadBack.currentCatalogHeadDigest =
-    POSITIVE.head.catalogHeadDigest;
+    digest('9');
   reject(wrongApplied, /restartRepair\.readBack\.appliedReadBack/);
 
   const duplicate = goldenArtifact();
@@ -246,6 +249,7 @@ function buildGoldenArtifact() {
           appliedReadBack: structuredClone(appliedReadBackFromTransfer(REPAIR)),
           semanticPostRead: structuredClone(semanticReadBackFromTransfer(REPAIR)),
         },
+        reannouncementAcknowledgedByPeerId: 'peer-receiver-real',
         restartedReady: {
           adapterId: GATE1_REAL_DKG_AGENT_ADAPTER_ID,
           peerId: 'peer-receiver-real',
