@@ -144,6 +144,7 @@ function row(number: number): Rfc64PublicCatalogInventoryEvidenceRowV1 {
     catalogRowDigest: digest(number * 4),
     contentDigest: digest((number * 4) + 1),
     sealDigest: digest((number * 4) + 2),
+    bundleDigest: digest((number * 4) + 3),
     kaUal: `did:dkg:otp:20430/${AUTHOR}/${number}`,
     activatedTripleCount: number + 1,
   });

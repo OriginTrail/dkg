@@ -58,6 +58,8 @@ export interface Rfc64PublicCatalogInventoryEvidenceRowV1 {
   readonly catalogRowDigest: Digest32V1;
   readonly contentDigest: Digest32V1;
   readonly sealDigest: Digest32V1;
+  /** Exact `row.transfer.blobDigest`, exposed directly for operator evidence. */
+  readonly bundleDigest: Digest32V1;
   readonly kaUal: string;
   readonly activatedTripleCount: number;
 }
@@ -239,6 +241,7 @@ function snapshotRow(
   const keys = Reflect.ownKeys(input);
   const expectedKeys = [
     'activatedTripleCount',
+    'bundleDigest',
     'catalogRowDigest',
     'contentDigest',
     'kaId',
@@ -270,6 +273,7 @@ function snapshotRow(
     assertCanonicalDigest(input.catalogRowDigest, `${label}.catalogRowDigest`);
     assertCanonicalDigest(input.contentDigest, `${label}.contentDigest`);
     assertCanonicalDigest(input.sealDigest, `${label}.sealDigest`);
+    assertCanonicalDigest(input.bundleDigest, `${label}.bundleDigest`);
     if (!Number.isSafeInteger(input.activatedTripleCount) || input.activatedTripleCount < 1) {
       throw new Error(`${label}.activatedTripleCount must be a positive safe integer`);
     }
@@ -299,6 +303,7 @@ function snapshotRow(
     catalogRowDigest: input.catalogRowDigest,
     contentDigest: input.contentDigest,
     sealDigest: input.sealDigest,
+    bundleDigest: input.bundleDigest,
     kaUal: input.kaUal,
     activatedTripleCount: input.activatedTripleCount,
   });
@@ -345,6 +350,7 @@ function sameRow(
     && expected.catalogRowDigest === observed.catalogRowDigest
     && expected.contentDigest === observed.contentDigest
     && expected.sealDigest === observed.sealDigest
+    && expected.bundleDigest === observed.bundleDigest
     && expected.kaUal === observed.kaUal
     && expected.activatedTripleCount === observed.activatedTripleCount;
 }
