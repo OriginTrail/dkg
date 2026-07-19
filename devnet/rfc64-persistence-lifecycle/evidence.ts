@@ -66,13 +66,24 @@ export function atomicWriteStableJson(
   artifactPathInput: string,
   value: unknown,
 ): AtomicArtifactWriteResult {
+  return atomicWriteExactBytes(
+    artifactPathInput,
+    Buffer.from(stableJson(value), 'utf8'),
+  );
+}
+
+/** Atomically publish caller-canonicalized artifact bytes without re-encoding them. */
+export function atomicWriteExactBytes(
+  artifactPathInput: string,
+  bytesInput: Uint8Array,
+): AtomicArtifactWriteResult {
   const artifactPath = resolve(artifactPathInput);
   const parentPath = dirname(artifactPath);
   mkdirSync(parentPath, { recursive: true, mode: 0o700 });
   const parentIdentity = inspectDirectory(parentPath, 'artifact parent directory');
   assertReplaceableArtifactTarget(artifactPath);
 
-  const bytes = Buffer.from(stableJson(value), 'utf8');
+  const bytes = Buffer.from(bytesInput);
   const intendedSha256 = sha256(bytes);
   const tempPath = resolve(
     parentPath,

@@ -11,7 +11,7 @@ import {
   type Gate2AuthoredInventory,
   type Gate2ReceivedInventory,
 } from './model.js';
-import { sha256Digest } from './src/canonical.ts';
+import { canonicalDocument, sha256Digest, type CanonicalValue } from './src/canonical.ts';
 import {
   GATE_EVALUATION,
   PRODUCT_BOUNDARY,
@@ -19,6 +19,12 @@ import {
   type AssetRowV1,
 } from './src/schema.ts';
 import { verify as verifyInventoryContract } from './src/verify.ts';
+import {
+  buildGate2RuntimeProvenanceV1,
+  type Gate2RuntimeManifestV1,
+  type Gate2RuntimeProcessEvidenceV1,
+  type Gate2RuntimeProvenanceV1,
+} from './runtime-provenance.ts';
 
 const COMMIT = /^[0-9a-f]{40,64}$/u;
 const DIGEST = /^0x[0-9a-f]{64}$/u;
@@ -34,6 +40,7 @@ const MAX_RAW_BYTES = 2 * 1024 * 1024;
 
 export interface Gate2VerifiedEvidence {
   readonly rawArtifactSha256: string;
+  readonly runtimeProvenanceDigest: string;
   readonly sourceCommit: string;
 }
 
@@ -41,6 +48,7 @@ export interface Gate2PassVerdict {
   readonly gate: 'OT-RFC-64 Gate 2 multi-asset completeness';
   readonly productBoundary: 'connected';
   readonly rawArtifactSha256: string;
+  readonly runtimeProvenanceDigest: string;
   readonly schemaVersion: typeof GATE2_VERDICT_SCHEMA_VERSION;
   readonly sourceCommit: string;
   readonly status: 'PASS';
@@ -53,6 +61,7 @@ export function buildGate2PassVerdict(
     gate: 'OT-RFC-64 Gate 2 multi-asset completeness',
     productBoundary: 'connected',
     rawArtifactSha256: verified.rawArtifactSha256,
+    runtimeProvenanceDigest: verified.runtimeProvenanceDigest,
     schemaVersion: GATE2_VERDICT_SCHEMA_VERSION,
     sourceCommit: verified.sourceCommit,
     status: 'PASS',
@@ -62,6 +71,7 @@ export function buildGate2PassVerdict(
 export function verifyGate2ArtifactBytes(
   rawBytes: Uint8Array,
   expectedHead: string,
+  expectedRuntimeManifest: Gate2RuntimeManifestV1,
 ): Gate2VerifiedEvidence {
   matchString(expectedHead, COMMIT, 'expected repository HEAD');
   if (rawBytes.byteLength < 1 || rawBytes.byteLength > MAX_RAW_BYTES) {
@@ -79,15 +89,26 @@ export function verifyGate2ArtifactBytes(
   } catch (cause) {
     throw new Error('Gate 2 artifact is not valid JSON', { cause });
   }
-  if (stableJson(parsed) !== text) fail('$', 'raw artifact is not exact canonical stable JSON');
-  verifyArtifact(parsed, expectedHead);
+  if (canonicalDocument(parsed as CanonicalValue) !== text) {
+    fail('$', 'raw artifact is not an exact RFC 8785 canonical document with one trailing LF');
+  }
+  const runtimeProvenanceDigest = verifyArtifact(
+    parsed,
+    expectedHead,
+    expectedRuntimeManifest,
+  );
   return Object.freeze({
     rawArtifactSha256: `0x${createHash('sha256').update(rawBytes).digest('hex')}`,
+    runtimeProvenanceDigest,
     sourceCommit: expectedHead,
   });
 }
 
-function verifyArtifact(value: unknown, expectedHead: string): void {
+function verifyArtifact(
+  value: unknown,
+  expectedHead: string,
+  expectedRuntimeManifest: Gate2RuntimeManifestV1,
+): string {
   const raw = closedRecord(value, '$', [
     'adapter',
     'authorizationNegative',
@@ -101,6 +122,7 @@ function verifyArtifact(value: unknown, expectedHead: string): void {
     'ready',
     'repository',
     'restartReplay',
+    'runtimeProvenance',
     'schemaVersion',
     'transitions',
     'transport',
@@ -120,6 +142,7 @@ function verifyArtifact(value: unknown, expectedHead: string): void {
     'protocolVersion',
     'replacementContract',
     'requiredProductionOperations',
+    'runtimeBuildManifestDigest',
   ]);
   exact(adapter.id, GATE2_REAL_DKG_AGENT_ADAPTER_ID, '$.adapter.id');
   exact(adapter.protocolVersion, GATE2_ADAPTER_PROTOCOL_VERSION, '$.adapter.protocolVersion');
@@ -132,6 +155,16 @@ function verifyArtifact(value: unknown, expectedHead: string): void {
   );
   exactJson(adapter.inspectedProductCommits, [expectedHead], '$.adapter.inspectedProductCommits');
 
+  const runtimeProvenanceDigest = verifyRuntimeProvenance(
+    raw.runtimeProvenance,
+    expectedRuntimeManifest,
+  );
+  exact(
+    adapter.runtimeBuildManifestDigest,
+    expectedRuntimeManifest.manifestDigest,
+    '$.adapter.runtimeBuildManifestDigest',
+  );
+
   const repository = closedRecord(raw.repository, '$.repository', [
     'testedHeadCommit',
     'trackedSourceCleanAfterProcesses',
@@ -141,7 +174,7 @@ function verifyArtifact(value: unknown, expectedHead: string): void {
   exact(repository.trackedSourceCleanBeforeSpawn, true, '$.repository.cleanBefore');
   exact(repository.trackedSourceCleanAfterProcesses, true, '$.repository.cleanAfter');
 
-  const peers = verifyReadyPair(raw.ready);
+  const peers = verifyReadyPair(raw.ready, expectedRuntimeManifest.manifestDigest);
   verifyProcessBoundary(raw.processBoundary);
   const policy = verifyPolicy(raw.policy);
   const inventories = verifyInventories(raw.inventory, policy);
@@ -185,7 +218,30 @@ function verifyArtifact(value: unknown, expectedHead: string): void {
     expectedApplied,
     peers,
     positiveWire.semantic,
+    expectedRuntimeManifest.manifestDigest,
   );
+  return runtimeProvenanceDigest;
+}
+
+function verifyRuntimeProvenance(
+  value: unknown,
+  expectedRuntimeManifest: Gate2RuntimeManifestV1,
+): string {
+  try {
+    const raw = value as Gate2RuntimeProvenanceV1;
+    exactJson(raw.sourceBuild, expectedRuntimeManifest, '$.runtimeProvenance.sourceBuild');
+    const rebuilt = buildGate2RuntimeProvenanceV1(
+      raw.sourceBuild,
+      raw.processes as readonly Gate2RuntimeProcessEvidenceV1[],
+    );
+    exactJson(raw, rebuilt, '$.runtimeProvenance');
+    return digest(raw.provenanceDigest, '$.runtimeProvenance.provenanceDigest');
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.startsWith('Gate 2 evidence verification failed')) {
+      throw cause;
+    }
+    fail('$.runtimeProvenance', cause instanceof Error ? cause.message : String(cause));
+  }
 }
 
 function verifyInventories(
@@ -208,6 +264,12 @@ function verifyInventories(
   const received = inventory.received as Gate2ReceivedInventory;
   exact(authored.signedRows.length, 3, '$.inventory.authored.signedRows.length');
   exact(received.activatedRows.length, 3, '$.inventory.received.activatedRows.length');
+  if (new Set(authored.signedRows.map((row) => row.contentDigest)).size !== 3) {
+    fail('$.inventory.authored.signedRows', 'content digests must be distinct per KA');
+  }
+  if (new Set(received.activatedRows.map((row) => row.contentDigest)).size !== 3) {
+    fail('$.inventory.received.activatedRows', 'content digests must be distinct per KA');
+  }
   exact(authored.catalogScope.networkId, policy.networkId, '$.inventory.authored.scope.networkId');
   exact(
     authored.catalogScope.contextGraphId,
@@ -383,6 +445,9 @@ function verifyPositiveWireInventory(
     rows.reduce((total, row) => total + row.activatedTripleCount, 0),
     `${path}.activatedTripleCount`,
   );
+  if (new Set(rows.map((row) => row.swmGraph)).size !== rows.length) {
+    fail(`${path}.rows`, 'SWM graphs must be distinct per KA');
+  }
   return { rows: Object.freeze(rows), verifiedControlObjectCount };
 }
 
@@ -394,6 +459,7 @@ const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
 
 function verifySemanticState(value: unknown, path: string, rows: readonly WireRow[]): void {
   const semantic = closedArray(value, path, 3);
+  const projections = new Set<string>();
   semantic.forEach((entry, index) => {
     const state = closedRecord(entry, `${path}[${index}]`, ['kaId', 'readBack']);
     exact(state.kaId, rows[index]!.kaId, `${path}[${index}].kaId`);
@@ -413,12 +479,14 @@ function verifySemanticState(value: unknown, path: string, rows: readonly WireRo
       `${path}[${index}].projectionNQuads`,
       256 * 1024,
     );
+    projections.add(projection);
     exact(
       sha256Digest(KA_PROJECTION_DIGEST_DOMAIN_V1, projection),
       rows[index]!.contentDigest,
       `${path}[${index}].projection digest`,
     );
   });
+  if (projections.size !== rows.length) fail(path, 'semantic projections must be distinct per KA');
 }
 
 function verifyRestart(
@@ -427,6 +495,7 @@ function verifyRestart(
   expectedApplied: unknown,
   peers: { author: string; receiver: string },
   semanticBefore: unknown,
+  runtimeManifestDigest: string,
 ): void {
   const restart = closedRecord(value, '$.restartReplay', [
     'appliedReadBack',
@@ -457,6 +526,7 @@ function verifyRestart(
     restart.restartedReady,
     '$.restartReplay.restartedReady',
     'receiver',
+    runtimeManifestDigest,
   );
   exact(restartedPeer, peers.receiver, '$.restartReplay.restartedReady.peerId');
   exactJson(restart.semanticPostRead, semanticBefore, '$.restartReplay.semanticPostRead');
@@ -471,25 +541,40 @@ function verifyRestart(
   verifySemanticState(restart.semanticPostRead, '$.restartReplay.semanticPostRead', rows);
 }
 
-function verifyReadyPair(value: unknown): { author: string; receiver: string } {
+function verifyReadyPair(
+  value: unknown,
+  runtimeManifestDigest: string,
+): { author: string; receiver: string } {
   const ready = closedRecord(value, '$.ready', ['author', 'receiver']);
-  const author = verifyReadyEvent(ready.author, '$.ready.author', 'author');
-  const receiver = verifyReadyEvent(ready.receiver, '$.ready.receiver', 'receiver');
+  const author = verifyReadyEvent(ready.author, '$.ready.author', 'author', runtimeManifestDigest);
+  const receiver = verifyReadyEvent(
+    ready.receiver,
+    '$.ready.receiver',
+    'receiver',
+    runtimeManifestDigest,
+  );
   if (author === receiver) fail('$.ready', 'author and receiver peers must be distinct');
   return { author, receiver };
 }
 
-function verifyReadyEvent(value: unknown, path: string, role: 'author' | 'receiver'): string {
+function verifyReadyEvent(
+  value: unknown,
+  path: string,
+  role: 'author' | 'receiver',
+  runtimeManifestDigest: string,
+): string {
   const ready = closedRecord(value, path, [
     'adapterId',
     'peerId',
     'protocolVersion',
     'role',
+    'runtimeBuildManifestDigest',
     'startupRepair',
   ]);
   exact(ready.adapterId, GATE2_REAL_DKG_AGENT_ADAPTER_ID, `${path}.adapterId`);
   exact(ready.protocolVersion, GATE2_ADAPTER_PROTOCOL_VERSION, `${path}.protocolVersion`);
   exact(ready.role, role, `${path}.role`);
+  exact(ready.runtimeBuildManifestDigest, runtimeManifestDigest, `${path}.runtimeBuildManifestDigest`);
   exact(ready.startupRepair, null, `${path}.startupRepair`);
   return boundedString(ready.peerId, `${path}.peerId`);
 }

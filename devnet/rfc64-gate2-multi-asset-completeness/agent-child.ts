@@ -25,6 +25,11 @@ export interface Gate2AgentSpawnSpec {
   readonly env: NodeJS.ProcessEnv;
 }
 
+export interface Gate2ProcessBoundaryEvidence {
+  readonly event: Gate2AgentEvent;
+  readonly exit: ProcessExitEvidence;
+}
+
 export interface Gate2AgentChildOptions {
   readonly eventTimeoutMs?: number;
   readonly registry: ChildProcessRegistry;
@@ -134,25 +139,25 @@ export class Gate2AgentChild {
     return event;
   }
 
-  async stop(requestId: string): Promise<ProcessExitEvidence> {
+  async stop(requestId: string): Promise<Gate2ProcessBoundaryEvidence> {
     if (this.child.exitCode !== null || this.child.signalCode !== null) {
-      return this.tracked.closed;
+      throw new Error(`${this.role} DKGAgent was already closed before the stop boundary`);
     }
-    await this.request('stop', requestId, 'stopped');
+    const event = await this.request('stop', requestId, 'stopped');
     const exit = await this.tracked.closed;
     if (exit.code !== 0 || exit.signal !== null) {
       throw new Error(`${this.role} DKGAgent did not stop cleanly: ${JSON.stringify(exit)}`);
     }
-    return exit;
+    return { event, exit };
   }
 
-  async killRestartBoundary(requestId: string): Promise<ProcessExitEvidence> {
-    await this.request('killRestart', requestId, 'kill-restart-ready');
+  async killRestartBoundary(requestId: string): Promise<Gate2ProcessBoundaryEvidence> {
+    const event = await this.request('killRestart', requestId, 'kill-restart-ready');
     const exit = await this.options.registry.terminateAndWait(this.tracked, 'SIGKILL');
     if (exit.code !== null || exit.signal !== 'SIGKILL') {
       throw new Error(`${this.role} crash boundary was not SIGKILL: ${JSON.stringify(exit)}`);
     }
-    return exit;
+    return { event, exit };
   }
 
   private consumeStdout(chunk: string): void {

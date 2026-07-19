@@ -13,9 +13,14 @@ import {
   buildGate2PassVerdict,
   verifyGate2ArtifactBytes,
 } from '../live-verifier.ts';
-import { sha256Digest } from '../src/canonical.ts';
+import { canonicalDocument, sha256Digest, type CanonicalValue } from '../src/canonical.ts';
 import { generateCompleteFixture } from '../src/generate.ts';
 import { computeAppliedInventoryDigest } from '../src/product-digests.ts';
+import {
+  buildGate2ExecutedRuntimeManifestV1,
+  buildGate2RuntimeManifestFromEntriesV1,
+  buildGate2RuntimeProvenanceV1,
+} from '../runtime-provenance.ts';
 
 const SOURCE_COMMIT = 'a'.repeat(40);
 const AUTHOR_PEER = '12D3KooWGate2Author';
@@ -26,6 +31,19 @@ const PROJECTIONS = [
   '<https://example.org/fixture-3> <https://schema.org/name> "Three" .\n',
 ];
 const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
+const RUNTIME_FILES = [
+  { path: 'packages/agent/dist/index.js', byteLength: 1, sha256: `0x${'1'.repeat(64)}` },
+  { path: 'packages/chain/dist/index.js', byteLength: 2, sha256: `0x${'2'.repeat(64)}` },
+  { path: 'packages/core/dist/index.js', byteLength: 3, sha256: `0x${'3'.repeat(64)}` },
+  { path: 'packages/storage/dist/index.js', byteLength: 4, sha256: `0x${'4'.repeat(64)}` },
+] as const;
+const RUNTIME_MANIFEST = buildGate2RuntimeManifestFromEntriesV1(SOURCE_COMMIT, RUNTIME_FILES);
+const EXECUTED_RUNTIME = buildGate2ExecutedRuntimeManifestV1(SOURCE_COMMIT, RUNTIME_FILES);
+const RUNTIME_PROVENANCE = buildGate2RuntimeProvenanceV1(RUNTIME_MANIFEST, [
+  { id: 'author', loaded: EXECUTED_RUNTIME },
+  { id: 'receiverBeforeCrash', loaded: EXECUTED_RUNTIME },
+  { id: 'receiverAfterRestart', loaded: EXECUTED_RUNTIME },
+]);
 
 function sample(): any {
   const fixture: any = JSON.parse(JSON.stringify(generateCompleteFixture(3)));
@@ -73,6 +91,7 @@ function sample(): any {
     peerId,
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     role,
+    runtimeBuildManifestDigest: RUNTIME_MANIFEST.manifestDigest,
     startupRepair: null,
   });
   const digest = (byte: string) => `0x${byte.repeat(64)}`;
@@ -86,6 +105,7 @@ function sample(): any {
       requiredProductionOperations: REQUIRED_PRODUCTION_ADAPTER_OPERATIONS,
       replacementContract:
         'real DKGAgent production APIs only; no fixture adapter or synthesized product evidence',
+      runtimeBuildManifestDigest: RUNTIME_MANIFEST.manifestDigest,
     },
     authorizationNegative: {
       attemptedCatalogHeadDigest: digest('8'),
@@ -147,6 +167,7 @@ function sample(): any {
       semanticPostRead: semantic,
       successorServedByPeerId: AUTHOR_PEER,
     },
+    runtimeProvenance: RUNTIME_PROVENANCE,
     schemaVersion: GATE2_RAW_SCHEMA_VERSION,
     transitions: [
       {
@@ -182,19 +203,22 @@ function sample(): any {
 }
 
 function bytes(value: unknown): Buffer {
-  return Buffer.from(stableJson(JSON.parse(JSON.stringify(value)) as unknown), 'utf8');
+  return Buffer.from(
+    canonicalDocument(JSON.parse(JSON.stringify(value)) as CanonicalValue),
+    'utf8',
+  );
 }
 
 test('connected artifact verifies and raw/verdict schemas are two-run byte-identical', () => {
   const firstRaw = bytes(sample());
   const secondRaw = bytes(sample());
   assert.deepEqual(firstRaw, secondRaw);
-  const firstVerified = verifyGate2ArtifactBytes(firstRaw, SOURCE_COMMIT);
-  const secondVerified = verifyGate2ArtifactBytes(secondRaw, SOURCE_COMMIT);
+  const firstVerified = verifyGate2ArtifactBytes(firstRaw, SOURCE_COMMIT, RUNTIME_MANIFEST);
+  const secondVerified = verifyGate2ArtifactBytes(secondRaw, SOURCE_COMMIT, RUNTIME_MANIFEST);
   assert.deepEqual(firstVerified, secondVerified);
   assert.equal(
-    stableJson(buildGate2PassVerdict(firstVerified)),
-    stableJson(buildGate2PassVerdict(secondVerified)),
+    canonicalDocument(buildGate2PassVerdict(firstVerified) as unknown as CanonicalValue),
+    canonicalDocument(buildGate2PassVerdict(secondVerified) as unknown as CanonicalValue),
   );
   assert.match(firstVerified.rawArtifactSha256, /^0x[0-9a-f]{64}$/u);
 });
@@ -221,7 +245,7 @@ for (const [label, mutate] of [
     const raw = sample();
     mutate(raw);
     assert.throws(
-      () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT),
+      () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
       /Gate 2 evidence verification failed at \$\.inventory/u,
     );
   });
@@ -231,7 +255,64 @@ test('a fixture boundary cannot masquerade as a connected Gate 2 pass', () => {
   const raw = sample();
   raw.adapter.productBoundary = 'not-connected';
   assert.throws(
-    () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT),
+    () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
     /\$\.adapter\.productBoundary/u,
+  );
+});
+
+test('only exact RFC 8785 JSON with one trailing LF is accepted', () => {
+  const raw = sample();
+  const exactBytes = bytes(raw);
+  assert.doesNotThrow(() => verifyGate2ArtifactBytes(
+    exactBytes,
+    SOURCE_COMMIT,
+    RUNTIME_MANIFEST,
+  ));
+  const canonical = exactBytes.toString('utf8');
+  for (const invalid of [
+    Buffer.from(stableJson(JSON.parse(JSON.stringify(raw))), 'utf8'),
+    Buffer.from(canonical.slice(0, -1), 'utf8'),
+    Buffer.from(`${canonical}\n`, 'utf8'),
+    Buffer.from(`${canonical.slice(0, -1)}\r\n`, 'utf8'),
+  ]) {
+    assert.throws(
+      () => verifyGate2ArtifactBytes(invalid, SOURCE_COMMIT, RUNTIME_MANIFEST),
+      /canonical document/u,
+    );
+  }
+  const verdict = canonicalDocument(
+    buildGate2PassVerdict(verifyGate2ArtifactBytes(
+      exactBytes,
+      SOURCE_COMMIT,
+      RUNTIME_MANIFEST,
+    )) as unknown as CanonicalValue,
+  );
+  assert.equal((verdict.match(/\n/gu) ?? []).length, 1);
+});
+
+test('conflated per-KA content digests are rejected even with a recomputed inventory digest', () => {
+  const raw = sample();
+  raw.inventory.authored.signedRows[1].contentDigest =
+    raw.inventory.authored.signedRows[0].contentDigest;
+  raw.inventory.received.activatedRows[1].contentDigest =
+    raw.inventory.received.activatedRows[0].contentDigest;
+  raw.inventory.received.declaredInventoryDigest = computeAppliedInventoryDigest(
+    raw.inventory.authored.declaredCatalogScopeDigest,
+    raw.inventory.received.activatedRows,
+  );
+  assert.throws(
+    () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
+    /content digests must be distinct per KA/u,
+  );
+});
+
+test('copied semantic projections cannot masquerade as three complete assets', () => {
+  const raw = sample();
+  raw.authorizationNegative.semanticBefore[1].readBack.projectionNQuads = PROJECTIONS[0];
+  raw.authorizationNegative.semanticAfter[1].readBack.projectionNQuads = PROJECTIONS[0];
+  raw.restartReplay.semanticPostRead[1].readBack.projectionNQuads = PROJECTIONS[0];
+  assert.throws(
+    () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
+    /projection/u,
   );
 });
