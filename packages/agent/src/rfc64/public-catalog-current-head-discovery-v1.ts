@@ -48,6 +48,17 @@ import {
   parseRfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
 
+import {
+  assertCanonicalWireEvmAddressV1,
+  bytesEqualV1 as bytesEqual,
+  encodeFlatCanonicalJsonV1,
+  isPlainRecordV1 as isPlainRecord,
+  parseFlatCanonicalJsonV1,
+  snapshotWirePeerIdV1,
+  type Rfc64FlatWireDiagnosticsV1,
+  type Rfc64WireFailV1,
+} from './public-catalog-wire-internal-v1.js';
+
 export const RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1 =
   '/dkg/catalog/1/author-head/current' as const;
 export const RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1 =
@@ -60,10 +71,6 @@ const CURRENT_HEAD_NOT_FOUND = 0;
 const CURRENT_HEAD_FOUND = 1;
 const CURRENT_HEAD_DENIED = 2;
 const CURRENT_HEAD_SNAPSHOT_MAX_ATTEMPTS = 2;
-const MAX_PEER_ID_BYTES = 256;
-const UTF8 = new TextEncoder();
-// Keep a leading BOM visible so canonical re-encoding rejects it.
-const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const QUERY_KEYS = Object.freeze([
   'authorAddress',
@@ -581,23 +588,21 @@ function assertExactIssuerSignatureProof(
   }
 }
 
+const FLAT_WIRE_DIAGNOSTICS: Rfc64FlatWireDiagnosticsV1 = Object.freeze({
+  notPlainObject: 'RFC-64 current-head query must be a plain object',
+  nonStringField: 'RFC-64 current-head query accepts only string or null fields',
+  exceedsMaxBytes: (maxBytes: number) => `RFC-64 current-head query exceeds ${maxBytes} bytes`,
+  emptyOrOversized: 'RFC-64 current-head query is empty or oversized',
+  notStrictUtf8Json: 'RFC-64 current-head query is not strict UTF-8 JSON',
+  notPlainJsonObject: 'RFC-64 current-head query must be a plain JSON object',
+  notCanonical: 'RFC-64 current-head query bytes are not canonical JCS',
+});
+
+const failWire: Rfc64WireFailV1 = (message, cause) =>
+  fail('catalog-discovery-wire', message, cause);
+
 function encodeFlatCanonicalJson(value: object, maxBytes: number): Uint8Array {
-  if (!isPlainRecord(value)) {
-    fail('catalog-discovery-wire', 'RFC-64 current-head query must be a plain object');
-  }
-  const fields: string[] = [];
-  for (const key of Object.keys(value).sort()) {
-    const field = value[key];
-    if (field !== null && typeof field !== 'string') {
-      fail('catalog-discovery-wire', 'RFC-64 current-head query accepts only string or null fields');
-    }
-    fields.push(`${JSON.stringify(key)}:${JSON.stringify(field)}`);
-  }
-  const bytes = UTF8.encode(`{${fields.join(',')}}`);
-  if (bytes.byteLength > maxBytes) {
-    fail('catalog-discovery-wire', `RFC-64 current-head query exceeds ${maxBytes} bytes`);
-  }
-  return bytes;
+  return encodeFlatCanonicalJsonV1(value, maxBytes, FLAT_WIRE_DIAGNOSTICS, failWire);
 }
 
 function parseFlatCanonicalJson(
@@ -605,23 +610,15 @@ function parseFlatCanonicalJson(
   expectedKeys: readonly string[],
   maxBytes: number,
 ): Record<string, unknown> {
-  if (!(input instanceof Uint8Array) || input.byteLength < 2 || input.byteLength > maxBytes) {
-    fail('catalog-discovery-wire', 'RFC-64 current-head query is empty or oversized');
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(UTF8_FATAL.decode(input));
-  } catch (cause) {
-    fail('catalog-discovery-wire', 'RFC-64 current-head query is not strict UTF-8 JSON', cause);
-  }
-  if (!isPlainRecord(parsed)) {
-    fail('catalog-discovery-wire', 'RFC-64 current-head query must be a plain JSON object');
-  }
-  assertExactWireKeys(parsed, expectedKeys);
-  if (!bytesEqual(encodeFlatCanonicalJson(parsed, maxBytes), input)) {
-    fail('catalog-discovery-wire', 'RFC-64 current-head query bytes are not canonical JCS');
-  }
-  return parsed;
+  // The key check stays local: this protocol admits only own enumerable data
+  // properties, which the catalog transport's plain key comparison does not.
+  return parseFlatCanonicalJsonV1(
+    input,
+    maxBytes,
+    FLAT_WIRE_DIAGNOSTICS,
+    failWire,
+    (parsed) => assertExactWireKeys(parsed, expectedKeys),
+  );
 }
 
 function assertExactWireKeys(
@@ -679,38 +676,14 @@ function snapshotExactWireRecord(
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
-  if (
-    typeof value !== 'string'
-    || !/^0x[0-9a-f]{40}$/.test(value)
-    || value === '0x0000000000000000000000000000000000000000'
-  ) {
-    fail('catalog-discovery-wire', `${label} must be a canonical lowercase nonzero EVM address`);
-  }
+  assertCanonicalWireEvmAddressV1(value, label, failWire);
 }
 
 function snapshotPeerId(value: unknown): string {
-  if (typeof value !== 'string') {
-    fail('catalog-discovery-input', 'remotePeerId must be a string');
-  }
-  const byteLength = UTF8.encode(value).byteLength;
-  if (byteLength < 1 || byteLength > MAX_PEER_ID_BYTES || value.trim() !== value) {
-    fail('catalog-discovery-input', 'remotePeerId is empty, oversized, or noncanonical');
-  }
-  return value;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
+  return snapshotWirePeerIdV1(
+    value,
+    (message, cause) => fail('catalog-discovery-input', message, cause),
+  );
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

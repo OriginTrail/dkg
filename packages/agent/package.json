@@ -39,6 +39,7 @@
     "./dist/rfc64/public-catalog-issuer-delegation-v1.js": null,
     "./dist/rfc64/public-catalog-successor-producer-v1.js": null,
     "./dist/rfc64/public-catalog-transport-v1.js": null,
+    "./dist/rfc64/public-catalog-wire-internal-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*"

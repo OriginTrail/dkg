@@ -42,6 +42,12 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 
+import {
+  bytesEqualV1 as bytesEqual,
+  isPlainRecordV1 as isPlainRecord,
+  snapshotWirePeerIdV1,
+} from './public-catalog-wire-internal-v1.js';
+
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/by-digest' as const;
 export const RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1 =
@@ -62,7 +68,6 @@ export const RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 =
 const FETCH_NOT_FOUND = 0;
 const FETCH_FOUND = 1;
 const FETCH_DENIED = 2;
-const MAX_PEER_ID_BYTES = 256;
 const UTF8 = new TextEncoder();
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -655,32 +660,16 @@ function assertCanonicalEvmAddress(value: unknown, label: string): asserts value
 }
 
 function snapshotPeerId(value: unknown): string {
-  if (typeof value !== 'string') fail('catalog-native-input', 'remotePeerId must be a string');
-  const byteLength = UTF8.encode(value).byteLength;
-  if (byteLength < 1 || byteLength > MAX_PEER_ID_BYTES || value.trim() !== value) {
-    fail('catalog-native-input', 'remotePeerId is empty, oversized, or noncanonical');
-  }
-  return value;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  return snapshotWirePeerIdV1(
+    value,
+    (message, cause) => fail('catalog-native-input', message, cause),
+  );
 }
 
 function deepFreeze<T>(value: T): T {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
   for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
   return Object.freeze(value);
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function fail(

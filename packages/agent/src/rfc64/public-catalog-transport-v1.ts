@@ -26,6 +26,17 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 
+import {
+  assertCanonicalWireEvmAddressV1,
+  bytesEqualV1 as bytesEqual,
+  encodeFlatCanonicalJsonV1,
+  isPlainRecordV1 as isPlainRecord,
+  parseFlatCanonicalJsonV1,
+  snapshotWirePeerIdV1,
+  type Rfc64FlatWireDiagnosticsV1,
+  type Rfc64WireFailV1,
+} from './public-catalog-wire-internal-v1.js';
+
 /**
  * Additive RFC-64 protocol IDs. Their `/catalog/1` component is the wire
  * compatibility boundary; neither protocol is negotiated under a legacy sync ID.
@@ -50,10 +61,6 @@ const ANNOUNCEMENT_DENIED = 0;
 const FETCH_NOT_FOUND = 0;
 const FETCH_FOUND = 1;
 const FETCH_DENIED = 2;
-const MAX_PEER_ID_BYTES = 256;
-const UTF8 = new TextEncoder();
-// Keep a leading BOM visible so canonical re-encoding rejects it.
-const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const ANNOUNCEMENT_KEYS = Object.freeze([
   'authorAddress',
@@ -638,27 +645,24 @@ function assertExactIssuerSignatureProof(
   }
 }
 
+const FLAT_WIRE_DIAGNOSTICS: Rfc64FlatWireDiagnosticsV1 = Object.freeze({
+  notPlainObject: 'RFC-64 catalog message must be a plain object',
+  nonStringField: 'RFC-64 catalog messages accept only string or null fields',
+  exceedsMaxBytes: (maxBytes: number) => `RFC-64 catalog message exceeds ${maxBytes} bytes`,
+  emptyOrOversized: 'RFC-64 catalog message is empty or oversized',
+  notStrictUtf8Json: 'RFC-64 catalog message is not strict UTF-8 JSON',
+  notPlainJsonObject: 'RFC-64 catalog message must be a plain JSON object',
+  notCanonical: 'RFC-64 catalog message bytes are not canonical JCS',
+});
+
+const failWire: Rfc64WireFailV1 = (message, cause) =>
+  fail('catalog-transport-wire', message, cause);
+
 function encodeFlatCanonicalJson(
   value: object,
   maxBytes: number,
 ): Uint8Array {
-  if (!isPlainRecord(value)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain object');
-  }
-  const keys = Object.keys(value).sort();
-  const fields: string[] = [];
-  for (const key of keys) {
-    const field = value[key];
-    if (field !== null && typeof field !== 'string') {
-      fail('catalog-transport-wire', 'RFC-64 catalog messages accept only string or null fields');
-    }
-    fields.push(`${JSON.stringify(key)}:${JSON.stringify(field)}`);
-  }
-  const bytes = UTF8.encode(`{${fields.join(',')}}`);
-  if (bytes.byteLength > maxBytes) {
-    fail('catalog-transport-wire', `RFC-64 catalog message exceeds ${maxBytes} bytes`);
-  }
-  return bytes;
+  return encodeFlatCanonicalJsonV1(value, maxBytes, FLAT_WIRE_DIAGNOSTICS, failWire);
 }
 
 function parseFlatCanonicalJson(
@@ -666,26 +670,13 @@ function parseFlatCanonicalJson(
   expectedKeys: readonly string[],
   maxBytes: number,
 ): Record<string, unknown> {
-  if (!(input instanceof Uint8Array) || input.byteLength < 2 || input.byteLength > maxBytes) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message is empty or oversized');
-  }
-  let text: string;
-  let parsed: unknown;
-  try {
-    text = UTF8_FATAL.decode(input);
-    parsed = JSON.parse(text);
-  } catch (cause) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message is not strict UTF-8 JSON', cause);
-  }
-  if (!isPlainRecord(parsed)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain JSON object');
-  }
-  assertExactWireKeys(parsed, expectedKeys);
-  const canonical = encodeFlatCanonicalJson(parsed, maxBytes);
-  if (!bytesEqual(canonical, input)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message bytes are not canonical JCS');
-  }
-  return parsed;
+  return parseFlatCanonicalJsonV1(
+    input,
+    maxBytes,
+    FLAT_WIRE_DIAGNOSTICS,
+    failWire,
+    (parsed) => assertExactWireKeys(parsed, expectedKeys),
+  );
 }
 
 function assertExactWireKeys(
@@ -702,38 +693,14 @@ function assertExactWireKeys(
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
-  if (
-    typeof value !== 'string'
-    || !/^0x[0-9a-f]{40}$/.test(value)
-    || value === '0x0000000000000000000000000000000000000000'
-  ) {
-    fail('catalog-transport-wire', `${label} must be a canonical lowercase nonzero EVM address`);
-  }
+  assertCanonicalWireEvmAddressV1(value, label, failWire);
 }
 
 function snapshotPeerId(value: unknown): string {
-  if (typeof value !== 'string') {
-    fail('catalog-transport-input', 'remotePeerId must be a string');
-  }
-  const byteLength = UTF8.encode(value).byteLength;
-  if (byteLength < 1 || byteLength > MAX_PEER_ID_BYTES || value.trim() !== value) {
-    fail('catalog-transport-input', 'remotePeerId is empty, oversized, or noncanonical');
-  }
-  return value;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
+  return snapshotWirePeerIdV1(
+    value,
+    (message, cause) => fail('catalog-transport-input', message, cause),
+  );
 }
 
 function deepFreeze<T>(value: T): T {
