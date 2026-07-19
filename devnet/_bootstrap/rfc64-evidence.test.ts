@@ -15,8 +15,9 @@ import {
 } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import evidenceVitestConfig from './vitest.evidence.config.js';
 import {
   RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
   RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
@@ -56,6 +57,24 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe('RFC-64 evidence Vitest discovery', () => {
+  it('keeps the evidence include repository-relative and POSIX-normalized', () => {
+    const config = evidenceVitestConfig as unknown as {
+      readonly root?: string;
+      readonly test?: { readonly include?: readonly string[] };
+    };
+    const include = config.test?.include?.[0];
+
+    expect(config.root).toBe(resolve(import.meta.dirname, '../..'));
+    expect(config.test?.include).toEqual([
+      'devnet/_bootstrap/rfc64-evidence.test.ts',
+    ]);
+    expect(include).toBeDefined();
+    expect(isAbsolute(include!)).toBe(false);
+    expect(include).not.toContain('\\');
+  });
 });
 
 describe('RFC-64 semantic snapshot evidence', () => {
