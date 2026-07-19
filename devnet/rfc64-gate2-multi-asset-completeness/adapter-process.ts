@@ -30,14 +30,19 @@ import {
   GATE2_AGENT_EVENT_PREFIX,
   GATE2_REAL_DKG_AGENT_ADAPTER_ID,
 } from './model.js';
+import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
 
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
+const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE2_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
   throw new Error('DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX must be 32 lowercase hex bytes');
+}
+if (!runtimeBuildManifestDigest || !/^0x[0-9a-f]{64}$/u.test(runtimeBuildManifestDigest)) {
+  throw new Error('DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST must be a canonical digest');
 }
 
 const dataDir = resolve(dataDirInput);
@@ -129,6 +134,7 @@ async function boot(): Promise<void> {
     multiaddr: tcp,
     peerId: created.peerId,
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
+    runtimeBuildManifestDigest,
     startupRepair: null,
   });
 }
@@ -332,7 +338,11 @@ async function handle(command: Command): Promise<void> {
       // The parent process owns SIGKILL and replacement. This command only
       // establishes an explicit process-protocol boundary; it creates no fake
       // repair record and intentionally does not stop the DKGAgent.
-      emit({ event: 'kill-restart-ready', requestId: command.requestId });
+      emit({
+        event: 'kill-restart-ready',
+        executedRuntimeManifest: sealGate2ExecutedRuntimeManifestV1(),
+        requestId: command.requestId,
+      });
       return;
     case 'stop':
       await stop(0, command.requestId);
@@ -600,7 +610,11 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
   try {
     await agent?.stop();
     if (requestId !== undefined) {
-      await emitAndFlush({ event: 'stopped', requestId });
+      await emitAndFlush({
+        event: 'stopped',
+        executedRuntimeManifest: sealGate2ExecutedRuntimeManifestV1(),
+        requestId,
+      });
     }
     process.exit(exitCode);
   } catch (error) {

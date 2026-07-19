@@ -12,7 +12,7 @@ import {
 import { ethers } from 'ethers';
 
 import {
-  atomicWriteStableJson,
+  atomicWriteExactBytes,
   readCleanRepositoryHead,
   stableJson,
 } from '../rfc64-persistence-lifecycle/evidence.js';
@@ -41,9 +41,18 @@ import {
   type CatalogScopeV1,
 } from './src/schema.ts';
 import { verify as verifyInventoryContract } from './src/verify.ts';
+import { canonicalDocument, type CanonicalValue } from './src/canonical.ts';
+import {
+  assertGate2RuntimeManifestEqualV1,
+  buildGate2RuntimeManifestV1,
+  buildGate2RuntimeProvenanceV1,
+  consumeGate2RuntimeLaunchReceiptV1,
+  type Gate2ExecutedRuntimeManifestV1,
+} from './runtime-provenance.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
+const RUNTIME_LOAD_HOOK = join(import.meta.dirname, 'runtime-load-hook.ts');
 const DEFAULT_RAW_ARTIFACT = join(import.meta.dirname, 'artifacts/gate2-result.json');
 const DEFAULT_VERDICT_ARTIFACT = join(import.meta.dirname, 'artifacts/gate2-verdict.json');
 const PROCESS_TIMEOUT_MS = 90_000;
@@ -66,17 +75,19 @@ const DEPLOYMENT = Object.freeze({
 const KA_NUMBERS = Object.freeze([7n, 8n, 9n]);
 const ASSERTION_ROOTS = Object.freeze([
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
-  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
-  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f',
+  '0x3f3c55f18e4bf87221b0f51de96594fc94496961cc7b71a1c6b9823ee10e1f30',
+  '0xa3bae85ecbcd93e7673b01492a36c8104cab9d0f391a5dd9923dcc7e09a4b9b9',
 ]);
-const CANONICAL_TWO_TRIPLE_PROJECTION =
+const PROJECTION_NQUADS = Object.freeze([
   '<https://example.org/alice> <https://schema.org/age> '
     + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
-const PROJECTION_NQUADS = Object.freeze([
-  CANONICAL_TWO_TRIPLE_PROJECTION,
-  CANONICAL_TWO_TRIPLE_PROJECTION,
-  CANONICAL_TWO_TRIPLE_PROJECTION,
+    + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
+  '<https://example.org/bob> <https://schema.org/age> '
+    + '"43"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+    + '<https://example.org/bob> <https://schema.org/name> "Bob" .\n',
+  '<https://example.org/carol> <https://schema.org/age> '
+    + '"44"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+    + '<https://example.org/carol> <https://schema.org/name> "Carol" .\n',
 ]);
 const GENESIS_ISSUED_AT = '1773900000000';
 const SUCCESSOR_ISSUED_AT = Object.freeze([
@@ -93,7 +104,15 @@ const ROLE_MASTER_KEYS = Object.freeze({
 });
 
 async function execute(): Promise<void> {
+  const launchReceipt = consumeGate2RuntimeLaunchReceiptV1();
   const headBefore = readCleanRepositoryHead(REPO_ROOT);
+  exact(headBefore, launchReceipt.sourceCommit, 'clean-build launch source commit');
+  assertGate2RuntimeManifestEqualV1(
+    buildGate2RuntimeManifestV1(REPO_ROOT, headBefore),
+    launchReceipt.manifest,
+  );
+  exact(new Set(PROJECTION_NQUADS).size, 3, 'distinct per-KA projections before spawn');
+  exact(new Set(ASSERTION_ROOTS).size, 3, 'distinct per-KA assertion roots before spawn');
   const rawArtifactPath = process.env.DKG_RFC64_GATE2_ARTIFACT ?? DEFAULT_RAW_ARTIFACT;
   const verdictArtifactPath = process.env.DKG_RFC64_GATE2_VERDICT_ARTIFACT
     ?? DEFAULT_VERDICT_ARTIFACT;
@@ -106,14 +125,18 @@ async function execute(): Promise<void> {
   let operationFailed = true;
   let primaryFailure: unknown;
   try {
-    const author = spawnAgent('author', authorDataDir, children);
-    const receiver = spawnAgent('receiver', receiverDataDir, children);
+    const author = spawnAgent(
+      'author', authorDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
+    );
+    const receiver = spawnAgent(
+      'receiver', receiverDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
+    );
     const [authorReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
       receiver.waitFor('ready'),
     ]);
-    requireRealReady(authorReady, 'author');
-    requireRealReady(receiverReady, 'receiver');
+    requireRealReady(authorReady, 'author', launchReceipt.manifest.manifestDigest);
+    requireRealReady(receiverReady, 'receiver', launchReceipt.manifest.manifestDigest);
     requireCondition(authorReady.peerId !== receiverReady.peerId, 'peer identities are not distinct');
     await connectBothWays(author, receiver, authorReady, receiverReady, 'initial');
 
@@ -426,10 +449,12 @@ async function execute(): Promise<void> {
     );
     exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
 
-    const receiverCrashExit = await receiver.killRestartBoundary('receiver-crash-v1');
-    const restartedReceiver = spawnAgent('receiver', receiverDataDir, children);
+    const receiverCrashBoundary = await receiver.killRestartBoundary('receiver-crash-v1');
+    const restartedReceiver = spawnAgent(
+      'receiver', receiverDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
+    );
     const restartedReady = await restartedReceiver.waitFor('ready');
-    requireRealReady(restartedReady, 'receiver');
+    requireRealReady(restartedReady, 'receiver', launchReceipt.manifest.manifestDigest);
     exact(restartedReady.peerId, receiverReady.peerId, 'receiver peer ID after restart');
     await connectBothWays(author, restartedReceiver, authorReady, restartedReady, 'restart');
     await acceptPolicy(restartedReceiver, 'restarted-receiver-policy-v1', CONTEXT_GRAPH_ID);
@@ -475,10 +500,37 @@ async function execute(): Promise<void> {
     );
     exactJson(replayApplied, expectedApplied, 'replay durable applied readback');
 
-    const restartedReceiverExit = await restartedReceiver.stop('receiver-stop-v1');
-    const authorExit = await author.stop('author-stop-v1');
+    const restartedReceiverBoundary = await restartedReceiver.stop('receiver-stop-v1');
+    const authorBoundary = await author.stop('author-stop-v1');
     const headAfter = readCleanRepositoryHead(REPO_ROOT);
     exact(headAfter, headBefore, 'tracked source commit after process run');
+    assertGate2RuntimeManifestEqualV1(
+      buildGate2RuntimeManifestV1(REPO_ROOT, headAfter),
+      launchReceipt.manifest,
+    );
+    const runtimeProvenance = buildGate2RuntimeProvenanceV1(
+      launchReceipt.manifest,
+      [
+        {
+          id: 'author',
+          loaded: requiredExecutedRuntimeManifest(authorBoundary.event, 'author stop'),
+        },
+        {
+          id: 'receiverBeforeCrash',
+          loaded: requiredExecutedRuntimeManifest(
+            receiverCrashBoundary.event,
+            'receiver pre-SIGKILL',
+          ),
+        },
+        {
+          id: 'receiverAfterRestart',
+          loaded: requiredExecutedRuntimeManifest(
+            restartedReceiverBoundary.event,
+            'restarted receiver stop',
+          ),
+        },
+      ],
+    );
 
     const artifact = {
       adapter: {
@@ -486,6 +538,7 @@ async function execute(): Promise<void> {
         inspectedProductCommits: [headBefore],
         productBoundary: 'connected',
         protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
+        runtimeBuildManifestDigest: launchReceipt.manifest.manifestDigest,
         requiredProductionOperations: REQUIRED_PRODUCTION_ADAPTER_OPERATIONS,
         replacementContract:
           'real DKGAgent production APIs only; no fixture adapter or synthesized product evidence',
@@ -530,8 +583,8 @@ async function execute(): Promise<void> {
         model: 'two real DKGAgent peer processes plus one receiver restart',
         receiverInstances: 2,
         stoppedExits: {
-          author: selectExit(authorExit),
-          restartedReceiver: selectExit(restartedReceiverExit),
+          author: selectExit(authorBoundary.exit),
+          restartedReceiver: selectExit(restartedReceiverBoundary.exit),
         },
       },
       ready: {
@@ -545,7 +598,7 @@ async function execute(): Promise<void> {
       },
       restartReplay: {
         appliedReadBack: structuredClone(replayApplied),
-        crashExit: receiverCrashExit,
+        crashExit: receiverCrashBoundary.exit,
         processLocalSynchronization: replayedSynchronization,
         reannouncementAcknowledgedByPeerId: restartedReady.peerId,
         receiverStats: {
@@ -560,6 +613,7 @@ async function execute(): Promise<void> {
         successorServedByPeerId: authorReady.peerId,
       },
       schemaVersion: GATE2_RAW_SCHEMA_VERSION,
+      runtimeProvenance: structuredClone(runtimeProvenance),
       transitions: structuredClone(transitions),
       transport: {
         finalAnnouncementPolicyDigest: requiredDigest(
@@ -578,7 +632,10 @@ async function execute(): Promise<void> {
         ),
       },
     };
-    const publication = atomicWriteStableJson(rawArtifactPath, artifact);
+    const publication = atomicWriteExactBytes(
+      rawArtifactPath,
+      new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
+    );
     process.stdout.write(
       `[rfc64-gate2-harness] wrote ${rawArtifactPath} sha256=${publication.sha256}\n`,
     );
@@ -989,26 +1046,38 @@ function spawnAgent(
   role: 'author' | 'receiver',
   dataDir: string,
   registry: ChildProcessRegistry,
+  runtimeManifestDigest: string,
+  sourceCommit: string,
 ): Gate2AgentChild {
+  const childEnv = { ...process.env };
+  delete childEnv.NODE_OPTIONS;
+  delete childEnv.NODE_PATH;
+  delete childEnv.TSX_TSCONFIG_PATH;
   return new Gate2AgentChild({
     eventTimeoutMs: PROCESS_TIMEOUT_MS,
     registry,
     role,
     spawn: {
       command: process.execPath,
-      args: ['--import', 'tsx', ADAPTER_PROCESS, role],
+      args: ['--import', 'tsx', '--import', RUNTIME_LOAD_HOOK, ADAPTER_PROCESS, role],
       cwd: REPO_ROOT,
       env: {
-        ...process.env,
+        ...childEnv,
         DKG_RFC64_GATE2_ADAPTER_DATA_DIR: dataDir,
         DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
+        DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: runtimeManifestDigest,
+        DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: sourceCommit,
         NODE_ENV: 'production',
       },
     },
   });
 }
 
-function requireRealReady(event: Gate2AgentEvent, expectedRole: 'author' | 'receiver'): void {
+function requireRealReady(
+  event: Gate2AgentEvent,
+  expectedRole: 'author' | 'receiver',
+  runtimeManifestDigest: string,
+): void {
   requireCondition(event.role === expectedRole, 'ready role differs from the spawned role');
   requireCondition(
     event.adapterId === GATE2_REAL_DKG_AGENT_ADAPTER_ID,
@@ -1021,6 +1090,7 @@ function requireRealReady(event: Gate2AgentEvent, expectedRole: 'author' | 'rece
   requireCondition(event.agentClass === 'DKGAgent', 'child did not boot a real DKGAgent');
   requireCondition(event.catalogServiceStarted === true, 'production catalog service did not start');
   requireCondition(event.startupRepair === null, 'adapter claimed nonexistent automatic startup repair');
+  exact(event.runtimeBuildManifestDigest, runtimeManifestDigest, 'child runtime build manifest digest');
   requireCondition(typeof event.peerId === 'string' && event.peerId.length > 0, 'peer ID is missing');
   requireCondition(
     typeof event.multiaddr === 'string' && event.multiaddr.includes('/tcp/'),
@@ -1049,8 +1119,23 @@ function selectReady(event: Gate2AgentEvent): Record<string, unknown> {
     peerId: event.peerId,
     protocolVersion: event.protocolVersion,
     role: event.role,
+    runtimeBuildManifestDigest: event.runtimeBuildManifestDigest,
     startupRepair: event.startupRepair,
   };
+}
+
+function requiredExecutedRuntimeManifest(
+  event: Gate2AgentEvent,
+  label: string,
+): Gate2ExecutedRuntimeManifestV1 {
+  if (
+    event.executedRuntimeManifest === null
+    || typeof event.executedRuntimeManifest !== 'object'
+    || Array.isArray(event.executedRuntimeManifest)
+  ) {
+    throw new Error(`${label} omitted its executed runtime manifest`);
+  }
+  return event.executedRuntimeManifest as Gate2ExecutedRuntimeManifestV1;
 }
 
 function selectExit(exit: ProcessExitEvidence): Record<string, unknown> {
