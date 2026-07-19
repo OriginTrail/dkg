@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -32,6 +33,7 @@ import {
   type Rfc64ControlObjectStoreDurabilityBoundaryV1,
   type StageVerifiedControlObjectV1,
 } from '../src/rfc64/control-object-store-v1.js';
+import { putRfc64ExactBytesV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 
 const PRIVATE_KEY = `0x${'42'.repeat(32)}`;
@@ -51,6 +53,25 @@ async function temporaryDataDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'dkg-rfc64-control-store-'));
   temporaryDirectories.push(path);
   return path;
+}
+
+function grantWindowsEveryoneRead(path: string, directory: boolean): void {
+  const permission = directory
+    ? '*S-1-1-0:(OI)(CI)(RX)'
+    : '*S-1-1-0:(R)';
+  const result = spawnSync(
+    'icacls.exe',
+    [path, '/grant', permission],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(
+      `failed to grant the Windows ACL test permission: ${
+        result.error?.message ?? (result.stderr.trim() || `icacls exited ${result.status}`)
+      }`,
+      result.error === undefined ? {} : { cause: result.error },
+    );
+  }
 }
 
 afterEach(async () => {
@@ -540,6 +561,35 @@ describe('RFC-64 durable control-object store v1', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'rejects permissive existing Windows file and directory ACLs',
+    async () => {
+      const directoryDataDir = await temporaryDataDirectory();
+      const directoryStore = await openRfc64ControlObjectStoreV1(directoryDataDir);
+      const objectsDirectory = join(
+        directoryDataDir,
+        RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
+        'objects',
+      );
+      directoryStore.close();
+      grantWindowsEveryoneRead(objectsDirectory, true);
+      await expect(openRfc64ControlObjectStoreV1(directoryDataDir))
+        .rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+
+      const fileDataDir = await temporaryDataDirectory();
+      const fileStore = await openRfc64ControlObjectStoreV1(fileDataDir);
+      const fixture = await signedFixture('8c');
+      await fileStore.stageVerifiedObjects([fixture]);
+      const paths = pathsFor(fileDataDir, fixture.envelope);
+      grantWindowsEveryoneRead(paths.object, false);
+      await expect(fileStore.getVerifiedObject({
+        objectDigest: fixture.envelope.objectDigest as Digest32V1,
+        signatureVariantDigest: paths.signatureDigest,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      })).rejects.toMatchObject({ code: 'control-store-unsafe-path' });
+    },
+  );
+
   it('returns null for an exact cache miss without calling the verifier', async () => {
     const dataDir = await temporaryDataDirectory();
     const store = await openRfc64ControlObjectStoreV1(dataDir);
@@ -579,6 +629,22 @@ describe('RFC-64 durable control-object store v1', () => {
       signatureVariantDigest: pathsFor(dataDir, fixture.envelope).signatureDigest,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     })).toThrow(expect.objectContaining({ code: 'control-store-closed' }));
+  });
+
+  it('rejects an escaping durable-file relative key inside the write operation', async () => {
+    const containmentRoot = await temporaryDataDirectory();
+    await expect(putRfc64ExactBytesV1({
+      containmentRoot,
+      relativePath: join('..', 'escaped.jcs'),
+      bytes: new TextEncoder().encode('{}'),
+      maxBytes: 16,
+      label: 'test control object',
+      kind: 'object',
+      io: Object.freeze({
+        boundary: () => {},
+        randomSuffix: () => '00'.repeat(16),
+      }),
+    })).rejects.toMatchObject({ code: 'unsafe-path' });
   });
 
   it('uses a closed typed error registry', () => {

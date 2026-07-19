@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +15,10 @@ import {
   RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH,
   openRfc64ControlObjectStoreV1,
 } from '../src/rfc64/control-object-store-v1.js';
+import {
+  createRfc64PersistenceOwnerCapabilityV1,
+  type Rfc64PersistenceOwnerCapabilityV1,
+} from '../src/rfc64/persistence-owner-capability-v1.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -262,9 +266,12 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       const dataDirectory = temporaryDataDirectory();
       const outside = temporaryDataDirectory();
       const inventory = await openInventoryV1(dataDirectory);
+      const ownership = createRfc64PersistenceOwnerCapabilityV1(
+        dirname(inventory.databasePath),
+        () => !inventory.closed,
+      );
       const initialStore = await openRfc64ControlObjectStoreV1(
-        dataDirectory,
-        inventory,
+        ownership,
       );
       initialStore.close();
       inventory.close();
@@ -286,15 +293,21 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     },
   );
 
-  it('requires the live inventory owner for the exact control-store dataDir', async () => {
+  it('requires an unforgeable live aggregate persistence owner capability', async () => {
     const dataDirectory = temporaryDataDirectory();
-    const otherDataDirectory = temporaryDataDirectory();
     const inventory = await openInventoryV1(dataDirectory);
+    const ownership = createRfc64PersistenceOwnerCapabilityV1(
+      dirname(inventory.databasePath),
+      () => !inventory.closed,
+    );
 
-    await expect(openRfc64ControlObjectStoreV1(otherDataDirectory, inventory))
-      .rejects.toMatchObject({ code: 'control-store-input' });
+    const store = await openRfc64ControlObjectStoreV1(ownership);
+    store.close();
+    await expect(openRfc64ControlObjectStoreV1(
+      {} as Rfc64PersistenceOwnerCapabilityV1,
+    )).rejects.toMatchObject({ code: 'control-store-input' });
     inventory.close();
-    await expect(openRfc64ControlObjectStoreV1(dataDirectory, inventory))
+    await expect(openRfc64ControlObjectStoreV1(ownership))
       .rejects.toMatchObject({ code: 'control-store-input' });
   });
 

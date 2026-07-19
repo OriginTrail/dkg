@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   existsSync,
   fstatSync,
@@ -24,13 +23,12 @@ import {
   sep,
 } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TextDecoder } from 'node:util';
 import {
+  applyRfc64OwnerOnlyPermissionsSyncV1,
+  assertRfc64FilesystemOwnerSyncV1,
   fsyncRfc64DirectorySyncV1,
-  rfc64CurrentUserOwnsUidV1,
-  rfc64PosixModeMatchesV1,
   rfc64RegularFileFsyncOpenFlagsV1,
 } from '../secure-filesystem-policy-v1.js';
 
@@ -560,19 +558,6 @@ function reopenVerifiedOwnedDatabase(
       { cause },
     );
   }
-}
-
-/** @internal Proves that the exact live foundation owns the lease for dataDir. */
-export function inventoryV1OwnsDataDir(
-  inventory: unknown,
-  dataDir: string,
-): inventory is Rfc64InventoryV1Foundation {
-  return inventory instanceof InventoryV1Foundation
-    && !inventory.closed
-    && typeof dataDir === 'string'
-    && dataDir.length > 0
-    && inventory.databasePath
-      === resolve(resolve(dataDir), INVENTORY_V1_RELATIVE_PATH);
 }
 
 async function loadSqliteModule(): Promise<SqliteModuleV1> {
@@ -1392,57 +1377,8 @@ function tightenOwnedFileMode(databasePath: string): void {
 }
 
 function assertFilesystemOwner(path: string): void {
-  if (process.platform === 'win32') {
-    const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$userSid = $identity.User
-$defaultOwnerSid = $identity.Owner
-$target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
-$acl = if ([System.IO.Directory]::Exists($target)) {
-  [System.IO.Directory]::GetAccessControl(
-    $target,
-    [System.Security.AccessControl.AccessControlSections]::Owner
-  )
-} else {
-  [System.IO.File]::GetAccessControl(
-    $target,
-    [System.Security.AccessControl.AccessControlSections]::Owner
-  )
-}
-$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
-if (
-  $owner.Value -ne $userSid.Value -and
-  $owner.Value -ne $defaultOwnerSid.Value
-) {
-  [Console]::Error.WriteLine(
-    "owner SID $($owner.Value) is neither token user $($userSid.Value) nor token default owner $($defaultOwnerSid.Value)"
-  )
-  exit 40
-}
-`;
-    const result = spawnSync(
-      'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      {
-        encoding: 'utf8',
-        windowsHide: true,
-        env: { ...process.env, DKG_RFC64_ACL_PATH: path },
-      },
-    );
-    if (result.error !== undefined || result.status !== 0) {
-      throw new InventoryV1OpenError(
-        'database-io',
-        `inventory path is not owned by the current Windows identity: ${path}`,
-        { cause: result.error ?? new Error(result.stderr.trim() || `PowerShell exited ${result.status}`) },
-      );
-    }
-    return;
-  }
   try {
-    if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
-      throw new Error('filesystem entry is not owned by the current process uid');
-    }
+    assertRfc64FilesystemOwnerSyncV1(path);
   } catch (cause) {
     throw new InventoryV1OpenError(
       'database-io',
@@ -1465,83 +1401,10 @@ function applySecurePermissions(path: string, mode: number, directory: boolean):
   // Never let chmod or Set-Acl turn a foreign existing entry into an owned one.
   // Newly created entries are also checked because they must already be owned
   // by this process before their permissions are tightened.
-  assertFilesystemOwner(path);
-  if (process.platform === 'win32') {
-    applyWindowsOwnerOnlyAcl(path, directory);
-    return;
-  }
   try {
-    chmodSync(path, mode);
-    const stat = statSync(path);
-    if (!rfc64CurrentUserOwnsUidV1(stat.uid)) {
-      throw new Error(`path owner uid ${stat.uid} does not match the current process uid`);
-    }
-    if (!rfc64PosixModeMatchesV1(stat.mode, mode)) {
-      throw new Error(`path mode ${(stat.mode & 0o777).toString(8)} does not match ${mode.toString(8)}`);
-    }
+    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
   } catch (cause) {
     throw new InventoryV1OpenError('database-io', `failed to set secure permissions on ${path}`, { cause });
-  }
-}
-
-function applyWindowsOwnerOnlyAcl(path: string, directory: boolean): void {
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-$target = $env:DKG_RFC64_ACL_PATH
-$isDirectory = [System.Convert]::ToBoolean($env:DKG_RFC64_ACL_DIRECTORY)
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = if ($isDirectory) {
-  [System.Security.AccessControl.DirectorySecurity]::new()
-} else {
-  [System.Security.AccessControl.FileSecurity]::new()
-}
-$acl.SetOwner($sid)
-$acl.SetAccessRuleProtection($true, $false)
-$inheritance = if ($isDirectory) {
-  [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-} else {
-  [System.Security.AccessControl.InheritanceFlags]::None
-}
-$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-  $sid,
-  [System.Security.AccessControl.FileSystemRights]::FullControl,
-  $inheritance,
-  [System.Security.AccessControl.PropagationFlags]::None,
-  [System.Security.AccessControl.AccessControlType]::Allow
-)
-$acl.AddAccessRule($rule)
-if ($isDirectory) {
-  [System.IO.Directory]::SetAccessControl($target, $acl)
-  $verified = [System.IO.Directory]::GetAccessControl($target)
-} else {
-  [System.IO.File]::SetAccessControl($target, $acl)
-  $verified = [System.IO.File]::GetAccessControl($target)
-}
-$rules = @($verified.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-if (-not $verified.AreAccessRulesProtected -or $rules.Count -ne 1) { exit 41 }
-if ($rules[0].IdentityReference.Value -ne $sid.Value) { exit 42 }
-if ($rules[0].AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { exit 43 }
-if (($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { exit 44 }
-`;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      windowsHide: true,
-      env: {
-        ...process.env,
-        DKG_RFC64_ACL_PATH: path,
-        DKG_RFC64_ACL_DIRECTORY: String(directory),
-      },
-    },
-  );
-  if (result.error !== undefined || result.status !== 0) {
-    throw new InventoryV1OpenError(
-      'database-io',
-      `failed to establish owner-only Windows ACL on ${path}`,
-      { cause: result.error ?? new Error(result.stderr.trim() || `PowerShell exited ${result.status}`) },
-    );
   }
 }
 

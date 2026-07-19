@@ -1,15 +1,15 @@
-import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
   RFC64_SECURE_DIRECTORY_MODE_V1,
   RFC64_SECURE_FILE_MODE_V1,
+  applyRfc64OwnerOnlyPermissionsSyncV1,
+  assertRfc64FilesystemOwnerSyncV1,
+  assertRfc64OwnerOnlyPermissionsSyncV1,
   fsyncRfc64DirectoryV1,
-  rfc64CurrentUserOwnsUidV1,
-  rfc64PosixModeMatchesV1,
   rfc64RegularFileFsyncOpenFlagsV1,
   rfc64RegularFileReadOpenFlagsV1,
-  rfc64UsesWindowsFilesystemPolicyV1,
 } from './secure-filesystem-policy-v1.js';
 
 export type Rfc64DurableFileErrorCodeV1 =
@@ -61,13 +61,13 @@ export async function assertRfc64ExistingDirectoryV1(
     if (entry.isSymbolicLink() || !entry.isDirectory()) {
       fail('unsafe-path', `${label} must be a non-symlink directory`);
     }
-    assertOwner(entry.uid, label);
-    if (
-      requireSecureMode
-      && !rfc64PosixModeMatchesV1(entry.mode, RFC64_SECURE_DIRECTORY_MODE_V1)
-    ) {
-      fail('unsafe-path', `${label} must have owner-only mode 0700`);
-    }
+    assertSecureAccess(
+      path,
+      RFC64_SECURE_DIRECTORY_MODE_V1,
+      true,
+      requireSecureMode,
+      label,
+    );
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('io', `failed to inspect ${label}`, cause);
@@ -129,7 +129,8 @@ export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
 }
 
 export interface PutRfc64ExactBytesInputV1<TKind extends string> {
-  readonly targetPath: string;
+  readonly containmentRoot: string;
+  readonly relativePath: string;
   readonly bytes: Uint8Array;
   readonly maxBytes: number;
   readonly label: string;
@@ -140,9 +141,20 @@ export interface PutRfc64ExactBytesInputV1<TKind extends string> {
 export async function putRfc64ExactBytesV1<TKind extends string>(
   input: PutRfc64ExactBytesInputV1<TKind>,
 ): Promise<void> {
-  const { targetPath, bytes, maxBytes, label, kind, io } = input;
+  const { containmentRoot, relativePath, bytes, maxBytes, label, kind, io } = input;
+  const targetPath = resolveContainedFileTarget(containmentRoot, relativePath);
   assertByteBounds(bytes, maxBytes, label);
-  const existing = await readRfc64OptionalBoundedBytesV1(targetPath, maxBytes, label);
+  await ensureRfc64SecureDirectoryTreeV1(
+    dirname(targetPath),
+    containmentRoot,
+    io,
+  );
+  const existing = await readRfc64OptionalBoundedBytesV1({
+    containmentRoot,
+    relativePath,
+    maxBytes,
+    label,
+  });
   if (existing !== null) {
     if (!bytesEqual(existing, bytes)) {
       fail('corrupt', `${label} bytes differ for the same immutable key`);
@@ -190,11 +202,18 @@ export async function putRfc64ExactBytesV1<TKind extends string>(
   }
 }
 
+export interface ReadRfc64OptionalBoundedBytesInputV1 {
+  readonly containmentRoot: string;
+  readonly relativePath: string;
+  readonly maxBytes: number;
+  readonly label: string;
+}
+
 export async function readRfc64OptionalBoundedBytesV1(
-  path: string,
-  maxBytes: number,
-  label: string,
+  input: ReadRfc64OptionalBoundedBytesInputV1,
 ): Promise<Uint8Array | null> {
+  const { containmentRoot, relativePath, maxBytes, label } = input;
+  const path = resolveContainedFileTarget(containmentRoot, relativePath);
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
     fail('input', `${label} maximum byte length must be a positive safe integer`);
   }
@@ -208,6 +227,8 @@ export async function readRfc64OptionalBoundedBytesV1(
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('io', `failed to inspect ${label}`, cause);
   }
+
+  await assertRfc64SecureDirectoryTreeV1(dirname(path), containmentRoot);
 
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -230,10 +251,13 @@ export async function readRfc64OptionalBoundedBytesV1(
     if (tail.bytesRead !== 0) {
       fail('corrupt', `${label} grew during its bounded read`);
     }
-    assertOwner(stat.uid, label);
-    if (!rfc64PosixModeMatchesV1(stat.mode, RFC64_SECURE_FILE_MODE_V1)) {
-      fail('unsafe-path', `${label} must have owner-only mode 0600`);
-    }
+    assertSecureAccess(
+      path,
+      RFC64_SECURE_FILE_MODE_V1,
+      false,
+      true,
+      label,
+    );
     return bytes;
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
@@ -242,6 +266,32 @@ export async function readRfc64OptionalBoundedBytesV1(
     if (handle !== null) await handle.close().catch(() => undefined);
   }
   return fail('io', `failed to complete bounded read of ${label}`);
+}
+
+async function assertRfc64SecureDirectoryTreeV1(
+  target: string,
+  containmentRoot: string,
+): Promise<void> {
+  const resolvedTarget = resolve(target);
+  const resolvedRoot = resolve(containmentRoot);
+  const relativeTarget = relative(resolvedRoot, resolvedTarget);
+  if (
+    relativeTarget === '..'
+    || relativeTarget.startsWith(`..${sep}`)
+    || isAbsolute(relativeTarget)
+  ) {
+    fail('unsafe-path', 'durable directory escaped its containment root');
+  }
+  await assertRfc64ExistingDirectoryV1(
+    resolvedRoot,
+    'durable store containment root',
+    true,
+  );
+  let current = resolvedRoot;
+  for (const component of relativeTarget.split(sep).filter(Boolean)) {
+    current = join(current, component);
+    await assertRfc64ExistingDirectoryV1(current, 'durable store directory', true);
+  }
 }
 
 async function assertExistingRegularFile(
@@ -254,13 +304,13 @@ async function assertExistingRegularFile(
     if (entry.isSymbolicLink() || !entry.isFile()) {
       fail('unsafe-path', `${label} must be a regular non-symlink file`);
     }
-    assertOwner(entry.uid, label);
-    if (
-      requireSecureMode
-      && !rfc64PosixModeMatchesV1(entry.mode, RFC64_SECURE_FILE_MODE_V1)
-    ) {
-      fail('unsafe-path', `${label} must have owner-only mode 0600`);
-    }
+    assertSecureAccess(
+      path,
+      RFC64_SECURE_FILE_MODE_V1,
+      false,
+      requireSecureMode,
+      label,
+    );
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('io', `failed to inspect ${label}`, cause);
@@ -269,23 +319,29 @@ async function assertExistingRegularFile(
 
 async function chmodSecure(path: string, mode: number, label: string): Promise<void> {
   try {
-    if (!rfc64UsesWindowsFilesystemPolicyV1()) await chmod(path, mode);
     const entry = await lstat(path);
-    assertOwner(entry.uid, label);
-    if (!rfc64PosixModeMatchesV1(entry.mode, mode)) {
-      throw new Error(
-        `${label} mode is ${(entry.mode & 0o777).toString(8)}, expected ${mode.toString(8)}`,
-      );
-    }
+    applyRfc64OwnerOnlyPermissionsSyncV1(path, mode, entry.isDirectory());
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
     fail('unsafe-path', `failed to secure ${label}`, cause);
   }
 }
 
-function assertOwner(uid: number, label: string): void {
-  if (!rfc64CurrentUserOwnsUidV1(uid)) {
-    fail('unsafe-path', `${label} is not owned by the current process user`);
+function assertSecureAccess(
+  path: string,
+  mode: number,
+  directory: boolean,
+  requireOwnerOnly: boolean,
+  label: string,
+): void {
+  try {
+    if (requireOwnerOnly) {
+      assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
+    } else {
+      assertRfc64FilesystemOwnerSyncV1(path);
+    }
+  } catch (cause) {
+    fail('unsafe-path', `${label} does not satisfy the owner-only access policy`, cause);
   }
 }
 
@@ -305,10 +361,13 @@ async function fsyncRegularFile(path: string, label: string): Promise<void> {
     if (!stat.isFile()) {
       fail('unsafe-path', `${label} fsync target is not a regular file`);
     }
-    assertOwner(stat.uid, label);
-    if (!rfc64PosixModeMatchesV1(stat.mode, RFC64_SECURE_FILE_MODE_V1)) {
-      fail('unsafe-path', `${label} fsync target must have owner-only mode 0600`);
-    }
+    assertSecureAccess(
+      path,
+      RFC64_SECURE_FILE_MODE_V1,
+      false,
+      true,
+      label,
+    );
     await handle.sync();
   } catch (cause) {
     if (cause instanceof Rfc64DurableFileErrorV1) throw cause;
@@ -330,6 +389,30 @@ function assertByteBounds(bytes: Uint8Array, maxBytes: number, label: string): v
   ) {
     fail('input', `${label} bytes are outside the configured immutable bounds`);
   }
+}
+
+function resolveContainedFileTarget(containmentRoot: string, relativePath: string): string {
+  if (
+    typeof containmentRoot !== 'string'
+    || containmentRoot.length === 0
+    || typeof relativePath !== 'string'
+    || relativePath.length === 0
+    || isAbsolute(relativePath)
+  ) {
+    fail('input', 'durable file target requires one root and a non-empty relative path');
+  }
+  const resolvedRoot = resolve(containmentRoot);
+  const targetPath = resolve(resolvedRoot, relativePath);
+  const relativeTarget = relative(resolvedRoot, targetPath);
+  if (
+    relativeTarget.length === 0
+    || relativeTarget === '..'
+    || relativeTarget.startsWith(`..${sep}`)
+    || isAbsolute(relativeTarget)
+  ) {
+    fail('unsafe-path', 'durable file target escaped its containment root');
+  }
+  return targetPath;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

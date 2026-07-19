@@ -15,6 +15,8 @@ import {
   parseCanonicalControlSignatureVariant,
   parseCanonicalSignedControlEnvelope,
   parseCanonicalUnsignedControlEnvelope,
+  recombineCanonicalSignedControlEnvelopeV1,
+  splitCanonicalSignedControlEnvelopeV1,
   type ControlObjectSignatureSuite,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
@@ -144,6 +146,41 @@ describe('Track-2 control-object envelopes', () => {
       signature: EOA_SIGNATURE,
       objectDigest: EOA_DIGEST,
     }))).toBe(EOA_CANONICAL_SIGNATURE_VARIANT);
+  });
+
+  it('owns the exact cache split and fail-closed recombination schema in core', () => {
+    const split = splitCanonicalSignedControlEnvelopeV1(EOA_SIGNED);
+
+    expect(split.envelope).toEqual(EOA_SIGNED);
+    expect(split.unsignedEnvelope).toEqual(EOA_VECTOR);
+    expect(split.signatureVariant).toEqual({
+      objectDigest: EOA_DIGEST,
+      signature: EOA_SIGNATURE,
+      signatureVariantDigest: EOA_SIGNATURE_VARIANT_DIGEST,
+    });
+    expect(new TextDecoder().decode(split.unsignedEnvelopeBytes))
+      .toBe(EOA_CANONICAL_UNSIGNED);
+    expect(new TextDecoder().decode(split.signatureVariantBytes))
+      .toBe(EOA_CANONICAL_SIGNATURE_VARIANT);
+    expect(recombineCanonicalSignedControlEnvelopeV1(
+      split.unsignedEnvelopeBytes,
+      split.signatureVariantBytes,
+      EOA_DIGEST,
+      EOA_SIGNATURE_VARIANT_DIGEST,
+    )).toEqual(EOA_SIGNED);
+
+    expect(() => recombineCanonicalSignedControlEnvelopeV1(
+      split.unsignedEnvelopeBytes,
+      split.signatureVariantBytes,
+      SAFE_DIGEST,
+      EOA_SIGNATURE_VARIANT_DIGEST,
+    )).toThrow(/requested digest keys/);
+    expect(() => recombineCanonicalSignedControlEnvelopeV1(
+      new TextEncoder().encode(SAFE_CANONICAL_UNSIGNED),
+      split.signatureVariantBytes,
+      EOA_DIGEST,
+      EOA_SIGNATURE_VARIANT_DIGEST,
+    )).toThrow(/digest mismatch/);
   });
 
   it('is independent of JavaScript insertion order and verifies exact claims', () => {

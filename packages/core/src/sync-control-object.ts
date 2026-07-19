@@ -269,6 +269,73 @@ export function parseCanonicalControlSignatureVariant(
   return variant;
 }
 
+export interface SplitCanonicalSignedControlEnvelopeV1 {
+  readonly envelope: SignedControlEnvelopeV1;
+  readonly unsignedEnvelope: UnsignedControlEnvelopeV1;
+  readonly signatureVariant: ControlObjectSignatureVariantV1;
+  readonly unsignedEnvelopeBytes: Uint8Array;
+  readonly signatureVariantBytes: Uint8Array;
+}
+
+/**
+ * Snapshot one signed envelope into the exact immutable records used by the
+ * RFC-64 digest-addressed cache. This is the sole schema-aware split boundary.
+ */
+export function splitCanonicalSignedControlEnvelopeV1(
+  input: SignedControlEnvelopeV1,
+): SplitCanonicalSignedControlEnvelopeV1 {
+  const envelope = parseCanonicalSignedControlEnvelope(
+    canonicalizeSignedControlEnvelopeBytes(input),
+  );
+  const unsignedEnvelope = extractUnsignedEnvelope(envelope);
+  const signatureVariantDigest = computeControlSignatureVariantDigestHex(
+    envelope.objectDigest,
+    envelope.signature,
+  );
+  const signatureVariant: ControlObjectSignatureVariantV1 = {
+    objectDigest: envelope.objectDigest,
+    signature: envelope.signature,
+    signatureVariantDigest,
+  };
+  return Object.freeze({
+    envelope,
+    unsignedEnvelope,
+    signatureVariant,
+    unsignedEnvelopeBytes: canonicalizeUnsignedControlEnvelopeBytes(unsignedEnvelope),
+    signatureVariantBytes: canonicalizeControlSignatureVariantBytes(signatureVariant),
+  });
+}
+
+/**
+ * Recombine exact cache records only when both records are canonical for the
+ * requested digest keys. Signed-envelope validation re-computes objectDigest.
+ */
+export function recombineCanonicalSignedControlEnvelopeV1(
+  unsignedEnvelopeInput: string | Uint8Array,
+  signatureVariantInput: string | Uint8Array,
+  expectedObjectDigest: string,
+  expectedSignatureVariantDigest: string,
+): SignedControlEnvelopeV1 {
+  assertCanonicalDigest(expectedObjectDigest, 'expectedObjectDigest');
+  assertCanonicalDigest(
+    expectedSignatureVariantDigest,
+    'expectedSignatureVariantDigest',
+  );
+  const unsignedEnvelope = parseCanonicalUnsignedControlEnvelope(unsignedEnvelopeInput);
+  const signatureVariant = parseCanonicalControlSignatureVariant(signatureVariantInput);
+  if (
+    signatureVariant.objectDigest !== expectedObjectDigest
+    || signatureVariant.signatureVariantDigest !== expectedSignatureVariantDigest
+  ) {
+    throw new Error('Control-object cache records do not match the requested digest keys');
+  }
+  return parseCanonicalSignedControlEnvelope(canonicalizeSignedControlEnvelopeBytes({
+    ...unsignedEnvelope,
+    objectDigest: expectedObjectDigest,
+    signature: signatureVariant.signature,
+  }));
+}
+
 function bytesToLowerHex(bytes: Uint8Array): string {
   let result = '0x';
   for (const byte of bytes) result += byte.toString(16).padStart(2, '0');

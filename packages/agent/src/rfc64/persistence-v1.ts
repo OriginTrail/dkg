@@ -1,3 +1,5 @@
+import { dirname } from 'node:path';
+
 import {
   openInventoryV1,
   type Rfc64InventoryV1Foundation,
@@ -6,6 +8,7 @@ import {
   openRfc64ControlObjectStoreV1,
   type Rfc64ControlObjectStoreV1,
 } from './control-object-store-v1.js';
+import { createRfc64PersistenceOwnerCapabilityV1 } from './persistence-owner-capability-v1.js';
 
 export interface OpenRfc64PersistenceOptionsV1 {
   /** Yield after each non-terminal fixed-size startup purge batch. */
@@ -74,7 +77,11 @@ export async function openRfc64PersistenceV1(
       if (batch.done) break;
       await yieldAfterPurgeBatch();
     }
-    const controlObjectStore = await openRfc64ControlObjectStoreV1(dataDir, inventory);
+    const ownership = createRfc64PersistenceOwnerCapabilityV1(
+      dirname(inventory.databasePath),
+      () => !inventory.closed,
+    );
+    const controlObjectStore = await openRfc64ControlObjectStoreV1(ownership);
     return new OwnedRfc64PersistenceV1(inventory, controlObjectStore);
   } catch (cause) {
     try {

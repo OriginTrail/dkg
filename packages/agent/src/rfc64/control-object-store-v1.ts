@@ -1,30 +1,20 @@
 import { randomBytes } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   MAX_CONTROL_OBJECT_BYTES,
   MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
   assertCanonicalDigest,
-  canonicalizeControlSignatureVariantBytes,
-  canonicalizeSignedControlEnvelopeBytes,
-  canonicalizeUnsignedControlEnvelopeBytes,
   computeControlSignatureVariantDigestHex,
-  parseCanonicalControlSignatureVariant,
-  parseCanonicalSignedControlEnvelope,
-  parseCanonicalUnsignedControlEnvelope,
-  type ControlObjectSignatureVariantV1,
+  recombineCanonicalSignedControlEnvelopeV1,
+  splitCanonicalSignedControlEnvelopeV1,
   type Digest32V1,
   type SignedControlEnvelopeV1,
-  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
   readVerifiedControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
-import {
-  inventoryV1OwnsDataDir,
-  type Rfc64InventoryV1Foundation,
-} from './inventory-v1/open.js';
 import {
   Rfc64DurableFileErrorV1,
   assertRfc64ExistingDirectoryV1,
@@ -34,6 +24,10 @@ import {
   type Rfc64DurableFileBoundaryV1,
   type Rfc64DurableFileIoV1,
 } from './durable-file-store-v1.js';
+import {
+  readLiveRfc64PersistenceOwnerRootV1,
+  type Rfc64PersistenceOwnerCapabilityV1,
+} from './persistence-owner-capability-v1.js';
 import {
   RFC64_POSIX_NAMESPACE_DURABILITY_V1,
   RFC64_SECURE_DIRECTORY_MODE_V1,
@@ -57,6 +51,7 @@ export type Rfc64ControlObjectStoreNamespaceDurabilityV1 = Rfc64NamespaceDurabil
 
 const OBJECTS_DIRECTORY = 'objects';
 const SIGNATURES_DIRECTORY = 'signatures';
+const CONTROL_OBJECT_STORE_DIRECTORY = 'control-objects-v1';
 const CANONICAL_FILE_SUFFIX = '.jcs';
 
 export const RFC64_CONTROL_OBJECT_STORE_ERROR_CODES_V1 = Object.freeze([
@@ -163,16 +158,15 @@ export type Rfc64ControlObjectStoreTestOpenerV1 = (
  * its single-process lease. This cache deliberately does not mint that lease.
  */
 export async function openRfc64ControlObjectStoreV1(
-  dataDir: string,
-  inventoryOwnership: Rfc64InventoryV1Foundation,
+  ownership: Rfc64PersistenceOwnerCapabilityV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  if (!inventoryV1OwnsDataDir(inventoryOwnership, dataDir)) {
-    fail(
-      'control-store-input',
-      'control object store requires the live inventory owner for the same dataDir',
-    );
+  let rfc64RootPath: string;
+  try {
+    rfc64RootPath = readLiveRfc64PersistenceOwnerRootV1(ownership);
+  } catch (cause) {
+    fail('control-store-input', 'control object store requires a live persistence owner', cause);
   }
-  return openRfc64ControlObjectStoreWithIoV1(dataDir, PRODUCTION_IO);
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, PRODUCTION_IO);
 }
 
 /** Test-only fault-boundary opener; shipped production code cannot install hooks. */
@@ -191,11 +185,10 @@ export function createRfc64ControlObjectStoreTestOpenerV1(
     randomSuffix: (): string => randomSuffix?.() ?? randomBytes(16).toString('hex'),
   }) satisfies Rfc64ControlObjectStoreIoV1;
   return async (dataDir: string): Promise<Rfc64ControlObjectStoreV1> =>
-    openRfc64ControlObjectStoreWithIoV1(dataDir, io);
+    openRfc64ControlObjectStoreForTestV1(dataDir, io);
 }
 
 interface PreparedStoredControlObjectV1 {
-  readonly envelope: SignedControlEnvelopeV1;
   readonly objectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
   readonly unsignedBytes: Uint8Array;
@@ -252,42 +245,36 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
       fail('control-store-input', 'verifyIssuerSignature must be a function');
     }
     return (async () => {
-      const objectPath = this.objectPath(objectDigest);
-      const signaturePath = this.signaturePath(objectDigest, signatureVariantDigest);
+      const objectPath = this.objectRelativePath(objectDigest);
+      const signaturePath = this.signatureRelativePath(
+        objectDigest,
+        signatureVariantDigest,
+      );
       const [unsignedBytes, variantBytes] = await mapDurableFileErrors(async () =>
         Promise.all([
-          readRfc64OptionalBoundedBytesV1(
-            objectPath,
-            MAX_CONTROL_OBJECT_BYTES,
-            'control object',
-          ),
-          readRfc64OptionalBoundedBytesV1(
-            signaturePath,
-            MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
-            'control signature variant',
-          ),
+          readRfc64OptionalBoundedBytesV1({
+            containmentRoot: this.rootPath,
+            relativePath: objectPath,
+            maxBytes: MAX_CONTROL_OBJECT_BYTES,
+            label: 'control object',
+          }),
+          readRfc64OptionalBoundedBytesV1({
+            containmentRoot: this.rootPath,
+            relativePath: signaturePath,
+            maxBytes: MAX_CONTROL_SIGNATURE_VARIANT_BYTES,
+            label: 'control signature variant',
+          }),
         ]));
       if (unsignedBytes === null || variantBytes === null) return null;
 
-      let unsigned: UnsignedControlEnvelopeV1;
-      let variant: ControlObjectSignatureVariantV1;
       let envelope: SignedControlEnvelopeV1;
       try {
-        unsigned = parseCanonicalUnsignedControlEnvelope(unsignedBytes);
-        variant = parseCanonicalControlSignatureVariant(variantBytes);
-        if (
-          variant.objectDigest !== objectDigest
-          || variant.signatureVariantDigest !== signatureVariantDigest
-        ) {
-          throw new Error('stored cache keys do not match the canonical records');
-        }
-        envelope = deepFreezePlain(parseCanonicalSignedControlEnvelope(
-          canonicalizeSignedControlEnvelopeBytes({
-            ...unsigned,
-            objectDigest,
-            signature: variant.signature,
-          }),
-        )) as SignedControlEnvelopeV1;
+        envelope = deepFreezePlain(recombineCanonicalSignedControlEnvelopeV1(
+          unsignedBytes,
+          variantBytes,
+          objectDigest,
+          signatureVariantDigest,
+        ));
       } catch (cause) {
         fail('control-store-corrupt', 'stored control object is not canonical for its exact keys', cause);
       }
@@ -312,34 +299,32 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   }
 
   private async stagePrepared(item: PreparedStoredControlObjectV1): Promise<void> {
-    const objectPath = this.objectPath(item.objectDigest);
+    const objectPath = this.objectRelativePath(item.objectDigest);
     await this.stageFileByKey(objectPath, item.unsignedBytes, 'object');
 
-    const signaturePath = this.signaturePath(
+    const signaturePath = this.signatureRelativePath(
       item.objectDigest,
       item.signatureVariantDigest,
     );
     await this.stageFileByKey(signaturePath, item.signatureVariantBytes, 'signature');
   }
 
-  private objectPath(objectDigest: Digest32V1): string {
+  private objectRelativePath(objectDigest: Digest32V1): string {
     const hex = objectDigest.slice(2);
     return join(
-      this.rootPath,
       OBJECTS_DIRECTORY,
       hex.slice(0, 2),
       `${hex}${CANONICAL_FILE_SUFFIX}`,
     );
   }
 
-  private signaturePath(
+  private signatureRelativePath(
     objectDigest: Digest32V1,
     signatureVariantDigest: Digest32V1,
   ): string {
     const objectHex = objectDigest.slice(2);
     const variantHex = signatureVariantDigest.slice(2);
     return join(
-      this.rootPath,
       SIGNATURES_DIRECTORY,
       objectHex.slice(0, 2),
       objectHex,
@@ -348,40 +333,36 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   }
 
   private stageFileByKey(
-    targetPath: string,
+    relativePath: string,
     bytes: Uint8Array,
     kind: 'object' | 'signature',
   ): Promise<void> {
-    const previous = this.#fileWriteTails.get(targetPath) ?? Promise.resolve();
+    const previous = this.#fileWriteTails.get(relativePath) ?? Promise.resolve();
     const run = previous.then(async () => {
       this.requireOpen();
-      await this.putExactFile(targetPath, bytes, kind);
+      await this.putExactFile(relativePath, bytes, kind);
     }, async () => {
       this.requireOpen();
-      await this.putExactFile(targetPath, bytes, kind);
+      await this.putExactFile(relativePath, bytes, kind);
     });
-    this.#fileWriteTails.set(targetPath, run);
+    this.#fileWriteTails.set(relativePath, run);
     void run.finally(() => {
-      if (this.#fileWriteTails.get(targetPath) === run) {
-        this.#fileWriteTails.delete(targetPath);
+      if (this.#fileWriteTails.get(relativePath) === run) {
+        this.#fileWriteTails.delete(relativePath);
       }
     }).catch(() => undefined);
     return run;
   }
 
   private async putExactFile(
-    targetPath: string,
+    relativePath: string,
     bytes: Uint8Array,
     kind: Rfc64ControlObjectStoreFileKindV1,
   ): Promise<void> {
     await mapDurableFileErrors(async () => {
-      await ensureRfc64SecureDirectoryTreeV1(
-        dirname(targetPath),
-        this.rootPath,
-        this.io,
-      );
       await putRfc64ExactBytesV1({
-        targetPath,
+        containmentRoot: this.rootPath,
+        relativePath,
         bytes,
         maxBytes: kind === 'object'
           ? MAX_CONTROL_OBJECT_BYTES
@@ -398,7 +379,7 @@ class FileRfc64ControlObjectStoreV1 implements Rfc64ControlObjectStoreV1 {
   }
 }
 
-async function openRfc64ControlObjectStoreWithIoV1(
+async function openRfc64ControlObjectStoreForTestV1(
   dataDirInput: string,
   io: Rfc64ControlObjectStoreIoV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
@@ -409,10 +390,30 @@ async function openRfc64ControlObjectStoreWithIoV1(
     fail('control-store-input', 'dataDir must be a non-empty path');
   }
   const dataDir = resolve(dataDirInput);
-  const rootPath = resolve(dataDir, RFC64_CONTROL_OBJECT_STORE_RELATIVE_PATH);
+  const rfc64RootPath = resolve(dataDir, 'rfc64-sync');
   await mapDurableFileErrors(async () => {
     await assertRfc64ExistingDirectoryV1(dataDir, 'DKG data directory', false);
-    await ensureRfc64SecureDirectoryTreeV1(rootPath, dataDir, io);
+    await ensureRfc64SecureDirectoryTreeV1(rfc64RootPath, dataDir, io);
+  });
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, io);
+}
+
+async function openRfc64ControlObjectStoreAtRootV1(
+  rfc64RootPathInput: string,
+  io: Rfc64ControlObjectStoreIoV1,
+): Promise<Rfc64ControlObjectStoreV1> {
+  if (!Object.isFrozen(io)) {
+    fail('control-store-input', 'control object store I/O adapter must be immutable');
+  }
+  const rfc64RootPath = resolve(rfc64RootPathInput);
+  const rootPath = resolve(rfc64RootPath, CONTROL_OBJECT_STORE_DIRECTORY);
+  await mapDurableFileErrors(async () => {
+    await assertRfc64ExistingDirectoryV1(
+      rfc64RootPath,
+      'RFC-64 persistence root',
+      true,
+    );
+    await ensureRfc64SecureDirectoryTreeV1(rootPath, rfc64RootPath, io);
     await ensureRfc64SecureDirectoryTreeV1(
       join(rootPath, OBJECTS_DIRECTORY),
       rootPath,
@@ -449,27 +450,19 @@ function prepareStageBatch(
     if (!(index in input)) fail('control-store-input', 'stage input must not contain holes');
     const item = input[index];
     try {
-      const envelope = deepFreezePlain(parseCanonicalSignedControlEnvelope(
-        canonicalizeSignedControlEnvelopeBytes(item.envelope),
-      )) as SignedControlEnvelopeV1;
+      const split = splitCanonicalSignedControlEnvelopeV1(item.envelope);
+      const envelope = deepFreezePlain(split.envelope);
       assertProofMatchesEnvelope(envelope, item.issuerSignature);
-      const unsigned = unsignedFromSigned(envelope);
-      const objectDigest = envelope.objectDigest as Digest32V1;
-      const signatureVariantDigest = computeControlSignatureVariantDigestHex(
-        objectDigest,
-        envelope.signature,
-      ) as Digest32V1;
-      const variant = Object.freeze({
-        objectDigest,
-        signature: envelope.signature,
-        signatureVariantDigest,
-      }) satisfies ControlObjectSignatureVariantV1;
+      const objectDigest = snapshotDigest(envelope.objectDigest, 'objectDigest');
+      const signatureVariantDigest = snapshotDigest(
+        split.signatureVariant.signatureVariantDigest,
+        'signatureVariantDigest',
+      );
       result[index] = Object.freeze({
-        envelope,
         objectDigest,
         signatureVariantDigest,
-        unsignedBytes: canonicalizeUnsignedControlEnvelopeBytes(unsigned),
-        signatureVariantBytes: canonicalizeControlSignatureVariantBytes(variant),
+        unsignedBytes: split.unsignedEnvelopeBytes,
+        signatureVariantBytes: split.signatureVariantBytes,
       });
     } catch (cause) {
       if (cause instanceof Rfc64ControlObjectStoreErrorV1) throw cause;
@@ -501,16 +494,6 @@ function assertProofMatchesEnvelope(
   ) {
     fail('control-store-verification', 'issuer signature proof is not bound to this envelope');
   }
-}
-
-function unsignedFromSigned(envelope: SignedControlEnvelopeV1): UnsignedControlEnvelopeV1 {
-  return {
-    issuer: envelope.issuer,
-    objectType: envelope.objectType,
-    payload: envelope.payload,
-    signatureEvidence: envelope.signatureEvidence,
-    signatureSuite: envelope.signatureSuite,
-  } as UnsignedControlEnvelopeV1;
 }
 
 async function mapDurableFileErrors<T>(operation: () => Promise<T>): Promise<T> {

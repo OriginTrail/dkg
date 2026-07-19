@@ -1,8 +1,11 @@
+import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   closeSync,
   constants,
   fsyncSync,
   openSync,
+  statSync,
 } from 'node:fs';
 import { open } from 'node:fs/promises';
 
@@ -35,6 +38,50 @@ export function rfc64CurrentUserOwnsUidV1(uid: number): boolean {
 
 export function rfc64PosixModeMatchesV1(mode: number, expected: number): boolean {
   return rfc64UsesWindowsFilesystemPolicyV1() || (mode & 0o777) === expected;
+}
+
+export function assertRfc64FilesystemOwnerSyncV1(path: string): void {
+  if (rfc64UsesWindowsFilesystemPolicyV1()) {
+    runWindowsAclPolicy(path, statSync(path).isDirectory(), 'owner');
+    return;
+  }
+  if (!rfc64CurrentUserOwnsUidV1(statSync(path).uid)) {
+    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
+  }
+}
+
+export function assertRfc64OwnerOnlyPermissionsSyncV1(
+  path: string,
+  expectedMode: number,
+  directory: boolean,
+): void {
+  if (rfc64UsesWindowsFilesystemPolicyV1()) {
+    runWindowsAclPolicy(path, directory, 'assert-owner-only');
+    return;
+  }
+  const stat = statSync(path);
+  if (!rfc64CurrentUserOwnsUidV1(stat.uid)) {
+    throw new Error('RFC-64 filesystem entry is not owned by the current process uid');
+  }
+  if (!rfc64PosixModeMatchesV1(stat.mode, expectedMode)) {
+    throw new Error(
+      `RFC-64 path mode ${(stat.mode & 0o777).toString(8)} does not match ${expectedMode.toString(8)}`,
+    );
+  }
+}
+
+export function applyRfc64OwnerOnlyPermissionsSyncV1(
+  path: string,
+  mode: number,
+  directory: boolean,
+): void {
+  if (rfc64UsesWindowsFilesystemPolicyV1()) {
+    runWindowsAclPolicy(path, directory, 'apply-owner-only');
+    return;
+  }
+  assertRfc64FilesystemOwnerSyncV1(path);
+  chmodSync(path, mode);
+  assertRfc64OwnerOnlyPermissionsSyncV1(path, mode, directory);
 }
 
 /** Node cannot FlushFileBuffers on a Windows directory handle. */
@@ -73,4 +120,125 @@ export function rfc64RegularFileFsyncOpenFlagsV1(): string | number {
 export function rfc64RegularFileReadOpenFlagsV1(): number {
   return constants.O_RDONLY
     | (rfc64UsesWindowsFilesystemPolicyV1() ? 0 : constants.O_NOFOLLOW);
+}
+
+type WindowsAclPolicyActionV1 = 'owner' | 'assert-owner-only' | 'apply-owner-only';
+
+function runWindowsAclPolicy(
+  path: string,
+  directory: boolean,
+  action: WindowsAclPolicyActionV1,
+): void {
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$userSid = $identity.User
+$defaultOwnerSid = $identity.Owner
+$target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
+$isDirectory = [System.Convert]::ToBoolean($env:DKG_RFC64_ACL_DIRECTORY)
+$action = $env:DKG_RFC64_ACL_ACTION
+
+function Read-TargetAcl {
+  if ($isDirectory) {
+    return [System.IO.Directory]::GetAccessControl(
+      $target,
+      [System.Security.AccessControl.AccessControlSections]'Owner, Access'
+    )
+  }
+  return [System.IO.File]::GetAccessControl(
+    $target,
+    [System.Security.AccessControl.AccessControlSections]'Owner, Access'
+  )
+}
+
+function Assert-CurrentOwner($acl) {
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+  if (
+    $owner.Value -ne $userSid.Value -and
+    $owner.Value -ne $defaultOwnerSid.Value
+  ) {
+    throw "owner SID $($owner.Value) is not the current token owner"
+  }
+}
+
+$acl = Read-TargetAcl
+Assert-CurrentOwner $acl
+
+if ($action -eq 'apply-owner-only') {
+  $acl = if ($isDirectory) {
+    [System.Security.AccessControl.DirectorySecurity]::new()
+  } else {
+    [System.Security.AccessControl.FileSecurity]::new()
+  }
+  $acl.SetOwner($userSid)
+  $acl.SetAccessRuleProtection($true, $false)
+  $inheritance = if ($isDirectory) {
+    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  } else {
+    [System.Security.AccessControl.InheritanceFlags]::None
+  }
+  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $userSid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    $inheritance,
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow
+  )
+  $acl.AddAccessRule($rule)
+  if ($isDirectory) {
+    [System.IO.Directory]::SetAccessControl($target, $acl)
+  } else {
+    [System.IO.File]::SetAccessControl($target, $acl)
+  }
+  $acl = Read-TargetAcl
+  Assert-CurrentOwner $acl
+}
+
+if ($action -ne 'owner') {
+  if (-not $acl.AreAccessRulesProtected) {
+    throw 'RFC-64 owner-only ACL must disable inherited access rules'
+  }
+  $allowedRights = 0
+  foreach ($rule in $acl.GetAccessRules(
+    $true,
+    $true,
+    [System.Security.Principal.SecurityIdentifier]
+  )) {
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+      continue
+    }
+    if ($rule.IdentityReference.Value -ne $userSid.Value) {
+      throw "allow ACL grants another SID: $($rule.IdentityReference.Value)"
+    }
+    $allowedRights = $allowedRights -bor [int]$rule.FileSystemRights
+  }
+  $fullControl = [int][System.Security.AccessControl.FileSystemRights]::FullControl
+  if (($allowedRights -band $fullControl) -ne $fullControl) {
+    throw 'current user does not hold FullControl on the RFC-64 path'
+  }
+}
+`;
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        DKG_RFC64_ACL_ACTION: action,
+        DKG_RFC64_ACL_DIRECTORY: String(directory),
+        DKG_RFC64_ACL_PATH: path,
+      },
+    },
+  );
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(
+      `RFC-64 Windows owner-only ACL policy failed for ${path}: ${
+        result.error?.message
+          ?? (result.stderr.trim() || `PowerShell exited ${result.status}`)
+      }`,
+      result.error === undefined ? {} : { cause: result.error },
+    );
+  }
 }
