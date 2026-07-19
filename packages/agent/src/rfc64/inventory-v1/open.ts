@@ -40,6 +40,7 @@ import {
 } from './sql.js';
 import {
   CandidateInventoryV1,
+  type CandidateCatalogPrecommitResultV1,
   type CandidateBucketDiffTraversalV1,
   type CandidateBucketHeaderV1,
   type CandidateBucketLoadKeyV1,
@@ -53,7 +54,12 @@ import {
   type VerifiedCandidateBucketLoadV1,
   type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
-import type { KaIdV1 } from '@origintrail-official/dkg-core';
+import type {
+  CatalogSealDeploymentProfileV1,
+  CgSharedProjectionVerificationLimitsV1,
+  KaIdV1,
+  SignedAuthorCatalogHeadEnvelopeV1,
+} from '@origintrail-official/dkg-core';
 import {
   createProductionInventoryV1LifecycleAdapter,
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
@@ -392,6 +398,23 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): CandidateBucketRowSnapshotV1 {
     this.requireOpen();
     return this.#candidate.readVerifiedCandidateCatalogRow(verifiedRow);
+  }
+
+  verifyCandidateCatalogPrecommitV1(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+    signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+    receivedBundleBytes: Uint8Array,
+    deployment: CatalogSealDeploymentProfileV1,
+    limits?: CgSharedProjectionVerificationLimitsV1,
+  ): CandidateCatalogPrecommitResultV1 {
+    this.requireOpen();
+    return this.#candidate.verifyCandidateCatalogPrecommitV1(
+      verifiedRow,
+      signedHead,
+      receivedBundleBytes,
+      deployment,
+      limits,
+    );
   }
 
   closeCandidateTraversal(

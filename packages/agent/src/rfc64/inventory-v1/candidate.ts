@@ -18,15 +18,23 @@ import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSubGraphNameV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
+  canonicalizeAuthorCatalogScopeV1,
+  canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
   deriveAuthorCatalogScopeFromHeadV1,
+  parseCanonicalSignedAuthorCatalogHeadEnvelopeV1,
   parseCanonicalDecimalU64,
   readVerifiedAuthorCatalogBucketDescriptorV1,
+  readVerifiedTransferredCatalogBundleMetadataV1,
+  verifyCgSharedProjectionV1,
+  verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type ByteLengthV1,
+  type CatalogSealDeploymentProfileV1,
+  type CgSharedProjectionVerificationLimitsV1,
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
@@ -36,6 +44,8 @@ import {
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
   type VerifiedAuthorCatalogDirectoryPathV1,
+  type VerifiedCgSharedProjectionV1,
+  type VerifiedTransferredCatalogBundleV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -142,6 +152,16 @@ export interface CandidateSessionGcBatchResultV1 {
   readonly done: boolean;
 }
 
+/**
+ * Precommit evidence for one exact live candidate row. Both fields are opaque,
+ * process-local capabilities. This container proves neither catalog-head authority
+ * nor policy/finality, and grants no semantic-store or activation authority.
+ */
+export interface CandidateCatalogPrecommitResultV1 {
+  readonly transferredBundle: VerifiedTransferredCatalogBundleV1;
+  readonly sharedProjection: VerifiedCgSharedProjectionV1;
+}
+
 export type InventoryV1CandidateErrorCode =
   | 'candidate-invalid-session'
   | 'candidate-startup-purge-required'
@@ -155,6 +175,10 @@ export type InventoryV1CandidateErrorCode =
   | 'candidate-traversal-closed'
   | 'candidate-invalid-row-proof'
   | 'candidate-stale-row-proof'
+  | 'candidate-row-not-present'
+  | 'candidate-head-binding'
+  | 'candidate-deployment-profile'
+  | 'candidate-binding-changed'
   | 'candidate-cursor-mismatch'
   | 'candidate-stream-complete'
   | 'candidate-in-use'
@@ -201,6 +225,18 @@ export interface Rfc64InventoryV1CandidateApi {
   readVerifiedCandidateCatalogRow(
     verifiedRow: VerifiedCandidateCatalogRowV1,
   ): CandidateBucketRowSnapshotV1;
+  /**
+   * Replace one live `present` row proof with structural transfer and semantic
+   * projection proofs. The caller must separately establish head authority,
+   * policy, placement/finality, atomic commit, and exact post-read success.
+   */
+  verifyCandidateCatalogPrecommitV1(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+    signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+    receivedBundleBytes: Uint8Array,
+    deployment: CatalogSealDeploymentProfileV1,
+    limits?: CgSharedProjectionVerificationLimitsV1,
+  ): CandidateCatalogPrecommitResultV1;
   closeCandidateTraversal(
     traversal: CandidateBucketRowsTraversalV1 | CandidateBucketDiffTraversalV1,
   ): void;
@@ -593,6 +629,189 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       );
     }
     return proof.snapshot;
+  }
+
+  verifyCandidateCatalogPrecommitV1(
+    verifiedRow: VerifiedCandidateCatalogRowV1,
+    signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+    receivedBundleBytes: Uint8Array,
+    deployment: CatalogSealDeploymentProfileV1,
+    limits?: CgSharedProjectionVerificationLimitsV1,
+  ): CandidateCatalogPrecommitResultV1 {
+    const candidate = this.readVerifiedCandidateCatalogRow(verifiedRow);
+    if (candidate.disposition !== 'present') {
+      throw new InventoryV1CandidateError(
+        'candidate-row-not-present',
+        'removed candidate rows cannot authorize payload transfer or semantic admission',
+      );
+    }
+
+    let transferredBundle: VerifiedTransferredCatalogBundleV1 | undefined;
+    let sharedProjection: VerifiedCgSharedProjectionV1 | undefined;
+    let verificationFailed = false;
+    let verificationFailure: unknown;
+    try {
+      // Snapshot every caller-controlled binding input once. The parsed head and
+      // deployment copy are the only forms passed to later verifiers, preventing
+      // a stateful Proxy from rebinding one candidate between verifier calls.
+      const headSnapshot = this.snapshotSignedHead(signedHead);
+      const deploymentSnapshot = this.snapshotDeploymentProfile(deployment);
+      this.assertCandidateHeadBinding(candidate, headSnapshot);
+
+      transferredBundle = verifyTransferredCatalogBundleV1(
+        headSnapshot,
+        candidate.row,
+        receivedBundleBytes,
+        deploymentSnapshot,
+      );
+      sharedProjection = verifyCgSharedProjectionV1(
+        transferredBundle,
+        headSnapshot,
+        candidate.row,
+        deploymentSnapshot,
+        limits,
+      );
+
+      const metadata = readVerifiedTransferredCatalogBundleMetadataV1(
+        transferredBundle,
+        headSnapshot,
+        candidate.row,
+        deploymentSnapshot,
+      );
+      if (
+        metadata.headObjectDigest !== candidate.header.targetCatalogHeadDigest
+        || metadata.catalogScopeDigest !== candidate.header.catalogScopeDigest
+        || metadata.catalogRowDigest !== candidate.expectedCatalogRowDigest
+      ) {
+        throw new InventoryV1CandidateError(
+          'candidate-binding-changed',
+          'verified transfer metadata does not match the live candidate binding',
+        );
+      }
+    } catch (cause) {
+      verificationFailed = true;
+      verificationFailure = cause;
+    }
+
+    // The wire objects above are untrusted JavaScript values. Accessors on a
+    // hostile value can re-enter the adapter and close/poison/reopen the
+    // originating traversal while core verification is running. Revalidate the
+    // exact opaque proof after all input consumption before returning authority.
+    let current: CandidateBucketRowSnapshotV1;
+    try {
+      current = this.readVerifiedCandidateCatalogRow(verifiedRow);
+    } catch (cause) {
+      throw new InventoryV1CandidateError(
+        'candidate-binding-changed',
+        'candidate row authority changed during transfer precommit verification',
+        { cause },
+      );
+    }
+    if (current !== candidate || current.disposition !== 'present') {
+      throw new InventoryV1CandidateError(
+        'candidate-binding-changed',
+        'candidate row binding changed during transfer precommit verification',
+      );
+    }
+    if (verificationFailed) throw verificationFailure;
+
+    return Object.freeze({
+      transferredBundle: transferredBundle!,
+      sharedProjection: sharedProjection!,
+    });
+  }
+
+  private snapshotSignedHead(
+    signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+  ): SignedAuthorCatalogHeadEnvelopeV1 {
+    try {
+      const canonicalBytes = canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1(signedHead);
+      const snapshot = parseCanonicalSignedAuthorCatalogHeadEnvelopeV1(canonicalBytes);
+      Object.freeze(snapshot.payload);
+      Object.freeze(snapshot.signatureEvidence);
+      return Object.freeze(snapshot);
+    } catch (cause) {
+      throw new InventoryV1CandidateError(
+        'candidate-head-binding',
+        'signed catalog head could not be snapshotted canonically',
+        { cause },
+      );
+    }
+  }
+
+  private snapshotDeploymentProfile(
+    deployment: CatalogSealDeploymentProfileV1,
+  ): Readonly<CatalogSealDeploymentProfileV1> {
+    try {
+      if (deployment === null || typeof deployment !== 'object' || Array.isArray(deployment)) {
+        throw new Error('deployment profile must be an object');
+      }
+      const keys = Reflect.ownKeys(deployment);
+      const expected = ['assertedAtChainId', 'assertedAtKav10Address', 'networkId'];
+      const stringKeys = keys.filter((key): key is string => typeof key === 'string');
+      if (
+        stringKeys.length !== keys.length
+        || stringKeys.length !== expected.length
+        || [...stringKeys].sort().some((key, index) => key !== expected[index])
+      ) {
+        throw new Error('deployment profile has unknown or missing fields');
+      }
+      for (const key of stringKeys) {
+        const descriptor = Object.getOwnPropertyDescriptor(deployment, key);
+        if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+          throw new Error('deployment profile fields must be enumerable data properties');
+        }
+      }
+
+      // Each scalar getter is consumed exactly once. Core verification validates
+      // the resulting plain, frozen profile before using it.
+      const networkId = deployment.networkId;
+      const assertedAtChainId = deployment.assertedAtChainId;
+      const assertedAtKav10Address = deployment.assertedAtKav10Address;
+      return Object.freeze({
+        networkId,
+        assertedAtChainId,
+        assertedAtKav10Address,
+      });
+    } catch (cause) {
+      throw new InventoryV1CandidateError(
+        'candidate-deployment-profile',
+        'deployment profile could not be snapshotted canonically',
+        { cause },
+      );
+    }
+  }
+
+  private assertCandidateHeadBinding(
+    candidate: CandidateBucketRowSnapshotV1,
+    signedHead: SignedAuthorCatalogHeadEnvelopeV1,
+  ): void {
+    try {
+      const scope = deriveAuthorCatalogScopeFromHeadV1(signedHead.payload);
+      const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+      if (
+        signedHead.objectDigest !== candidate.header.targetCatalogHeadDigest
+        || scopeDigest !== candidate.header.catalogScopeDigest
+        || canonicalizeAuthorCatalogScopeV1(scope)
+          !== canonicalizeAuthorCatalogScopeV1(candidate.catalogScope)
+        || computeAuthorCatalogRowDigestV1(scopeDigest, candidate.row)
+          !== candidate.expectedCatalogRowDigest
+      ) {
+        throw new Error('signed head, catalog scope, and candidate row do not share one binding');
+      }
+    } catch (cause) {
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'candidate-head-binding'
+      ) {
+        throw cause;
+      }
+      throw new InventoryV1CandidateError(
+        'candidate-head-binding',
+        'signed catalog head does not bind the live candidate row',
+        { cause },
+      );
+    }
   }
 
   closeCandidateTraversal(
