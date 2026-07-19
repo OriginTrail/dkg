@@ -37,6 +37,7 @@ const SECP256K1_HALF_N = BigInt(
 const EIP1271_INTERFACE = new ethers.Interface([
   'function isValidSignature(bytes32,bytes) view returns (bytes4)',
 ]);
+declare const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1: unique symbol;
 
 export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
   'unsupported-chain',
@@ -160,6 +161,11 @@ export interface VerifyControlEnvelopeIssuerSignatureOptionsV1 {
 }
 
 export interface VerifiedControlEnvelopeIssuerSignatureV1 {
+  readonly [VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1]: true;
+}
+
+/** Immutable evidence retained behind the process-local verification token. */
+export interface VerifiedControlEnvelopeIssuerSignatureSnapshotV1 {
   readonly objectDigest: Digest32V1;
   readonly signatureVariantDigest: Digest32V1;
   readonly issuer: EvmAddressV1;
@@ -174,6 +180,11 @@ export interface VerifiedControlEnvelopeIssuerSignatureV1 {
         readonly blockHash: Digest32V1;
       };
 }
+
+const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1 = new WeakMap<
+  object,
+  VerifiedControlEnvelopeIssuerSignatureSnapshotV1
+>();
 
 /**
  * Verify only generic envelope cryptography. A successful result does not prove
@@ -192,7 +203,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
 
   if (envelope.signatureSuite === 'eip191-personal-sign-digest-v1') {
     verifyCanonicalEip191(envelope);
-    return Object.freeze({
+    return mintVerifiedControlEnvelopeIssuerSignatureV1({
       objectDigest,
       signatureVariantDigest,
       issuer,
@@ -288,7 +299,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
       );
     }
 
-    return Object.freeze({
+    return mintVerifiedControlEnvelopeIssuerSignatureV1({
       objectDigest,
       signatureVariantDigest,
       issuer,
@@ -305,6 +316,42 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
     if (timeout !== undefined) clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abortFromCaller);
   }
+}
+
+/** Reject lookalikes, casts, clones, and serialized copies of verification tokens. */
+export function assertVerifiedControlEnvelopeIssuerSignatureV1(
+  value: unknown,
+): asserts value is VerifiedControlEnvelopeIssuerSignatureV1 {
+  if (
+    (typeof value !== 'object' && typeof value !== 'function')
+    || value === null
+    || !VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.has(value as object)
+  ) {
+    throw new TypeError(
+      'control-envelope issuer signature token was not minted by this verifier',
+    );
+  }
+}
+
+export function readVerifiedControlEnvelopeIssuerSignatureV1(
+  value: unknown,
+): VerifiedControlEnvelopeIssuerSignatureSnapshotV1 {
+  assertVerifiedControlEnvelopeIssuerSignatureV1(value);
+  return VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.get(value as object)!;
+}
+
+function mintVerifiedControlEnvelopeIssuerSignatureV1(
+  snapshot: VerifiedControlEnvelopeIssuerSignatureSnapshotV1,
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  const immutable = Object.freeze({
+    ...snapshot,
+    verificationEvidence: Object.freeze({ ...snapshot.verificationEvidence }),
+  }) as VerifiedControlEnvelopeIssuerSignatureSnapshotV1;
+  const capability = Object.freeze(
+    Object.create(null),
+  ) as VerifiedControlEnvelopeIssuerSignatureV1;
+  VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.set(capability as object, immutable);
+  return capability;
 }
 
 function snapshotEnvelope(input: SignedControlEnvelopeV1): SignedControlEnvelopeV1 {

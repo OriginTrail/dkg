@@ -18,6 +18,8 @@ import {
   EIP1271_CANONICAL_ABI_RETURN_V1,
   ControlSignatureVerificationErrorV1,
   CurrentFinalizedEvmCallErrorV1,
+  assertVerifiedControlEnvelopeIssuerSignatureV1,
+  readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
@@ -58,7 +60,8 @@ describe('RFC-64 control-object issuer signature verifier', () => {
   it('verifies EIP-191 over raw digest bytes and returns immutable variant identity', async () => {
     const wallet = new ethers.Wallet(PRIVATE_KEY);
     const envelope = await eoaEnvelope(wallet);
-    const verified = await verifyControlEnvelopeIssuerSignatureV1(envelope);
+    const capability = await verifyControlEnvelopeIssuerSignatureV1(envelope);
+    const verified = readVerifiedControlEnvelopeIssuerSignatureV1(capability);
 
     expect(envelope.objectDigest).toBe(EIP191_VECTOR_DIGEST);
     expect(envelope.signature).toBe(EIP191_VECTOR_SIGNATURE);
@@ -70,8 +73,30 @@ describe('RFC-64 control-object issuer signature verifier', () => {
       verificationEvidence: { kind: 'eip191' },
     });
     expect(verified.signatureVariantDigest).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(Object.isFrozen(capability)).toBe(true);
+    expect(Object.getPrototypeOf(capability)).toBeNull();
     expect(Object.isFrozen(verified)).toBe(true);
     expect(Object.isFrozen(verified.verificationEvidence)).toBe(true);
+  });
+
+  it('rejects forged, cloned, and serialized verification-token lookalikes', async () => {
+    const capability = await verifyControlEnvelopeIssuerSignatureV1(
+      await eoaEnvelope(new ethers.Wallet(PRIVATE_KEY)),
+    );
+    expect(() => assertVerifiedControlEnvelopeIssuerSignatureV1(capability)).not.toThrow();
+    for (const lookalike of [
+      {},
+      { ...capability },
+      Object.create(null),
+      JSON.parse(JSON.stringify(capability)) as unknown,
+    ]) {
+      expect(() => assertVerifiedControlEnvelopeIssuerSignatureV1(lookalike)).toThrow(
+        /was not minted by this verifier/,
+      );
+      expect(() => readVerifiedControlEnvelopeIssuerSignatureV1(lookalike)).toThrow(
+        /was not minted by this verifier/,
+      );
+    }
   });
 
   it('rejects signing UTF-8 hex text and a signature from another issuer', async () => {
@@ -138,9 +163,10 @@ describe('RFC-64 control-object issuer signature verifier', () => {
   it('issues one exact bounded raw EIP-1271 call at current-finalized state', async () => {
     const call = vi.fn(async () => FINALIZED_OK);
     const envelope = safeEnvelope();
-    const verified = await verifyControlEnvelopeIssuerSignatureV1(envelope, {
+    const capability = await verifyControlEnvelopeIssuerSignatureV1(envelope, {
       callEvmAtCurrentFinalized: call,
     });
+    const verified = readVerifiedControlEnvelopeIssuerSignatureV1(capability);
 
     expect(call).toHaveBeenCalledTimes(1);
     const request = call.mock.calls[0]![0];
@@ -232,9 +258,10 @@ describe('RFC-64 control-object issuer signature verifier', () => {
         return Reflect.get(target, property, receiver);
       },
     }) as CurrentFinalizedEvmCallResultV1;
-    const verified = await verifyControlEnvelopeIssuerSignatureV1(safeEnvelope(), {
+    const capability = await verifyControlEnvelopeIssuerSignatureV1(safeEnvelope(), {
       callEvmAtCurrentFinalized: callReturning(stateful),
     });
+    const verified = readVerifiedControlEnvelopeIssuerSignatureV1(capability);
     expect(verified.verificationEvidence).toMatchObject({ blockNumber: '123' });
     expect(blockNumberReads).toBe(1);
   });
@@ -377,25 +404,35 @@ describe('RFC-64 control-object issuer signature verifier', () => {
     const second = safeEnvelope('0x1234');
     const call = callReturning(FINALIZED_OK);
 
-    const verifiedFirst = await verifyControlEnvelopeIssuerSignatureV1(first, {
-      callEvmAtCurrentFinalized: call,
-    });
-    const verifiedSecond = await verifyControlEnvelopeIssuerSignatureV1(second, {
-      callEvmAtCurrentFinalized: call,
-    });
+    const verifiedFirst = readVerifiedControlEnvelopeIssuerSignatureV1(
+      await verifyControlEnvelopeIssuerSignatureV1(first, {
+        callEvmAtCurrentFinalized: call,
+      }),
+    );
+    const verifiedSecond = readVerifiedControlEnvelopeIssuerSignatureV1(
+      await verifyControlEnvelopeIssuerSignatureV1(second, {
+        callEvmAtCurrentFinalized: call,
+      }),
+    );
     expect(verifiedFirst.objectDigest).toBe(verifiedSecond.objectDigest);
     expect(verifiedFirst.signatureVariantDigest).not.toBe(verifiedSecond.signatureVariantDigest);
   });
 
   it('accepts 1-byte and 4096-byte EIP-1271 signatures and rejects 0/4097 structurally', async () => {
     const call = callReturning(FINALIZED_OK);
-    await expect(verifyControlEnvelopeIssuerSignatureV1(safeEnvelope('0xaa'), {
+    const oneByte = await verifyControlEnvelopeIssuerSignatureV1(safeEnvelope('0xaa'), {
       callEvmAtCurrentFinalized: call,
-    })).resolves.toMatchObject({ signatureSuite: 'eip1271-current-finalized-v1' });
-    await expect(verifyControlEnvelopeIssuerSignatureV1(
+    });
+    expect(readVerifiedControlEnvelopeIssuerSignatureV1(oneByte)).toMatchObject({
+      signatureSuite: 'eip1271-current-finalized-v1',
+    });
+    const maxBytes = await verifyControlEnvelopeIssuerSignatureV1(
       safeEnvelope(`0x${'aa'.repeat(4096)}`),
       { callEvmAtCurrentFinalized: call },
-    )).resolves.toMatchObject({ signatureSuite: 'eip1271-current-finalized-v1' });
+    );
+    expect(readVerifiedControlEnvelopeIssuerSignatureV1(maxBytes)).toMatchObject({
+      signatureSuite: 'eip1271-current-finalized-v1',
+    });
     await expect(verifyControlEnvelopeIssuerSignatureV1(safeEnvelope('0x'), {
       callEvmAtCurrentFinalized: call,
     })).rejects.toMatchObject({ code: 'CONTROL_SIGNATURE_ENVELOPE_INVALID' });

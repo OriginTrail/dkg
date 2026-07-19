@@ -14,6 +14,8 @@ export {
   EIP1271_MAGIC_VALUE_V1,
   ControlSignatureVerificationErrorV1,
   CurrentFinalizedEvmCallErrorV1,
+  assertVerifiedControlEnvelopeIssuerSignatureV1,
+  readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
   type ControlSignatureVerificationDispositionV1,
   type ControlSignatureVerificationErrorCodeV1,
@@ -23,6 +25,7 @@ export {
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureSnapshotV1,
   type VerifyControlEnvelopeIssuerSignatureOptionsV1,
 } from './control-object-signature-verifier.js';
 export {
