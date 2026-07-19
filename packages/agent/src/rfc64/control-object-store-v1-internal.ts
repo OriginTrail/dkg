@@ -17,12 +17,10 @@ import {
 import {
   Rfc64DurableFileErrorV1,
   assertRfc64ExistingDirectoryV1,
-  createRfc64DurableFileStoreForTestV1,
-  createRfc64DurableFileStoreV1,
-  ensureRfc64SecureDirectoryTreeForTestV1,
-  ensureRfc64SecureDirectoryTreeV1,
+  createRfc64DurableFileStoreWithInstrumentationV1,
+  ensureRfc64SecureDirectoryTreeWithInstrumentationV1,
   type Rfc64DurableFileBoundaryV1,
-  type Rfc64DurableFileLifecycleV1,
+  type Rfc64DurableFileInstrumentationV1,
   type Rfc64DurableFileStoreV1,
 } from './durable-file-store-v1.js';
 import {
@@ -87,8 +85,8 @@ type Rfc64ControlObjectStoreFileKindV1 = 'object' | 'signature';
 export type Rfc64ControlObjectStoreDurabilityBoundaryV1 =
   Rfc64DurableFileBoundaryV1<Rfc64ControlObjectStoreFileKindV1>;
 
-interface Rfc64ControlObjectStoreLifecycleV1
-  extends Rfc64DurableFileLifecycleV1<Rfc64ControlObjectStoreFileKindV1> {}
+export interface Rfc64ControlObjectStoreInstrumentationV1
+  extends Rfc64DurableFileInstrumentationV1<Rfc64ControlObjectStoreFileKindV1> {}
 
 export interface StageVerifiedControlObjectV1 {
   readonly envelope: SignedControlEnvelopeV1;
@@ -151,8 +149,15 @@ export async function openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
   ownership: Rfc64PersistenceRootOwnershipV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
   const rfc64RootPath = ownership.assertHeldAndGetRootPathV1();
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, null);
+  return openRfc64ControlObjectStoreAtRootV1(
+    rfc64RootPath,
+    NOOP_RFC64_CONTROL_OBJECT_STORE_INSTRUMENTATION_V1,
+  );
 }
+
+const NOOP_RFC64_CONTROL_OBJECT_STORE_INSTRUMENTATION_V1 = Object.freeze({
+  boundary: (): void => {},
+}) satisfies Rfc64ControlObjectStoreInstrumentationV1;
 
 interface PreparedStoredControlObjectV1 {
   readonly objectDigest: Digest32V1;
@@ -429,26 +434,17 @@ async function settleAllOrThrowV1<T>(
   });
 }
 
-/** @internal Used only by the package-local test support module. */
-export async function openRfc64ControlObjectStoreForTestV1(
+/** @internal Package-local lifecycle/instrumentation composition seam. */
+export async function openRfc64ControlObjectStoreWithInstrumentationV1(
   dataDirInput: string,
-  lifecycle: Rfc64ControlObjectStoreLifecycleV1,
+  instrumentation: Rfc64ControlObjectStoreInstrumentationV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  assertRfc64ControlObjectStoreTestEnvironmentV1();
-  if (!Object.isFrozen(lifecycle)) {
-    fail('control-store-input', 'control object store lifecycle adapter must be immutable');
+  if (!Object.isFrozen(instrumentation)) {
+    fail('control-store-input', 'control object store instrumentation must be immutable');
   }
   if (typeof dataDirInput !== 'string' || dataDirInput.length === 0) {
     fail('control-store-input', 'dataDir must be a non-empty path');
   }
-  const guardedLifecycle = Object.freeze({
-    boundary: async (
-      boundary: Rfc64ControlObjectStoreDurabilityBoundaryV1,
-    ): Promise<void> => {
-      assertRfc64ControlObjectStoreTestEnvironmentV1();
-      await lifecycle.boundary(boundary);
-    },
-  });
   const dataDir = resolve(dataDirInput);
   const rfc64RootPath = resolveRfc64PersistenceRootV1(dataDir);
   await mapDurableFileErrors(async () => {
@@ -457,30 +453,21 @@ export async function openRfc64ControlObjectStoreForTestV1(
       'DKG data directory',
       { access: 'owner' },
     );
-    await ensureRfc64SecureDirectoryTreeForTestV1(
+    await ensureRfc64SecureDirectoryTreeWithInstrumentationV1(
       rfc64RootPath,
       dataDir,
-      guardedLifecycle,
+      instrumentation,
     );
   });
-  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, guardedLifecycle);
-}
-
-function assertRfc64ControlObjectStoreTestEnvironmentV1(): void {
-  if (process.env.NODE_ENV !== 'test') {
-    fail(
-      'control-store-input',
-      'control store test opener is available only under NODE_ENV=test',
-    );
-  }
+  return openRfc64ControlObjectStoreAtRootV1(rfc64RootPath, instrumentation);
 }
 
 async function openRfc64ControlObjectStoreAtRootV1(
   rfc64RootPathInput: string,
-  testLifecycle: Rfc64ControlObjectStoreLifecycleV1 | null,
+  instrumentation: Rfc64ControlObjectStoreInstrumentationV1,
 ): Promise<Rfc64ControlObjectStoreV1> {
-  if (testLifecycle !== null && !Object.isFrozen(testLifecycle)) {
-    fail('control-store-input', 'control object store lifecycle adapter must be immutable');
+  if (!Object.isFrozen(instrumentation)) {
+    fail('control-store-input', 'control object store instrumentation must be immutable');
   }
   const rfc64RootPath = resolve(rfc64RootPathInput);
   const rootPath = resolveRfc64ControlObjectStorePathV1(rfc64RootPath);
@@ -490,18 +477,19 @@ async function openRfc64ControlObjectStoreAtRootV1(
       'RFC-64 persistence root',
       { access: 'owner-only' },
     );
-    const ensureTree = testLifecycle === null
-      ? (target: string, root: string) =>
-          ensureRfc64SecureDirectoryTreeV1(target, root)
-      : (target: string, root: string) =>
-          ensureRfc64SecureDirectoryTreeForTestV1(target, root, testLifecycle);
+    const ensureTree = (target: string, root: string) =>
+      ensureRfc64SecureDirectoryTreeWithInstrumentationV1(
+        target,
+        root,
+        instrumentation,
+      );
     await ensureTree(rootPath, rfc64RootPath);
     await ensureTree(join(rootPath, OBJECTS_DIRECTORY), rootPath);
     await ensureTree(join(rootPath, SIGNATURES_DIRECTORY), rootPath);
   });
-  const durableFiles = testLifecycle === null
-    ? createRfc64DurableFileStoreV1<Rfc64ControlObjectStoreFileKindV1>(rootPath)
-    : createRfc64DurableFileStoreForTestV1(rootPath, testLifecycle);
+  const durableFiles = createRfc64DurableFileStoreWithInstrumentationV1<
+    Rfc64ControlObjectStoreFileKindV1
+  >(rootPath, instrumentation);
   return new FileRfc64ControlObjectStoreV1(rootPath, durableFiles);
 }
 
