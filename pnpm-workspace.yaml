@@ -20,6 +20,7 @@ packages:
   - "devnet/v10-rs-prune"
   - "devnet/v10-rs-wallet-rotation"
   - "devnet/_bootstrap"
+  - "devnet/rfc64-persistence-lifecycle"
   - "devnet/pr1386-term-canon"
   - "devnet/pr1385-subgraph-rs"
   - "devnet/pr1388-okf-integration"
