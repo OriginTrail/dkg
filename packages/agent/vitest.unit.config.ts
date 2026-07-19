@@ -122,6 +122,7 @@ export default defineConfig({
       "test/rfc64-public-catalog-transport-v1.test.ts",
       "test/rfc64-public-catalog-receiver-v1.test.ts",
       "test/rfc64-public-catalog-gate1.integration.test.ts",
+      "test/rfc64-public-catalog-native-transport-v1.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
