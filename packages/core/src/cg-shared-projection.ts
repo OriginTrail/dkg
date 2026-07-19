@@ -706,10 +706,18 @@ function normalizeVerificationLimits(
   value: CgSharedProjectionVerificationLimitsV1,
 ): Readonly<CgSharedProjectionVerificationLimitsV1> {
   const hard = DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1;
+  // Capture each caller-controlled limit exactly once. A stateful getter or
+  // Proxy could otherwise return a safe value during validation and an
+  // oversized value when the frozen result is built, smuggling a limit past
+  // the hard resource ceilings. Every check and the returned object below read
+  // only these captured scalars, never `value` a second time.
+  const maxProjectionBytes = value?.maxProjectionBytes;
+  const maxPublicTriples = value?.maxPublicTriples;
+  const maxLineBytes = value?.maxLineBytes;
   for (const [name, member, ceiling] of [
-    ['maxProjectionBytes', value?.maxProjectionBytes, hard.maxProjectionBytes],
-    ['maxPublicTriples', value?.maxPublicTriples, hard.maxPublicTriples],
-    ['maxLineBytes', value?.maxLineBytes, hard.maxLineBytes],
+    ['maxProjectionBytes', maxProjectionBytes, hard.maxProjectionBytes],
+    ['maxPublicTriples', maxPublicTriples, hard.maxPublicTriples],
+    ['maxLineBytes', maxLineBytes, hard.maxLineBytes],
   ] as const) {
     if (
       !Number.isSafeInteger(member)
@@ -722,16 +730,16 @@ function normalizeVerificationLimits(
       );
     }
   }
-  if (value.maxLineBytes > value.maxProjectionBytes) {
+  if (maxLineBytes > maxProjectionBytes) {
     fail(
       'projection-resource-refused',
       'maxLineBytes cannot exceed maxProjectionBytes',
     );
   }
   return Object.freeze({
-    maxProjectionBytes: value.maxProjectionBytes,
-    maxPublicTriples: value.maxPublicTriples,
-    maxLineBytes: value.maxLineBytes,
+    maxProjectionBytes,
+    maxPublicTriples,
+    maxLineBytes,
   });
 }
 
