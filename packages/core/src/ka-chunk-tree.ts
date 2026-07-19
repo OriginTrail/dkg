@@ -40,6 +40,24 @@ export class KaChunkTreeV1Error extends Error {
 }
 
 /**
+ * Validate a complete transfer length before any transfer-sized buffer is
+ * allocated or hashed. Callers that learn the declared length from a
+ * descriptor can therefore reject an over-limit transfer up front.
+ */
+export function assertKaChunkTreeByteLengthV1(byteLength: bigint): void {
+  if (
+    typeof byteLength !== 'bigint'
+    || byteLength < MIN_KA_TRANSFER_BYTES_V1
+    || byteLength > MAX_KA_TRANSFER_BYTES_V1
+  ) {
+    fail(
+      'chunk-tree-byte-length',
+      `bundle length must be ${MIN_KA_TRANSFER_BYTES_V1}-${MAX_KA_TRANSFER_BYTES_V1} bytes`,
+    );
+  }
+}
+
+/**
  * Compute the exact index- and length-bound RFC-64 leaf digest for one non-empty
  * transfer chunk. This is a dormant structural primitive; it makes no RDF or seal claim.
  */
@@ -84,12 +102,7 @@ function computeLeafDigestBytes(chunkIndex: bigint, chunkBytes: Uint8Array): Uin
 export function computeKaChunkTreeRootV1(bundleBytes: Uint8Array): Digest32V1 {
   assertOwnedFixedUint8Array(bundleBytes, 'bundleBytes');
   const byteLength = BigInt(bundleBytes.byteLength);
-  if (byteLength < MIN_KA_TRANSFER_BYTES_V1 || byteLength > MAX_KA_TRANSFER_BYTES_V1) {
-    fail(
-      'chunk-tree-byte-length',
-      `bundle length must be ${MIN_KA_TRANSFER_BYTES_V1}-${MAX_KA_TRANSFER_BYTES_V1} bytes`,
-    );
-  }
+  assertKaChunkTreeByteLengthV1(byteLength);
 
   const chunkCount = ((byteLength - 1n) / KA_TRANSFER_CHUNK_SIZE_BYTES_V1) + 1n;
   if (chunkCount < 1n || chunkCount > MAX_KA_TRANSFER_CHUNKS_V1) {

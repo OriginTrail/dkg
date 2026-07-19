@@ -19,6 +19,8 @@ export default defineConfig({
       "test/generic-sql-source.test.ts",
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
+      "test/publish-foreign-author-resolution.test.ts",
+      "test/durable-integrity-seal-assertion-version.test.ts",
       "test/promote-async-default-agent.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/sync-envelope-cursor.test.ts",

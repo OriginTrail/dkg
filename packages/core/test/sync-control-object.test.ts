@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CONTROL_OBJECT_SIGNATURE_SUITES,
   MAX_CONTROL_OBJECT_BYTES,
   MAX_EIP1271_SIGNATURE_BYTES,
   assertControlObjectDigest,
@@ -13,6 +14,7 @@ import {
   parseCanonicalControlSignatureVariant,
   parseCanonicalSignedControlEnvelope,
   parseCanonicalUnsignedControlEnvelope,
+  type ControlObjectSignatureSuite,
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '../src/sync-control-object.js';
@@ -176,6 +178,26 @@ describe('Track-2 control-object envelopes', () => {
       ...SAFE_VECTOR,
       signatureEvidence: { kind: 'none' },
     })).toThrow(/EIP-1271 signature evidence|unknown or missing fields/);
+  });
+
+  it('keeps the immutable signature-suite registry authoritative', () => {
+    expect(Object.isFrozen(CONTROL_OBJECT_SIGNATURE_SUITES)).toBe(true);
+    expect(() => (CONTROL_OBJECT_SIGNATURE_SUITES as unknown as string[]).push('evil-suite'))
+      .toThrow();
+    const validEnvelopeBySuite = {
+      'eip191-personal-sign-digest-v1': EOA_VECTOR,
+      'eip1271-current-finalized-v1': SAFE_VECTOR,
+    } satisfies Record<ControlObjectSignatureSuite, UnsignedControlEnvelopeV1>;
+    for (const suite of CONTROL_OBJECT_SIGNATURE_SUITES) {
+      expect(validEnvelopeBySuite[suite].signatureSuite).toBe(suite);
+      expect(() => assertUnsignedControlEnvelope(validEnvelopeBySuite[suite])).not.toThrow();
+    }
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureSuite: 'evil-suite',
+    } as unknown as UnsignedControlEnvelopeV1)).toThrow(
+      /Unsupported control-object signature suite/,
+    );
   });
 
   it.each(['01', '+1', '-1', '1.0', '1e3', ''])('rejects non-canonical chainId %j', (chainId) => {
