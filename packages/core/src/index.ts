@@ -375,3 +375,4 @@ export {
   type CanonicalGraphScopedAuthorSealErrorCode,
 } from './canonical-graph-scoped-author-seal.js';
 export * from './catalog-seal-binding.js';
+export * from './transferred-catalog-bundle.js';
