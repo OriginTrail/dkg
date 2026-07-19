@@ -1,0 +1,23 @@
+{
+  "name": "@origintrail-experiments/wal-iblt-profile-v1",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "sweep": "tsx scripts/sweep.ts",
+    "vectors": "tsx scripts/generate-vectors.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@vitest/coverage-v8": "^4.0.18",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7",
+    "vitest": "^4.0.18"
+  }
+}

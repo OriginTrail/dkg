@@ -1,0 +1,100 @@
+{
+  "warning": "EXPERIMENTAL: not a ProtocolV1 conformance vector",
+  "referenceProfile": "paper-baseline-v0",
+  "requesterHeadId": "3bb513a6348f1baddffe61c7dc3bc8eab0107fb77db336036cb34e98044c6745",
+  "providerHeadId": "a88e1648e3ab7abfb738c3a21a90eed5977a27769845cf4c72130c83fc52797d",
+  "requesterNonce": "95dac2892198a073324a0ceb4eeb7a846ac57a97a1d5c758c31c602d0a73d30f",
+  "reconciliationSeed": "befc571eb2ca1ebe82c88e93ec95e2178fa26bc058680dacdb2d43fdea07e93c",
+  "receiverIds": [
+    "c6dbb6e67c5061ad3076b01244341eec2af79069604c684b7212533520ba1b5b",
+    "943aebfe77de93f2044fff972104d9fba3145749276d8957fdf0e9cd13071fa7",
+    "128d42eabd65961a0fc644631bfe7b465d2fadb06ab0a7e5cf864d15d9b46510"
+  ],
+  "providerIds": [
+    "c6dbb6e67c5061ad3076b01244341eec2af79069604c684b7212533520ba1b5b",
+    "943aebfe77de93f2044fff972104d9fba3145749276d8957fdf0e9cd13071fa7",
+    "0d68daaf0466c2c02efce025f0cc4459b930448ad9031797c6717b9b2e163811",
+    "5dd6f2e1f68f9165bec0970a527acdda130924092627b84af7da63009a3deb40"
+  ],
+  "receiverRoot": "efc192e00db4b77f35a540de0c8dec962436edfc036a7bcf86800d802c08cab8",
+  "providerRoot": "73488fe957491d6aa2b3191464648a96d87a8326f5cd23f936db89bc732b1cd5",
+  "symbols": [
+    {
+      "symbolIndex": 0,
+      "count": "4",
+      "idXor": "025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad",
+      "checksumXor": "4f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d",
+      "canonicalCbor": "8400045820025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad58204f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d"
+    },
+    {
+      "symbolIndex": 1,
+      "count": "4",
+      "idXor": "025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad",
+      "checksumXor": "4f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d",
+      "canonicalCbor": "8401045820025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad58204f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d"
+    },
+    {
+      "symbolIndex": 2,
+      "count": "4",
+      "idXor": "025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad",
+      "checksumXor": "4f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d",
+      "canonicalCbor": "8402045820025f7556f967a1faa40538aac7864e9423daa7a3b8054ec1be49a2638796d7ad58204f154ac0f4cdc19de768325a82855398892f8da98031813b2954b081e64c6e9d"
+    },
+    {
+      "symbolIndex": 3,
+      "count": "2",
+      "idXor": "9b0d44078adff0c88eb62718164ed33639feb460466bd00185c83035ba87f01b",
+      "checksumXor": "acf74a2c757b6cac362b85f05c9ab05e00546996b026dc7e1b96fc15f6d8b8db",
+      "canonicalCbor": "84030258209b0d44078adff0c88eb62718164ed33639feb460466bd00185c83035ba87f01b5820acf74a2c757b6cac362b85f05c9ab05e00546996b026dc7e1b96fc15f6d8b8db"
+    }
+  ],
+  "decode": {
+    "complete": true,
+    "providerOnly": [
+      "0d68daaf0466c2c02efce025f0cc4459b930448ad9031797c6717b9b2e163811",
+      "5dd6f2e1f68f9165bec0970a527acdda130924092627b84af7da63009a3deb40"
+    ],
+    "receiverOnly": [
+      "128d42eabd65961a0fc644631bfe7b465d2fadb06ab0a7e5cf864d15d9b46510"
+    ],
+    "peelTrace": [
+      {
+        "symbolIndex": 3,
+        "outcome": "provider-only",
+        "idHex": "5dd6f2e1f68f9165bec0970a527acdda130924092627b84af7da63009a3deb40"
+      },
+      {
+        "symbolIndex": 1,
+        "outcome": "provider-only",
+        "idHex": "0d68daaf0466c2c02efce025f0cc4459b930448ad9031797c6717b9b2e163811"
+      },
+      {
+        "symbolIndex": 0,
+        "outcome": "receiver-only",
+        "idHex": "128d42eabd65961a0fc644631bfe7b465d2fadb06ab0a7e5cf864d15d9b46510"
+      },
+      {
+        "symbolIndex": 2,
+        "outcome": "zero"
+      }
+    ]
+  },
+  "fallbackPages": [
+    {
+      "offset": 0,
+      "done": false,
+      "ids": [
+        "0d68daaf0466c2c02efce025f0cc4459b930448ad9031797c6717b9b2e163811",
+        "5dd6f2e1f68f9165bec0970a527acdda130924092627b84af7da63009a3deb40"
+      ]
+    },
+    {
+      "offset": 2,
+      "done": true,
+      "ids": [
+        "943aebfe77de93f2044fff972104d9fba3145749276d8957fdf0e9cd13071fa7",
+        "c6dbb6e67c5061ad3076b01244341eec2af79069604c684b7212533520ba1b5b"
+      ]
+    }
+  ]
+}

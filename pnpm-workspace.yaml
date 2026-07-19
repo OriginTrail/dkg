@@ -29,3 +29,4 @@ packages:
   - "devnet/pr1387-bulk-register-agents"
   - "devnet/pr1384-preserve-agents-on-transfer"
   - "devnet/pr1370-admin-op-wallet"
+  - "experiments/wal-iblt-profile-v1"
