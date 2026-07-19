@@ -4,15 +4,16 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE } from '../src/rfc64/control-object-store-v1.js';
-import {
-  createRfc64DurableFileStoreForTestV1,
-  createRfc64DurableFileStoreV1,
-} from '../src/rfc64/durable-file-store-v1.js';
+import { createRfc64DurableFileStoreV1 } from '../src/rfc64/durable-file-store-v1.js';
 import { applyRfc64OwnerOnlyPermissionsSyncV1 } from '../src/rfc64/secure-filesystem-policy-v1.js';
 import {
   createTemporaryDataDirectoryFixture,
   deferred,
 } from './support/rfc64-control-object-store-fixtures.js';
+import {
+  createRfc64DurableFileStoreForTestV1,
+  type Rfc64DurableFileTestLifecycleV1,
+} from './support/rfc64-durable-file-store-test-support.js';
 
 const temporaryDirectories = createTemporaryDataDirectoryFixture();
 const { temporaryDataDirectory } = temporaryDirectories;
@@ -97,7 +98,7 @@ describe('RFC-64 durable file store v1', () => {
             joined.resolve();
           }
         },
-      }),
+      } satisfies Rfc64DurableFileTestLifecycleV1<'signature'>),
     );
     const put = (relativePath: string, value: string) => durableFiles.putExactBytes({
       relativePath,

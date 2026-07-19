@@ -59,21 +59,16 @@ export type Rfc64DurableFileBoundaryV1<TKind extends string = string> =
   | 'directory.parent-fsynced'
   | `${TKind}.${Rfc64DurableFilePublishBoundaryV1}`;
 
-export interface Rfc64DurableFileLifecycleV1<TKind extends string = string> {
+/** Package-internal observation seam for durability and directory coordination. */
+export interface Rfc64DurableFileInstrumentationV1<TKind extends string = string> {
   readonly boundary: (
     boundary: Rfc64DurableFileBoundaryV1<TKind>,
   ) => void | Promise<void>;
-}
-
-/** @internal Source-test lifecycle with deterministic directory single-flight observation. */
-export interface Rfc64DurableFileTestLifecycleV1<TKind extends string = string>
-  extends Rfc64DurableFileLifecycleV1<TKind> {
   readonly directoryPreparation?: (
     observation: Rfc64DirectoryPreparationObservationV1,
   ) => void | Promise<void>;
 }
 
-/** @internal Source-test observation emitted by the guarded test factory. */
 export interface Rfc64DirectoryPreparationObservationV1 {
   readonly path: string;
   readonly disposition: 'started' | 'joined';
@@ -89,45 +84,21 @@ export interface Rfc64DurableFileStoreV1<TKind extends string> {
 export function createRfc64DurableFileStoreV1<TKind extends string>(
   containmentRoot: string,
 ): Rfc64DurableFileStoreV1<TKind> {
-  return createRfc64DurableFileStoreWithLifecycleV1(
+  return createRfc64DurableFileStoreWithInstrumentationV1(
     containmentRoot,
-    PRODUCTION_DURABLE_FILE_LIFECYCLE_V1,
+    NOOP_RFC64_DURABLE_FILE_INSTRUMENTATION_V1,
   );
 }
 
-/** @internal Package-local fault injection; unavailable outside source tests. */
-export function createRfc64DurableFileStoreForTestV1<TKind extends string>(
+/** @internal Package-local lifecycle/instrumentation composition seam. */
+export function createRfc64DurableFileStoreWithInstrumentationV1<TKind extends string>(
   containmentRoot: string,
-  lifecycle: Rfc64DurableFileTestLifecycleV1<TKind>,
+  instrumentation: Rfc64DurableFileInstrumentationV1<TKind>,
 ): Rfc64DurableFileStoreV1<TKind> {
-  assertRfc64DurableFileTestEnvironmentV1();
-  const observeDirectoryPreparation = lifecycle.directoryPreparation;
-  const guardedLifecycle = Object.freeze({
-    boundary: async (boundary: Rfc64DurableFileBoundaryV1<TKind>): Promise<void> => {
-      assertRfc64DurableFileTestEnvironmentV1();
-      await lifecycle.boundary(boundary);
-    },
-    directoryPreparation: async (
-      observation: Rfc64DirectoryPreparationObservationV1,
-    ): Promise<void> => {
-      assertRfc64DurableFileTestEnvironmentV1();
-      await observeDirectoryPreparation?.(observation);
-    },
-  });
-  return createRfc64DurableFileStoreWithLifecycleV1(
-    containmentRoot,
-    guardedLifecycle,
-  );
-}
-
-const PRODUCTION_DURABLE_FILE_LIFECYCLE_V1 = Object.freeze({
-  boundary: (): void => {},
-}) satisfies Rfc64DurableFileTestLifecycleV1;
-
-function createRfc64DurableFileStoreWithLifecycleV1<TKind extends string>(
-  containmentRoot: string,
-  lifecycle: Rfc64DurableFileTestLifecycleV1<TKind>,
-): Rfc64DurableFileStoreV1<TKind> {
+  if (!Object.isFrozen(instrumentation)) {
+    fail('input', 'RFC-64 durable-file instrumentation must be immutable');
+  }
+  const lifecycle = instrumentation;
   const directoryPreparations = new Map<string, Promise<void>>();
   const prepareDirectoryComponent = async (path: string): Promise<void> => {
     const key = resolve(path);
@@ -185,6 +156,10 @@ function createRfc64DurableFileStoreWithLifecycleV1<TKind extends string>(
   });
 }
 
+const NOOP_RFC64_DURABLE_FILE_INSTRUMENTATION_V1 = Object.freeze({
+  boundary: (): void => {},
+}) satisfies Rfc64DurableFileInstrumentationV1;
+
 export async function assertRfc64ExistingDirectoryV1(
   path: string,
   label: string,
@@ -212,53 +187,37 @@ export async function ensureRfc64SecureDirectoryTreeV1<TKind extends string>(
   containmentRoot: string,
   containmentRootAccess: Rfc64ExistingAccessV1 = 'owner',
 ): Promise<void> {
-  return ensureRfc64SecureDirectoryTreeWithLifecycleV1(
+  return ensureRfc64SecureDirectoryTreeWithInstrumentationV1(
     target,
     containmentRoot,
-    PRODUCTION_DURABLE_FILE_LIFECYCLE_V1,
+    NOOP_RFC64_DURABLE_FILE_INSTRUMENTATION_V1,
     containmentRootAccess,
   );
 }
 
-/** @internal Package-local fault injection; unavailable outside source tests. */
-export async function ensureRfc64SecureDirectoryTreeForTestV1<TKind extends string>(
+/** @internal Package-local lifecycle/instrumentation composition seam. */
+export async function ensureRfc64SecureDirectoryTreeWithInstrumentationV1<
+  TKind extends string,
+>(
   target: string,
   containmentRoot: string,
-  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  instrumentation: Rfc64DurableFileInstrumentationV1<TKind>,
   containmentRootAccess: Rfc64ExistingAccessV1 = 'owner',
 ): Promise<void> {
-  assertRfc64DurableFileTestEnvironmentV1();
-  const guardedLifecycle = Object.freeze({
-    boundary: async (boundary: Rfc64DurableFileBoundaryV1<TKind>): Promise<void> => {
-      assertRfc64DurableFileTestEnvironmentV1();
-      await lifecycle.boundary(boundary);
-    },
-  });
-  return ensureRfc64SecureDirectoryTreeWithLifecycleV1(
-    target,
-    containmentRoot,
-    guardedLifecycle,
-    containmentRootAccess,
-  );
-}
-
-async function ensureRfc64SecureDirectoryTreeWithLifecycleV1<TKind extends string>(
-  target: string,
-  containmentRoot: string,
-  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
-  containmentRootAccess: Rfc64ExistingAccessV1,
-): Promise<void> {
+  if (!Object.isFrozen(instrumentation)) {
+    fail('input', 'RFC-64 durable-file instrumentation must be immutable');
+  }
   await walkRfc64ContainedDirectoryTreeV1(
     target,
     containmentRoot,
     containmentRootAccess,
-    (current) => prepareRfc64SecureDirectoryComponentV1(current, lifecycle),
+    (current) => prepareRfc64SecureDirectoryComponentV1(current, instrumentation),
   );
 }
 
 async function prepareRfc64SecureDirectoryComponentV1<TKind extends string>(
   path: string,
-  lifecycle: Rfc64DurableFileLifecycleV1<TKind>,
+  lifecycle: Rfc64DurableFileInstrumentationV1<TKind>,
 ): Promise<void> {
   let created = false;
   try {
@@ -291,7 +250,7 @@ export interface PutRfc64ExactBytesInputV1<TKind extends string> {
 interface InternalPutRfc64ExactBytesInputV1<TKind extends string>
   extends PutRfc64ExactBytesInputV1<TKind> {
   readonly containmentRoot: string;
-  readonly lifecycle: Rfc64DurableFileLifecycleV1<TKind>;
+  readonly lifecycle: Rfc64DurableFileInstrumentationV1<TKind>;
   readonly prepareDirectoryTree: (
     target: string,
     containmentRootAccess: Rfc64ExistingAccessV1,
@@ -692,10 +651,4 @@ function fail(
     message,
     cause === undefined ? {} : { cause },
   );
-}
-
-function assertRfc64DurableFileTestEnvironmentV1(): void {
-  if (process.env.NODE_ENV !== 'test') {
-    fail('input', 'RFC-64 durable-file fault injection is unavailable outside NODE_ENV=test');
-  }
 }
