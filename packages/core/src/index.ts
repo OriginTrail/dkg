@@ -15,6 +15,8 @@ export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './sync-control-object.js';
 export * from './cg-policy-objects.js';
+export * from './administrative-authority-objects.js';
+export * from './author-catalog-authority-objects.js';
 export {
   MAX_DECIMAL_U64,
   MAX_DECIMAL_U256,
