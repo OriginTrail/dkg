@@ -65,6 +65,7 @@ import {
   type Rfc64PublicCatalogNativeTransportV1,
 } from './public-catalog-native-transport-v1.js';
 import type {
+  FetchedRfc64PublicCatalogHeadV1,
   Rfc64PublicCatalogHeadAnnouncementV1,
   Rfc64PublicCatalogTransportV1,
 } from './public-catalog-transport-v1.js';
@@ -98,6 +99,21 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly swmGraph: string;
   readonly appliedHeadStatus: 'applied' | 'existing';
 }
+
+/** Exact durable evidence for the canonical empty catalog bootstrap. */
+export interface Rfc64PublicCatalogNativeGenesisEvidenceV1 {
+  /** Digest of the exact empty applied inventory (zero rows). */
+  readonly inventoryDigest: Digest32V1;
+  readonly catalogHeadDigest: Digest32V1;
+  readonly inventoryRowCount: 0;
+  readonly activatedTripleCount: 0;
+  readonly stagedObjectCount: 2;
+  readonly appliedHeadStatus: 'applied' | 'existing';
+}
+
+export type Rfc64PublicCatalogNativeSynchronizationEvidenceV1 =
+  | Rfc64PublicCatalogNativeGenesisEvidenceV1
+  | Rfc64PublicCatalogNativeActivationEvidenceV1;
 
 export type Rfc64PublicCatalogNativeReceiverErrorCodeV1 =
   | 'catalog-native-receiver-input'
@@ -148,23 +164,222 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     return this.withScopeSerialization(
       catalogScopeLockKey(announcement),
-      () => this.synchronizeOnePublicOpenRowSerialized(remotePeerId, announcement, deployment),
+      async () => {
+        const evidence = await this.synchronizePublicOpenCatalogSerialized(
+          remotePeerId,
+          announcement,
+          deployment,
+          'successor',
+        );
+        if (evidence.inventoryRowCount !== 1) {
+          fail('catalog-native-receiver-slice', 'one-row synchronization returned genesis evidence');
+        }
+        return evidence;
+      },
     );
   }
 
-  private async synchronizeOnePublicOpenRowSerialized(
+  /**
+   * Fetch and apply either the canonical empty genesis or the bounded one-row
+   * successor. This is the production-facing entrypoint for a fresh receiver:
+   * callers do not need to seed durable history out of band.
+   */
+  async synchronizePublicOpenCatalog(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     deployment: CatalogSealDeploymentProfileV1,
-  ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
+  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
+    return this.withScopeSerialization(
+      catalogScopeLockKey(announcement),
+      () => this.synchronizePublicOpenCatalogSerialized(
+        remotePeerId,
+        announcement,
+        deployment,
+        'any',
+      ),
+    );
+  }
+
+  /** Fetch, fully verify, and durably initialize exactly one empty genesis. */
+  async bootstrapEmptyPublicOpenCatalog(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    deployment: CatalogSealDeploymentProfileV1,
+  ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
+    return this.withScopeSerialization(
+      catalogScopeLockKey(announcement),
+      async () => {
+        const evidence = await this.synchronizePublicOpenCatalogSerialized(
+          remotePeerId,
+          announcement,
+          deployment,
+          'genesis',
+        );
+        if (evidence.inventoryRowCount !== 0) {
+          fail('catalog-native-receiver-slice', 'genesis bootstrap returned successor evidence');
+        }
+        return evidence;
+      },
+    );
+  }
+
+  private async synchronizePublicOpenCatalogSerialized(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    deployment: CatalogSealDeploymentProfileV1,
+    expected: 'any' | 'genesis' | 'successor',
+  ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
     const fetchedHead = await this.options.headTransport.fetchCatalogHead(
       remotePeerId,
       announcement,
       { timeoutMs: this.#timeoutMs },
     );
     if (fetchedHead === null) {
-      fail('catalog-native-receiver-not-found', 'announced successor head was not found');
+      fail('catalog-native-receiver-not-found', 'announced catalog head was not found');
     }
+    const head = fetchedHead.envelope;
+    if (expected === 'genesis' || (expected === 'any' && claimsGenesisHistory(head))) {
+      return this.bootstrapEmptyPublicOpenCatalogFetched(
+        remotePeerId,
+        announcement,
+        fetchedHead,
+      );
+    }
+    if (expected === 'successor' && claimsGenesisHistory(head)) {
+      fail('catalog-native-receiver-slice', 'one-row synchronization does not accept genesis');
+    }
+    return this.synchronizeOnePublicOpenRowFetched(
+      remotePeerId,
+      announcement,
+      deployment,
+      fetchedHead,
+    );
+  }
+
+  private async bootstrapEmptyPublicOpenCatalogFetched(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    fetchedHead: FetchedRfc64PublicCatalogHeadV1,
+  ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
+    const head = fetchedHead.envelope;
+    assertEmptyGenesisHead(head);
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
+      deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    );
+    const inventoryDigest = computeRfc64AppliedInventoryDigestV1({
+      catalogScopeDigest,
+      rows: [],
+    });
+    const current = this.options.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      head.payload.authorAddress,
+    );
+    const replay = assertEmptyGenesisHistory(current, head, inventoryDigest);
+    const scope = nativeScope(announcement, head);
+    const fetchedDirectory = await this.options.contentTransport.fetchCatalogObject(
+      remotePeerId,
+      {
+        ...scope,
+        kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
+        targetObjectType: AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+        targetObjectDigest: head.payload.directoryRootDigest,
+      },
+      { timeoutMs: this.#timeoutMs },
+    );
+    if (fetchedDirectory === null) {
+      fail('catalog-native-receiver-not-found', 'genesis directory root was not found');
+    }
+    try {
+      assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(
+        fetchedDirectory.envelope,
+        head.payload.bucketCount,
+      );
+      const directory = fetchedDirectory.envelope;
+      assertAuthorCatalogDirectoryNodeScopeBindingV1(
+        directory.payload,
+        deriveAuthorCatalogScopeFromHeadV1(head.payload),
+      );
+      if (directory.issuer !== head.issuer) {
+        throw new Error('genesis directory issuer differs from head');
+      }
+      const path = verifyAuthorCatalogDirectoryPathV1(head, [directory], '0' as never);
+      const descriptor = readVerifiedAuthorCatalogBucketDescriptorV1(path, head);
+      if (
+        descriptor.bucketId !== '0'
+        || descriptor.bucketDigest !== ZERO_DIGEST32_V1
+        || descriptor.rowCount !== '0'
+        || descriptor.byteLength !== '0'
+      ) {
+        throw new Error('genesis directory descriptor is not canonically empty');
+      }
+    } catch (cause) {
+      fail('catalog-native-receiver-catalog', 'empty genesis directory is invalid', cause);
+    }
+
+    try {
+      await this.options.controlObjects.stageVerifiedObjects([
+        fetchedDirectory,
+        fetchedHead,
+      ]);
+    } catch (cause) {
+      fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
+    }
+
+    let appliedHeadStatus: 'applied' | 'existing';
+    if (replay) {
+      appliedHeadStatus = 'existing';
+    } else {
+      try {
+        appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+          catalogScopeDigest,
+          authorAddress: head.payload.authorAddress,
+          expectedCurrentCatalogHeadDigest: null,
+          currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+          appliedInventoryDigest: inventoryDigest,
+          catalogVersion: head.payload.version,
+          inventoryRowCount: '0' as never,
+        }).status;
+      } catch (cause) {
+        const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+          catalogScopeDigest,
+          head.payload.authorAddress,
+        );
+        if (!isExactEmptyGenesisSnapshot(reconciled, head, inventoryDigest)) {
+          fail(
+            'catalog-native-receiver-history',
+            'genesis applied-head CAS lost to a different durable history',
+            cause,
+          );
+        }
+        appliedHeadStatus = 'existing';
+      }
+    }
+    const postRead = this.options.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      head.payload.authorAddress,
+    );
+    if (!isExactEmptyGenesisSnapshot(postRead, head, inventoryDigest)) {
+      fail(
+        'catalog-native-receiver-history',
+        'empty genesis durable post-read differs in head, digest, version, or row count',
+      );
+    }
+    return Object.freeze({
+      inventoryDigest,
+      catalogHeadDigest: head.objectDigest as Digest32V1,
+      inventoryRowCount: 0 as const,
+      activatedTripleCount: 0 as const,
+      stagedObjectCount: 2 as const,
+      appliedHeadStatus,
+    });
+  }
+
+  private async synchronizeOnePublicOpenRowFetched(
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    deployment: CatalogSealDeploymentProfileV1,
+    fetchedHead: FetchedRfc64PublicCatalogHeadV1,
+  ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
     const head = fetchedHead.envelope;
     assertFirstSliceHead(head);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
@@ -351,7 +566,8 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           head.payload.authorAddress,
         );
         if (
-          reconciled?.currentCatalogHeadDigest !== head.objectDigest
+          reconciled === null
+          || reconciled.currentCatalogHeadDigest !== head.objectDigest
           || reconciled.appliedInventoryDigest !== activation.inventoryDigest
         ) {
           fail(
@@ -406,6 +622,58 @@ function catalogScopeLockKey(announcement: Rfc64PublicCatalogHeadAnnouncementV1)
     announcement.subGraphName,
     announcement.authorAddress,
   ]);
+}
+
+function claimsGenesisHistory(head: SignedAuthorCatalogHeadEnvelopeV1): boolean {
+  return head.payload.version === '0' || head.payload.previousHeadDigest === null;
+}
+
+function assertEmptyGenesisHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
+  if (
+    head.payload.subGraphName !== null
+    || head.payload.era !== '0'
+    || head.payload.bucketCount !== '1'
+    || head.payload.directoryHeight !== '0'
+    || head.payload.totalRows !== '0'
+    || head.payload.version !== '0'
+    || head.payload.previousHeadDigest !== null
+  ) {
+    fail(
+      'catalog-native-receiver-slice',
+      'genesis bootstrap requires the canonical empty public/open root catalog',
+    );
+  }
+}
+
+function assertEmptyGenesisHistory(
+  current: AppliedCatalogHeadSnapshotV1 | null,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  inventoryDigest: Digest32V1,
+): boolean {
+  if (current === null) return false;
+  if (!isExactEmptyGenesisSnapshot(current, head, inventoryDigest)) {
+    fail(
+      'catalog-native-receiver-history',
+      'genesis cannot replace or diverge from existing durable applied history',
+    );
+  }
+  return true;
+}
+
+function isExactEmptyGenesisSnapshot(
+  current: AppliedCatalogHeadSnapshotV1 | null,
+  head: SignedAuthorCatalogHeadEnvelopeV1,
+  inventoryDigest: Digest32V1,
+): boolean {
+  return current !== null
+    && current.catalogScopeDigest === computeAuthorCatalogScopeDigestV1(
+      deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    )
+    && current.authorAddress === head.payload.authorAddress
+    && current.currentCatalogHeadDigest === head.objectDigest
+    && current.appliedInventoryDigest === inventoryDigest
+    && current.catalogVersion === '0'
+    && current.inventoryRowCount === '0';
 }
 
 function assertMonotonicSuccessorHistory(

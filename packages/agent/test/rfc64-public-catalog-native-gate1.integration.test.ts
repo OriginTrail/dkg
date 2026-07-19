@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
+  AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   DKGNode,
   ProtocolRouter,
   assertAuthorCatalogRowV1,
@@ -12,19 +13,24 @@ import {
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
+  computeAuthorCatalogHeadObjectDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaChunkTreeRootV1,
   deriveAuthorCatalogScopeFromHeadV1,
   encodeOpaqueKaBundleV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
+  type AuthorCatalogHeadV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
+  type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
+  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -96,7 +102,10 @@ afterEach(async () => {
   }));
 });
 
-async function openPersistence(label: string): Promise<Rfc64PersistenceV1> {
+async function openPersistence(label: string): Promise<{
+  directory: string;
+  persistence: Rfc64PersistenceV1;
+}> {
   const directory = await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${label}-`));
   temporaryDirectories.push(directory);
   const persistence = await openRfc64PersistenceV1(
@@ -104,7 +113,7 @@ async function openPersistence(label: string): Promise<Rfc64PersistenceV1> {
     { yieldAfterPurgeBatch: async () => {} },
   );
   persistences.push(persistence);
-  return persistence;
+  return { directory, persistence };
 }
 
 async function startNode(): Promise<DKGNode> {
@@ -124,8 +133,21 @@ async function connect(from: DKGNode, to: DKGNode): Promise<void> {
 }
 
 describe('RFC-64 Gate 1 native successor to public SWM', () => {
-  it('fetches head to row to bundle and activates one exact KA on a live receiver', async () => {
+  it('bootstraps exact empty genesis then activates one successor without manual seeding', async () => {
     const fixture = await setupLiveReceiver();
+    const genesisEvidence = await fixture.bootstrap();
+    expect(genesisEvidence).toEqual({
+      inventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest: fixture.scopeDigest,
+        rows: [],
+      }),
+      catalogHeadDigest: fixture.genesis.head.objectDigest,
+      inventoryRowCount: 0,
+      activatedTripleCount: 0,
+      stagedObjectCount: 2,
+      appliedHeadStatus: 'applied',
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
     const evidence = await fixture.synchronize();
 
     const expectedRowDigest = computeAuthorCatalogRowDigestV1(
@@ -188,6 +210,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }));
 
     expect(fixture.authorObjectRead.mock.calls.map(([digest]) => digest)).toEqual([
+      fixture.genesis.head.payload.directoryRootDigest,
       fixture.successor.head.payload.directoryRootDigest,
       fixture.successor.bucket?.objectDigest,
     ]);
@@ -197,9 +220,95 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
   }, 30_000);
 
+  it('rejects a signed genesis whose directory is not exactly empty', async () => {
+    const fixture = await setupLiveReceiver();
+
+    await expect(fixture.bootstrap(fixture.invalidGenesisAnnouncement)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-catalog',
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('retries genesis idempotently after verified staging wins but its CAS crashes', async () => {
+    const fixture = await setupLiveReceiver();
+    const crashGapReceiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1: () => {
+        throw new Error('simulated crash after genesis staging and before applied-head CAS');
+      },
+    });
+
+    await expect(fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      crashGapReceiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-history' });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.bootstrap()).resolves.toMatchObject({
+      appliedHeadStatus: 'applied',
+      inventoryRowCount: 0,
+    });
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
+  it('replays genesis after persistence restart and then accepts its successor', async () => {
+    const fixture = await setupLiveReceiver();
+    await expect(fixture.bootstrap()).resolves.toMatchObject({
+      appliedHeadStatus: 'applied',
+      inventoryRowCount: 0,
+    });
+    await fixture.receiverPersistence.close();
+    const reopened = await openRfc64PersistenceV1(
+      fixture.receiverDirectory,
+      { yieldAfterPurgeBatch: async () => {} },
+    );
+    persistences.push(reopened);
+    const restartedReceiver = fixture.createReceiver(
+      reopened.inventory,
+      reopened.controlObjects,
+    );
+
+    await expect(fixture.bootstrap(
+      fixture.genesisAnnouncement,
+      restartedReceiver,
+    )).resolves.toMatchObject({
+      appliedHeadStatus: 'existing',
+      inventoryRowCount: 0,
+    });
+    expect(reopened.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toMatchObject({
+      currentCatalogHeadDigest: fixture.genesis.head.objectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest: fixture.scopeDigest,
+        rows: [],
+      }),
+      catalogVersion: '0',
+      inventoryRowCount: '0',
+    });
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      restartedReceiver,
+    )).resolves.toMatchObject({
+      appliedHeadStatus: 'applied',
+      inventoryRowCount: 1,
+    });
+  }, 30_000);
+
   it('rejects a live bundle whose AuthorAttestation does not recover its catalog author', async () => {
     const attacker = new ethers.Wallet(`0x${'77'.repeat(32)}`);
     const fixture = await setupLiveReceiver(attacker);
+    await fixture.bootstrap();
 
     await expect(fixture.synchronize()).rejects.toMatchObject({
       code: 'catalog-native-receiver-transfer',
@@ -209,6 +318,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 
   it('serializes one scope so a competing successor never activates over the winner', async () => {
     const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
     const winner = fixture.synchronize();
     const loser = fixture.synchronize(fixture.competingAnnouncement);
 
@@ -223,6 +333,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 
   it('repairs the semantic-before-CAS crash gap idempotently on a new receiver instance', async () => {
     const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
     const crashGapReceiver = fixture.createReceiver({
       readAppliedCatalogHeadV1:
         fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
@@ -255,12 +366,14 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 });
 
 async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
-  const [authorNode, receiverNode, authorPersistence, receiverPersistence] = await Promise.all([
+  const [authorNode, receiverNode, authorOpened, receiverOpened] = await Promise.all([
     startNode(),
     startNode(),
     openPersistence('author'),
     openPersistence('receiver'),
   ]);
+  const authorPersistence = authorOpened.persistence;
+  const receiverPersistence = receiverOpened.persistence;
   await connect(receiverNode, authorNode);
   const receiverStore = new OxigraphStore();
   const scope = {
@@ -286,18 +399,6 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     signer,
   });
   const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-  receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1({
-    catalogScopeDigest: scopeDigest,
-    authorAddress: AUTHOR,
-    expectedCurrentCatalogHeadDigest: null,
-    currentCatalogHeadDigest: genesis.head.objectDigest as Digest32V1,
-    appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
-      catalogScopeDigest: scopeDigest,
-      rows: [],
-    }),
-    catalogVersion: genesis.head.payload.version,
-    inventoryRowCount: '0' as never,
-  });
   const successor = await produceSparseAuthorCatalogSuccessorV1({
     previousHead: genesis.head,
     previousDirectoryPath: genesis.directoryPath,
@@ -316,8 +417,17 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     issuedAt: '1773900001001' as never,
     signer,
   });
+  const invalidGenesis = await buildInvalidEmptyGenesis(
+    genesis.head,
+    successor.directoryPath[0]!,
+  );
   const authorObjects = new Map<string, SignedControlEnvelopeV1>(
-    [...successor.stagedObjects, ...competingSuccessor.stagedObjects]
+    [
+      ...genesis.stagedObjects,
+      ...invalidGenesis.stagedObjects,
+      ...successor.stagedObjects,
+      ...competingSuccessor.stagedObjects,
+    ]
       .map((envelope) => [envelope.objectDigest, envelope]),
   );
   const authorObjectRead = vi.fn(async (digest: Digest32V1) =>
@@ -325,7 +435,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
     digest === rowBundle.row.transfer.blobDigest ? rowBundle.bundleBytes : null);
   const verifiedObjects = await Promise.all(
-    [...genesis.stagedObjects, ...successor.stagedObjects, ...competingSuccessor.stagedObjects]
+    [
+      ...genesis.stagedObjects,
+      ...invalidGenesis.stagedObjects,
+      ...successor.stagedObjects,
+      ...competingSuccessor.stagedObjects,
+    ]
       .map(async (envelope) => ({
       envelope,
       issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
@@ -335,10 +450,18 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const headKeys = staged.objects.find(
     (keys) => keys.objectDigest === successor.head.objectDigest,
   );
+  const genesisHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === genesis.head.objectDigest,
+  );
+  const invalidGenesisHeadKeys = staged.objects.find(
+    (keys) => keys.objectDigest === invalidGenesis.head.objectDigest,
+  );
   const competingHeadKeys = staged.objects.find(
     (keys) => keys.objectDigest === competingSuccessor.head.objectDigest,
   );
   if (headKeys === undefined) throw new Error('successor head was not staged');
+  if (genesisHeadKeys === undefined) throw new Error('genesis head was not staged');
+  if (invalidGenesisHeadKeys === undefined) throw new Error('invalid genesis head was not staged');
   if (competingHeadKeys === undefined) throw new Error('competing successor head was not staged');
   const receivedAnnouncements: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
   const openPolicy = async () => Object.freeze({
@@ -401,25 +524,38 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     catalogHeadObjectDigest: headKeys.objectDigest,
     signatureVariantDigest: headKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const genesisAnnouncement = Object.freeze({
+    ...announcement,
+    catalogVersion: genesis.head.payload.version,
+    catalogHeadObjectDigest: genesisHeadKeys.objectDigest,
+    signatureVariantDigest: genesisHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
   const competingAnnouncement = Object.freeze({
     ...announcement,
     catalogHeadObjectDigest: competingHeadKeys.objectDigest,
     signatureVariantDigest: competingHeadKeys.signatureVariantDigest,
   }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  const invalidGenesisAnnouncement = Object.freeze({
+    ...genesisAnnouncement,
+    catalogHeadObjectDigest: invalidGenesisHeadKeys.objectDigest,
+    signatureVariantDigest: invalidGenesisHeadKeys.signatureVariantDigest,
+  }) satisfies Rfc64PublicCatalogHeadAnnouncementV1;
+  await authorHeadTransport.announceCatalogHead(receiverNode.peerId, genesisAnnouncement);
   await authorHeadTransport.announceCatalogHead(receiverNode.peerId, announcement);
-  expect(receivedAnnouncements).toEqual([announcement]);
+  expect(receivedAnnouncements).toEqual([genesisAnnouncement, announcement]);
   const createReceiver = (
     inventory: Pick<
       Rfc64PersistenceV1['inventory'],
       'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
     >,
+    controlObjects = receiverPersistence.controlObjects,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
-      headTransport: receiverHeadTransport,
-      contentTransport: receiverNativeTransport,
-      controlObjects: receiverPersistence.controlObjects,
-      inventory,
-      store: receiverStore,
-    });
+    headTransport: receiverHeadTransport,
+    contentTransport: receiverNativeTransport,
+    controlObjects,
+    inventory,
+    store: receiverStore,
+  });
   const receiver = createReceiver(receiverPersistence.inventory);
   return {
     announcement,
@@ -428,11 +564,22 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     competingAnnouncement,
     createReceiver,
     genesis,
+    genesisAnnouncement,
+    invalidGenesisAnnouncement,
+    receiverDirectory: receiverOpened.directory,
     receiverPersistence,
     receiverStore,
     rowBundle,
     scopeDigest,
     successor,
+    bootstrap: (
+      selectedAnnouncement = genesisAnnouncement,
+      selectedReceiver = receiver,
+    ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
+      authorNode.peerId,
+      selectedAnnouncement,
+      DEPLOYMENT,
+    ),
     synchronize: (
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
@@ -442,6 +589,49 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       DEPLOYMENT,
     ),
   };
+}
+
+async function buildInvalidEmptyGenesis(
+  sourceHead: SignedAuthorCatalogHeadEnvelopeV1,
+  sourceDirectory: SignedAuthorCatalogDirectoryNodeEnvelopeV1,
+): Promise<{
+  head: SignedAuthorCatalogHeadEnvelopeV1;
+  stagedObjects: readonly SignedControlEnvelopeV1[];
+}> {
+  const headPayload = {
+    ...sourceHead.payload,
+    directoryRootDigest: sourceDirectory.objectDigest,
+  } as AuthorCatalogHeadV1;
+  const headUnsigned = testUnsignedEnvelope(AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1, headPayload);
+  const head = await signTestEnvelope(
+    headUnsigned,
+    computeAuthorCatalogHeadObjectDigestV1(headUnsigned),
+  ) as SignedAuthorCatalogHeadEnvelopeV1;
+  return Object.freeze({ head, stagedObjects: Object.freeze([sourceDirectory, head]) });
+}
+
+function testUnsignedEnvelope(
+  objectType: string,
+  payload: unknown,
+): UnsignedControlEnvelopeV1 {
+  return Object.freeze({
+    issuer: AUTHOR,
+    objectType,
+    payload,
+    signatureEvidence: Object.freeze({ kind: 'none' }),
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  }) as UnsignedControlEnvelopeV1;
+}
+
+async function signTestEnvelope(
+  unsigned: UnsignedControlEnvelopeV1,
+  objectDigest: Digest32V1,
+): Promise<SignedControlEnvelopeV1> {
+  return Object.freeze({
+    ...unsigned,
+    objectDigest,
+    signature: await AUTHOR_WALLET.signMessage(ethers.getBytes(objectDigest)),
+  }) as SignedControlEnvelopeV1;
 }
 
 async function buildRowBundle(
