@@ -34,6 +34,7 @@ const APPLIED_INVENTORY_DIGEST_DOMAIN_V1 = 'dkg-rfc64-applied-inventory-v1\n';
 
 export type Rfc64PublicCatalogInventoryCompletenessErrorCodeV1 =
   | 'catalog-inventory-completeness-input'
+  | 'catalog-inventory-completeness-slice'
   | 'catalog-inventory-completeness-count'
   | 'catalog-inventory-completeness-order'
   | 'catalog-inventory-completeness-duplicate'
@@ -93,12 +94,13 @@ export interface VerifyRfc64PublicCatalogInventoryCompletenessInputV1 {
 export function verifyRfc64PublicCatalogInventoryCompletenessV1(
   input: VerifyRfc64PublicCatalogInventoryCompletenessInputV1,
 ): Rfc64PublicCatalogInventoryCompletenessEvidenceV1 {
+  const boundary = snapshotTopLevelInput(input);
   let scope: Readonly<AuthorCatalogScopeV1>;
   let expectedCount: bigint;
   try {
-    scope = snapshotScope(input?.catalogScope);
+    scope = snapshotScope(boundary.catalogScope);
     expectedCount = parseCanonicalDecimalU64(
-      input?.expectedTotalRows,
+      boundary.expectedTotalRows,
       'expectedTotalRows',
     );
   } catch (cause) {
@@ -108,15 +110,24 @@ export function verifyRfc64PublicCatalogInventoryCompletenessV1(
       cause,
     );
   }
-  if (expectedCount > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)) {
+  if (scope.bucketCount !== '1') {
+    fail(
+      'catalog-inventory-completeness-slice',
+      'bounded Gate-2 catalog completion requires exactly one signed bucket',
+    );
+  }
+  if (
+    expectedCount < 1n
+    || expectedCount > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
+  ) {
     fail(
       'catalog-inventory-completeness-count',
-      `bounded catalog completion supports at most ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`,
+      `bounded catalog completion supports 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`,
     );
   }
 
-  const expected = snapshotRows(input.expectedRows, scope, 'expectedRows', true);
-  const observed = snapshotRows(input.observedRows, scope, 'observedRows', false);
+  const expected = snapshotRows(boundary.expectedRows, scope, 'expectedRows', true);
+  const observed = snapshotRows(boundary.observedRows, scope, 'observedRows', false);
   if (BigInt(expected.length) !== expectedCount) {
     fail(
       'catalog-inventory-completeness-count',
@@ -153,26 +164,54 @@ export function verifyRfc64PublicCatalogInventoryCompletenessV1(
   const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   return Object.freeze({
     catalogScopeDigest,
-    inventoryRowCount: input.expectedTotalRows,
+    inventoryRowCount: boundary.expectedTotalRows,
     inventoryDigest: computeInventoryDigest(catalogScopeDigest, expected),
     rows: expected,
   });
 }
 
+function snapshotTopLevelInput(
+  input: VerifyRfc64PublicCatalogInventoryCompletenessInputV1,
+): Readonly<VerifyRfc64PublicCatalogInventoryCompletenessInputV1> {
+  const fields = snapshotExactDataRecord(input, [
+    'catalogScope',
+    'expectedRows',
+    'expectedTotalRows',
+    'observedRows',
+  ], 'inventory completeness input');
+  return Object.freeze({
+    catalogScope: fields.catalogScope as AuthorCatalogScopeV1,
+    expectedTotalRows: fields.expectedTotalRows as CountV1,
+    expectedRows: fields.expectedRows as readonly Rfc64PublicCatalogInventoryEvidenceRowV1[],
+    observedRows: fields.observedRows as readonly Rfc64PublicCatalogInventoryEvidenceRowV1[],
+  });
+}
+
 function snapshotScope(input: AuthorCatalogScopeV1): Readonly<AuthorCatalogScopeV1> {
-  const scope = {
-    networkId: input.networkId,
-    contextGraphId: input.contextGraphId,
-    governanceChainId: input.governanceChainId,
-    governanceContractAddress: input.governanceContractAddress,
-    ownershipTransitionDigest: input.ownershipTransitionDigest,
-    subGraphName: input.subGraphName,
-    authorAddress: input.authorAddress,
-    era: input.era,
-    bucketCount: input.bucketCount,
-  } as AuthorCatalogScopeV1;
+  const fields = snapshotExactDataRecord(input, [
+    'authorAddress',
+    'bucketCount',
+    'contextGraphId',
+    'era',
+    'governanceChainId',
+    'governanceContractAddress',
+    'networkId',
+    'ownershipTransitionDigest',
+    'subGraphName',
+  ], 'catalogScope');
+  const scope = Object.freeze({
+    networkId: fields.networkId,
+    contextGraphId: fields.contextGraphId,
+    governanceChainId: fields.governanceChainId,
+    governanceContractAddress: fields.governanceContractAddress,
+    ownershipTransitionDigest: fields.ownershipTransitionDigest,
+    subGraphName: fields.subGraphName,
+    authorAddress: fields.authorAddress,
+    era: fields.era,
+    bucketCount: fields.bucketCount,
+  } as AuthorCatalogScopeV1);
   assertAuthorCatalogScopeV1(scope);
-  return Object.freeze(scope);
+  return scope;
 }
 
 function snapshotRows(
@@ -181,15 +220,12 @@ function snapshotRows(
   label: 'expectedRows' | 'observedRows',
   requireCanonicalInputOrder: boolean,
 ): readonly Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1>[] {
-  assertDenseOrdinaryArray(input, label);
-  if (input.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    fail(
-      'catalog-inventory-completeness-count',
-      `${label} exceeds the ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1}-row bucket bound`,
-    );
-  }
-
-  const rows = input.map((row, index) => snapshotRow(row, scope, `${label}[${index}]`));
+  const values = snapshotDenseBoundedOrdinaryArray(input, label);
+  const rows = values.map((row, index) => snapshotRow(
+    row as Rfc64PublicCatalogInventoryEvidenceRowV1,
+    scope,
+    `${label}[${index}]`,
+  ));
   assertNoDuplicateRows(rows, label);
   if (requireCanonicalInputOrder) {
     for (let index = 1; index < rows.length; index += 1) {
@@ -235,11 +271,7 @@ function snapshotRow(
   scope: Readonly<AuthorCatalogScopeV1>,
   label: string,
 ): Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1> {
-  if (!isPlainRecord(input)) {
-    fail('catalog-inventory-completeness-input', `${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(input);
-  const expectedKeys = [
+  const fields = snapshotExactDataRecord(input, [
     'activatedTripleCount',
     'bundleDigest',
     'catalogRowDigest',
@@ -247,38 +279,31 @@ function snapshotRow(
     'kaId',
     'kaUal',
     'sealDigest',
-  ];
-  if (
-    keys.length !== expectedKeys.length
-    || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
-  ) {
-    fail('catalog-inventory-completeness-input', `${label} has missing or extra fields`);
-  }
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (
-      descriptor === undefined
-      || !descriptor.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    ) {
-      fail(
-        'catalog-inventory-completeness-input',
-        `${label}.${key} must be an enumerable data property`,
-      );
-    }
-  }
+  ], label);
+  const snapshot = Object.freeze({
+    kaId: fields.kaId,
+    catalogRowDigest: fields.catalogRowDigest,
+    contentDigest: fields.contentDigest,
+    sealDigest: fields.sealDigest,
+    bundleDigest: fields.bundleDigest,
+    kaUal: fields.kaUal,
+    activatedTripleCount: fields.activatedTripleCount,
+  }) as unknown as Rfc64PublicCatalogInventoryEvidenceRowV1;
 
   try {
-    assertCanonicalKaId(input.kaId, `${label}.kaId`);
-    assertCanonicalDigest(input.catalogRowDigest, `${label}.catalogRowDigest`);
-    assertCanonicalDigest(input.contentDigest, `${label}.contentDigest`);
-    assertCanonicalDigest(input.sealDigest, `${label}.sealDigest`);
-    assertCanonicalDigest(input.bundleDigest, `${label}.bundleDigest`);
-    if (!Number.isSafeInteger(input.activatedTripleCount) || input.activatedTripleCount < 1) {
+    assertCanonicalKaId(snapshot.kaId, `${label}.kaId`);
+    assertCanonicalDigest(snapshot.catalogRowDigest, `${label}.catalogRowDigest`);
+    assertCanonicalDigest(snapshot.contentDigest, `${label}.contentDigest`);
+    assertCanonicalDigest(snapshot.sealDigest, `${label}.sealDigest`);
+    assertCanonicalDigest(snapshot.bundleDigest, `${label}.bundleDigest`);
+    if (
+      !Number.isSafeInteger(snapshot.activatedTripleCount)
+      || snapshot.activatedTripleCount < 1
+    ) {
       throw new Error(`${label}.activatedTripleCount must be a positive safe integer`);
     }
-    const parsedUal = parseDeterministicKnowledgeAssetUal(input.kaUal);
-    if (parsedUal.ual !== input.kaUal) {
+    const parsedUal = parseDeterministicKnowledgeAssetUal(snapshot.kaUal);
+    if (parsedUal.ual !== snapshot.kaUal) {
       throw new Error(`${label}.kaUal is not canonical`);
     }
     if (
@@ -288,7 +313,7 @@ function snapshotRow(
       throw new Error(`${label}.kaUal differs from the trusted catalog scope`);
     }
     const packedKaId = (BigInt(parsedUal.agentAddress) << 96n) | BigInt(parsedUal.kaNumber);
-    if (packedKaId !== BigInt(input.kaId)) {
+    if (packedKaId !== BigInt(snapshot.kaId)) {
       throw new Error(`${label}.kaUal does not encode its signed kaId`);
     }
   } catch (cause) {
@@ -298,15 +323,7 @@ function snapshotRow(
       cause,
     );
   }
-  return Object.freeze({
-    kaId: input.kaId,
-    catalogRowDigest: input.catalogRowDigest,
-    contentDigest: input.contentDigest,
-    sealDigest: input.sealDigest,
-    bundleDigest: input.bundleDigest,
-    kaUal: input.kaUal,
-    activatedTripleCount: input.activatedTripleCount,
-  });
+  return snapshot;
 }
 
 function computeInventoryDigest(
@@ -355,29 +372,108 @@ function sameRow(
     && expected.activatedTripleCount === observed.activatedTripleCount;
 }
 
-function assertDenseOrdinaryArray(value: unknown, label: string): asserts value is unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
-    fail('catalog-inventory-completeness-input', `${label} must be an ordinary Array`);
-  }
-  const ownKeys = Reflect.ownKeys(value);
-  if (
-    ownKeys.some((key) => typeof key !== 'string')
-    || ownKeys.length !== value.length + 1
-    || !ownKeys.includes('length')
-  ) {
-    fail(
-      'catalog-inventory-completeness-input',
-      `${label} must be dense and contain no custom properties`,
-    );
-  }
-  for (let index = 0; index < value.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+function snapshotDenseBoundedOrdinaryArray(
+  value: unknown,
+  label: 'expectedRows' | 'observedRows',
+): readonly unknown[] {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+      fail('catalog-inventory-completeness-input', `${label} must be an ordinary Array`);
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (
+      lengthDescriptor === undefined
+      || lengthDescriptor.enumerable
+      || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+      || typeof lengthDescriptor.value !== 'number'
+      || !Number.isSafeInteger(lengthDescriptor.value)
+      || lengthDescriptor.value < 0
+    ) {
+      fail('catalog-inventory-completeness-input', `${label}.length is not an exact data field`);
+    }
+    const length = lengthDescriptor.value;
+    // Enforce the work ceiling before enumerating or copying caller rows.
+    if (length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
       fail(
-        'catalog-inventory-completeness-input',
-        `${label} must contain only enumerable data elements`,
+        'catalog-inventory-completeness-count',
+        `${label} exceeds the ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1}-row bucket bound`,
       );
     }
+    const ownKeys = Reflect.ownKeys(value);
+    if (
+      ownKeys.some((key) => typeof key !== 'string')
+      || ownKeys.length !== length + 1
+      || !ownKeys.includes('length')
+    ) {
+      fail(
+        'catalog-inventory-completeness-input',
+        `${label} must be dense and contain no custom properties`,
+      );
+    }
+    const snapshot = new Array<unknown>(length);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+        fail(
+          'catalog-inventory-completeness-input',
+          `${label} must contain only enumerable data elements`,
+        );
+      }
+      snapshot[index] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogInventoryCompletenessErrorV1) throw cause;
+    fail(
+      'catalog-inventory-completeness-input',
+      `${label} could not be snapshotted exactly`,
+      cause,
+    );
+  }
+}
+
+function snapshotExactDataRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+  label: string,
+): Readonly<Record<string, unknown>> {
+  try {
+    if (!isPlainRecord(value)) {
+      fail('catalog-inventory-completeness-input', `${label} must be a plain object`);
+    }
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== expectedKeys.length
+      || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
+    ) {
+      fail(
+        'catalog-inventory-completeness-input',
+        `${label} has missing or extra fields`,
+      );
+    }
+    const snapshot: Record<string, unknown> = Object.create(null);
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined
+        || !descriptor.enumerable
+        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      ) {
+        fail(
+          'catalog-inventory-completeness-input',
+          `${label}.${key} must be an enumerable data property`,
+        );
+      }
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogInventoryCompletenessErrorV1) throw cause;
+    fail(
+      'catalog-inventory-completeness-input',
+      `${label} could not be snapshotted exactly`,
+      cause,
+    );
   }
 }
 

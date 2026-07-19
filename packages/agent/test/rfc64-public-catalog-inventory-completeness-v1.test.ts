@@ -46,7 +46,9 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
       `did:dkg:otp:20430/${AUTHOR}/10`,
       `did:dkg:otp:20430/${AUTHOR}/100`,
     ]);
-    expect(evidence.inventoryDigest).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(evidence.inventoryDigest).toBe(
+      '0x299d93f46a4baa1a0099f3ebfabb43f2070dc590313c4abfcf22f3541766a79e',
+    );
 
     const repeated = verifyRfc64PublicCatalogInventoryCompletenessV1({
       catalogScope: { ...SCOPE },
@@ -133,7 +135,156 @@ describe('RFC-64 public catalog bounded inventory completeness', () => {
       observedRows: [wrongPackedId],
     }), 'catalog-inventory-completeness-input');
   });
+
+  it('enforces the signed-bucket 1..1024 row boundary before enumerating rows', () => {
+    expectCode(() => verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: { ...SCOPE, bucketCount: '2' as CountV1 },
+      expectedTotalRows: '1' as CountV1,
+      expectedRows: [row(1)],
+      observedRows: [row(1)],
+    }), 'catalog-inventory-completeness-slice');
+
+    expectCode(() => verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '0' as CountV1,
+      expectedRows: [],
+      observedRows: [],
+    }), 'catalog-inventory-completeness-count');
+
+    const maximum = Array.from({ length: 1024 }, (_value, index) => row(index + 1));
+    const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '1024' as CountV1,
+      expectedRows: maximum,
+      observedRows: [...maximum].reverse(),
+    });
+    expect(evidence.inventoryRowCount).toBe('1024');
+    expect(evidence.rows).toHaveLength(1024);
+    expect(evidence.rows[0].kaUal).toBe(`did:dkg:otp:20430/${AUTHOR}/1`);
+    expect(evidence.rows[1023].kaUal).toBe(`did:dkg:otp:20430/${AUTHOR}/1024`);
+
+    let enumeratedOversizedRows = false;
+    const oversized = new Proxy(new Array(1025), {
+      ownKeys(target) {
+        enumeratedOversizedRows = true;
+        return Reflect.ownKeys(target);
+      },
+    }) as Rfc64PublicCatalogInventoryEvidenceRowV1[];
+    expectCode(() => verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '1024' as CountV1,
+      expectedRows: oversized,
+      observedRows: maximum,
+    }), 'catalog-inventory-completeness-count');
+    expect(enumeratedOversizedRows).toBe(false);
+  });
+
+  it('snapshots top-level, array, scope, and row data without invoking switching gets', () => {
+    let topLevelGets = 0;
+    let scopeGets = 0;
+    let arrayGets = 0;
+    let rowGets = 0;
+    const only = row(7);
+    const switchingScope = new Proxy({ ...SCOPE }, {
+      get(target, key, receiver) {
+        scopeGets += 1;
+        return key === 'networkId' && scopeGets > 1
+          ? 'otp:tampered'
+          : Reflect.get(target, key, receiver);
+      },
+    });
+    const switchingRow = new Proxy({ ...only }, {
+      get(target, key, receiver) {
+        rowGets += 1;
+        return key === 'contentDigest' && rowGets > 1
+          ? digest(999)
+          : Reflect.get(target, key, receiver);
+      },
+    });
+    const switchingArray = new Proxy([switchingRow], {
+      get(target, key, receiver) {
+        arrayGets += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const switchingInput = new Proxy({
+      catalogScope: switchingScope,
+      expectedTotalRows: '1' as CountV1,
+      expectedRows: switchingArray,
+      observedRows: switchingArray,
+    }, {
+      get(target, key, receiver) {
+        topLevelGets += 1;
+        return key === 'expectedTotalRows' && topLevelGets > 1
+          ? '999'
+          : Reflect.get(target, key, receiver);
+      },
+    });
+
+    const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1(switchingInput);
+    expect(evidence.inventoryRowCount).toBe('1');
+    expect(evidence.rows[0]).toEqual(only);
+    expect({ topLevelGets, scopeGets, arrayGets, rowGets }).toEqual({
+      topLevelGets: 0,
+      scopeGets: 0,
+      arrayGets: 0,
+      rowGets: 0,
+    });
+  });
+
+  it('rejects accessor inputs without invoking them and remains reentry-safe', () => {
+    let getterInvoked = false;
+    const accessorInput = Object.defineProperties({}, {
+      catalogScope: { value: SCOPE, enumerable: true },
+      expectedTotalRows: {
+        enumerable: true,
+        get() {
+          getterInvoked = true;
+          return '1';
+        },
+      },
+      expectedRows: { value: [row(1)], enumerable: true },
+      observedRows: { value: [row(1)], enumerable: true },
+    }) as VerifyParameters;
+    expectCode(
+      () => verifyRfc64PublicCatalogInventoryCompletenessV1(accessorInput),
+      'catalog-inventory-completeness-input',
+    );
+    expect(getterInvoked).toBe(false);
+
+    const only = row(9);
+    let reentered = false;
+    let insideTrap = false;
+    const reentrantRow = new Proxy({ ...only }, {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === 'contentDigest' && !insideTrap) {
+          insideTrap = true;
+          const nested = verifyRfc64PublicCatalogInventoryCompletenessV1({
+            catalogScope: SCOPE,
+            expectedTotalRows: '1' as CountV1,
+            expectedRows: [only],
+            observedRows: [only],
+          });
+          reentered = nested.rows[0].kaId === only.kaId;
+          insideTrap = false;
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const outer = verifyRfc64PublicCatalogInventoryCompletenessV1({
+      catalogScope: SCOPE,
+      expectedTotalRows: '1' as CountV1,
+      expectedRows: [reentrantRow],
+      observedRows: [reentrantRow],
+    });
+    expect(reentered).toBe(true);
+    expect(outer.rows[0]).toEqual(only);
+  });
 });
+
+type VerifyParameters = Parameters<
+  typeof verifyRfc64PublicCatalogInventoryCompletenessV1
+>[0];
 
 const BASE = Object.freeze([row(1), row(2)]);
 
