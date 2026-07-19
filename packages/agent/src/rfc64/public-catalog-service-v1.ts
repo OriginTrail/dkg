@@ -183,11 +183,21 @@ export class Rfc64PublicCatalogServiceV1 {
         reconcileHead: (remotePeerId, announcement, signal) =>
           this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
       } satisfies Rfc64PublicCatalogReceiverReconcilerV1
-      : options.native.createReconciler({
-        headTransport: this.#transport,
-        contentTransport: this.#nativeTransport!,
+      : options.native.createReconciler(Object.freeze({
+        // Pass explicit capability objects rather than the owned transport
+        // instances. The reconciler may fetch, but cannot start/stop protocols
+        // or retain the router through a runtime-private implementation field.
+        headTransport: Object.freeze({
+          fetchCatalogHead: this.#transport.fetchCatalogHead.bind(this.#transport),
+        }),
+        contentTransport: Object.freeze({
+          fetchCatalogObject: this.#nativeTransport!.fetchCatalogObject.bind(
+            this.#nativeTransport!,
+          ),
+          fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
+        }),
         transportTimeoutMs: this.#transportTimeoutMs,
-      });
+      }));
     this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
   }
 
