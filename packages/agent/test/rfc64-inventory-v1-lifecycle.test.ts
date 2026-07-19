@@ -191,6 +191,57 @@ function createIncompatibleOwnedInventory(path: string, label: string): void {
   }
 }
 
+async function createCrashedWalIncompatibleOwnedInventory(
+  path: string,
+  label: string,
+): Promise<void> {
+  createIncompatibleOwnedInventory(path, label);
+  const script = String.raw`
+const { DatabaseSync } = require('node:sqlite');
+const database = new DatabaseSync(process.env.DKG_RFC64_CRASHED_WAL_PATH);
+database.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; BEGIN; INSERT INTO wrong_v1 VALUES (\'wal-row\'); COMMIT');
+process.stdout.write('READY\n');
+setInterval(() => {}, 60_000);
+`;
+  const child = spawn(process.execPath, ['--experimental-sqlite', '-e', script], {
+    env: { ...process.env, DKG_RFC64_CRASHED_WAL_PATH: path },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let stdout = '';
+    const timeout = setTimeout(() => {
+      rejectReady(new Error(`crashed-WAL child did not become ready: ${stderr}`));
+    }, 10_000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (!stdout.includes('READY\n')) return;
+      clearTimeout(timeout);
+      resolveReady();
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      rejectReady(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      rejectReady(new Error(
+        `crashed-WAL child exited before ready: code=${code} signal=${signal} stderr=${stderr}`,
+      ));
+    });
+  });
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolveExit) => child.once('exit', (code, signal) => resolveExit({ code, signal })),
+  );
+  child.kill('SIGKILL');
+  expect(await exit).toEqual({ code: null, signal: 'SIGKILL' });
+  expect(existsSync(`${path}-wal`)).toBe(true);
+  expect(existsSync(`${path}-shm`)).toBe(true);
+}
+
 function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
@@ -581,7 +632,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
       expectOpenErrorCode(error, 'database-busy'));
   });
 
-  it('closes a corrupt owned target before reporting unavailable durability', async () => {
+  it('rejects corrupt quarantine before its exclusivity proof and closes as ordinary cleanup', async () => {
     const dataDirectory = temporaryDataDirectory();
     const path = databasePath(dataDirectory);
     const initialized = await openInventoryV1(dataDirectory);
@@ -629,7 +680,7 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     await expect(openWithoutDurability(dataDirectory)).rejects.toSatisfy(
       (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
     );
-    expect(closeReasons).toContain('automatic-corrupt-quarantine');
+    expect(closeReasons).toEqual(['failed-open-cleanup']);
     await expect(openWithoutDurability(dataDirectory)).rejects.toSatisfy(
       (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
     );
@@ -914,6 +965,37 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     const check = new DatabaseSync(path, { readOnly: true });
     expect(check.prepare('SELECT value FROM wrong_v1').get()?.value).toBe('must-survive');
     check.close();
+  });
+
+  it('does not enter the quarantine proof for an unsupported crashed-WAL candidate', async () => {
+    const dataDirectory = temporaryDataDirectory();
+    const path = databasePath(dataDirectory);
+    await createCrashedWalIncompatibleOwnedInventory(path, 'main-row');
+    const boundaries: InventoryV1QuarantineBoundary[] = [];
+    const closeReasons: string[] = [];
+    const openWithoutDurability = createInventoryV1TestOpener({
+      quarantineCapability: null,
+      boundary: (boundary) => { boundaries.push(boundary); },
+      closeTarget: (close, reason) => {
+        close();
+        closeReasons.push(reason);
+      },
+    });
+
+    await expect(openWithoutDurability(dataDirectory)).rejects.toSatisfy(
+      (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+    );
+
+    expect(boundaries).not.toContain('target-exclusivity-proven');
+    expect(closeReasons).toEqual(['failed-open-cleanup']);
+    expectNoQuarantine(path);
+    const recovered = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(recovered.prepare('SELECT value FROM wrong_v1 ORDER BY rowid').all())
+        .toEqual([{ value: 'main-row' }, { value: 'wal-row' }]);
+    } finally {
+      recovered.close();
+    }
   });
 
   it('refuses NOTADB bytes without manufacturing DK64 ownership or quarantine', async () => {
