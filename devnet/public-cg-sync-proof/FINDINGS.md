@@ -129,10 +129,17 @@ so a fix races nobody. Best filed as a second root cause on issue **#1760**.
 All three would have shipped a wrong conclusion. They are the reason the
 assertions are shaped the way they are.
 
-**1. A green VM check that meant nothing.** An early run reported "LIVE receiver
-converged on VM ✅" — but via *storage hosting*, while chain reconciliation was
-stuck the entire time. Fix: assert content presence and **sync-mechanism
-progress** separately, and classify the receiver against the storage-ACK set.
+**1. A green VM check whose reasoning was wrong.** An early run reported "LIVE
+receiver converged on VM ✅" while chain reconciliation was stuck the entire
+time, and it was initially attributed to *storage hosting*. That attribution was
+itself wrong: **storage ACK does not deliver VM at all** — the ACK path persists
+into SWM only (`packages/publisher/src/storage-ack-handler.ts:1182-1188`); a VM
+graph URI is built only on the UPDATE path (`:1837-1843`). Hosting is also not
+chain-sharded (`packages/agent/src/swm/enumerate-cg-hosts.ts:15-23`). The real
+delivery was durable peer sync in every case. Two lessons survive regardless:
+assert content presence and **sync-mechanism progress** separately, and keep the
+decisive receiver at arm's length from the publish (not in the ACK set, and not
+a node already used as the LIVE receiver).
 
 **2. A devnet too small to contain the answer.** On 4 nodes, ACK quorum is 3, so
 author + 3 peers means **every peer must ACK** — no non-host subscriber can
@@ -152,12 +159,56 @@ spec does not contain manufactures bugs that do not exist.
 
 ---
 
+## Release claims
+
+### CAN claim (devnet-proven, reproducible)
+
+> Agents subscribing to a public Context Graph — both open-contribution and
+> curated-contribution — converge on the author's finalized, chain-verified
+> Verifiable Memory, including agents that subscribe *after* publication.
+> Observed convergence ~3 s on a 6-node devnet, for receivers proven not to be
+> in the publish ACK set.
+
+### MUST NOT claim
+
+1. **Bounded or guaranteed delivery latency.** If a subscriber misses the live
+   window *and* has already synced cleanly, the reconciler will not retry for up
+   to ~10 min (`SYNC_RECONCILER_INTERVAL_MS` 5 min, `SYNC_STALENESS_THRESHOLD_MS`
+   10 min — `packages/agent/src/dkg-agent-constants.ts:175,183`). This is
+   eventual consistency, not an SLA.
+2. **Anything about private / invite-only CGs.** Untested here. Note the
+   reconciler is *not* public-scoped — `resolveVmReconcileTarget` admits any
+   subscribed or core-hosted CG with an `onChainId` — so the access-widening
+   exposure lives there.
+3. **That the reconcile watermark is a health signal.** It sits at 0 with VM
+   fully present. Monitoring and docs must not read `watermark < head` as "sync
+   broken"; that will raise false alarms on healthy nodes.
+4. **That chain-driven VM reconciliation works**, or that VM sync survives
+   durable peer sync being unavailable.
+
+### Not fully explained
+
+The original "0 VM on the receiver" observation from the first 6-node run was
+never root-caused — those node logs were overwritten by a devnet restart. The
+timing explanation (sampling during the window that races the author's
+`status='confirmed'` flip, before the responder will serve the graph —
+`sync/responder/graph-plan.ts:893`) is **inference, not observation**.
+
 ## Recommendation
 
-1. **Ship it.** "Any agent subscribing to a public Context Graph converges to
-   both SWM and VM, including content published before it subscribed" is TRUE
-   for both public cells and is now devnet-proven and reproducible.
-2. **File the reconcile defect on #1760** as a second root cause, with the fix
-   locus above. Not release-blocking; do not rush it into a release build.
-3. **Do not claim** that chain-driven VM reconciliation works, or that VM sync is
-   resilient to durable-sync being unavailable.
+1. **Ship it, with no code change.** The user-visible requirement is met and now
+   has a reproducible proof artifact. Shipping is current behavior plus evidence,
+   so there is no diff to regress.
+2. **Do not touch the defer.** It is a deliberate fence
+   (`finalization-handler.ts:1345-1348`): a locally synthesized
+   `status='confirmed'` is re-served to other peers as authoritative
+   (`graph-plan.ts:893`) and is unauditable forever without a txHash on disk.
+3. **Fast-follow, not now:** widen the active-fetch trigger at
+   `dkg-agent-swm-host.ts:3693` to also fire on a *new, split* outcome label for
+   the SWM-verified/VM-absent case. Split the label — gating on the bare
+   `verified-vm-metadata-pending` would re-fetch forever after VM lands (25
+   defers observed on a single node). This clears the watermark and tightens
+   worst-case latency without relaxing any check.
+4. **File on issue #1760** as a second root cause.
+5. **The one criterion that flips "ship" to "hold":** if bounded delivery latency
+   is a hard release requirement. It is not bounded today.
