@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import {
   computeControlObjectDigestHex,
   type AuthorCatalogScopeV1,
+  type DecimalU64V1,
   type Digest32V1,
   type EvmAddressV1,
   type SignedControlEnvelopeV1,
@@ -44,7 +45,7 @@ import {
 } from './support/rfc64-control-object-store-fixtures.js';
 
 const SAFE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
-const BLOCK_HASH = `0x${'44'.repeat(32)}`;
+const BLOCK_HASH = `0x${'44'.repeat(32)}` as Digest32V1;
 const openRfc64ControlObjectStoreV1 = createRfc64ControlObjectStoreTestOpenerV1();
 const temporaryDirectories = createTemporaryDataDirectoryFixture();
 const { temporaryDataDirectory } = temporaryDirectories;
@@ -55,7 +56,7 @@ afterEach(async () => {
 
 const finalizedEip1271Call: CurrentFinalizedEvmCallV1 = async (request) => ({
   chainId: request.chainId,
-  blockNumber: '123',
+  blockNumber: '123' as DecimalU64V1,
   blockHash: BLOCK_HASH,
   returnData: EIP1271_CANONICAL_ABI_RETURN_V1,
 });
@@ -212,8 +213,27 @@ describe('RFC-64 durable control-object store v1', () => {
   it('converges concurrent staging through durable no-replace keys', async () => {
     const dataDir = await temporaryDataDirectory();
     const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
+    const objectTempsReady = deferred();
+    const signatureTempsReady = deferred();
+    let objectTempsFsynced = 0;
+    let signatureTempsFsynced = 0;
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: (boundary) => boundaries.push(boundary),
+      boundary: async (boundary) => {
+        boundaries.push(boundary);
+        // Make both callers reach each immutable-key collision before either
+        // may publish. Without this rendezvous, a slower platform may validly
+        // let the second call reconcile the winner before allocating a temp.
+        if (boundary === 'object.temp-fsynced') {
+          objectTempsFsynced += 1;
+          if (objectTempsFsynced === 2) objectTempsReady.resolve();
+          await objectTempsReady.promise;
+        }
+        if (boundary === 'signature.temp-fsynced') {
+          signatureTempsFsynced += 1;
+          if (signatureTempsFsynced === 2) signatureTempsReady.resolve();
+          await signatureTempsReady.promise;
+        }
+      },
     })(dataDir);
     const fixture = await signedFixture('2');
     boundaries.length = 0;
@@ -272,7 +292,9 @@ describe('RFC-64 durable control-object store v1', () => {
     const dataDir = await temporaryDataDirectory();
     const boundaries: Rfc64ControlObjectStoreDurabilityBoundaryV1[] = [];
     const store = await createRfc64ControlObjectStoreTestOpenerV1({
-      boundary: (boundary) => boundaries.push(boundary),
+      boundary: (boundary) => {
+        boundaries.push(boundary);
+      },
     })(dataDir);
     const [first, second] = await contractSignatureVariantsFixture();
     expect(first.envelope.objectDigest).toBe(second.envelope.objectDigest);
