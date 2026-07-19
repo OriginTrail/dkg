@@ -318,6 +318,110 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(stageKaBundle).not.toHaveBeenCalled();
     expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
+
+  it('fails control-object staging only after the bundle is durably staged first', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const events: string[] = [];
+    const stageKaBundle = vi.fn(async (input) => {
+      events.push('bundle');
+      return durableBundleReceipt(input);
+    });
+    const stageVerifiedObjects = vi.fn(async () => {
+      events.push('objects');
+      throw new Error('durable control-object write failed');
+    });
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-control-stage' });
+
+    // Bundle-first ordering: the immutable bundle is durably staged before the
+    // control-object write, so a control-stage failure can leave only an
+    // unreferenced bundle (no head is advanced) — never a head pointing at an
+    // unavailable bundle.
+    expect(events).toEqual(['bundle', 'objects']);
+    expect(stageKaBundle).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a one-row previous head whose bucket is missing before any staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+    expect(first.publication.head.payload).toMatchObject({ totalRows: '1' });
+
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+
+    await expect(producer.produceAndStage({
+      previousHead: first.publication.head,
+      previousDirectoryPath: first.publication.directoryPath,
+      // A totalRows='1' head requires an exact one-row bucket; null is out of slice.
+      previousBucket: null,
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+      deployment: DEPLOYMENT,
+      issuedAt: '1773900002000' as never,
+      catalogSigner: catalogSigner(),
+      catalogIssuerAuthorization: authorization,
+    })).rejects.toMatchObject({ code: 'catalog-successor-producer-history' });
+
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
+  });
+
+  it('produces a version-2 successor that replaces the current one-row bucket', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+    expect(first.publication.head.payload).toMatchObject({ version: '1', totalRows: '1' });
+    expect(first.publication.bucket?.payload.rows.length).toBe(1);
+
+    // A valid one-row -> one-row replacement updates the SAME KA/coordinate and
+    // increments assertionVersion by exactly one (an ordinary one-KA delta).
+    const second = await stageOne(
+      {
+        head: first.publication.head,
+        directoryPath: first.publication.directoryPath,
+        bucket: first.publication.bucket,
+      },
+      authorization,
+      '1773900002000',
+      await authorSeal(AUTHOR_WALLET, KA_NUMBER, '2'),
+    );
+
+    expect(second.publication.head.payload).toMatchObject({
+      subGraphName: null,
+      bucketCount: '1',
+      directoryHeight: '0',
+      totalRows: '1',
+      version: '2',
+      previousHeadDigest: first.publication.head.objectDigest,
+    });
+    expect(second.publication.bucket?.payload.rows).toEqual([second.row]);
+    expect(second.row).not.toEqual(first.row);
+  });
 });
 
 type BundleStageInput = {
@@ -344,6 +448,45 @@ async function producerHistory() {
     signer: catalogSigner(),
   });
   return { genesis, authorization };
+}
+
+/**
+ * Drive one full produceAndStage over a previous slice through working mocks,
+ * reusing the exact author seal / projection / issuer authorization. Used to
+ * build a real one-row predecessor (successor #1) so the steady-state replace
+ * and unsupported-previous-slice paths can be exercised end-to-end.
+ */
+async function stageOne(
+  previous: Pick<
+    Awaited<ReturnType<typeof produceEmptyAuthorCatalogGenesisV1>>,
+    'head' | 'directoryPath' | 'bucket'
+  >,
+  authorization: Awaited<ReturnType<typeof directCatalogAuthorization>>,
+  issuedAt = '1773900001000',
+  seal?: CanonicalGraphScopedAuthorSealV1,
+) {
+  const stageKaBundle = vi.fn(durableBundleReceipt);
+  const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+    durable: true as const,
+    namespaceDurability: 'test-exact-durable' as never,
+    objects: Object.freeze([]),
+  }));
+  const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+    controlObjects: { stageVerifiedObjects } as never,
+    stageKaBundle,
+  });
+  return producer.produceAndStage({
+    previousHead: previous.head,
+    previousDirectoryPath: previous.directoryPath,
+    previousBucket: previous.bucket,
+    assertionCoordinate: 'gate-1-object' as never,
+    projectionBytes: PROJECTION,
+    seal: seal ?? await authorSeal(AUTHOR_WALLET),
+    deployment: DEPLOYMENT,
+    issuedAt: issuedAt as never,
+    catalogSigner: catalogSigner(),
+    catalogIssuerAuthorization: authorization,
+  });
 }
 
 async function directCatalogAuthorization(
@@ -391,13 +534,19 @@ function catalogSigner() {
   };
 }
 
-async function authorSeal(signingWallet: ethers.Wallet): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(
+  signingWallet: ethers.Wallet,
+  kaNumber = KA_NUMBER,
+  assertionVersion = '1',
+): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
     authorAddress: AUTHOR,
-    reservedKaId: BigInt(KA_ID),
+    reservedKaId: BigInt(kaId),
   });
   const signature = ethers.Signature.from(await signingWallet.signTypedData(
     typedData.domain,
@@ -412,11 +561,11 @@ async function authorSeal(signingWallet: ethers.Wallet): Promise<CanonicalGraphS
     authorSchemeVersion: '1',
     assertedAtChainId: DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address: KAV10,
-    reservedKaId: KA_ID,
+    reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
-    kaUal: UAL,
-    assertionVersion: '1',
+    kaUal,
+    assertionVersion,
     publicTripleCount: '2',
     privateTripleCount: '0',
     privateMerkleRoot: null,
