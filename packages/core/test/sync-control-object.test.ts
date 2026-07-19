@@ -6,6 +6,7 @@ import {
   assertControlObjectDigest,
   assertSignedControlEnvelope,
   assertUnsignedControlEnvelope,
+  canonicalizeSignedControlEnvelopeBytes,
   canonicalizeUnsignedControlEnvelopeBytes,
   computeControlObjectDigestHex,
   computeControlSignatureVariantDigestHex,
@@ -112,6 +113,8 @@ describe('Track-2 control-object envelopes', () => {
   });
 
   it('strictly decodes and validates canonical EIP-191 and EIP-1271 signed envelopes', () => {
+    expect(new TextDecoder().decode(canonicalizeSignedControlEnvelopeBytes(EOA_SIGNED)))
+      .toBe(EOA_CANONICAL_SIGNED);
     expect(parseCanonicalSignedControlEnvelope(EOA_CANONICAL_SIGNED)).toMatchObject({
       objectDigest: EOA_DIGEST,
       signature: EOA_SIGNATURE,
@@ -198,6 +201,25 @@ describe('Track-2 control-object envelopes', () => {
         contractAddress: EOA_ISSUER,
       },
     })).toThrow(/must equal the envelope issuer/);
+  });
+
+  it('enforces the full unsigned 256-bit chainId boundary before BigInt conversion', () => {
+    const maxU256 = ((1n << 256n) - 1n).toString();
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureEvidence: { ...SAFE_VECTOR.signatureEvidence, chainId: maxU256 },
+    })).not.toThrow();
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureEvidence: {
+        ...SAFE_VECTOR.signatureEvidence,
+        chainId: (1n << 256n).toString(),
+      },
+    })).toThrow(/u256/);
+    expect(() => assertUnsignedControlEnvelope({
+      ...SAFE_VECTOR,
+      signatureEvidence: { ...SAFE_VECTOR.signatureEvidence, chainId: '9'.repeat(100_000) },
+    })).toThrow(/u256/);
   });
 
   it('rejects non-canonical and zero EVM issuers', () => {
@@ -309,6 +331,48 @@ describe('Track-2 control-object envelopes', () => {
     expect(() => computeControlObjectDigestHex({ ...EOA_VECTOR, payload })).toThrow(
       /Canonical JSON exceeds/,
     );
+  });
+
+  it('enforces the complete signed-envelope byte ceiling through canonical serialization', () => {
+    const emptyPayloadEnvelope: UnsignedControlEnvelopeV1 = {
+      ...EOA_VECTOR,
+      payload: { blob: '' },
+    };
+    const unsignedBaseBytes = canonicalizeUnsignedControlEnvelopeBytes(
+      emptyPayloadEnvelope,
+    ).byteLength;
+    const unsignedAtLimit: UnsignedControlEnvelopeV1 = {
+      ...emptyPayloadEnvelope,
+      payload: { blob: 'x'.repeat(MAX_CONTROL_OBJECT_BYTES - unsignedBaseBytes) },
+    };
+    expect(canonicalizeUnsignedControlEnvelopeBytes(unsignedAtLimit)).toHaveLength(
+      MAX_CONTROL_OBJECT_BYTES,
+    );
+    expect(() => assertSignedControlEnvelope({
+      ...unsignedAtLimit,
+      objectDigest: computeControlObjectDigestHex(unsignedAtLimit),
+      signature: EOA_SIGNATURE,
+    })).toThrow(/Canonical JSON exceeds/);
+
+    const emptySigned: SignedControlEnvelopeV1 = {
+      ...emptyPayloadEnvelope,
+      objectDigest: computeControlObjectDigestHex(emptyPayloadEnvelope),
+      signature: EOA_SIGNATURE,
+    };
+    const signedBaseBytes = canonicalizeSignedControlEnvelopeBytes(emptySigned).byteLength;
+    const signedAtLimitUnsigned: UnsignedControlEnvelopeV1 = {
+      ...emptyPayloadEnvelope,
+      payload: { blob: 'x'.repeat(MAX_CONTROL_OBJECT_BYTES - signedBaseBytes) },
+    };
+    const signedAtLimit: SignedControlEnvelopeV1 = {
+      ...signedAtLimitUnsigned,
+      objectDigest: computeControlObjectDigestHex(signedAtLimitUnsigned),
+      signature: EOA_SIGNATURE,
+    };
+    expect(canonicalizeSignedControlEnvelopeBytes(signedAtLimit)).toHaveLength(
+      MAX_CONTROL_OBJECT_BYTES,
+    );
+    expect(() => assertSignedControlEnvelope(signedAtLimit)).not.toThrow();
   });
 
   it('rejects malformed or mismatched detached signature variants', () => {

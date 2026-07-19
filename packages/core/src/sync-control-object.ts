@@ -34,19 +34,42 @@ export type ControlObjectSignatureEvidence =
       readonly contractAddress: string;
     };
 
-export interface UnsignedControlEnvelopeV1<Payload extends CanonicalJsonValue = CanonicalJsonValue> {
+interface ControlEnvelopeBaseV1<Payload extends CanonicalJsonValue> {
   readonly objectType: string;
   readonly payload: Payload;
-  readonly signatureSuite: ControlObjectSignatureSuite;
   readonly issuer: string;
-  readonly signatureEvidence: ControlObjectSignatureEvidence;
 }
 
-export interface SignedControlEnvelopeV1<Payload extends CanonicalJsonValue = CanonicalJsonValue>
-  extends UnsignedControlEnvelopeV1<Payload> {
+export interface Eip191UnsignedControlEnvelopeV1<
+  Payload extends CanonicalJsonValue = CanonicalJsonValue,
+> extends ControlEnvelopeBaseV1<Payload> {
+  readonly signatureSuite: 'eip191-personal-sign-digest-v1';
+  readonly signatureEvidence: { readonly kind: 'none' };
+}
+
+export interface Eip1271UnsignedControlEnvelopeV1<
+  Payload extends CanonicalJsonValue = CanonicalJsonValue,
+> extends ControlEnvelopeBaseV1<Payload> {
+  readonly signatureSuite: 'eip1271-current-finalized-v1';
+  readonly signatureEvidence: {
+    readonly kind: 'eip1271-current-finalized';
+    readonly chainId: string;
+    readonly contractAddress: string;
+  };
+}
+
+export type UnsignedControlEnvelopeV1<
+  Payload extends CanonicalJsonValue = CanonicalJsonValue,
+> = Eip191UnsignedControlEnvelopeV1<Payload> | Eip1271UnsignedControlEnvelopeV1<Payload>;
+
+interface SignedControlEnvelopeFieldsV1 {
   readonly objectDigest: string;
   readonly signature: string;
 }
+
+export type SignedControlEnvelopeV1<
+  Payload extends CanonicalJsonValue = CanonicalJsonValue,
+> = UnsignedControlEnvelopeV1<Payload> & SignedControlEnvelopeFieldsV1;
 
 export interface ControlObjectSignatureVariantV1 {
   readonly objectDigest: string;
@@ -60,6 +83,7 @@ const SIGNATURE_VARIANT_DOMAIN_BYTES = UTF8.encode(CONTROL_SIGNATURE_VARIANT_DIG
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
 const LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})+$/;
 const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+const MAX_U256 = (1n << 256n) - 1n;
 
 /**
  * Return the exact RFC-64 unsigned-envelope bytes used by every digest/signature
@@ -135,7 +159,14 @@ export function parseCanonicalUnsignedControlEnvelope(
 export function assertSignedControlEnvelope(
   envelope: SignedControlEnvelopeV1,
 ): void {
-  validateSignedControlEnvelope(envelope, true);
+  validateSignedControlEnvelope(envelope);
+}
+
+/** Return the exact bounded canonical bytes of a complete signed envelope. */
+export function canonicalizeSignedControlEnvelopeBytes(
+  envelope: SignedControlEnvelopeV1,
+): Uint8Array {
+  return validateSignedControlEnvelope(envelope);
 }
 
 /** Strictly decode and validate a canonical signed wire envelope. */
@@ -148,7 +179,7 @@ export function parseCanonicalSignedControlEnvelope(
     throw new Error('Signed control-object envelope must be a plain JSON object');
   }
   const envelope = parsed as unknown as SignedControlEnvelopeV1;
-  validateSignedControlEnvelope(envelope, false);
+  validateSignedControlEnvelope(envelope);
   return envelope;
 }
 
@@ -220,7 +251,7 @@ export function parseCanonicalControlSignatureVariant(
   return variant;
 }
 
-export function assertCanonicalEvmAddress(value: string, label = 'address'): void {
+function assertCanonicalEvmAddress(value: string, label = 'address'): void {
   if (typeof value !== 'string' || !EVM_ADDRESS.test(value)) {
     throw new Error(`${label} must be a lowercase 20-byte 0x EVM address`);
   }
@@ -229,7 +260,7 @@ export function assertCanonicalEvmAddress(value: string, label = 'address'): voi
   }
 }
 
-export function bytesToLowerHex(bytes: Uint8Array): string {
+function bytesToLowerHex(bytes: Uint8Array): string {
   let result = '0x';
   for (const byte of bytes) result += byte.toString(16).padStart(2, '0');
   return result;
@@ -237,8 +268,7 @@ export function bytesToLowerHex(bytes: Uint8Array): string {
 
 function validateSignedControlEnvelope(
   envelope: SignedControlEnvelopeV1,
-  enforceSignedSize: boolean,
-): void {
+): Uint8Array {
   if (!isPlainRecord(envelope)) {
     throw new Error('Signed control-object envelope must be a plain JSON object');
   }
@@ -257,17 +287,15 @@ function validateSignedControlEnvelope(
   assertCanonicalDigest(envelope.objectDigest, 'objectDigest');
   assertSignatureForSuite(envelope.signature, envelope.signatureSuite);
   const canonicalUnsigned = canonicalizeUnsignedControlEnvelopeBytesAfterFields(unsigned);
-  if (
-    enforceSignedSize
-    && canonicalUnsigned.byteLength + signedEnvelopeAdditionalBytes(envelope)
-      > MAX_CONTROL_OBJECT_BYTES
-  ) {
-    throw new Error(`Signed control-object envelope exceeds ${MAX_CONTROL_OBJECT_BYTES} bytes`);
-  }
+  const canonicalSigned = canonicalizeJsonBytes(toCanonicalSignedEnvelope(envelope), {
+    maxBytes: MAX_CONTROL_OBJECT_BYTES,
+    maxDepth: MAX_CONTROL_OBJECT_DEPTH,
+  });
   const expectedDigest = bytesToLowerHex(digestWithDomain(DOMAIN_BYTES, canonicalUnsigned));
   if (envelope.objectDigest !== expectedDigest) {
     throw new Error(`Control-object digest mismatch: expected ${expectedDigest}`);
   }
+  return canonicalSigned;
 }
 
 function assertUnsignedControlEnvelopeFields(
@@ -321,9 +349,11 @@ function assertUnsignedControlEnvelopeFields(
     }
     if (
       typeof envelope.signatureEvidence.chainId !== 'string'
+      || envelope.signatureEvidence.chainId.length > 78
       || !CANONICAL_UNSIGNED_DECIMAL.test(envelope.signatureEvidence.chainId)
+      || BigInt(envelope.signatureEvidence.chainId) > MAX_U256
     ) {
-      throw new Error('EIP-1271 chainId must be a canonical unsigned decimal string');
+      throw new Error('EIP-1271 chainId must be a canonical unsigned decimal u256 string');
     }
     assertCanonicalEvmAddress(
       envelope.signatureEvidence.contractAddress,
@@ -391,6 +421,15 @@ function assertCanonicalHexBytes(
 function extractUnsignedEnvelope(
   envelope: SignedControlEnvelopeV1,
 ): UnsignedControlEnvelopeV1 {
+  if (envelope.signatureSuite === 'eip191-personal-sign-digest-v1') {
+    return {
+      issuer: envelope.issuer,
+      objectType: envelope.objectType,
+      payload: envelope.payload,
+      signatureEvidence: envelope.signatureEvidence,
+      signatureSuite: envelope.signatureSuite,
+    };
+  }
   return {
     issuer: envelope.issuer,
     objectType: envelope.objectType,
@@ -420,15 +459,18 @@ function toCanonicalUnsignedEnvelope(
   };
 }
 
-function signedEnvelopeAdditionalBytes(
+function toCanonicalSignedEnvelope(
   envelope: SignedControlEnvelopeV1,
-): number {
-  // The signed form adds exactly two comma-delimited ASCII fields to the already
-  // non-empty unsigned object. Sorting changes placement, never byte length.
-  return (
-    1 + '"objectDigest":'.length + envelope.objectDigest.length + 2
-    + 1 + '"signature":'.length + envelope.signature.length + 2
-  );
+): CanonicalJsonValue {
+  const unsigned = toCanonicalUnsignedEnvelope(envelope) as Record<
+    string,
+    CanonicalJsonValue
+  >;
+  return {
+    ...unsigned,
+    objectDigest: envelope.objectDigest,
+    signature: envelope.signature,
+  };
 }
 
 function digestWithDomain(domain: Uint8Array, payload: Uint8Array): Uint8Array {
