@@ -773,6 +773,11 @@ describe('RFC-64 durable control-object store v1', () => {
 
   it('publishes immutable keys without clobbering a racing independent writer', async () => {
     const containmentRoot = await temporaryDataDirectory();
+    applyRfc64OwnerOnlyPermissionsSyncV1(
+      containmentRoot,
+      RFC64_CONTROL_OBJECT_STORE_DIRECTORY_MODE,
+      true,
+    );
     const relativePath = join('race', 'immutable.jcs');
     const firstBytes = new TextEncoder().encode('{"writer":"first"}');
     const secondBytes = new TextEncoder().encode('{"writer":"second"}');
