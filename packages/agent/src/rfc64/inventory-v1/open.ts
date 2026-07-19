@@ -854,10 +854,13 @@ function openOrRebuildOwnedDatabase(
       verifyOwnedSchema(database);
     } catch (error) {
       if (!(error instanceof OwnedInventoryV1SchemaError)) throw error;
+      // Eligibility is a precondition for even the zero-timeout/checkpoint
+      // quarantine proof. In particular, do not checkpoint or truncate a
+      // crashed WAL on a deployment that cannot durably rename the namespace.
+      assertQuarantineDurabilityAvailable(lifecycle);
       assertDatabaseQuiescent(database, lifecycle);
       closeInventoryTarget(database, 'automatic-schema-quarantine', lifecycle);
       database = null;
-      assertQuarantineDurabilityAvailable(lifecycle);
       beginQuarantine(databasePath, lifecycle);
       finishPendingQuarantine(sqlite, databasePath, lifecycle);
       return openOrRebuildOwnedDatabase(sqlite, databasePath, lifecycle);
@@ -915,6 +918,15 @@ function openOrRebuildOwnedDatabase(
           { cause: error },
         );
       }
+      // Refuse before BEGIN EXCLUSIVE or wal_checkpoint(TRUNCATE) can alter a
+      // corrupt unit on an uncertified deployment. The ordinary cleanup close
+      // may still perform SQLite's normal recovery, which the RFC permits.
+      try {
+        assertQuarantineDurabilityAvailable(lifecycle);
+      } catch (cause) {
+        closeProbe();
+        throw cause;
+      }
       try {
         assertCorruptDatabaseQuiescent(database, lifecycle);
       } catch (cause) {
@@ -928,10 +940,6 @@ function openOrRebuildOwnedDatabase(
       }
       closeInventoryTarget(database, 'automatic-corrupt-quarantine', lifecycle);
       database = null;
-      // The corrupt target handle is deliberately closed before this platform
-      // gate can reject quarantine. The caller may release DK6L only after that
-      // target close has succeeded.
-      assertQuarantineDurabilityAvailable(lifecycle);
       beginQuarantine(databasePath, lifecycle);
       finishPendingQuarantine(sqlite, databasePath, lifecycle);
       return openOrRebuildOwnedDatabase(sqlite, databasePath, lifecycle);
@@ -1316,7 +1324,19 @@ function assertFilesystemOwner(path: string): void {
     const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$owner = (Get-Acl -LiteralPath $env:DKG_RFC64_ACL_PATH).GetOwner([System.Security.Principal.SecurityIdentifier])
+$target = [System.IO.Path]::GetFullPath($env:DKG_RFC64_ACL_PATH)
+$acl = if ([System.IO.Directory]::Exists($target)) {
+  [System.IO.Directory]::GetAccessControl(
+    $target,
+    [System.Security.AccessControl.AccessControlSections]::Owner
+  )
+} else {
+  [System.IO.File]::GetAccessControl(
+    $target,
+    [System.Security.AccessControl.AccessControlSections]::Owner
+  )
+}
+$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
 if ($owner.Value -ne $sid.Value) { exit 40 }
 `;
     const result = spawnSync(
@@ -1408,8 +1428,13 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
-$verified = Get-Acl -LiteralPath $target
+if ($isDirectory) {
+  [System.IO.Directory]::SetAccessControl($target, $acl)
+  $verified = [System.IO.Directory]::GetAccessControl($target)
+} else {
+  [System.IO.File]::SetAccessControl($target, $acl)
+  $verified = [System.IO.File]::GetAccessControl($target)
+}
 $rules = @($verified.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 if (-not $verified.AreAccessRulesProtected -or $rules.Count -ne 1) { exit 41 }
 if ($rules[0].IdentityReference.Value -ne $sid.Value) { exit 42 }
