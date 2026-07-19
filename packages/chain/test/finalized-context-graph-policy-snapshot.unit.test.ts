@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type {
   BlockNumberV1,
   ChainIdV1,
+  ContextGraphAccessPolicyV1,
+  ContextGraphPublishPolicyV1,
   Digest32V1,
   EvmAddressV1,
 } from '@origintrail-official/dkg-core';
@@ -10,7 +12,6 @@ import type {
 import {
   FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1,
   FinalizedContextGraphPolicyErrorV1,
-  createFixedFinalizedContextGraphPolicyResolverV1,
   resolveFinalizedContextGraphPolicySnapshotV1,
   snapshotFinalizedContextGraphPolicyV1,
   type FinalizedContextGraphPolicyErrorCodeV1,
@@ -25,6 +26,12 @@ const AUTHORITY = `0x${'33'.repeat(20)}` as EvmAddressV1;
 const ZERO = `0x${'0'.repeat(40)}` as EvmAddressV1;
 const BLOCK_HASH = `0x${'44'.repeat(32)}` as Digest32V1;
 const NAME_HASH = `0x${'55'.repeat(32)}` as Digest32V1;
+const MAX_U64 = '18446744073709551615';
+const ABOVE_MAX_U64 = '18446744073709551616';
+const MAX_U256 =
+  '115792089237316195423570985008687907853269984665640564039457584007913129639935';
+const ABOVE_MAX_U256 =
+  '115792089237316195423570985008687907853269984665640564039457584007913129639936';
 
 function validRequest(): FinalizedContextGraphPolicyRequestV1 {
   return { chainId: CHAIN_ID, contextGraphId: '42', governanceContract: CGS };
@@ -58,7 +65,11 @@ function expectFailure(operation: () => unknown, code: FinalizedContextGraphPoli
 describe('RFC-64 Gate 5 finalized Context Graph policy snapshot', () => {
   it('composes an immutable snapshot binding anchor, identity, and every policy field', () => {
     const snapshot = snapshotFinalizedContextGraphPolicyV1(validRequest(), validRaw());
+    const accessPolicy: ContextGraphAccessPolicyV1 = snapshot.accessPolicy;
+    const publishPolicy: ContextGraphPublishPolicyV1 = snapshot.publishPolicy;
     expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(accessPolicy).toBe(1);
+    expect(publishPolicy).toBe(0);
     expect(snapshot).toEqual({
       schema: FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1,
       chainId: CHAIN_ID,
@@ -77,7 +88,8 @@ describe('RFC-64 Gate 5 finalized Context Graph policy snapshot', () => {
   });
 
   it('reaches the same snapshot through the resolver seam (mock-adapter parity)', async () => {
-    const resolver = createFixedFinalizedContextGraphPolicyResolverV1(validRaw());
+    const raw = Object.freeze(validRaw());
+    const resolver = () => Promise.resolve(raw);
     const viaSeam = await resolveFinalizedContextGraphPolicySnapshotV1(resolver, validRequest());
     const direct = snapshotFinalizedContextGraphPolicyV1(validRequest(), validRaw());
     expect(viaSeam).toEqual(direct);
@@ -98,6 +110,45 @@ describe('RFC-64 Gate 5 finalized Context Graph policy snapshot', () => {
     expect(snapshot.active).toBe(false);
   });
 
+  it('accepts the canonical u64 block-number maximum and rejects MAX_U64 + 1', () => {
+    const snapshot = snapshotFinalizedContextGraphPolicyV1(validRequest(), {
+      ...validRaw(),
+      blockNumber: MAX_U64 as BlockNumberV1,
+    });
+    expect(snapshot.blockNumber).toBe(MAX_U64);
+    expectFailure(
+      () => snapshotFinalizedContextGraphPolicyV1(validRequest(), {
+        ...validRaw(),
+        blockNumber: ABOVE_MAX_U64 as BlockNumberV1,
+      }),
+      'request-binding',
+    );
+  });
+
+  it('accepts canonical u256 identity boundaries and rejects values above them', () => {
+    const snapshot = snapshotFinalizedContextGraphPolicyV1(
+      { ...validRequest(), contextGraphId: MAX_U256 },
+      { ...validRaw(), publishAuthorityAccountId: MAX_U256 },
+    );
+    expect(snapshot.contextGraphId).toBe(MAX_U256);
+    expect(snapshot.publishAuthorityAccountId).toBe(MAX_U256);
+
+    expectFailure(
+      () => snapshotFinalizedContextGraphPolicyV1(
+        { ...validRequest(), contextGraphId: ABOVE_MAX_U256 },
+        validRaw(),
+      ),
+      'request-binding',
+    );
+    expectFailure(
+      () => snapshotFinalizedContextGraphPolicyV1(validRequest(), {
+        ...validRaw(),
+        publishAuthorityAccountId: ABOVE_MAX_U256,
+      }),
+      'request-binding',
+    );
+  });
+
   it('fails closed on an unregistered context graph (zero owner)', () => {
     expectFailure(
       () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), owner: ZERO }),
@@ -111,6 +162,8 @@ describe('RFC-64 Gate 5 finalized Context Graph policy snapshot', () => {
     ['zero governanceContract', () => snapshotFinalizedContextGraphPolicyV1({ ...validRequest(), governanceContract: ZERO }, validRaw()), 'request-binding'],
     ['checksummed (non-lowercase) owner', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), owner: `0x${'Ab'.repeat(20)}` as EvmAddressV1 }), 'malformed-owner'],
     ['malformed publishAuthority', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), publishAuthority: '0xdeadbeef' as EvmAddressV1 }), 'malformed-authority'],
+    ['hex publishAuthorityAccountId', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), publishAuthorityAccountId: '0x7' }), 'request-binding'],
+    ['non-canonical publishAuthorityAccountId', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), publishAuthorityAccountId: '07' }), 'request-binding'],
     ['out-of-range accessPolicy', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), accessPolicy: 2 }), 'unsupported-access-policy'],
     ['out-of-range publishPolicy', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), publishPolicy: 9 }), 'unsupported-publish-policy'],
     ['malformed blockHash', () => snapshotFinalizedContextGraphPolicyV1(validRequest(), { ...validRaw(), blockHash: '0xdead' as Digest32V1 }), 'malformed-anchor'],

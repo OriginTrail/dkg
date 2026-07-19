@@ -45,7 +45,6 @@ export {
   CG_PUBLISH_POLICY_VALUES_V1,
   FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1,
   FinalizedContextGraphPolicyErrorV1,
-  createFixedFinalizedContextGraphPolicyResolverV1,
   resolveFinalizedContextGraphPolicySnapshotV1,
   snapshotFinalizedContextGraphPolicyV1,
   type FinalizedContextGraphPolicyErrorCodeV1,

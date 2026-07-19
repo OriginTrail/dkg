@@ -1,7 +1,13 @@
 import {
   assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
+  assertCanonicalDigest,
   type BlockNumberV1,
   type ChainIdV1,
+  type ContextGraphAccessPolicyV1,
+  type ContextGraphPublishPolicyV1,
+  type DecimalU256V1,
   type Digest32V1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
@@ -24,12 +30,8 @@ export const FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1 =
 export const CG_ACCESS_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 export const CG_PUBLISH_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 
-const CANONICAL_UINT256_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
-const MAX_UINT256 =
-  115792089237316195423570985008687907853269984665640564039457584007913129639935n;
 const CANONICAL_LOWER_ADDRESS = /^0x[0-9a-f]{40}$/;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
-const CANONICAL_DIGEST_32 = /^0x[0-9a-f]{64}$/;
 
 export type FinalizedContextGraphPolicyErrorCodeV1 =
   | 'request-binding'
@@ -82,16 +84,16 @@ export type RawFinalizedContextGraphPolicyFieldsV1 = {
 export type FinalizedContextGraphPolicySnapshotV1 = {
   readonly schema: typeof FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1;
   readonly chainId: ChainIdV1;
-  readonly contextGraphId: string;
+  readonly contextGraphId: DecimalU256V1;
   readonly governanceContract: EvmAddressV1;
   readonly blockNumber: BlockNumberV1;
   readonly blockHash: Digest32V1;
   readonly owner: EvmAddressV1;
   readonly active: boolean;
-  readonly accessPolicy: number;
-  readonly publishPolicy: number;
+  readonly accessPolicy: ContextGraphAccessPolicyV1;
+  readonly publishPolicy: ContextGraphPublishPolicyV1;
   readonly publishAuthority: EvmAddressV1;
-  readonly publishAuthorityAccountId: string;
+  readonly publishAuthorityAccountId: DecimalU256V1;
   readonly nameHash: Digest32V1;
 };
 
@@ -104,11 +106,35 @@ export interface FinalizedContextGraphPolicyResolverV1 {
   (request: FinalizedContextGraphPolicyRequestV1): Promise<RawFinalizedContextGraphPolicyFieldsV1>;
 }
 
-function assertCanonicalUint256(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !CANONICAL_UINT256_DECIMAL.test(value) || BigInt(value) > MAX_UINT256) {
-    throw new FinalizedContextGraphPolicyErrorV1('request-binding', `${label} must be a canonical decimal uint256`);
+function canonicalDecimalU256(
+  value: unknown,
+  code: FinalizedContextGraphPolicyErrorCodeV1,
+  label: string,
+): DecimalU256V1 {
+  try {
+    assertCanonicalDecimalU256(value, label);
+    return value;
+  } catch {
+    throw new FinalizedContextGraphPolicyErrorV1(
+      code,
+      `${label} must be a canonical decimal uint256`,
+    );
   }
-  return value;
+}
+
+function canonicalBlockNumber(
+  value: unknown,
+  code: FinalizedContextGraphPolicyErrorCodeV1,
+): BlockNumberV1 {
+  try {
+    assertCanonicalDecimalU64(value, 'blockNumber');
+    return value;
+  } catch {
+    throw new FinalizedContextGraphPolicyErrorV1(
+      code,
+      'blockNumber must be a canonical decimal uint64',
+    );
+  }
 }
 
 function assertLowerAddress(
@@ -126,11 +152,20 @@ function assertLowerAddress(
   return value as EvmAddressV1;
 }
 
-function assertDigest32(value: unknown, code: FinalizedContextGraphPolicyErrorCodeV1, label: string): Digest32V1 {
-  if (typeof value !== 'string' || !CANONICAL_DIGEST_32.test(value)) {
-    throw new FinalizedContextGraphPolicyErrorV1(code, `${label} must be a 0x-prefixed lowercase 32-byte hex digest`);
+function canonicalDigest32(
+  value: unknown,
+  code: FinalizedContextGraphPolicyErrorCodeV1,
+  label: string,
+): Digest32V1 {
+  try {
+    assertCanonicalDigest(value, label);
+    return value;
+  } catch {
+    throw new FinalizedContextGraphPolicyErrorV1(
+      code,
+      `${label} must be a 0x-prefixed lowercase 32-byte hex digest`,
+    );
   }
-  return value as Digest32V1;
 }
 
 /**
@@ -151,7 +186,11 @@ export function snapshotFinalizedContextGraphPolicyV1(
   } catch {
     throw new FinalizedContextGraphPolicyErrorV1('request-binding', 'request chainId is not canonical');
   }
-  const contextGraphId = assertCanonicalUint256(request.contextGraphId, 'contextGraphId');
+  const contextGraphId = canonicalDecimalU256(
+    request.contextGraphId,
+    'request-binding',
+    'contextGraphId',
+  );
   const governanceContract = assertLowerAddress(
     request.governanceContract, 'request-binding', 'governanceContract', false,
   );
@@ -166,21 +205,27 @@ export function snapshotFinalizedContextGraphPolicyV1(
     );
   }
   const publishAuthority = assertLowerAddress(raw.publishAuthority, 'malformed-authority', 'publishAuthority', true);
-  const publishAuthorityAccountId = assertCanonicalUint256(raw.publishAuthorityAccountId, 'publishAuthorityAccountId');
+  const publishAuthorityAccountId = canonicalDecimalU256(
+    raw.publishAuthorityAccountId,
+    'request-binding',
+    'publishAuthorityAccountId',
+  );
 
-  if (!CG_ACCESS_POLICY_VALUES_V1.includes(raw.accessPolicy as 0 | 1)) {
+  if (raw.accessPolicy !== 0 && raw.accessPolicy !== 1) {
     throw new FinalizedContextGraphPolicyErrorV1('unsupported-access-policy', `unsupported accessPolicy ${String(raw.accessPolicy)}`);
   }
-  if (!CG_PUBLISH_POLICY_VALUES_V1.includes(raw.publishPolicy as 0 | 1)) {
+  const accessPolicy: ContextGraphAccessPolicyV1 = raw.accessPolicy;
+  if (raw.publishPolicy !== 0 && raw.publishPolicy !== 1) {
     throw new FinalizedContextGraphPolicyErrorV1('unsupported-publish-policy', `unsupported publishPolicy ${String(raw.publishPolicy)}`);
   }
+  const publishPolicy: ContextGraphPublishPolicyV1 = raw.publishPolicy;
   if (typeof raw.active !== 'boolean') {
     throw new FinalizedContextGraphPolicyErrorV1('malformed-anchor', 'active must be a boolean');
   }
 
-  const blockHash = assertDigest32(raw.blockHash, 'malformed-anchor', 'blockHash');
-  const blockNumber = assertCanonicalUint256(raw.blockNumber, 'blockNumber') as unknown as BlockNumberV1;
-  const nameHash = assertDigest32(raw.nameHash, 'malformed-name-binding', 'nameHash');
+  const blockHash = canonicalDigest32(raw.blockHash, 'malformed-anchor', 'blockHash');
+  const blockNumber = canonicalBlockNumber(raw.blockNumber, 'request-binding');
+  const nameHash = canonicalDigest32(raw.nameHash, 'malformed-name-binding', 'nameHash');
 
   return Object.freeze({
     schema: FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1,
@@ -191,8 +236,8 @@ export function snapshotFinalizedContextGraphPolicyV1(
     blockHash,
     owner,
     active: raw.active,
-    accessPolicy: raw.accessPolicy,
-    publishPolicy: raw.publishPolicy,
+    accessPolicy,
+    publishPolicy,
     publishAuthority,
     publishAuthorityAccountId,
     nameHash,
@@ -206,16 +251,4 @@ export async function resolveFinalizedContextGraphPolicySnapshotV1(
 ): Promise<FinalizedContextGraphPolicySnapshotV1> {
   const raw = await resolver(request);
   return snapshotFinalizedContextGraphPolicyV1(request, raw);
-}
-
-/**
- * A fixed mock resolver for parity tests. Returns exactly the supplied raw
- * fields regardless of request; production resolvers instead issue the finalized
- * `getContextGraph`/`getNameHash` reads through the strict RPC primitives.
- */
-export function createFixedFinalizedContextGraphPolicyResolverV1(
-  raw: RawFinalizedContextGraphPolicyFieldsV1,
-): FinalizedContextGraphPolicyResolverV1 {
-  const frozen = Object.freeze({ ...raw });
-  return () => Promise.resolve(frozen);
 }
