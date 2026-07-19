@@ -498,12 +498,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       announcement,
       peers,
     });
-    const catalogScope = Object.freeze({ ...scope }) as Readonly<AuthorCatalogScopeV1>;
+    const catalogScope = Object.freeze({
+      ...deriveAuthorCatalogScopeFromHeadV1(head.payload),
+    }) as Readonly<AuthorCatalogScopeV1>;
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
+    const predecessorScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
     const signedBucketRowCount = produced.publication.bucket?.payload.rows.length.toString();
     if (
       signedBucketRowCount === undefined
       || signedBucketRowCount !== head.payload.totalRows
+      || catalogScopeDigest !== predecessorScopeDigest
       || produced.assets.some(
         (asset) => asset.projection.catalogScopeDigest !== catalogScopeDigest,
       )
