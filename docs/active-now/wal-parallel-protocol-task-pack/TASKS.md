@@ -549,17 +549,17 @@ projection.
 
 ### Acceptance area
 
-- [ ] Schema creation and migrations are deterministic, transactional, and
+- [x] Schema creation and migrations are deterministic, transactional, and
       backwards/forwards gated by explicit versions.
-- [ ] Fault injection at every insert, set update, checkpoint, commit, rollback,
+- [x] Fault injection at every insert, set update, checkpoint, commit, rollback,
       and process boundary yields either the old state or the complete new state.
-- [ ] No acknowledged WAL object is lost and no checkpoint references absent
+- [x] No acknowledged WAL object is lost and no checkpoint references absent
       object, set-commitment, policy, or snapshot state.
-- [ ] Idempotency returns the original result for the same request digest and
+- [x] Idempotency returns the original result for the same request digest and
       rejects key reuse with a different digest across restart.
-- [ ] Corruption/integrity failures produce `blocked` and never false `complete`
+- [x] Corruption/integrity failures produce `blocked` and never false `complete`
       or automatic graph mutation.
-- [ ] Queue, quarantine, and GC limits remain bounded under adversarial input.
+- [x] Queue, quarantine, and GC limits remain bounded under adversarial input.
 
 ---
 

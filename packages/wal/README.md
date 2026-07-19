@@ -240,6 +240,89 @@ are at most 1 MiB. Staging additionally caps physical bytes, parts per object,
 simultaneous incomplete objects, lifetime, and assembly/verification buffers.
 No sparse final or staging file is used.
 
+## Crash-safe WAL control state
+
+WAL-006 adds `WalControlStore`, exported from
+`@origintrail-official/dkg-wal/control`. It reuses the packed store's
+`objects.sqlite` database so every accepted logical WAL row has a foreign key
+to an already durable complete-object record. The packed-store schema remains
+version 1; the control layer has its own explicit `wal_control_schema` version
+and transactional migration boundary. Connections use SQLite WAL mode,
+`synchronous=FULL`, foreign keys, `BEGIN IMMEDIATE`, and a process-local
+per-database writer mutex for asynchronous local finalization.
+
+The control schema records complete admitted objects, received range metadata,
+author lanes, set-commitment snapshots, signed checkpoints, bounded IBLT cache,
+head vectors, idempotency results, staged admission, materialization progress,
+peer/provider state, persistent retry work, quarantine metadata, and GC work.
+Ranges, cache entries, quarantine rows, and their referenced package-internal
+artifacts have explicit expiry and bounded ownership. Packed segment recovery
+owns unindexed segment-tail cleanup; the range receiver owns orphan range-file
+cleanup; `WalControlStore.cleanupExpired()` owns their durable control rows.
+
+Local publication first makes the complete `WalObjectV1` bytes durable in the
+packed store. A single control transaction then verifies the exact next lane
+sequence/link, restores and advances the object-set commitment, inserts the
+object and signed checkpoint, advances the author lane, and records the
+idempotency result. It performs no graph or network work. A retry after a lost
+commit acknowledgement returns the original committed IDs, set root, count,
+and sequence; reuse of the key for a different request digest fails closed.
+
+```mermaid
+sequenceDiagram
+    participant A as DKG adapter
+    participant P as Packed object store
+    participant C as WalControlStore
+    participant S as SQLite control transaction
+    A->>P: put(expected ID, complete canonical bytes)
+    P->>P: Verify, append, fsync, index commit
+    P-->>A: Complete object is durable
+    A->>C: finalizeLocal(object, checkpoint, idempotency key)
+    C->>S: BEGIN IMMEDIATE
+    C->>S: Verify physical object and next lane position
+    C->>S: Insert WAL row and set-commitment snapshot
+    C->>S: Insert signed checkpoint and advance lane
+    C->>S: Persist request digest and exact result
+    C->>S: COMMIT
+    S-->>A: Object ID, checkpoint ID, root, count, sequence
+    alt Commit reply is lost
+        A->>C: Retry same key and request digest
+        C-->>A: Original committed result
+    end
+```
+
+Remote bytes enter separately. An adapter stages proof, closure, and provider
+metadata; only a fully verified, physically present batch moves from `STAGED`
+to `ADMITTED` in the same transaction that creates its logical WAL rows. Later
+authority and causal-closure rules are implemented by WAL-007 through WAL-011;
+WAL-006 provides their durable fail-closed boundary without weakening them.
+
+Rollback protection is deliberately outside ordinary WAL/graph snapshots.
+`rollback-high-water.sqlite` is mode `0600`, uses its own versioned schema and
+WAL/FULL durability, and is paired to control state by a random 16-byte guard.
+A missing, substituted, mismatched, malformed, or decreasing high-water store
+blocks use; it is never recreated over an existing guard. Integrity scans also
+block on SQLite, foreign-key, physical-object, lane-count, membership, or
+commitment-snapshot inconsistency and never mutate RDF.
+
+```mermaid
+sequenceDiagram
+    participant R as Restarting runtime
+    participant C as objects.sqlite control state
+    participant H as rollback-high-water.sqlite
+    participant Q as Persistent retry queues
+    R->>C: Validate packed schema and control schema version
+    R->>C: PRAGMA quick_check and foreign_key_check
+    R->>H: Validate schema, permissions boundary, and paired guard
+    alt Any integrity or rollback guard failure
+        R-->>R: State = blocked; no graph mutation or authority claim
+    else State is valid
+        R->>Q: Return expired leases to READY
+        R->>C: Expire bounded range/cache/quarantine metadata
+        R-->>R: State = complete and replay may resume
+    end
+```
+
 ## IBLT sequence
 
 ```mermaid

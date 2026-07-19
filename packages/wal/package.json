@@ -25,6 +25,11 @@
       "import": "./dist/store/index.js",
       "default": "./dist/store/index.js"
     },
+    "./control": {
+      "types": "./dist/control/index.d.ts",
+      "import": "./dist/control/index.js",
+      "default": "./dist/control/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
