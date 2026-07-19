@@ -65,43 +65,114 @@ describe('RFC-64 D26 policy cell classification', () => {
       classifyRfc64PolicyCellV1(policy(1, 1)),
       classifyRfc64PolicyCellV1(policy(1, 0)),
     ];
-    expect(cells.map((cell) => cell.cell)).toEqual(RFC64_POLICY_CELLS_V1);
-    expect(cells.map((cell) => cell.rosterMode)).toEqual([
-      'forbidden',
-      'forbidden',
-      'required',
-      'required',
+    expect(cells).toEqual([
+      {
+        cell: 'public-open',
+        sharing: 'open',
+        contribution: 'open',
+        rosterMode: 'forbidden',
+        catalogDisclosure: 'open-authenticated',
+        swmSubmission: 'open-authenticated',
+        ordinaryPayloadFetch: 'open-authenticated',
+        providerEligibility: 'authenticated-exact-bundle-holder',
+        vmPublisherAuthorization: 'any-wallet',
+        publishAuthority: null,
+        publishAuthorityAccountId: '0',
+        vmExpectedSet: 'finalized-chain-ordinals',
+        writeOnlyVmIngress: 'not-applicable-open-sharing',
+      },
+      {
+        cell: 'public-curated',
+        sharing: 'open',
+        contribution: 'curated',
+        rosterMode: 'forbidden',
+        catalogDisclosure: 'open-authenticated',
+        swmSubmission: 'open-authenticated',
+        ordinaryPayloadFetch: 'open-authenticated',
+        providerEligibility: 'authenticated-exact-bundle-holder',
+        vmPublisherAuthorization: 'direct-eoa-or-safe',
+        publishAuthority: CURATOR,
+        publishAuthorityAccountId: '0',
+        vmExpectedSet: 'finalized-chain-ordinals',
+        writeOnlyVmIngress: 'not-applicable-open-sharing',
+      },
+      {
+        cell: 'private-open',
+        sharing: 'invite-only',
+        contribution: 'open',
+        rosterMode: 'required',
+        catalogDisclosure: 'current-member-only',
+        swmSubmission: 'current-member-only',
+        ordinaryPayloadFetch: 'current-member-only',
+        providerEligibility: 'current-member-with-provider-role',
+        vmPublisherAuthorization: 'any-wallet',
+        publishAuthority: null,
+        publishAuthorityAccountId: '0',
+        vmExpectedSet: 'finalized-chain-ordinals',
+        writeOnlyVmIngress: 'finalized-open-inclusion-only',
+      },
+      {
+        cell: 'private-curated',
+        sharing: 'invite-only',
+        contribution: 'curated',
+        rosterMode: 'required',
+        catalogDisclosure: 'current-member-only',
+        swmSubmission: 'current-member-only',
+        ordinaryPayloadFetch: 'current-member-only',
+        providerEligibility: 'current-member-with-provider-role',
+        vmPublisherAuthorization: 'direct-eoa-or-safe',
+        publishAuthority: CURATOR,
+        publishAuthorityAccountId: '0',
+        vmExpectedSet: 'finalized-chain-ordinals',
+        writeOnlyVmIngress: 'historical-open-inclusion-only',
+      },
     ]);
-    expect(cells.map((cell) => cell.vmPublisherAuthorization)).toEqual([
-      'any-wallet',
-      'direct-eoa-or-safe',
-      'any-wallet',
-      'direct-eoa-or-safe',
-    ]);
-    expect(cells.map((cell) => cell.catalogDisclosure)).toEqual([
-      'open-authenticated',
-      'open-authenticated',
-      'current-member-only',
-      'current-member-only',
-    ]);
+    expect(Object.isFrozen(RFC64_POLICY_CELLS_V1)).toBe(true);
+    expect(cells.every(Object.isFrozen)).toBe(true);
   });
 
   it('classifies direct and PCA curator domains without granting authority', () => {
-    expect(classifyRfc64PolicyCellV1(policy(0, 0)).vmPublisherAuthorization)
-      .toBe('direct-eoa-or-safe');
-    expect(classifyRfc64PolicyCellV1(policy(0, 0, { pca: true })).vmPublisherAuthorization)
-      .toBe('pca-owner-or-registered-agent');
+    expect(classifyRfc64PolicyCellV1(policy(1, 0, { pca: true }))).toEqual({
+      cell: 'private-curated',
+      sharing: 'invite-only',
+      contribution: 'curated',
+      rosterMode: 'required',
+      catalogDisclosure: 'current-member-only',
+      swmSubmission: 'current-member-only',
+      ordinaryPayloadFetch: 'current-member-only',
+      providerEligibility: 'current-member-with-provider-role',
+      vmPublisherAuthorization: 'pca-owner-or-registered-agent',
+      publishAuthority: CURATOR,
+      publishAuthorityAccountId: '7',
+      vmExpectedSet: 'finalized-chain-ordinals',
+      writeOnlyVmIngress: 'historical-open-inclusion-only',
+    });
   });
 
   it('makes write-only ingress inclusion-time and registration aware', () => {
-    expect(classifyRfc64PolicyCellV1(policy(1, 1)).writeOnlyVmIngress)
-      .toBe('finalized-open-inclusion-only');
-    expect(classifyRfc64PolicyCellV1(policy(1, 0)).writeOnlyVmIngress)
-      .toBe('historical-open-inclusion-only');
-    expect(classifyRfc64PolicyCellV1(policy(1, 1, { registered: false })).writeOnlyVmIngress)
-      .toBe('not-applicable-unregistered');
-    expect(classifyRfc64PolicyCellV1(policy(0, 1)).writeOnlyVmIngress)
-      .toBe('not-applicable-open-sharing');
+    expect(classifyRfc64PolicyCellV1(policy(1, 0, {
+      registered: false,
+      pca: true,
+    }))).toEqual({
+      cell: 'private-curated',
+      sharing: 'invite-only',
+      contribution: 'curated',
+      rosterMode: 'required',
+      catalogDisclosure: 'current-member-only',
+      swmSubmission: 'current-member-only',
+      ordinaryPayloadFetch: 'current-member-only',
+      providerEligibility: 'current-member-with-provider-role',
+      vmPublisherAuthorization: 'pca-owner-or-registered-agent',
+      publishAuthority: CURATOR,
+      publishAuthorityAccountId: '7',
+      vmExpectedSet: 'none-unregistered',
+      writeOnlyVmIngress: 'not-applicable-unregistered',
+    });
+    expect(classifyRfc64PolicyCellV1(policy(0, 1, { registered: false })))
+      .toMatchObject({
+        vmExpectedSet: 'none-unregistered',
+        writeOnlyVmIngress: 'not-applicable-open-sharing',
+      });
   });
 
   it('returns a detached immutable descriptor', () => {

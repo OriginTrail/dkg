@@ -7,13 +7,30 @@ const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
+const expectedRfc64PolicyCells = [
+  'public-open',
+  'public-curated',
+  'private-open',
+  'private-curated',
+];
 
 if (
   typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
+  || typeof root.classifyRfc64PolicyCellV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+if (
+  !Array.isArray(root.RFC64_POLICY_CELLS_V1)
+  || !Object.isFrozen(root.RFC64_POLICY_CELLS_V1)
+  || root.RFC64_POLICY_CELLS_V1.length !== expectedRfc64PolicyCells.length
+  || root.RFC64_POLICY_CELLS_V1.some(
+    (cell, index) => cell !== expectedRfc64PolicyCells[index]
+  )
+) {
+  throw new Error('package root did not expose the closed RFC-64 policy-cell list');
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
