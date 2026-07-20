@@ -369,8 +369,9 @@ export function createPublisherInspectorFromStore(
 export function createPublisherControlFromStore(
   store: TripleStore,
   publicSnapshotStore?: WorkspacePublicSnapshotStore,
+  maxRetries?: number,
 ): AsyncLiftPublisher {
-  return new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore });
+  return new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore, maxRetries });
 }
 
 export async function createPublisherRuntimeFromAgent(args: {

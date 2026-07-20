@@ -1736,6 +1736,9 @@ export async function runDaemonInner(
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
+    // #1836 — forward the operator retry budget to the agent so its own
+    // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
+    publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
@@ -1957,6 +1960,10 @@ export async function runDaemonInner(
   const publisherControl = createPublisherControlFromStore(
     agent.store,
     createPublicSnapshotStore(dkgDir(), config),
+    // #1836 — the daemon admission instance MUST carry the operator's retry
+    // budget; without it every API-admitted VM-publish job was stamped with the
+    // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
+    config.publisher?.maxRetries,
   );
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
