@@ -887,6 +887,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private async writeJob(job: LiftJob): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(serializeJob(job, this.graphUri));
+    // Durability before the on-chain send. The 'broadcast' record is written
+    // inside the write-ahead hook (EVMChainAdapterBase.dispatchSerializedV10Write
+    // awaits onBroadcast strictly before the tx is sent). Without an fsync here,
+    // a daemon crash in the flush->send window loses the record: on restart the
+    // job reads back as 'validated', recover() resets it, and it re-broadcasts
+    // with a fresh hash -> a double on-chain submission. Flushing on this
+    // execute-capable transition closes that window. Scoped to 'broadcast' so a
+    // whole-store snapshot is not taken on every state change (matches the
+    // promote queue's per-write flush intent, bounded to where it is load-bearing).
+    if (job.status === 'broadcast') {
+      await this.store.flush?.();
+    }
   }
 
   private async deleteJob(jobId: string): Promise<void> {
