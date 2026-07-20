@@ -83,6 +83,11 @@ export default defineConfig({
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
           'test/blazegraph-harden.test.ts',
+          // `dkg store harden` Commander wrapper: config gating, running-
+          // daemon --yes refusal, dry-run routing, confirmation, and
+          // options.containerName persistence. Mocked config/readline/
+          // executor — no docker, no hardhat.
+          'test/store-harden-command.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',

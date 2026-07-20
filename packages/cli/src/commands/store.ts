@@ -20,7 +20,6 @@ import {
 import { deriveBlazegraphContainerName } from '../daemon/blazegraph-docker.js';
 import {
   executeHardenMigration,
-  planHardenMigration,
   type HardenStep,
 } from '../daemon/blazegraph-harden.js';
 
