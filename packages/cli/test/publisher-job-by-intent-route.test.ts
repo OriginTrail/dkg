@@ -14,13 +14,17 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
     await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {})));
   });
 
-  function kaVmPublishRequest() {
+  function kaVmPublishRequest(overrides: Record<string, unknown> = {}) {
     const authorAddress = '0x1111111111111111111111111111111111111111';
     const kaNumber = 7n;
     const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
     return {
       contextGraphId: 'music-social',
       name: 'albums',
+      // Admission always persists a non-empty agent lane; the default here mirrors
+      // the ctx.requestAgentAddress the route falls back to, so the lifecycle key
+      // matches on both write and lookup (as it does in production).
+      agentAddress: '0x0',
       shareOperationId: 'share-op-1',
       roots: [] as string[],
       contentScopeVersion: 2 as const,
@@ -44,14 +48,17 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
       swmCurrentAssertion: '12'.repeat(32),
       kaNumber: kaNumber.toString(),
       reservedUal: kaUal,
+      ...overrides,
     };
   }
 
-  async function newControlWithJob(): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string }> {
+  async function newControlWithJob(
+    overrides: Record<string, unknown> = {},
+  ): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string }> {
     const store = new OxigraphStore();
     stores.push(store);
     const control = createPublisherControlFromStore(store);
-    const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(overrides));
     return { control, jobId };
   }
 
@@ -87,9 +94,52 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
     await handlePublisherRoutes(ctx);
     expect(responseStatus(ctx)).toBe(400);
   });
+
+  // #1828 (otReviewAgent): admission indexes under a non-empty agent lane, and a
+  // recovering client rarely retains agentAddress. The route must default the
+  // omitted lane to the caller's authenticated agent (the same resolver admission
+  // used), not the empty lane, or the job is invisible.
+  it('defaults an omitted agentAddress to the caller lane so an agent-scoped job is still found', async () => {
+    const agentLane = `0x${'ab'.repeat(20)}`;
+    const { control, jobId } = await newControlWithJob({ agentAddress: agentLane });
+
+    // Same lane, agentAddress omitted -> recovered via the caller-lane default.
+    const ctx = createContext('/api/publisher/job-by-intent?contextGraphId=music-social&name=albums', control, agentLane);
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(200);
+    const body = responseBody(ctx) as { result: string; job?: { jobId: string } };
+    expect(body.result).toBe('active');
+    expect(body.job?.jobId).toBe(jobId);
+
+    // A different caller lane (still omitting agentAddress) must NOT see it —
+    // proves the defaulted lane is actually applied to the lookup key.
+    const otherCtx = createContext('/api/publisher/job-by-intent?contextGraphId=music-social&name=albums', control, `0x${'cd'.repeat(20)}`);
+    await handlePublisherRoutes(otherCtx);
+    expect((responseBody(otherCtx) as { result: string }).result).toBe('none');
+  });
+
+  // #1828 (zsculac): admission normalizes contextGraphId (trim + strip the
+  // did:dkg:context-graph: prefix) before persisting, so recovery must apply the
+  // same normalization or the URI form the client submitted returns a false none.
+  it('normalizes a did:dkg:context-graph URI contextGraphId to the persisted bare id', async () => {
+    const { control, jobId } = await newControlWithJob();
+    const ctx = createContext(
+      '/api/publisher/job-by-intent?contextGraphId=did%3Adkg%3Acontext-graph%3Amusic-social&name=albums',
+      control,
+    );
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(200);
+    const body = responseBody(ctx) as { result: string; job?: { jobId: string } };
+    expect(body.result).toBe('active');
+    expect(body.job?.jobId).toBe(jobId);
+  });
 });
 
-function createContext(path: string, publisherControl: RequestContext['publisherControl']): RequestContext {
+function createContext(
+  path: string,
+  publisherControl: RequestContext['publisherControl'],
+  requestAgentAddress = '0x0',
+): RequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
   const req = Readable.from([]);
   Object.assign(req, { method: 'GET', url: path, headers: { host: '127.0.0.1' } });
@@ -125,7 +175,7 @@ function createContext(path: string, publisherControl: RequestContext['publisher
     url,
     path: url.pathname,
     requestToken: undefined,
-    requestAgentAddress: '0x0',
+    requestAgentAddress,
   };
 }
 

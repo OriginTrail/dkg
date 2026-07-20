@@ -16,6 +16,8 @@ export default defineConfig({
           'test/api-client.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
+          // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
+          'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',

@@ -193,6 +193,7 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -396,20 +397,32 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
   // when supplied, only qualifies exactIntentMatch. Never mutates.
   if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
-    const contextGraphId = url.searchParams.get("contextGraphId") ?? undefined;
+    const rawContextGraphId = url.searchParams.get("contextGraphId");
     const name = url.searchParams.get("name") ?? undefined;
-    if (!contextGraphId || !name) {
+    if (!rawContextGraphId || !name) {
       return jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
     }
     const intentKey = url.searchParams.get("intentKey") ?? undefined;
     if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
       return jsonResponse(res, 400, { error: "Malformed intentKey" });
     }
+    // Derive the lifecycle key from the SAME normalization admission persisted, or
+    // a client that retries with the exact facts it originally submitted gets a
+    // false result=none (#1828):
+    //  - contextGraphId: admission runs resolveRequiredWriteContextGraphId, which
+    //    trims and strips the did:dkg:context-graph: prefix before persisting.
+    //  - agentAddress: admission always persists a non-empty lane
+    //    (agentAddress ?? defaultAgentAddress ?? peerId); a recovering client rarely
+    //    retains it, so default to the caller's authenticated lane — resolved by the
+    //    identical chain (resolveAgentAddress) admission used — instead of the empty
+    //    lane, which would never match. An explicit query param still wins.
+    const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+    const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
     const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent({
       contextGraphId,
       name,
       subGraphName: url.searchParams.get("subGraphName") ?? undefined,
-      agentAddress: url.searchParams.get("agentAddress") ?? undefined,
+      agentAddress: explicitAgentAddress ?? requestAgentAddress,
       intentKey,
     });
     const { kind, ...rest } = lookup;
