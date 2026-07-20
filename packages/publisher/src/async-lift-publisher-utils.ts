@@ -2,6 +2,7 @@ import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
+  isTerminalLiftJobState,
 } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
@@ -62,6 +63,19 @@ export function getRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
 
 export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
+}
+
+/**
+ * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal
+ * state, or a failed job admission would still reaccept (retryable with retries
+ * remaining). Admission dedup (findActiveKnowledgeAssetVmPublishJob) and the
+ * intent-recovery lookup MUST both partition on this so they cannot drift — an
+ * occupying job is the live one to bind; everything else (finalized, exhausted
+ * or non-retryable failed) is superseded.
+ */
+export function isOccupyingLifecycleJob(job: LiftJob): boolean {
+  if (!isTerminalLiftJobState(job.status)) return true;
+  return isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries;
 }
 
 export function createKnowledgeAssetVmPublishSnapshotRequest(

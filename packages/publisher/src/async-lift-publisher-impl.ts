@@ -9,7 +9,6 @@ import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
-  isTerminalLiftJobState,
   createLiftJobFailureMetadata,
   getLiftJobFailurePolicy,
   type LiftJob,
@@ -68,6 +67,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -334,8 +334,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     // (getStatus/list/findActive all share it) and NOT introduced here; admission's
     // claim-locked findActive remains the authoritative dedup guard, so a transient
     // false `none` cannot by itself create a duplicate active job. Making writeJob
-    // atomic (single transactional store.update) is a dedicated follow-up so this PR
-    // does not put raw-SPARQL payload-literal escaping on the hot write path.
+    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
+    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
     );
@@ -343,15 +343,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null);
     if (jobs.length === 0) return { kind: 'none' };
-    // Partition on lifecycle-subject OCCUPANCY, identically to admission dedup
-    // (findActiveKnowledgeAssetVmPublishJob): a job occupies the subject while it
-    // is non-terminal OR a retryable failed job with retries remaining — admission
-    // would reaccept the latter, so it is the live job to bind, NOT superseded.
-    const occupiesLifecycleSubject = (job: LiftJob): boolean =>
-      !isTerminalLiftJobState(job.status)
-      || (isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries);
-    const active = jobs.filter(occupiesLifecycleSubject);
-    const superseded = jobs.filter((job) => !occupiesLifecycleSubject(job));
+    // Partition on lifecycle-subject occupancy via the SHARED predicate that
+    // admission dedup (findActiveKnowledgeAssetVmPublishJob) also uses, so the two
+    // partitions are identical by construction: an occupying job (non-terminal, or
+    // a retryable failed job with retries remaining that admission would reaccept)
+    // is the live job to bind; everything else is superseded.
+    const active = jobs.filter(isOccupyingLifecycleJob);
+    const superseded = jobs.filter((job) => !isOccupyingLifecycleJob(job));
     const intentKeyOf = (job: LiftJob): string | undefined =>
       isKnowledgeAssetVmPublishJobRequest(job.request)
         ? job.request.knowledgeAssetVmPublish.intentKey
@@ -712,14 +710,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   ): Promise<{ job: LiftJob; compatible: boolean } | null> {
     const jobs = await this.list();
     for (const job of jobs) {
-      if (job.status === 'finalized') continue;
-      if (isFailedJob(job)) {
-        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-      }
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
+      // #1828 — occupancy + lifecycle subject via the SHARED helpers so admission
+      // dedup and the intent-recovery lookup partition jobs identically (a job that
+      // still occupies the subject is the live one; finalized/exhausted/non-retryable
+      // are superseded).
+      if (!isOccupyingLifecycleJob(job)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      // #1828 — derive the lifecycle subject from the shared helper so admission
-      // dedup and intent-recovery lookup partition jobs identically.
       const sameLifecycleSubject =
         knowledgeAssetVmPublishLifecycleKey(publish) === knowledgeAssetVmPublishLifecycleKey(request);
       if (!sameLifecycleSubject) continue;
