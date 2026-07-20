@@ -4807,7 +4807,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // have advanced this KA while catch-up waited on the lock.
                 readStoredAssertionVersion: async (asset) => {
                   const result = await this.store.query(
-                    `SELECT ?v WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
+                    `SELECT (MAX(?v) AS ?v) WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
                     + `<${assertSafeIri(asset.headSubject)}> `
                     + `<http://dkg.io/ontology/assertionVersion> ?v } }`,
                     { priority: 'background', source: 'agent.sharedMemorySync.readStoredAssertionVersion' },
