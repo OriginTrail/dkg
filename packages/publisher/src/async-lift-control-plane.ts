@@ -236,12 +236,25 @@ export function knowledgeAssetVmPublishLifecycleKey(publish: {
   subGraphName?: string;
   agentAddress?: string;
 }): string {
-  return [
+  const separator = String.fromCharCode(0x1f);
+  const components = [
     publish.contextGraphId,
     publish.name,
     publish.subGraphName ?? '',
     agentAddressScopeKey(publish.agentAddress),
-  ].join(String.fromCharCode(0x1f));
+  ];
+  // The components are joined with U+001F, so a component that itself contains the
+  // delimiter would shift the boundaries and collide two distinct intents onto one
+  // lifecycle subject. The recovery route rejects control chars, but the admission
+  // validators (validateAssertionName/validateSubGraphName) do NOT exclude U+001F —
+  // so fail closed HERE, the single point every path (admission dedup, index, and
+  // lookup) funnels through, rather than silently alias. #1828 review.
+  if (components.some((component) => component.includes(separator))) {
+    throw new Error(
+      'knowledgeAssetVmPublishLifecycleKey: components must not contain the U+001F delimiter',
+    );
+  }
+  return components.join(separator);
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   CONTROL_LIFECYCLE_KEY,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
+  knowledgeAssetVmPublishLifecycleKey,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 
@@ -114,6 +115,26 @@ describe('#1828 async lift intent lookup', () => {
     expect(intent.type).toBe('bindings');
     if (intent.type !== 'bindings') return;
     expect(intent.bindings).toHaveLength(0);
+  });
+
+  // #1828 review (otReviewAgent + branarakic): components are joined with U+001F, so
+  // a component carrying that delimiter would shift boundaries and collide two
+  // distinct intents onto one lifecycle subject. The key builder is the single choke
+  // point (admission dedup, index, lookup), so it fails closed there.
+  it('rejects a lifecycle-key component that contains the U+001F delimiter', () => {
+    expect(() =>
+      knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'al' + String.fromCharCode(0x1f) + 'bums' }),
+    ).toThrow(/U\+001F delimiter/);
+    expect(() =>
+      knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' }),
+    ).not.toThrow();
+  });
+
+  it('admission rejects a name carrying the U+001F delimiter (no silent collision)', async () => {
+    const publisher = createPublisher();
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'al' + String.fromCharCode(0x1f) + 'bums' })),
+    ).rejects.toThrow(/U\+001F delimiter/);
   });
 
   it('recovers the live in-flight job from facts alone (AC1)', async () => {
