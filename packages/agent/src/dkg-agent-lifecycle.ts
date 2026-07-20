@@ -101,10 +101,7 @@ import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
-import {
-  authenticateVerifiedGraphScopedAsset,
-  materializeVerifiedGraphScopedAsset,
-} from './sync/requester/graph-scoped-materialization.js';
+import { dkgSemanticCore } from './semantic/dkg-semantic-core.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -285,7 +282,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -4156,22 +4153,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         source: 'agent.durableSync.storeInsert',
       }),
       storeGraphScopedAsset: async (asset) => {
-        const authenticatedAsset = await authenticateVerifiedGraphScopedAsset(
-          this.chain,
-          asset,
-          (cgId) => this.getContextGraphOnChainId(cgId),
+        const { authenticatedAsset, outcome } = await dkgSemanticCore.applyVerifiedGraphScopedAsset(
+          'legacy-sync',
+          {
+            chain: this.chain,
+            store: this.store,
+            asset,
+            resolveOnChainContextGraphId: (cgId) => this.getContextGraphOnChainId(cgId),
+            options: {
+              priority: 'background',
+              source: 'agent.durableSync.graphScopedMaterialization',
+            },
+            oversizeHooks: {
+              recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+            },
+          },
         );
-        const outcome = await materializeVerifiedGraphScopedAsset({
-          store: this.store,
-          asset: authenticatedAsset,
-          options: {
-            priority: 'background',
-            source: 'agent.durableSync.graphScopedMaterialization',
-          },
-          oversizeHooks: {
-            recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-          },
-        });
         if (outcome === 'applied') {
           this.invalidateListContextGraphsCache();
           this.contextGraphMetaProjection.markDirtyFromQuads(authenticatedAsset.metadataQuads);

@@ -841,10 +841,11 @@ evaluator.
       across supported runtimes and stores.
 - [x] Existing DKG publish/share/update/delete golden cases encode to results
       with identical canonical RDF and authorization outcomes.
-- [ ] Code-path instrumentation proves the current-sync path and WAL encoding/
-      replay path invoke the same semantic implementation; no operation-specific
-      DKG decision is copied into `packages/wal`.
-- [ ] Existing semantic-core tests prove unsupported/nondeterministic SPARQL and
+- [x] Code-path instrumentation proves the legacy-sync path and WAL
+      accepted-outcome encoding boundary use the same semantic implementation;
+      no operation-specific DKG decision is copied into `packages/wal`. The
+      actual WAL replay invocation is an explicit `WAL-014` acceptance gate.
+- [x] Existing semantic-core tests prove unsupported/nondeterministic SPARQL and
       graph-scope escape attempts fail before accepted-outcome encoding; WAL
       contains no independent parser or evaluator.
 - [x] `parents`, `baseHeads`, `baseStateDigest`, `resultStateDigest`, touched keys,

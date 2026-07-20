@@ -7,10 +7,18 @@ already accepted by the existing DKG semantic implementation. It does not
 accept or evaluate source SPARQL. The earlier WAL-only SPARQL parser/evaluator
 was non-conformant with the one-semantic-core rule and has been removed.
 
-The remaining acceptance gap is code-path proof: the current synchronization
-path and future WAL replay path must be instrumented to show that they invoke
-the same existing DKG/SWM/VM/verified-memory/authorization/finality/crypto
-entry points. WAL-014 must not start until that proof is closed.
+The shared code boundary is now explicit. Production legacy-sync graph
+materialization, verified SWM recovery, and chain-driven VM reconciliation call
+`DkgSemanticCore`, which delegates only to the existing implementations. Its
+driver label is trace metadata and cannot select behavior. A static architecture
+test rejects any production source that bypasses this adapter for those entry
+points.
+
+Local publisher WAL capture remains downstream of the existing successful DKG
+operation, so encoding cannot create or alter a semantic decision. `WAL-014`
+must route its actual replay candidates through this same adapter; that runtime
+integration is a `WAL-014` acceptance condition, not a second implementation to
+be introduced in `WAL-012`.
 
 ## Accepted-outcome encoding boundary
 
@@ -90,9 +98,13 @@ semantic core before WAL-015 persists any projection.
    mutations, and every resource bound with stable `WAL_RDF_*` codes.
 5. Remote tests derive only explicit canonical candidates, recompute
    base/result digests and touched keys, and never execute audit bytes.
-6. The architectural reuse proof remains open: instrumented current-sync and
-   WAL-replay cases must demonstrate identical semantic entry points and
-   outcomes before WAL-014.
+6. The architecture test invokes every adapter entry point with both
+   `legacy-sync` and `wal-sync`, proving identical delegates, results, and
+   rejection identity. Production source scanning permits direct low-level
+   calls only inside the adapter and the underlying function definitions.
+7. `packages/wal` has no dependency on agent, publisher, chain, query, or store
+   semantic implementations. Its reconciliation module has a separate enforced
+   byte/`WalObjectId`-set-only boundary.
 
 ## Validation receipts
 
@@ -114,12 +126,15 @@ WAL accepted-outcome boundary
 
 Shared semantic implementation
   PASS: local publisher capture occurs only after existing operations succeed
-  PENDING: instrumented same-entry-point proof for current sync and WAL replay
+  PASS: legacy graph materialization, verified SWM recovery, and VM reconcile
+        enter one DkgSemanticCore adapter
+  PASS: five boundary tests prove driver-independent delegate/result/rejection
+        behavior and reject production bypass calls
+  PASS: 55 focused agent tests covering the boundary and existing entry points
 ```
 
 ## Next boundary
 
-Close the shared-semantic-core code-path audit. WAL-013 may durably encode
-already-accepted local outcomes in shadow mode, but WAL-014 replay cannot be
-implemented as a new reducer or semantic evaluator. It must schedule bytes,
-invoke the existing core, and hand only that core's result to WAL-015.
+Finish WAL-013 durable shadow authoring. WAL-014 then schedules bytes and invokes
+the existing core through `DkgSemanticCore`; it cannot be implemented as a new
+reducer or semantic evaluator. Only the core's outcome may reach WAL-015.

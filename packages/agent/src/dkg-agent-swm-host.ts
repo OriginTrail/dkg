@@ -233,12 +233,13 @@ import {
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
-  reconcileContextGraph,
   RecentUalSet,
   VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type ReconcileResult,
 } from './chain-reconciler.js';
+import { dkgSemanticCore } from './semantic/dkg-semantic-core.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -400,7 +401,7 @@ import type { DKGAgent } from './dkg-agent.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
-type VmReconcileEngineResult = Awaited<ReturnType<typeof reconcileContextGraph>>;
+type VmReconcileEngineResult = ReconcileResult;
 type VmReconcileTarget = {
   sub: ContextGraphSub;
   onChainId: string;
@@ -2728,12 +2729,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // before the evidence gate. A current watermark can still need this repair.
     await this.healStrandedScopedKCs(localCgId, target.sub);
 
-    const result = await reconcileContextGraph(
-      this.createVmReconcileDeps(localCgId),
-      target.cursor,
-      localCgId,
-      target.onChainCgId,
-    );
+    const result = await dkgSemanticCore.reconcileVm('chain-event', {
+      deps: this.createVmReconcileDeps(localCgId),
+      state: target.cursor,
+      localContextGraphId: localCgId,
+      onChainContextGraphId: target.onChainCgId,
+    });
     const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
     this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
     return response;
