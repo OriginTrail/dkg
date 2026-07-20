@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  StoreResponseTooLargeError,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
+import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
+import {
+  createResponderFreshSwmMetaPlanMemo,
+  FRESH_SWM_META_PLAN_MAX_SUBJECTS,
+} from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   RDF_TYPE,
@@ -304,6 +313,255 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   });
 
+  it('fails the session when an already-served subject is replaced with the SAME row count (content binding, not just cardinality)', async () => {
+    const cgId = 'meta-ceiling-samecount';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    const opIds = ['a', 'b', 'c', 'd', 'e', 'f'];
+    for (const opId of opIds) {
+      await store.insert(workspaceOpQuads(cgId, opId, `urn:m:${opId}`, metaGraph, fresh));
+    }
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      // Page size 2 splits the 5-row subject `a` across pages, so page 1 must
+      // REREAD `a` and slice it at the plan's prefix sums — the exact shape
+      // that used to accept a same-count replacement and serve a hybrid
+      // row-group assembled from two versions of one subject.
+      syncPageSize: 2,
+      snapshotBudget: TINY_SNAPSHOT_BUDGET, // forces plan-paged mode
+    });
+    const base = { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta' as const, limit: 2 };
+
+    const page0 = linesFromNquads(await cap.invoke({ ...base, offset: 0, syncSessionId: 'SC1' }));
+    expect(page0).toHaveLength(2);
+
+    // Same-count replacement of the split subject: 5 rows before, 5 rows after.
+    const splitSubject = `urn:dkg:share:${cgId}:a`;
+    await store.delete([
+      { graph: metaGraph, subject: splitSubject, predicate: `${DKG_NS}rootEntity`, object: 'urn:m:a' },
+    ]);
+    await store.insert([
+      { graph: metaGraph, subject: splitSubject, predicate: `${DKG_NS}note`, object: '"swapped"' },
+    ]);
+
+    await expect(cap.invoke({ ...base, offset: 2, syncSessionId: 'SC1' }))
+      .rejects.toThrow(/Shared-memory meta sync plan changed while reading/);
+
+    // A fresh session rebuilds the plan and serves the replaced content whole.
+    const recovered = await collectAllPages(cap, { ...base, syncSessionId: 'SC2' }, 2);
+    expect(recovered.lines.size).toBe(6 * 5);
+    const joined = [...recovered.lines].join('\n');
+    expect(joined).toContain('"swapped"');
+    expect(joined).not.toContain(`<${splitSubject}> <${DKG_NS}rootEntity>`);
+    await store.close();
+  });
+
+  it('serves a coherent NEW row-group when a NOT-yet-read subject mutates same-count (bounded freshness skew, never a tear)', async () => {
+    // Guarantee boundary, made explicit per review: whole-subject row-groups
+    // are the consistency unit. A subject read exactly once is served whole
+    // from a single query, so a same-count change BEFORE its only read serves
+    // the newer coherent group — the bounded skew any keyset pager has. Only a
+    // REREAD of a split subject binds (and verifies) content.
+    const cgId = 'meta-ceiling-skew';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    const opIds = ['a', 'b', 'c', 'd', 'e', 'f'];
+    for (const opId of opIds) {
+      await store.insert(workspaceOpQuads(cgId, opId, `urn:m:${opId}`, metaGraph, fresh));
+    }
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 5, // window = exactly one whole 5-row subject
+      snapshotBudget: TINY_SNAPSHOT_BUDGET,
+    });
+    const base = { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta' as const, limit: 5 };
+
+    const page0 = linesFromNquads(await cap.invoke({ ...base, offset: 0, syncSessionId: 'SK1' }));
+    expect(page0).toHaveLength(5);
+
+    // Same-count mutation of subject `b`, which page 1 will read for the FIRST time.
+    const nextSubject = `urn:dkg:share:${cgId}:b`;
+    await store.delete([
+      { graph: metaGraph, subject: nextSubject, predicate: `${DKG_NS}rootEntity`, object: 'urn:m:b' },
+    ]);
+    await store.insert([
+      { graph: metaGraph, subject: nextSubject, predicate: `${DKG_NS}note`, object: '"swapped-whole"' },
+    ]);
+
+    const page1 = linesFromNquads(await cap.invoke({ ...base, offset: 5, syncSessionId: 'SK1' }));
+    expect(page1).toHaveLength(5);
+    const joined = page1.join('\n');
+    // The NEW group, whole: replacement present, replaced row absent — no hybrid.
+    expect(joined).toContain('"swapped-whole"');
+    expect(joined).not.toContain(`<${nextSubject}> <${DKG_NS}rootEntity>`);
+    expect(page1.every((line) => line.startsWith(`<${nextSubject}>`))).toBe(true);
+    await store.close();
+  });
+
+  it('fails the session on a compensating cross-subject count mutation within one window (per-subject counts, not the window aggregate)', async () => {
+    const cgId = 'meta-ceiling-compensate';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    for (const opId of ['a', 'b', 'c', 'd']) {
+      await store.insert(workspaceOpQuads(cgId, opId, `urn:m:${opId}`, metaGraph, fresh));
+    }
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 10,
+      snapshotBudget: TINY_SNAPSHOT_BUDGET,
+    });
+    const base = { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta' as const, limit: 10 };
+
+    // Page 0 = subjects a+b whole. Page 1's window will be subjects c+d.
+    const page0 = linesFromNquads(await cap.invoke({ ...base, offset: 0, syncSessionId: 'CP1' }));
+    expect(page0).toHaveLength(10);
+
+    // c loses a row, d gains one: the WINDOW aggregate still totals 10, but the
+    // plan's prefix sums for c/d are now both wrong — an aggregate-count guard
+    // passes and misaligns every later slice (duplicate/skip at page seams).
+    await store.delete([
+      { graph: metaGraph, subject: `urn:dkg:share:${cgId}:c`, predicate: `${DKG_NS}rootEntity`, object: 'urn:m:c' },
+    ]);
+    await store.insert([
+      { graph: metaGraph, subject: `urn:dkg:share:${cgId}:d`, predicate: `${DKG_NS}note`, object: '"extra"' },
+    ]);
+
+    await expect(cap.invoke({ ...base, offset: 10, syncSessionId: 'CP1' }))
+      .rejects.toThrow(/Shared-memory meta sync plan changed while reading/);
+    await store.close();
+  });
+
+  it('degrades to plan paging when the STORE response byte cap fires during snapshot materialization (#1868 review: untyped escape)', async () => {
+    const cgId = 'meta-ceiling-storecap';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    const quads: Quad[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      quads.push(...workspaceOpQuads(cgId, `op-${String(index).padStart(2, '0')}`, `urn:sc:${index}`, metaGraph, fresh));
+    }
+    await store.insert(quads);
+
+    // Emulate the storage layer's 32 MiB response cap: any whole-subject
+    // window query addressing MANY subjects at once (the snapshot
+    // materialization) throws StoreResponseTooLargeError, while the paged
+    // lane's small windows stay under the cap. Before the fix this error
+    // escaped untyped past the per-snapshot budget accounting and failed the
+    // phase outright instead of falling back.
+    let capThrows = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: unknown) => {
+      const normalized = sparql.replace(/\s+/g, ' ');
+      if (normalized.includes('VALUES ?s') && !normalized.includes('COUNT(')) {
+        const subjectCount = (normalized.match(/<urn:dkg:share:/g) ?? []).length;
+        if (subjectCount > 10) {
+          capThrows += 1;
+          throw new StoreResponseTooLargeError(1024, 2048);
+        }
+      }
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    // DEFAULT budgets: the snapshot lane is attempted first and must degrade.
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 7 });
+    const { lines } = await collectAllPages(
+      cap,
+      { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta', limit: 7, syncSessionId: 'storecap-session' },
+      7,
+    );
+    expect(lines.size).toBe(200);
+    expect(capThrows).toBeGreaterThan(0);
+    await store.close();
+  });
+
+  it('degrades to plan paging when the fresh snapshot crosses only the per-snapshot BYTE estimate budget', async () => {
+    const cgId = 'meta-ceiling-bytebudget';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    for (const opId of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      await store.insert(workspaceOpQuads(cgId, opId, `urn:m:${opId}`, metaGraph, fresh));
+    }
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 4,
+      snapshotBudget: {
+        maxRows: 1_000_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1_000_000,
+        // Well below one row's ~200-byte heap estimate: the snapshot path must
+        // throw the per-snapshot BYTES error (row budget never binds) and the
+        // session must still complete through the plan-paged reader.
+        maxSnapshotBytesEstimate: 64,
+      },
+    });
+    const watch = forbidSwmMetaSortOrOffsetQueries(store);
+    const { lines } = await collectAllPages(
+      cap,
+      { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta', limit: 4, syncSessionId: 'bytebudget-session' },
+      4,
+    );
+    expect(lines.size).toBe(30);
+    watch.assertWindowQueriesObserved();
+    await store.close();
+  });
+
+  it('refuses a fresh subject set beyond the plan cardinality cap as a TYPED bounded refusal, via LIMIT-bounded discovery', async () => {
+    const cgId = 'meta-ceiling-cardinality';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    // One row per subject: cap + 1 admitted subjects. The plan would retain a
+    // subject entry for every one of them — this is the reviewed unbounded
+    // control-plane growth (#1868), so it must refuse, bounded and typed,
+    // BEFORE materializing an unbounded discovery result.
+    const quads: Quad[] = [];
+    for (let index = 0; index <= FRESH_SWM_META_PLAN_MAX_SUBJECTS; index += 1) {
+      quads.push({
+        graph: metaGraph,
+        subject: `urn:card:${String(index).padStart(6, '0')}`,
+        predicate: `${DKG_NS}publishedAt`,
+        object: `"${fresh}"^^<${XSD_DT}>`,
+      });
+    }
+    await insertChunked(store, quads);
+
+    // Bounded-by-construction: every TTL discovery query over the meta graph
+    // must carry the cap-derived LIMIT so the store can never stream an
+    // unbounded subject set into the plan builder.
+    let discoveryLimitQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: unknown) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes('SELECT DISTINCT ?s') && normalized.includes('_shared_memory_meta')) {
+        expect(normalized).toMatch(/LIMIT \d+$/);
+        if (normalized.endsWith(`LIMIT ${FRESH_SWM_META_PLAN_MAX_SUBJECTS + 1}`)) {
+          discoveryLimitQueries += 1;
+        }
+      }
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'cardinality-session',
+    })).rejects.toThrow(/per-snapshot rows budget/);
+    expect(discoveryLimitQueries).toBeGreaterThan(0);
+    await store.close();
+  }, 120_000);
+
   it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard 64,000-row build cap', async () => {
     const cgId = 'meta-ceiling-monster';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -384,6 +642,94 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
   });
 });
 
+describe('TTL meta session plans are charged to the responder snapshot budget (#1868 review)', () => {
+  const plan = (bytesEstimate: number) => ({ entries: [], totalRows: 0, bytesEstimate });
+
+  it('admits, LRU-evicts and rejects plans via the GLOBAL budget while exempting them from per-snapshot caps', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 1_000,
+      maxBytesEstimate: 10_000,
+      // Deliberately tiny per-snapshot caps: plans are control-plane entries
+      // bounded by their own fixed construction caps, so per-snapshot limits
+      // must NOT reject them (shrinking those limits is how a session is
+      // forced into the plan-paged mode that NEEDS the plan).
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: 1,
+    });
+    const memo = createResponderFreshSwmMetaPlanMemo(60_000, 8, budget);
+
+    await memo.get('k1', async () => plan(4_000));
+    expect(budget.stats().snapshots).toBe(1);
+    expect(budget.stats().bytesEstimate).toBe(4_000);
+
+    await memo.get('k2', async () => plan(4_000));
+    expect(budget.stats().snapshots).toBe(2);
+
+    // Global pressure: admitting k3 must evict the least-recently-used idle
+    // plan (k1) rather than growing past the global byte budget.
+    await memo.get('k3', async () => plan(4_000));
+    expect(budget.stats().bytesEstimate).toBe(8_000);
+    expect(await memo.get('k1', async () => plan(1), { requireExisting: true })).toBeNull();
+
+    // A plan that cannot fit even after draining evictables is a typed
+    // global rejection (the requester's quiet retryable limit), never an
+    // uncharged retention.
+    await expect(memo.get('kX', async () => plan(50_000)))
+      .rejects.toThrow(/global estimated bytes budget/);
+  });
+
+  it('memo eviction and TTL expiry release the charged bytes', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 1_000,
+      maxBytesEstimate: 100_000,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: 1,
+    });
+    const memo = createResponderFreshSwmMetaPlanMemo(60_000, 2, budget);
+    await memo.get('a', async () => plan(1_000));
+    await memo.get('b', async () => plan(1_000));
+    expect(budget.stats().bytesEstimate).toBe(2_000);
+    // maxEntries=2: inserting c evicts the memo's oldest entry AND its charge.
+    await memo.get('c', async () => plan(1_000));
+    expect(budget.stats().snapshots).toBe(2);
+    expect(budget.stats().bytesEstimate).toBe(2_000);
+  });
+
+  it('the sync handler wires the responder budget through to plan admission', async () => {
+    const cgId = 'meta-plan-budget-wire';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    await store.insert(workspaceOpQuads(cgId, 'a', 'urn:w:a', metaGraph, fresh));
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 5,
+      snapshotBudget: {
+        maxRows: 1_000_000,
+        // Global byte budget below even one plan's scalar estimate: PLAN
+        // admission must fail typed through the handler (proving
+        // registerSyncHandler passes its budget into the meta plan memo, not
+        // an uncharged default). maxSnapshotRows=1 keeps the ROW snapshot on
+        // its memoized per-snapshot refusal so it never reaches the global
+        // budget itself — the plan memo is the only global-budget client here.
+        maxBytesEstimate: 100,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 5,
+      syncSessionId: 'plan-budget-wire',
+    })).rejects.toThrow(/global estimated bytes budget/);
+    await store.close();
+  });
+});
+
 describe('requester reassembly of the plan-paged SWM meta lane (#1847 x #1788)', () => {
   function makeCtx(): OperationContext {
     return { kind: 'system', id: 'meta-ceiling-requester', startedAt: Date.now() } as never;
@@ -407,7 +753,9 @@ describe('requester reassembly of the plan-paged SWM meta lane (#1847 x #1788)',
     cap: CapturedSyncHandler,
     cgId: string,
     pageSize: number,
+    afterPage?: (pagesServed: number) => Promise<void>,
   ) {
+    let pagesServed = 0;
     return fetchSyncPages({
       ctx: makeCtx(),
       remotePeerId: '12D3KooWMetaCeilingRemote',
@@ -434,7 +782,10 @@ describe('requester reassembly of the plan-paged SWM meta lane (#1847 x #1788)',
       },
       send: async (_peerId, _protocolId, data) => {
         const envelope = JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope;
-        return new TextEncoder().encode(await cap.invoke(envelope));
+        const out = await cap.invoke(envelope);
+        pagesServed += 1;
+        await afterPage?.(pagesServed);
+        return new TextEncoder().encode(out);
       },
       logWarn: noop,
       logInfo: noop,
@@ -516,4 +867,51 @@ describe('requester reassembly of the plan-paged SWM meta lane (#1847 x #1788)',
       await store.close();
     });
   }
+
+  it('never completes with a hybrid row-group when a split subject is replaced same-count mid-session (#1868 review repro)', async () => {
+    // lupuszr's reproduction shape: ONE five-row operation, page size 1, a
+    // same-count replacement between pages. A count-only guard accepted the
+    // reread and assembled a five-row hybrid of both versions (omitting
+    // publishedAt); the content binding must fail the session instead, and the
+    // requester must never report a completed phase carrying the hybrid.
+    const cgId = 'meta-samecount-requester';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    await store.insert(workspaceOpQuads(cgId, 'solo', 'urn:sq:solo', metaGraph, fresh));
+    const subject = `urn:dkg:share:${cgId}:solo`;
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 1,
+      snapshotBudget: TINY_SNAPSHOT_BUDGET, // plan-paged mode: every page rereads the subject
+    });
+
+    const mutateAfterFirstPage = async (pagesServed: number) => {
+      if (pagesServed !== 1) return;
+      await store.delete([
+        { graph: metaGraph, subject, predicate: `${DKG_NS}publishedAt`, object: `"${fresh}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+      ]);
+      await store.insert([
+        { graph: metaGraph, subject, predicate: `${DKG_NS}note`, object: '"replacement"' },
+      ]);
+    };
+
+    let threw = false;
+    let result: Awaited<ReturnType<typeof fetchAllMeta>> | undefined;
+    try {
+      result = await fetchAllMeta(cap, cgId, 1, mutateAfterFirstPage);
+    } catch {
+      threw = true;
+    }
+    if (!threw) {
+      expect(result!.completed).toBe(false);
+    }
+    // Whatever partial rows the requester holds, they must not mix versions:
+    // the pre-mutation publishedAt row and the post-mutation replacement row
+    // can never coexist in one assembled row-group.
+    const objects = (result?.quads ?? []).map((quad) => quad.object).join('\n');
+    expect(objects.includes('"replacement"') && objects.includes(fresh)).toBe(false);
+    await store.close();
+  });
 });
