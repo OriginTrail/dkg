@@ -26,7 +26,7 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
-import { withKeyedLocks } from './keyed-lock.js';
+import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
@@ -1304,13 +1304,12 @@ export class SharedMemoryHandler {
         contentScope,
         subGraphName,
       );
-      const lockNamespace = subGraphName
-        ? `${contextGraphId}\0${subGraphName}`
-        : contextGraphId;
       // All assertion versions currently replace the same exact per-KA layer
       // graph. Lock by UAL, not subject and not version, so concurrent version
-      // deliveries cannot interleave a DROP/INSERT pair.
-      const lockKeys = [`${lockNamespace}\0ka\0${contentScope.ual}`];
+      // deliveries cannot interleave a DROP/INSERT pair. The key is derived by
+      // the SHARED helper so the public catch-up materializer serializes on the
+      // identical string — see swmKaWriteLockKey for why drift here is silent.
+      const lockKeys = [swmKaWriteLockKey(contextGraphId, subGraphName, contentScope.ual)];
 
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
