@@ -74,6 +74,13 @@ export interface ChainReconcilerDeps {
     ordinal: number,
     headBlock: number | undefined,
   ) => Promise<OrdinalOutcome>;
+  /** Maximum ordinals attempted before yielding the global VM worker. */
+  maxOrdinalsPerPass?: number;
+  /**
+   * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
+   * pass must stop when discovery repairs a stale/reused chain id.
+   */
+  isTargetCurrent?: (localCgId: string, onChainCgId: bigint) => boolean | Promise<boolean>;
   /** Persist the watermark. Called ONLY when it actually moves. */
   persistWatermark: (localCgId: string, watermark: number) => void;
   /** Confirmation depth (blocks) before a completed ordinal advances the watermark. */
@@ -86,13 +93,19 @@ export interface ReconcileResult {
   watermark: number;
   reconciled: number;
   pending: number;
+  processed: number;
+  /** True when another bounded slice should be queued immediately. */
+  hasMore: boolean;
+  /** True when this pass stopped because its captured chain binding changed. */
+  staleTarget: boolean;
 }
 
 /**
- * One sweep pass for a single CG: reconcile every ordinal in `[watermark, head)`
- * (skipping ones already completed and held in the cursor), then advance the
- * contiguous, confirmation-depth-buried watermark. Persists the watermark only
- * if it moved. Mutates `state` in place (the agent owns one `CursorState` per CG).
+ * One bounded sweep slice for a single CG: reconcile up to
+ * `maxOrdinalsPerPass` ordinals in `[watermark, head)` (skipping ones already
+ * completed and held in the cursor), then advance the contiguous,
+ * confirmation-depth-buried watermark. Persists the watermark only if it
+ * moved. Mutates `state` in place (the agent owns one `CursorState` per CG).
  */
 export async function reconcileContextGraph(
   deps: ChainReconcilerDeps,
@@ -108,7 +121,16 @@ export async function reconcileContextGraph(
   // work. A watermark ahead of the observed head is surfaced by the caller as
   // an evidence mismatch, but is equally non-actionable in this pass.
   if (before >= head) {
-    return { head, watermark: before, reconciled: 0, pending: 0 };
+    state.scanOrdinal = before;
+    return {
+      head,
+      watermark: before,
+      reconciled: 0,
+      pending: 0,
+      processed: 0,
+      hasMore: false,
+      staleTarget: false,
+    };
   }
 
   // Keep transient head-fetch failures distinct from truly head-less chains.
@@ -130,13 +152,37 @@ export async function reconcileContextGraph(
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
-  let pending = 0;
-  const ordinals = ordinalsToReconcile(state, head);
+  let processed = 0;
+  let staleTarget = false;
+  const outstandingBefore = ordinalsToReconcile(state, head);
+  const configuredLimit = deps.maxOrdinalsPerPass;
+  const passLimit = configuredLimit === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Math.floor(configuredLimit));
+  const scanStart = Math.max(state.watermark, state.scanOrdinal);
+  let candidates = outstandingBefore.filter((ordinal) => ordinal >= scanStart);
+  if (candidates.length === 0 && outstandingBefore.length > 0) {
+    // A prior slice reached the observed head. A later periodic pass starts a
+    // fresh cycle from the first still-missing contiguous gap.
+    state.scanOrdinal = state.watermark;
+    candidates = outstandingBefore;
+  }
+  const ordinals = candidates.slice(0, passLimit);
+  const hasUnvisitedCandidates = candidates.length > ordinals.length;
   if (headUnavailable) {
-    pending = ordinals.length;
+    state.scanOrdinal = state.watermark;
   } else {
     for (const ordinal of ordinals) {
+      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+        staleTarget = true;
+        break;
+      }
       const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+      processed += 1;
+      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+        staleTarget = true;
+        break;
+      }
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
@@ -148,20 +194,35 @@ export async function reconcileContextGraph(
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,
         );
-      } else {
-        pending += 1;
       }
     }
   }
 
-  if (state.watermark !== before) {
-    deps.persistWatermark(localCgId, state.watermark);
-    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
-  } else if (reconciled > 0 || pending > 0) {
-    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
+  if (staleTarget || headUnavailable || !hasUnvisitedCandidates) {
+    state.scanOrdinal = state.watermark;
+  } else if (ordinals.length > 0) {
+    state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
   }
 
-  return { head, watermark: state.watermark, reconciled, pending };
+  const pending = ordinalsToReconcile(state, head).length;
+  const hasMore = !headUnavailable && !staleTarget && hasUnvisitedCandidates;
+
+  if (state.watermark !== before) {
+    deps.persistWatermark(localCgId, state.watermark);
+    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, processed=${processed}, reconciled=${reconciled}, pending=${pending})`);
+  } else if (reconciled > 0 || pending > 0) {
+    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, processed=${processed}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
+  }
+
+  return {
+    head,
+    watermark: state.watermark,
+    reconciled,
+    pending,
+    processed,
+    hasMore,
+    staleTarget,
+  };
 }
 
 /**

@@ -409,6 +409,15 @@ type VmReconcileTarget = {
   watermarkBefore: number;
 };
 
+type VmReconcileOrdinalOptions = {
+  /** Shared by every ordinal in one bounded pass. */
+  acquireActiveFetchPermit?: () => boolean;
+  /** Cap peer rotations for the one batch fetch; omitted preserves legacy behavior. */
+  maxPeerAttempts?: number;
+  /** Re-check a captured local/on-chain binding around slow fetch work. */
+  isTargetCurrent?: () => boolean;
+};
+
 /**
  * Max age (ms) of a cached `publishPolicy` value the host-mode self-signed
  * admission gate (`isConfirmedPublicForHostMode`) will trust. Deliberately
@@ -2736,6 +2745,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
     this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
+    // Queue one trailing slice while this key is still active. The dispatcher
+    // places it behind already-waiting live CGs, so a large graph makes steady
+    // progress without monopolising the only VM worker.
+    if (result.hasMore || result.staleTarget) {
+      this.vmReconcileDispatcher?.triggerLive(localCgId);
+    }
     return response;
   }
 
@@ -2773,6 +2788,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   createVmReconcileDeps(this: DKGAgent, localCgId: string): ChainReconcilerDeps {
+    const capturedSub = this.subscribedContextGraphs.get(localCgId);
+    const capturedOnChainId = capturedSub?.onChainId;
+    const capturedCursor = this.reconcileCursors.get(localCgId);
+    let remainingFetches = DKGAgentBase.VM_RECONCILE_FETCHES_PER_BATCH;
+    const isTargetCurrent = (): boolean => {
+      const current = this.subscribedContextGraphs.get(localCgId);
+      return current === capturedSub
+        && current?.onChainId === capturedOnChainId
+        && this.reconcileCursors.get(localCgId) === capturedCursor;
+    };
     return {
       getKCCount: async (cg) => {
         const head = Number(await this.chain.getContextGraphKCCount!(cg));
@@ -2788,7 +2813,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return await this.chain.getBlockNumber();
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
-        this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),
+        this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
+          acquireActiveFetchPermit: () => {
+            if (remainingFetches <= 0) return false;
+            remainingFetches -= 1;
+            return true;
+          },
+          maxPeerAttempts: 1,
+          isTargetCurrent,
+        }),
+      maxOrdinalsPerPass: DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
+      isTargetCurrent: () => isTargetCurrent(),
       persistWatermark: (lcg, watermark) => {
         const sub = this.subscribedContextGraphs.get(lcg);
         if (!sub) return;
@@ -3629,10 +3664,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainCgId: bigint,
     ordinal: number,
     headBlock: number | undefined,
+    options: VmReconcileOrdinalOptions = {},
   ): Promise<OrdinalOutcome> {
     const ctx = createOperationContext('system');
     const versionBlock = headBlock ?? 0;
     this.pruneVmReconcileState();
+
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
 
     let kaId: bigint;
     let merkleRoot: Uint8Array;
@@ -3675,6 +3715,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'pending' };
     }
 
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
     const fh = this.getOrCreateFinalizationHandler();
     const reconcileInput = {
       contextGraphId: localCgId,
@@ -3694,25 +3737,37 @@ export class SwmHostModeMethods extends DKGAgentBase {
       swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
       // Active fetch: pull the missing snapshot core-first (selectCatchupPeers
       // already prioritises known cores + the preferred sync peer), then retry.
-      if (this.shouldRunVmReconcileActiveFetch(localCgId)) {
+      const batchAllowsFetch = options.acquireActiveFetchPermit?.() ?? true;
+      const cooldownAllowsFetch = batchAllowsFetch
+        && this.shouldRunVmReconcileActiveFetch(localCgId);
+      if (batchAllowsFetch && cooldownAllowsFetch) {
         activeFetchRan = true;
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'fetch', ordinal, kaId: kaId.toString(), ual,
         });
         let maxAttempts = 1;
+        const fixedMaxAttempts = options.maxPeerAttempts === undefined
+          ? undefined
+          : Math.max(1, Math.floor(options.maxPeerAttempts));
+        if (fixedMaxAttempts !== undefined) maxAttempts = fixedMaxAttempts;
         for (let attempt = 0; attempt < maxAttempts && outcome === 'no-swm'; attempt += 1) {
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            break;
+          }
           try {
             const fetchResult = await this.syncContextGraphFromConnectedPeers(localCgId, {
               includeSharedMemory: true,
               maxPeers: 1,
               peerRotationKey: localCgId,
             });
-            maxAttempts = Math.max(
-              maxAttempts,
-              fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
-              this.vmReconcileConnectedPeerCount(),
-            );
+            if (fixedMaxAttempts === undefined) {
+              maxAttempts = Math.max(
+                maxAttempts,
+                fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
+                this.vmReconcileConnectedPeerCount(),
+              );
+            }
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }
@@ -3722,8 +3777,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
             activeFetchHadUsableResponse = true;
           } catch (err) {
             this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
-            maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
+            if (fixedMaxAttempts === undefined) {
+              maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
+            }
             continue;
+          }
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            break;
           }
           outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
         }
@@ -3731,8 +3791,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
         }
       } else {
-        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by per-CG cooldown`);
+        const reason = batchAllowsFetch ? 'per-CG cooldown' : 'per-batch fetch budget';
+        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by ${reason}`);
       }
+    }
+
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
     }
 
     switch (outcome) {

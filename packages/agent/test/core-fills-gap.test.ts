@@ -57,7 +57,17 @@ interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
   registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
-  reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
+  reconcileChainOrdinal(
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+    headBlock: number | undefined,
+    options?: {
+      acquireActiveFetchPermit?: () => boolean;
+      maxPeerAttempts?: number;
+      isTargetCurrent?: () => boolean;
+    },
+  ): Promise<{ status: string }>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
   runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
     status: string;
@@ -1897,6 +1907,46 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       watermarkAfter: 2,
     });
     expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('shares one active payload-fetch permit across a bounded ordinal batch', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillBatchFetchBudget', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'batch-fetch-budget';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '324',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 3n;
+
+    const permits: boolean[] = [];
+    const peerAttemptCaps: Array<number | undefined> = [];
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      _ordinal: number,
+      _headBlock: number | undefined,
+      options: {
+        acquireActiveFetchPermit?: () => boolean;
+        maxPeerAttempts?: number;
+        isTargetCurrent?: () => boolean;
+      },
+    ) => {
+      permits.push(options.acquireActiveFetchPermit?.() ?? true);
+      peerAttemptCaps.push(options.maxPeerAttempts);
+      expect(options.isTargetCurrent?.()).toBe(true);
+      return { status: 'reconciled', blockNumber: 0 };
+    };
+
+    const result = await internals.runVmReconcileForCg(localCgId, 'manual');
+
+    expect(result.watermarkAfter).toBe(3);
+    expect(permits).toEqual([true, false, false]);
+    expect(peerAttemptCaps).toEqual([1, 1, 1]);
   });
 
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {
