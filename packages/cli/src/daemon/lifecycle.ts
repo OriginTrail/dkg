@@ -1964,6 +1964,16 @@ export async function runDaemonInner(
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
     maxRetries: config.publisher?.maxRetries,
   });
+  // #1828 — one-time idempotent backfill of the durable-admission intent index
+  // for VM-publish jobs admitted before it existed. Additive-only (RDF set
+  // semantics), so it is safe here — before the runner starts — and fail-open so
+  // a backfill hiccup never blocks boot.
+  try {
+    const indexed = await publisherControl.ensureVmPublishIntentIndex();
+    if (indexed > 0) log(`Publisher: backfilled intent-recovery index for ${indexed} job(s)`);
+  } catch (err) {
+    log(`Publisher: intent-index backfill skipped (${(err as Error)?.message ?? String(err)})`);
+  }
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
     log(

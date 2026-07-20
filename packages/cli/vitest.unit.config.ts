@@ -14,6 +14,8 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/api-client.test.ts',
+          // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
+          'test/publisher-job-by-intent-route.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',

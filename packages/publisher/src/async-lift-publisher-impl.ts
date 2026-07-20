@@ -9,6 +9,7 @@ import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
+  isTerminalLiftJobState,
   createLiftJobFailureMetadata,
   getLiftJobFailurePolicy,
   type LiftJob,
@@ -31,6 +32,8 @@ import type {
   AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
+  IntentLookupInput,
+  IntentLookupResult,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
@@ -53,6 +56,9 @@ import {
   DEFAULT_GRAPH_URI,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
+  CONTROL_LIFECYCLE_KEY,
+  knowledgeAssetVmPublishLifecycleKey,
+  serializeVmPublishIntentIndex,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
@@ -314,6 +320,51 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
     return this.parseJobPayload(rows[0]?.['payload']);
+  }
+
+  async lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult> {
+    await this.ensureGraph();
+    const key = knowledgeAssetVmPublishLifecycleKey(facts);
+    // Object-bound triple pattern (not a FILTER) so the store resolves it via the
+    // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+    );
+    const jobs = expectBindings(result)
+      .map((row) => this.parseJobPayload(row['payload']))
+      .filter((job): job is LiftJob => job !== null);
+    if (jobs.length === 0) return { kind: 'none' };
+    const active = jobs.filter((job) => !isTerminalLiftJobState(job.status));
+    const terminal = jobs.filter((job) => isTerminalLiftJobState(job.status));
+    const intentKeyOf = (job: LiftJob): string | undefined =>
+      isKnowledgeAssetVmPublishJobRequest(job.request)
+        ? job.request.knowledgeAssetVmPublish.intentKey
+        : undefined;
+    const exact = (candidates: LiftJob[]): { exactIntentMatch?: boolean } =>
+      facts.intentKey === undefined
+        ? {}
+        : { exactIntentMatch: candidates.some((job) => intentKeyOf(job) === facts.intentKey) };
+    if (active.length > 1) return { kind: 'conflict', jobs: active };
+    if (active.length === 1) {
+      return { kind: 'active', job: active[0]!, superseded: terminal, ...exact(active) };
+    }
+    return { kind: 'superseded', jobs: terminal, ...exact(terminal) };
+  }
+
+  /**
+   * #1828 — idempotently backfill the ephemeral intent index for VM-publish jobs
+   * admitted before the index existed. Additive insert only (RDF set-semantics
+   * make re-runs no-ops); never deletes/rewrites, so it cannot race the runner.
+   * Returns the number of jobs (re)indexed. Run once at boot.
+   */
+  async ensureVmPublishIntentIndex(): Promise<number> {
+    await this.ensureGraph();
+    const jobs = await this.list();
+    const quads = jobs.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
+    if (quads.length > 0) {
+      await this.store.insert(quads);
+    }
+    return quads.length / 2;
   }
 
   async list(filter: { status?: LiftJobState } = {}): Promise<LiftJob[]> {
@@ -636,10 +687,10 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      const sameLifecycleSubject = publish.contextGraphId === request.contextGraphId
-        && publish.name === request.name
-        && (publish.subGraphName ?? '') === (request.subGraphName ?? '')
-        && agentAddressScopeKey(publish.agentAddress) === agentAddressScopeKey(request.agentAddress);
+      // #1828 — derive the lifecycle subject from the shared helper so admission
+      // dedup and intent-recovery lookup partition jobs identically.
+      const sameLifecycleSubject =
+        knowledgeAssetVmPublishLifecycleKey(publish) === knowledgeAssetVmPublishLifecycleKey(request);
       if (!sameLifecycleSubject) continue;
       return { job, compatible: publish.intentKey === request.intentKey };
     }
@@ -1578,8 +1629,4 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
 function txHashFromSignedPhase(phase: string): LiftJobHex | null {
   const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
   return match ? (match[1] as LiftJobHex) : null;
-}
-
-function agentAddressScopeKey(agentAddress?: string): string {
-  return agentAddress?.trim().toLowerCase() ?? '';
 }

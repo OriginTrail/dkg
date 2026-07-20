@@ -391,6 +391,31 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { job, payload });
   }
 
+  // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1828 — read-only durable-admission recovery, keyed on the lifecycle facts a
+  // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
+  // when supplied, only qualifies exactIntentMatch. Never mutates.
+  if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
+    const contextGraphId = url.searchParams.get("contextGraphId") ?? undefined;
+    const name = url.searchParams.get("name") ?? undefined;
+    if (!contextGraphId || !name) {
+      return jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
+    }
+    const intentKey = url.searchParams.get("intentKey") ?? undefined;
+    if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+      return jsonResponse(res, 400, { error: "Malformed intentKey" });
+    }
+    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent({
+      contextGraphId,
+      name,
+      subGraphName: url.searchParams.get("subGraphName") ?? undefined,
+      agentAddress: url.searchParams.get("agentAddress") ?? undefined,
+      intentKey,
+    });
+    const { kind, ...rest } = lookup;
+    return jsonResponse(res, 200, { result: kind, ...rest });
+  }
+
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
   if (req.method === "GET" && path.startsWith("/api/publisher/jobs/")) {
     const segments = path.slice("/api/publisher/jobs/".length).split("/");

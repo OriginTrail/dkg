@@ -29,11 +29,39 @@ export class AsyncLiftJobConflictError extends Error {
   }
 }
 
+/** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
+export interface IntentLookupInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional exactness qualifier; sets `exactIntentMatch` on the result. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1828 — deterministic result of an intent lookup. At most one ACTIVE job can
+ * exist per lifecycle subject (admission dedup invariant), so `active` is the
+ * live job to bind; `superseded` carries terminal jobs sharing the subject;
+ * `conflict` (>1 active) signals a broken invariant. `exactIntentMatch` (only
+ * when the caller passed `intentKey`) reports whether the returned job's stored
+ * intent equals it.
+ */
+export type IntentLookupResult =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'active'; readonly job: LiftJob; readonly superseded: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
+
 export interface AsyncLiftPublisher {
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
+  /** #1828 — read-only recovery lookup by lifecycle facts (+ optional intentKey). */
+  lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
+  /** #1828 — idempotent boot backfill of the ephemeral intent index. Returns jobs (re)indexed. */
+  ensureVmPublishIntentIndex(): Promise<number>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<LiftJob | null>;

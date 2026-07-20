@@ -41,6 +41,15 @@ export const CONTROL_UPDATED_AT = 'urn:dkg:publisher:updatedAt';
 export const CONTROL_RETRY_COUNT = 'urn:dkg:publisher:retryCount';
 export const CONTROL_MAX_RETRIES = 'urn:dkg:publisher:maxRetries';
 export const CONTROL_LAST_RETRY_REASON = 'urn:dkg:publisher:lastRetryReason';
+// #1828 — ephemeral secondary index on the (mutable) job subject enabling O(1)
+// intent recovery. These triples live on jobRef, so clear/cancel/deleteJob
+// remove them with the job. PR3 (#1829) append-only journal MUST key intent on
+// its OWN journal subjects and may reuse only these predicate-URI strings —
+// never rely on the job-subject index for durability. `lifecycleKey` mirrors the
+// promote queue's uniquenessKey (the dedup subject); `intentKey` is the
+// exactness qualifier.
+export const CONTROL_LIFECYCLE_KEY = 'urn:dkg:publisher:lifecycleKey';
+export const CONTROL_INTENT_KEY = 'urn:dkg:publisher:intentKey';
 export const CONTROL_WALLET_ID = 'urn:dkg:publisher:walletId';
 export const CONTROL_CLAIMED_BY = 'urn:dkg:publisher:claimedBy';
 export const CONTROL_CLAIM_TOKEN = 'urn:dkg:publisher:claimToken';
@@ -204,7 +213,51 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
     pushOptional(quads, jobRef, CONTROL_TX_HASH_CHECKED, job.recovery.txHashChecked, graphUri, literal);
   }
 
+  // #1828 — materialize the ephemeral recovery index on the job subject.
+  quads.push(...serializeVmPublishIntentIndex(job, graphUri));
+
   return quads;
+}
+
+/** Canonical agent lane for a VM-publish lifecycle subject (case-insensitive, trimmed). */
+function agentAddressScopeKey(agentAddress?: string): string {
+  return agentAddress?.trim().toLowerCase() ?? '';
+}
+
+/**
+ * #1828 — the lifecycle subject a VM-publish job dedups on
+ * (contextGraphId, name, subGraphName, agent lane), joined by U+001F (a control
+ * char absent from every component) into one literal for indexed equality
+ * lookup, mirroring the promote queue's uniquenessKey. MUST stay identical to
+ * findActiveKnowledgeAssetVmPublishJob's tuple — both derive it from here.
+ */
+export function knowledgeAssetVmPublishLifecycleKey(publish: {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress?: string;
+}): string {
+  return [
+    publish.contextGraphId,
+    publish.name,
+    publish.subGraphName ?? '',
+    agentAddressScopeKey(publish.agentAddress),
+  ].join(String.fromCharCode(0x1f));
+}
+
+/**
+ * #1828 — the two ephemeral index triples on the job subject (lifecycle key +
+ * intent key), for VM-publish jobs only. Single source used by both serializeJob
+ * and the boot backfill so the index is built identically everywhere.
+ */
+export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Quad[] {
+  if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
+  const jobRef = jobSubject(job.jobId);
+  const publish = job.request.knowledgeAssetVmPublish;
+  return [
+    quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(knowledgeAssetVmPublishLifecycleKey(publish)), graphUri),
+    quad(jobRef, CONTROL_INTENT_KEY, literal(publish.intentKey), graphUri),
+  ];
 }
 
 export function serializeRequest(request: LiftJobRequest, subject: string, graphUri: string): Quad[] {
