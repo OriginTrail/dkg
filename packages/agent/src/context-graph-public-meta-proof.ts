@@ -41,6 +41,29 @@ const AUTHORITATIVE_PUBLIC_META_REQUIREMENTS: readonly PublicMetaRequirement[] =
   PUBLIC_ACCESS_POLICY_REQUIREMENT,
 ];
 
+/**
+ * Materialize the canonical root `_meta` facts required to prove that a
+ * Context Graph is publicly readable.
+ *
+ * Keep writers on the same requirement model as snapshot and store-side
+ * validators. Public graph definitions remain in ONTOLOGY for discovery, but
+ * these two facts are duplicated into the graph's own `_meta` partition so a
+ * late subscriber can authenticate the control snapshot before admitting SWM
+ * data.
+ */
+export function buildAuthoritativePublicMetaQuads(contextGraphId: string): Quad[] {
+  const graph = contextGraphMetaGraphUri(contextGraphId);
+  const subject = contextGraphDataGraphUri(contextGraphId);
+  return AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.map((requirement) => ({
+    subject,
+    predicate: requirement.predicate,
+    object: requirement.object.kind === 'iri'
+      ? requirement.object.value
+      : `"${requirement.object.value}"`,
+    graph,
+  }));
+}
+
 function matchesRequirementObject(
   value: string,
   requirement: PublicMetaObjectRequirement,

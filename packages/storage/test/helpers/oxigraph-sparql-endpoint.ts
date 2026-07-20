@@ -11,6 +11,8 @@
  *   - POST /update                                  → store.update(), 204 / 400
  *   - POST /query  Accept: sparql-results+json      → SELECT (W3C JSON) / ASK
  *   - POST /query  Accept: n-quads | n-triples      → CONSTRUCT (N-Quads text)
+ * It also accepts BlazegraphStore's N-Quads bulk-insert request on /query,
+ * allowing backend-portability tests to exercise that adapter hermetically.
  */
 import { createServer, type Server } from 'node:http';
 import oxigraph from 'oxigraph';
@@ -76,6 +78,13 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       try {
+        const contentType = String(req.headers['content-type'] ?? '');
+        if (contentType.includes('text/x-nquads') || contentType.includes('application/n-quads')) {
+          store.load(body, { format: 'application/n-quads' });
+          res.writeHead(200);
+          res.end();
+          return;
+        }
         if (req.url?.includes('/update')) {
           store.update(body);
           res.writeHead(204);

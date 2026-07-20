@@ -144,6 +144,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
+import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -949,6 +950,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.node.start();
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
+
+    // Public definitions were historically written only to ONTOLOGY while
+    // late-subscriber admission requires the canonical proof in root `_meta`.
+    // Repair only graphs whose ontology creator is this exact peer. This runs
+    // after libp2p has exposed the stable peer ID but before protocol handlers
+    // and sync serving are registered. Foreign/discovered graphs remain
+    // ineligible; conflicting local policy remains fail-closed.
+    try {
+      const repaired = await repairCreatorPublicMetaProjections(
+        this.store,
+        this.node.peerId.toString(),
+      );
+      if (repaired.repairedGraphs > 0) {
+        this.log.info(
+          ctx,
+          `Repaired authoritative public metadata for ${repaired.repairedGraphs} creator-owned context graph(s) (${repaired.insertedTriples} triples)`,
+        );
+      }
+      if (repaired.conflictingGraphs.length > 0) {
+        this.log.warn(
+          ctx,
+          `Skipped authoritative public metadata repair for ${repaired.conflictingGraphs.length} context graph(s) with conflicting root policy: ${repaired.conflictingGraphs.join(', ')}`,
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to repair creator-owned public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // Load registered agents from triple store; auto-register default if none exist.
     // loadAgentsFromStore restores defaultAgentAddress from the persisted
