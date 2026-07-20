@@ -104,6 +104,7 @@ export default defineConfig({
       "test/private-cg-membership-bootstrap.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
+      "test/swm-snapshot-materializer.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
