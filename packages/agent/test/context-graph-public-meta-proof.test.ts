@@ -83,6 +83,14 @@ describe('authoritative public metadata proof', () => {
         })),
         expected: false,
       },
+      {
+        name: 'definition stored outside the root metadata graph',
+        mutate: (quads: Quad[]) => quads.map((quad) => ({
+          ...quad,
+          graph: quad.subject,
+        })),
+        expected: false,
+      },
     ];
 
     for (const [index, proofCase] of cases.entries()) {

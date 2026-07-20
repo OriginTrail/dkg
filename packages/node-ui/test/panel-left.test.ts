@@ -278,21 +278,31 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('Public Ready Graph');
   });
 
-  it('keeps a passive public catalogue result separate from project activation', async () => {
+  it('clears the previous project target when browsing a passive public catalogue result', async () => {
     const { container } = await renderPanel();
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     act(() => {
       useProjectsStore.setState({
-        contextGraphs: [{
-          id: 'public-passive',
-          name: 'Passive Public Graph',
-          accessPolicy: 'public',
-          callerInvolved: false,
-          subscribed: false,
-          synced: false,
-        } as any],
-        activeProjectId: null,
+        contextGraphs: [
+          {
+            id: 'private-active',
+            name: 'Previously Active Private Graph',
+            accessPolicy: 'private',
+            callerInvolved: true,
+            subscribed: true,
+            synced: true,
+          } as any,
+          {
+            id: 'public-passive',
+            name: 'Passive Public Graph',
+            accessPolicy: 'public',
+            callerInvolved: false,
+            subscribed: false,
+            synced: false,
+          } as any,
+        ],
+        activeProjectId: 'private-active',
       });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],

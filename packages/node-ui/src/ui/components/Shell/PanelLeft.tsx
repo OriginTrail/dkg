@@ -421,6 +421,7 @@ export function PanelLeft() {
                       cg={cg}
                       isBrowsing={activeTabId === `project:${cg.id}`}
                       onBrowse={() => {
+                        setActiveProject(null);
                         openTab({
                           id: `project:${cg.id}`,
                           label: cg.name || cg.id.slice(0, 16),
