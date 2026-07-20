@@ -275,6 +275,38 @@ function seenShareOpKey(cgId: string, shareOperationId: string): string {
  * Validates the request, stores public triples into SWM graph
  * and metadata into SWM meta graph. No chain, no UAL.
  */
+/**
+ * The SWM encryption policy for one context graph, as a single decision.
+ *
+ * Two DIFFERENT questions, and conflating them turns a public+agent-gated CG
+ * into a permanent failure in whichever direction the local chain probe happens
+ * to disagree with the sender's:
+ *
+ *   requiresEncryptedPayload  MUST it be encrypted?  policy, chain-derived
+ *   supportsEncryptedPayload  MAY it be encrypted?   structure, local
+ *
+ * A public CG's allowlist governs PUBLISH AUTHORITY, not READ ACCESS, so a CG
+ * proven public on-chain stops REQUIRING encryption — but an agent-gated CG must
+ * still ACCEPT it, because a sender whose chain probe failed will fail closed and
+ * encrypt. Admitting both encodings is what makes rollout skew, RPC flakes, and
+ * older clients survivable instead of silently dropped.
+ *
+ * Exported so the shipped decision itself is testable: a test that reimplements
+ * this expression would keep passing if the handler stopped honouring it.
+ */
+export function resolveWorkspaceEncryptionRequirement(params: {
+  readonly hasPrivateAccessPolicy: boolean;
+  readonly agentGateAddresses: readonly string[] | null;
+  readonly provenPublicOnChain: boolean;
+}): { requiresEncryptedPayload: boolean; supportsEncryptedPayload: boolean } {
+  const isAgentGated = params.agentGateAddresses !== null;
+  const gateRequiresEncryption = isAgentGated && !params.provenPublicOnChain;
+  return {
+    requiresEncryptedPayload: params.hasPrivateAccessPolicy || gateRequiresEncryption,
+    supportsEncryptedPayload: params.hasPrivateAccessPolicy || isAgentGated,
+  };
+}
+
 export class SharedMemoryHandler {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
@@ -1058,9 +1090,25 @@ export class SharedMemoryHandler {
       // member->curator SWM share on a public/curated CG. Both sides now read
       // the same live on-chain predicate, and both fail closed when it cannot
       // prove public.
-      const gateRequiresEncryption = agentGateAddresses !== null
-        && !(await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx));
-      const requiresEncryptedPayload = hasPrivateAccessPolicy || gateRequiresEncryption;
+      const { requiresEncryptedPayload, supportsEncryptedPayload } =
+        resolveWorkspaceEncryptionRequirement({
+          hasPrivateAccessPolicy,
+          agentGateAddresses,
+          provenPublicOnChain: await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx),
+        });
+      // MUST-be-encrypted and MAY-be-encrypted are different questions, and
+      // conflating them turns a public+agent-gated CG into a permanent failure
+      // in whichever direction the local chain probe happens to disagree with
+      // the sender's. The two probes legitimately diverge during an RPC flake,
+      // a stale mapping, rollout skew, or an older client: a sender that cannot
+      // prove public FAILS CLOSED and encrypts, and a receiver that CAN prove
+      // public would then reject that encrypted write below — the mirror image
+      // of the plaintext drop this change exists to fix.
+      //
+      // Structural fact (is this CG gated at all?) governs what is ACCEPTABLE.
+      // Chain-proven policy governs only what is REQUIRED. So an agent-gated CG
+      // always SUPPORTS Sender-Key payloads, and a public one merely stops
+      // demanding them. Both encodings are admitted during any skew window.
       if (requiresEncryptedPayload && !decoded.encryptedPayload && !decoded.senderKeyMessage) {
         const reason = `Sender Key encrypted workspace payload required for private or agent-gated context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
@@ -1068,7 +1116,7 @@ export class SharedMemoryHandler {
       }
 
       if (decoded.senderKeyMessage) {
-        if (!requiresEncryptedPayload) {
+        if (!supportsEncryptedPayload) {
           const reason = `Sender Key payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
@@ -1101,7 +1149,10 @@ export class SharedMemoryHandler {
           return { applied: false, reason, retryable: false };
         }
       } else if (decoded.encryptedPayload) {
-        if (!requiresEncryptedPayload) {
+        // Same must-vs-may split as the Sender-Key branch above: acceptance is
+        // governed by whether the CG is gated at all, not by whether the local
+        // chain probe currently proves it public.
+        if (!supportsEncryptedPayload) {
           const reason = `encrypted workspace payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
