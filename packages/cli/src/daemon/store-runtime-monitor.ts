@@ -35,7 +35,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { defaultDockerRunner, type DockerRunner } from './blazegraph-docker.js';
+import { defaultDockerRunner, deriveBlazegraphContainerName, type DockerRunner } from './blazegraph-docker.js';
 import { checkExternalStoreReachable } from './store-health-check.js';
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
@@ -103,6 +103,31 @@ function hardenLockIsLive(lockPath: string, log: (m: string) => void): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * Resolve the docker container the daemon is allowed to auto-restart for
+ * a given runtime store config, or null when the store is not a
+ * daemon-managed Blazegraph (operator-managed stores and every other
+ * backend must NEVER be touched by docker — log-only monitoring).
+ *
+ * Single authority for the managed-store criteria: lifecycle's boot
+ * recovery and its runtime-monitor setup both call this, so the two
+ * phases can never disagree about which container (if any) the daemon
+ * owns. Do not re-implement the backend/managedByDkg branch inline.
+ */
+export function resolveManagedBlazegraphContainer(
+  storeConfig:
+    | {
+        backend: string;
+        options?: Record<string, unknown>;
+      }
+    | undefined,
+): string | null {
+  if (storeConfig?.backend !== 'blazegraph') return null;
+  const options = storeConfig.options as Record<string, unknown> | undefined;
+  if (options?.managedByDkg !== true) return null;
+  return deriveBlazegraphContainerName(options);
 }
 
 export interface StoreMonitorStats {

@@ -314,10 +314,10 @@ import {
 import {
   attemptManagedStoreBootRecovery,
   createStoreRuntimeMonitor,
+  resolveManagedBlazegraphContainer,
   storeBootRestartTsPath,
   storeHardenLockPath,
 } from './store-runtime-monitor.js';
-import { deriveBlazegraphContainerName } from './blazegraph-docker.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
@@ -1408,11 +1408,7 @@ export async function runDaemonInner(
       // restarts the daemon → same wedged store) heals nothing, while a
       // container restart does. Operator-managed stores keep the
       // fail-fast behaviour unchanged.
-      const managedBlazegraphContainer =
-        runtimeStore?.backend === 'blazegraph' &&
-        (runtimeStore.options as Record<string, unknown> | undefined)?.managedByDkg === true
-          ? deriveBlazegraphContainerName(runtimeStore.options as Record<string, unknown>)
-          : null;
+      const managedBlazegraphContainer = resolveManagedBlazegraphContainer(runtimeStore);
       if (managedBlazegraphContainer) {
         log(
           `[STORE-HEALTH] managed Blazegraph unreachable at boot — attempting one ` +
@@ -2371,11 +2367,7 @@ export async function runDaemonInner(
   // so it — like operator-managed stores — is monitored log-only
   // (managedContainerName stays null → docker is never touched).
   if (isExternalBackend(runtimeStore?.backend) && process.env.DKG_STORE_MONITOR_DISABLED !== '1') {
-    const managedContainerName =
-      runtimeStore?.backend === 'blazegraph' &&
-      (runtimeStore.options as Record<string, unknown> | undefined)?.managedByDkg === true
-        ? deriveBlazegraphContainerName(runtimeStore.options as Record<string, unknown>)
-        : null;
+    const managedContainerName = resolveManagedBlazegraphContainer(runtimeStore);
     const storeMonitor = createStoreRuntimeMonitor({
       storeConfig: runtimeStore,
       managedContainerName,

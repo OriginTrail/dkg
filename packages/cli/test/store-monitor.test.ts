@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import {
   createStoreRuntimeMonitor,
   attemptManagedStoreBootRecovery,
+  resolveManagedBlazegraphContainer,
   STORE_BOOT_RESTART_TS_FILENAME,
   STORE_HARDEN_LOCK_FILENAME,
   storeHardenLockPath,
@@ -433,5 +434,49 @@ describe('attemptManagedStoreBootRecovery', () => {
       expect(restartCalls(calls)).toHaveLength(0);
       expect(logs.some((l) => l.includes('store.monitor.suspended-by-harden'))).toBe(true);
     });
+  });
+});
+
+describe('resolveManagedBlazegraphContainer', () => {
+  // Single authority for "may the daemon touch docker for this store?".
+  // Both lifecycle phases (boot recovery + runtime monitor setup) resolve
+  // through this helper, so these cases pin the managed-store criteria.
+
+  it('derives the container name for a daemon-managed Blazegraph store', () => {
+    expect(resolveManagedBlazegraphContainer(STORE_CONFIG)).toBe(CONTAINER);
+  });
+
+  it('prefers a persisted options.containerName over URL derivation', () => {
+    expect(resolveManagedBlazegraphContainer({
+      backend: 'blazegraph',
+      options: { ...STORE_CONFIG.options, containerName: 'custom-bg' },
+    })).toBe('custom-bg');
+  });
+
+  it('returns null for an operator-managed Blazegraph (managedByDkg absent or false)', () => {
+    // The daemon must NEVER docker-restart a store it does not own.
+    expect(resolveManagedBlazegraphContainer({
+      backend: 'blazegraph',
+      options: { url: STORE_CONFIG.options.url },
+    })).toBeNull();
+    expect(resolveManagedBlazegraphContainer({
+      backend: 'blazegraph',
+      options: { url: STORE_CONFIG.options.url, managedByDkg: false },
+    })).toBeNull();
+  });
+
+  it('returns null for non-blazegraph backends and missing config', () => {
+    expect(resolveManagedBlazegraphContainer({
+      backend: 'sparql-http',
+      options: { url: STORE_CONFIG.options.url, managedByDkg: true },
+    })).toBeNull();
+    expect(resolveManagedBlazegraphContainer(undefined)).toBeNull();
+  });
+
+  it('returns null when neither containerName nor a Blazegraph namespace URL is available', () => {
+    expect(resolveManagedBlazegraphContainer({
+      backend: 'blazegraph',
+      options: { url: 'http://127.0.0.1:9999/not-a-namespace-endpoint', managedByDkg: true },
+    })).toBeNull();
   });
 });
