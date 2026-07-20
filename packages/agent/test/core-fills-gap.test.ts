@@ -1530,6 +1530,34 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch.calls).toHaveLength(1);
   });
 
+  it('runs at most one active fetch per admitted pass even when the first fetch outlives the cooldown', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-20T18:00:00.000Z'));
+      const internals = await boot();
+      const localCgId = '64';
+      const onChainCgId = 64n;
+      registerUnmatchedKC(internals.chain, 9024n, onChainCgId);
+      registerUnmatchedKC(internals.chain, 9025n, onChainCgId);
+      internals.subscribedContextGraphs.set(localCgId, {
+        subscribed: true,
+        onChainId: onChainCgId.toString(),
+      });
+
+      const fetch = recorder(async () => {
+        vi.setSystemTime(Date.now() + 61_000);
+        return emptyCatchupStats();
+      });
+      (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+      await internals.runVmReconcileForCg(localCgId, 'periodic');
+
+      expect(fetch.calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls through a no-protocol active-fetch peer before caching a miss', async () => {
     const internals = await boot();
     const onChainCgId = 47n;

@@ -2722,21 +2722,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     source: VmReconcileSource,
   ): Promise<ContextGraphReconcileResult> {
-    const target = await this.resolveVmReconcileTarget(localCgId);
+    this.vmReconcileActivePasses.add(localCgId);
+    this.vmReconcileFetchUsedInPass.delete(localCgId);
+    try {
+      const target = await this.resolveVmReconcileTarget(localCgId);
 
-    // Keep the legacy-label -> scoped-VM migration in the admitted lane and
-    // before the evidence gate. A current watermark can still need this repair.
-    await this.healStrandedScopedKCs(localCgId, target.sub);
+      // Keep the legacy-label -> scoped-VM migration in the admitted lane and
+      // before the evidence gate. A current watermark can still need this repair.
+      await this.healStrandedScopedKCs(localCgId, target.sub);
 
-    const result = await reconcileContextGraph(
-      this.createVmReconcileDeps(localCgId),
-      target.cursor,
-      localCgId,
-      target.onChainCgId,
-    );
-    const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
-    this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
-    return response;
+      const result = await reconcileContextGraph(
+        this.createVmReconcileDeps(localCgId),
+        target.cursor,
+        localCgId,
+        target.onChainCgId,
+      );
+      const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
+      this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
+      return response;
+    } finally {
+      this.vmReconcileActivePasses.delete(localCgId);
+      this.vmReconcileFetchUsedInPass.delete(localCgId);
+    }
   }
 
   async resolveVmReconcileTarget(
@@ -3494,12 +3501,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
   shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
     const now = Date.now();
     this.pruneVmReconcileState(now);
+    if (
+      this.vmReconcileActivePasses.has(localCgId)
+      && this.vmReconcileFetchUsedInPass.has(localCgId)
+    ) {
+      return false;
+    }
     const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
     if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
       return false;
     }
     if (lastFetchAt !== undefined) this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileFetchCooldownAt.set(localCgId, now);
+    if (this.vmReconcileActivePasses.has(localCgId)) {
+      this.vmReconcileFetchUsedInPass.add(localCgId);
+    }
     return true;
   }
 

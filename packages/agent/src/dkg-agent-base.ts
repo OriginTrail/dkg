@@ -941,8 +941,12 @@ export class DKGAgentBase {
   /** Keys already consulted in the durable store during this process lifetime. */
   protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
-  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
+  /** Phase D/A4 — per-CG active-fetch cooldown between reconciliation passes. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** CGs currently executing one admitted VM reconciliation pass. */
+  protected readonly vmReconcileActivePasses = new Set<string>();
+  /** Active passes that already spent their single network-fetch budget. */
+  protected readonly vmReconcileFetchUsedInPass = new Set<string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected readonly vmReconcileCatchupPeerOrder = new Map<string, {
