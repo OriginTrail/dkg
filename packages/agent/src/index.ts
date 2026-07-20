@@ -80,6 +80,11 @@ export {
   type DkgWalEpochSnapshotValidatorOptionsV1,
 } from './wal/retention-semantic-adapter.js';
 export {
+  DkgWalMigrationSemanticAdapterV1,
+  createDkgWalMigrationSemanticAdapterV1,
+  type DkgWalMigrationSemanticAdapterOptionsV1,
+} from './wal/genesis-migration-adapter.js';
+export {
   DkgWalProjectionMaterializerError,
   DkgWalProjectionMaterializerV1,
   type DkgWalProjectionApplyResultV1,

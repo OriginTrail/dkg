@@ -46,7 +46,8 @@ export type DkgSemanticEntryPoint =
   | 'wal-replay-compatible-merge'
   | 'wal-delete-expiry-authorization'
   | 'wal-snapshot-baseline-entry-validation'
-  | 'wal-snapshot-baseline-conflict-validation';
+  | 'wal-snapshot-baseline-conflict-validation'
+  | 'wal-legacy-genesis-authorization';
 
 export type DkgWalReplaySemanticEntryPoint = Extract<
   DkgSemanticEntryPoint,
@@ -60,6 +61,11 @@ export type DkgWalRetentionSemanticEntryPoint = Extract<
   | 'wal-delete-expiry-authorization'
   | 'wal-snapshot-baseline-entry-validation'
   | 'wal-snapshot-baseline-conflict-validation'
+>;
+
+export type DkgWalMigrationSemanticEntryPoint = Extract<
+  DkgSemanticEntryPoint,
+  'wal-legacy-genesis-authorization'
 >;
 
 export interface DkgSemanticCoreTraceEvent {
@@ -230,6 +236,18 @@ export class DkgSemanticCore {
   async invokeWalRetentionSemanticEntryPoint<T>(
     driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
     entryPoint: DkgWalRetentionSemanticEntryPoint,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, entryPoint, operation);
+  }
+
+  /**
+   * Trace the existing migration-policy decision. The supplied implementation
+   * owns provenance visibility; this boundary never promotes legacy state.
+   */
+  async invokeWalMigrationSemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
+    entryPoint: DkgWalMigrationSemanticEntryPoint,
     operation: () => Promise<T>,
   ): Promise<T> {
     return this.invoke(driver, entryPoint, operation);

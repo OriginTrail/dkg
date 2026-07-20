@@ -380,6 +380,11 @@ describe('WAL-v1 author snapshot baseline', () => {
       ...overrides,
     });
 
+    await expect(verifySnapshotBaselineV1({ ...base, baselineKind: 'unsupported' as never }))
+      .rejects.toMatchObject({ code: 'WAL_RETENTION_INVALID' });
+    await expect(verifySnapshotBaselineV1({ ...base, baselineKind: 'genesis' }))
+      .rejects.toMatchObject({ code: 'WAL_RETENTION_SNAPSHOT_BINDING' });
+
     const wrongEnvelope = encodePublicDkgPayload({
       payloadKind: BigInt(WAL_V1_ENUMS.payloadKind.DKG_MUTATION),
       codec: BigInt(WAL_V1_ENUMS.codec.DETERMINISTIC_CBOR),

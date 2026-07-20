@@ -1152,17 +1152,17 @@ nodes to current authenticated state without inventing pre-WAL causal history.
 
 ### Acceptance area
 
-- [ ] Repeating genesis against the same maintenance snapshot produces the same
+- [x] Repeating genesis against the same maintenance snapshot produces the same
       canonical state/manifest digests and never mutates production data in
       dry-run mode.
-- [ ] Provable author state is signed only by that author; ambiguous/unclaimable
+- [x] Provable author state is signed only by that author; ambiguous/unclaimable
       rows remain quarantined unless explicit migration policy authorizes a
       clearly labeled pre-WAL provenance view.
-- [ ] Empty, stale, below-floor, and projection-only nodes reach exact target
+- [x] Empty, stale, below-floor, and projection-only nodes reach exact target
       roots, complete WAL objects, RDF, conflict, tombstone, and VM state.
-- [ ] Backfill performs no remote graph enumeration; local complete-WAL rebuild
+- [x] Backfill performs no remote graph enumeration; local complete-WAL rebuild
       performs zero network payload transfer.
-- [ ] Barrier abort/resume and crashes at every snapshot/checkpoint/vector step
+- [x] Barrier abort/resume and crashes at every snapshot/checkpoint/vector step
       preserve current-sync authority and never omit a post-barrier mutation.
 - [ ] Backfill p95 is no worse than the same-data/link current-sync full-sync baseline
       and emits the required evidence manifest.

@@ -54,6 +54,8 @@ export interface VerifySnapshotBaselineInputV1 {
   readonly expectedAdapterVersion: bigint;
   readonly expectedChainFrontier: ProtocolTuple<'ChainFrontierV1'> | null;
   readonly semanticCore: WalRetentionSemanticCoreV1;
+  /** Genesis has an authenticated empty covered lane and no fabricated pre-WAL heads. */
+  readonly baselineKind?: 'retention' | 'genesis';
   /**
    * Required only for a private envelope. The current crypto implementation
    * must authenticate/decrypt it; this callback cannot return untrusted bytes.
@@ -70,6 +72,10 @@ export interface VerifySnapshotBaselineInputV1 {
 export async function verifySnapshotBaselineV1(
   input: VerifySnapshotBaselineInputV1,
 ): Promise<VerifiedSnapshotBaselineV1> {
+  if (input.baselineKind !== undefined && input.baselineKind !== 'retention' && input.baselineKind !== 'genesis') {
+    retentionError('WAL_RETENTION_INVALID', 'snapshot baseline kind is unsupported');
+  }
+  const genesis = input.baselineKind === 'genesis';
   const object = verifyWalObjectV1(input.snapshotObjectCanonicalBytes);
   const envelope = decodeDkgPayloadEnvelope(object.payloadBytes);
   if (
@@ -127,6 +133,22 @@ export async function verifySnapshotBaselineV1(
       'manifest does not exactly bind its signed covered checkpoint, root, count, and v1 floor',
     );
   }
+  if (genesis && (
+    manifest[4] !== 0n
+    || manifest[7] !== 0n
+    || manifest[8] !== 0n
+    || checkpoint[4] !== 0n
+    || checkpoint[7] !== 0n
+    || checkpoint[8] !== 0n
+    || checkpoint[9] !== null
+    || checkpoint[10] !== null
+    || checkpoint[11] !== 0n
+  )) {
+    retentionError(
+      'WAL_RETENTION_SNAPSHOT_BINDING',
+      'genesis snapshot must bind the signed empty epoch-zero checkpoint without pre-WAL history',
+    );
+  }
   if (
     !bytesEqualV1(manifest[11], input.expectedPolicyObjectId)
     || manifest[12] !== input.expectedAdapterVersion
@@ -158,10 +180,16 @@ export async function verifySnapshotBaselineV1(
   uniqueKeyedTuples(manifest[10], 'snapshot conflicts');
   const entryKeys = new Set(manifest[9].map(entry => hex(entry[0])));
   for (const entry of manifest[9]) {
-    if (entry[2].length === 0 || entry[2].some(head => !covered.has(hex(head)))) {
+    if (
+      (genesis && entry[2].length !== 0)
+      || (!genesis && entry[2].length === 0)
+      || entry[2].some(head => !covered.has(hex(head)))
+    ) {
       retentionError(
         'WAL_RETENTION_SNAPSHOT_CLOSURE',
-        'every author snapshot entry requires covered same-author active heads',
+        genesis
+          ? 'genesis snapshot entries must not fabricate pre-WAL active heads'
+          : 'every author snapshot entry requires covered same-author active heads',
       );
     }
     if (entry[1] === LIVE) {
@@ -199,10 +227,16 @@ export async function verifySnapshotBaselineV1(
     }
   }
   for (const conflict of manifest[10]) {
-    if (!entryKeys.has(hex(conflict[0])) || conflict[1].length === 0) {
+    if (
+      !entryKeys.has(hex(conflict[0]))
+      || (genesis && (conflict[1].length !== 0 || conflict[2].length !== 0))
+      || (!genesis && conflict[1].length === 0)
+    ) {
       retentionError(
         'WAL_RETENTION_SNAPSHOT_CLOSURE',
-        'snapshot conflict must touch an included entry and name external heads',
+        genesis
+          ? 'genesis snapshot conflict must touch an entry without fabricating pre-WAL heads'
+          : 'snapshot conflict must touch an included entry and name external heads',
       );
     }
     for (const reference of [...conflict[1], ...conflict[2]]) {
