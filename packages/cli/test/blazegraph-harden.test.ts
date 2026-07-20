@@ -35,7 +35,7 @@ import {
   type DockerRunner,
   type DockerCommandResult,
 } from '../src/daemon/blazegraph-docker.js';
-import { storeHardenLockPath } from '../src/daemon/store-health-check.js';
+import { storeHardenLockPath } from '../src/daemon/store-runtime-monitor.js';
 import { parseHardenPortOption } from '../src/commands/store.js';
 
 const NAME = 'dkg-blazegraph-dkg';

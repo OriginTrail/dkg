@@ -19,7 +19,7 @@ import {
   waitForBlazegraphReady,
   type DockerRunner,
 } from '../blazegraph-docker.js';
-import { storeHardenLockPath } from '../store-health-check.js';
+import { storeHardenLockPath } from '../store-runtime-monitor.js';
 import {
   HARDEN_BACKUP_SUFFIX,
   inspectHardenState,
@@ -43,7 +43,7 @@ export interface ExecuteHardenMigrationOptions {
    * DKG config home (`dkgDir()`), resolved by the caller exactly the way
    * the `dkg store harden` command resolves its config. The harden lock
    * marker (`<dkgHome>/.store-harden.lock`, see
-   * store-health-check.ts `storeHardenLockPath`) lives here so the
+   * store-runtime-monitor.ts `storeHardenLockPath`) lives here so the
    * daemon's runtime store monitor — which reads the same path — can
    * suspend its docker restarts while the migration holds the container
    * stopped.
@@ -242,8 +242,8 @@ export async function executeHardenMigration(
   await mkdir(migrationDir, { recursive: true });
 
   // BLOCKER-1(a): write the harden lock BEFORE the first mutating step.
-  // The daemon's runtime store monitor (store-health-check.ts) reads this
-  // exact path and suspends its docker restarts while the file exists —
+  // The daemon's runtime store monitor (store-runtime-monitor.ts) reads
+  // this exact path and suspends its docker restarts while it exists —
   // otherwise its 6x30s failure ladder would `docker restart` the
   // deliberately-stopped legacy container while a multi-minute
   // `docker cp` is still reading the journal out of it (torn export).

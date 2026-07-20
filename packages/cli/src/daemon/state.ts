@@ -15,7 +15,7 @@
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { DkgConfig } from '../config.js';
 import { isStandaloneInstall } from '../config.js';
-import type { StoreMonitorStats } from './store-health-check.js';
+import type { StoreMonitorStats } from './store-runtime-monitor.js';
 
 export type CorsAllowlist = '*' | string[];
 

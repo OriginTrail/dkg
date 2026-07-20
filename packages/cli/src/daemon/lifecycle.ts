@@ -306,15 +306,17 @@ import {
   skipChainResetWipe,
 } from './chain-reset-wipe.js';
 import {
-  attemptManagedStoreBootRecovery,
   checkExternalStoreReachable,
   checkOrSetStoreIdentity,
-  createStoreRuntimeMonitor,
   formatHealthCheckFailure,
   formatIdentityTagMismatch,
+} from './store-health-check.js';
+import {
+  attemptManagedStoreBootRecovery,
+  createStoreRuntimeMonitor,
   storeBootRestartTsPath,
   storeHardenLockPath,
-} from './store-health-check.js';
+} from './store-runtime-monitor.js';
 import { deriveBlazegraphContainerName } from './blazegraph-docker.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';

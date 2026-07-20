@@ -26,7 +26,7 @@ import {
   STORE_HARDEN_LOCK_FILENAME,
   storeHardenLockPath,
   type StoreMonitorStats,
-} from '../src/daemon/store-health-check.js';
+} from '../src/daemon/store-runtime-monitor.js';
 import type { DockerRunner } from '../src/daemon/blazegraph-docker.js';
 
 const CONTAINER = 'dkg-blazegraph-dkg';
