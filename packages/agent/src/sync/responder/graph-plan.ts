@@ -99,6 +99,37 @@ export interface FreshSwmDataGraphPlanMemo {
   ): Promise<FreshSwmDataGraphPlan | null>;
 }
 
+interface FreshSwmMetaSubjectEntry {
+  subject: string;
+  rowCount: number;
+}
+
+interface FreshSwmMetaGraphPlanEntry {
+  graph: string;
+  /** TTL-admitted subjects, compareCodePoint-sorted; row counts are exact at plan build. */
+  subjects: readonly FreshSwmMetaSubjectEntry[];
+  rowCount: number;
+}
+
+/**
+ * Session plan for the TTL-filtered SWM meta phase (#1847). Holds only
+ * graph/subject/count scalars — never payload rows — so a 64,000+-row `_meta`
+ * graph costs the plan a few hundred kilobytes at most while the rows stay in
+ * the store until each page addresses its own bounded subject window.
+ */
+interface FreshSwmMetaPlan {
+  entries: readonly FreshSwmMetaGraphPlanEntry[];
+  totalRows: number;
+}
+
+export interface FreshSwmMetaPlanMemo {
+  get(
+    key: string,
+    load: () => Promise<FreshSwmMetaPlan>,
+    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+  ): Promise<FreshSwmMetaPlan | null>;
+}
+
 interface ExactGraphPagePlanEntry {
   graph: string;
   rowCount: number;
@@ -250,8 +281,31 @@ export function createResponderFreshSwmDataGraphPlanMemo(
   ttlMs = 10 * 60_000,
   maxEntries = 32,
 ): FreshSwmDataGraphPlanMemo {
-  const cached = new Map<string, { value: FreshSwmDataGraphPlan; cachedAt: number }>();
-  const inflight = new Map<string, Promise<FreshSwmDataGraphPlan>>();
+  return createSessionPlanMemo<FreshSwmDataGraphPlan>(ttlMs, maxEntries);
+}
+
+/**
+ * Session-scoped plan cache for the TTL-filtered SWM META phase (#1847). Same
+ * lifetime/refresh contract as {@link createResponderFreshSwmDataGraphPlanMemo}:
+ * touched on every page, offset>0 requires the existing plan so a rebuilt plan
+ * against a moved TTL cutoff can never make a numeric offset skip or duplicate.
+ */
+export function createResponderFreshSwmMetaPlanMemo(
+  ttlMs = 10 * 60_000,
+  maxEntries = 32,
+): FreshSwmMetaPlanMemo {
+  return createSessionPlanMemo<FreshSwmMetaPlan>(ttlMs, maxEntries);
+}
+
+function createSessionPlanMemo<T>(ttlMs: number, maxEntries: number): {
+  get(
+    key: string,
+    load: () => Promise<T>,
+    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+  ): Promise<T | null>;
+} {
+  const cached = new Map<string, { value: T; cachedAt: number }>();
+  const inflight = new Map<string, Promise<T>>();
   const prune = (now = Date.now()) => {
     for (const [key, entry] of cached) {
       if (now - entry.cachedAt >= ttlMs) cached.delete(key);
@@ -295,38 +349,7 @@ export function createResponderExactGraphPagePlanMemo(
   ttlMs = 10 * 60_000,
   maxEntries = 32,
 ): ExactGraphPagePlanMemo {
-  const cached = new Map<string, { value: ExactGraphPagePlan; cachedAt: number }>();
-  const inflight = new Map<string, Promise<ExactGraphPagePlan>>();
-  const prune = (now = Date.now()) => {
-    for (const [key, entry] of cached) {
-      if (now - entry.cachedAt >= ttlMs) cached.delete(key);
-    }
-  };
-  return {
-    async get(key, load, options) {
-      throwIfAborted(options?.signal);
-      const now = Date.now();
-      prune(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      const existing = cached.get(key);
-      if (!options?.refresh && existing) {
-        cached.delete(key);
-        cached.set(key, { value: existing.value, cachedAt: now });
-        return existing.value;
-      }
-      if (options?.requireExisting) return null;
-      if (!existing && cached.size >= maxEntries) cached.delete(cached.keys().next().value!);
-      const pendingLoad = load()
-        .then((value) => {
-          cached.set(key, { value, cachedAt: Date.now() });
-          return value;
-        })
-        .finally(() => inflight.delete(key));
-      inflight.set(key, pendingLoad);
-      return raceAgainstAbort(pendingLoad, options?.signal);
-    },
-  };
+  return createSessionPlanMemo<ExactGraphPagePlan>(ttlMs, maxEntries);
 }
 
 function createSubGraphNameMemo(
@@ -465,6 +488,7 @@ export async function readSwmMetaPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
@@ -478,32 +502,109 @@ export async function readSwmMetaPage(params: {
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
-  return readResponderRowsPage(
-    cache,
-    (offset, limit, signal) => readSwmMetaRowsPage(
+
+  if (params.cutoffIso == null) {
+    // Legacy unfiltered sessions: unchanged bounded raw-graph snapshot with the
+    // existing store-paged compatibility fallback.
+    return readResponderRowsPage(
+      cache,
+      (offset, limit, signal) => readSwmMetaRowsPage(
+        params.store,
+        candidateGraphs,
+        offset,
+        limit,
+        signal,
+      ),
+      params.offset,
+      params.limit,
+      params.signal,
+      cache
+        ? () => readBoundedSwmMetaSnapshot(
+          params.store,
+          candidateGraphs,
+          cache,
+        )
+        : undefined,
+    );
+  }
+
+  // #1847: the TTL-filtered lane. Two invariants shape it:
+  //
+  //  1. The old bounded snapshot loaded the RAW meta graph and applied the
+  //     row/byte budget BEFORE the TTL filter, so a long-lived CG whose `_meta`
+  //     crossed 64,000 raw rows was refused even when its fresh subset was a
+  //     few hundred rows — and with the fallback gated off for TTL sessions the
+  //     refusal was permanent (10/15 mainnet cores, fifa-world-cup-2026).
+  //  2. The old TTL fallback query (DISTINCT + UNION join + global
+  //     `ORDER BY ?g ?s ?p ?o` + growing OFFSET over a mutable graph family)
+  //     was gated off DELIBERATELY: it can pin cores and gigabytes on large
+  //     stores (#1597 class). Re-enabling the flag alone would trade a bounded
+  //     refusal for a store-melting query; that query is deleted, not revived.
+  //
+  // The fix mirrors buildFreshSwmDataGraphPlan: tiny discovery queries find the
+  // TTL-admitted subjects (small results, no payload sort), the session plan
+  // caches only graph/subject/count scalars, the snapshot materializes only the
+  // ADMITTED rows (so the budget now binds on what is actually served), and an
+  // intrinsically-oversized fresh set degrades to bounded whole-subject window
+  // pages from the same plan instead of failing permanently.
+  const cutoffIso = params.cutoffIso;
+  // Consume the explicit session refresh once: when the snapshot build crosses
+  // its budget, the immediate page-zero fallback must reuse the just-built plan
+  // instead of rebuilding (and re-counting) it against a moving store.
+  let planRefreshPending = params.refreshRowList === true;
+  const getPlan = async (
+    pageOffset: number,
+    pageSignal: AbortSignal | undefined,
+  ): Promise<FreshSwmMetaPlan> => {
+    const loadPlan = () => buildFreshSwmMetaPlan(
       params.store,
       candidateGraphs,
-      params.cutoffIso,
+      cutoffIso,
+      pageSignal,
+    );
+    const refreshPlan = pageOffset === 0 && planRefreshPending;
+    if (refreshPlan) planRefreshPending = false;
+    const plan = params.freshMetaPlanMemo && params.rowListCacheKey
+      ? await params.freshMetaPlanMemo.get(params.rowListCacheKey, loadPlan, {
+        refresh: refreshPlan,
+        requireExisting: pageOffset > 0,
+        signal: pageSignal,
+      })
+      : await loadPlan();
+    if (!plan) {
+      throw new Error('Shared-memory meta sync session graph plan expired before page completion');
+    }
+    return plan;
+  };
+  const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) =>
+    readFreshSwmMetaRowsPageFromPlan(
+      params.store,
+      await getPlan(offset, signal),
       offset,
       limit,
+      cache?.key ?? `swm-meta:${params.contextGraphId}`,
       signal,
-    ),
+    );
+  return readResponderRowsPage(
+    cache,
+    loadStoreBoundedPage,
     params.offset,
     params.limit,
     params.signal,
     cache
-      ? () => readBoundedSwmMetaSnapshot(
+      ? async () => readBoundedFreshSwmMetaSnapshot(
         params.store,
-        candidateGraphs,
-        params.cutoffIso,
+        await getPlan(0, undefined),
+        cutoffIso,
         cache,
       )
       : undefined,
-    // The TTL-filtered SPARQL fallback joins and globally sorts a mutable meta
-    // graph. On large stores that query is worse than a bounded refusal: it can
-    // consume multiple cores and gigabytes until the HTTP timeout. Unfiltered
-    // legacy sessions retain the existing store-paged compatibility path.
-    params.cutoffIso == null,
+    // The per-snapshot budget fallback MUST stay enabled here (#1847): it now
+    // degrades to the bounded plan-paged reader above, never to the deleted
+    // global-sort query. Passing `params.cutoffIso == null` in this position is
+    // the exact defect that made every 64,000-row `_meta` CG permanently
+    // unsyncable on mainnet.
+    true,
   );
 }
 
@@ -1952,38 +2053,15 @@ async function readRowsAcrossGraphsExcludingSubjectPrefix(
     .sort(compareRows);
 }
 
-async function readSwmMetaRows(
-  store: TripleStore,
-  swmMetaGraphs: readonly string[],
-  cutoffIso: string | null,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const swmMetaValues = graphValues(swmMetaGraphs);
-  if (!swmMetaValues) return [];
-  const res = await store.query(`
-    SELECT DISTINCT ?g ?s ?p ?o WHERE {
-      VALUES ?g { ${swmMetaValues} }
-      GRAPH ?g {
-        ?s ?p ?o .
-        ${cutoffIso
-    ? `
-        ?s <${DKG_PUBLISHED_AT}> ?ts .
-        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
-    : ''}
-      }
-    }
-  `, syncResponderStoreOptions(signal, 'sync.responder.readSwmMetaRows'));
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g)
-    .sort(compareRows);
-}
-
+/**
+ * Legacy (cutoffIso == null) bounded snapshot: reads the raw candidate meta
+ * graphs under the per-snapshot budget. TTL-filtered sessions use
+ * {@link readBoundedFreshSwmMetaSnapshot}, whose budget binds on the admitted
+ * fresh subset instead of the raw graph size (#1847).
+ */
 async function readBoundedSwmMetaSnapshot(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
-  cutoffIso: string | null,
   cache: RowListCache,
 ): Promise<readonly SyncRow[]> {
   const limits = cache.memo.snapshotLoadLimits ?? {
@@ -2064,7 +2142,7 @@ async function readBoundedSwmMetaSnapshot(
     }
   }
 
-  return filterSwmMetaSnapshotRows(rows, cutoffIso);
+  return filterSwmMetaSnapshotRows(rows, null);
 }
 
 function filterSwmMetaSnapshotRows(
@@ -2125,10 +2203,17 @@ function filterSwmMetaSnapshotRows(
   return rows.filter((row) => admitted.has(row.s)).sort(compareRows);
 }
 
+/**
+ * Legacy UNFILTERED store-paged compatibility path (cutoffIso == null sessions
+ * only). The former TTL variant of this query — DISTINCT + a six-predicate
+ * UNION join + global `ORDER BY ?g ?s ?p ?o` re-evaluated with a growing
+ * OFFSET per page over a mutable graph family — was the #1847 store-melter and
+ * is deliberately DELETED, not gated: TTL-filtered sessions page from the
+ * session plan via {@link readFreshSwmMetaRowsPageFromPlan} instead.
+ */
 async function readSwmMetaRowsPage(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
-  cutoffIso: string | null,
   offset: number,
   limit: number,
   signal?: AbortSignal,
@@ -2137,40 +2222,15 @@ async function readSwmMetaRowsPage(
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
   const swmMetaValues = graphValues(swmMetaGraphs);
-  const swmMetaClause = swmMetaValues
-    ? `
-        VALUES ?g { ${swmMetaValues} }
-        GRAPH ?g {
-          ?s ?p ?o .
-          ${cutoffIso
-            ? `
-          {
-            ?s <${DKG_PUBLISHED_AT}> ?ts .
-          } UNION {
-            # Graph-scoped SWM heads are current-state pointers and therefore
-            # intentionally have no independent publishedAt row. Bind them to
-            # the timestamped WorkspaceOperation they select so TTL recovery
-            # receives the head plus its immutable commitment atomically.
-            ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-               <${DKG_KA_UAL}> ?headUal ;
-               <${DKG_ASSERTION_VERSION}> ?headVersion ;
-               <${DKG_SHARE_OPERATION_ID}> ?shareId .
-            ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-               <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-               <${DKG_KA_UAL}> ?headUal ;
-               <${DKG_ASSERTION_VERSION}> ?headVersion ;
-               <${DKG_SHARE_OPERATION_ID}> ?shareId ;
-               <${DKG_PUBLISHED_AT}> ?ts .
-          }
-          FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
-            : ''}
-        }
-      `
-    : '';
-  if (!swmMetaClause) return [];
+  if (!swmMetaValues) return [];
+  // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of pre-admitted SWM meta graph IRIs
+  // sparql-scan-allow: R3 -- pre-existing legacy (cutoff-less) compatibility lane, unchanged behavior; TTL sessions page from the session plan instead (#1847)
   const res = await store.query(`
     SELECT DISTINCT ?g ?s ?p ?o WHERE {
-      ${swmMetaClause}
+      VALUES ?g { ${swmMetaValues} }
+      GRAPH ?g {
+        ?s ?p ?o .
+      }
     }
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
@@ -2180,6 +2240,319 @@ async function readSwmMetaRowsPage(
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g);
+}
+
+const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
+
+/**
+ * Discover the TTL-admitted subjects of one SWM meta graph with two
+ * small-result queries (no payload rows, no sort, no OFFSET):
+ *
+ *  1. subjects carrying their own fresh `publishedAt` — the
+ *     {@link readFreshSwmRoots} shape, an indexed predicate probe whose result
+ *     is the fresh subset, not the graph;
+ *  2. graph-scoped SWM heads. Heads are current-state pointers and
+ *     intentionally have no independent publishedAt row; they are admitted via
+ *     the timestamped WorkspaceOperation they select (same six-predicate join
+ *     the TTL lane has always used), so TTL recovery receives the head plus its
+ *     immutable commitment atomically.
+ *
+ * SWM meta subjects are IRIs by contract (workspace writers skolemize blank
+ * nodes before storage); non-IRI subjects cannot appear in a VALUES clause and
+ * are skipped.
+ */
+async function readFreshSwmMetaSubjects(
+  store: TripleStore,
+  graph: string,
+  cutoffIso: string,
+  signal?: AbortSignal,
+): Promise<Set<string>> {
+  const cutoffFilter =
+    `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
+  const subjects = new Set<string>();
+  const freshRes = await store.query(`
+    SELECT DISTINCT ?s WHERE {
+      GRAPH <${assertSafeIri(graph)}> {
+        ?s <${DKG_PUBLISHED_AT}> ?ts .
+        ${cutoffFilter}
+      }
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmMetaSubjects'));
+  if (freshRes.type === 'bindings') {
+    for (const row of freshRes.bindings) {
+      const subject = row['s'];
+      if (subject && isIriTerm(subject)) subjects.add(subject);
+    }
+  }
+  const headRes = await store.query(`
+    SELECT DISTINCT ?s WHERE {
+      GRAPH <${assertSafeIri(graph)}> {
+        ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+           <${DKG_KA_UAL}> ?headUal ;
+           <${DKG_ASSERTION_VERSION}> ?headVersion ;
+           <${DKG_SHARE_OPERATION_ID}> ?shareId .
+        ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+           <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+           <${DKG_KA_UAL}> ?headUal ;
+           <${DKG_ASSERTION_VERSION}> ?headVersion ;
+           <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+           <${DKG_PUBLISHED_AT}> ?ts .
+        ${cutoffFilter}
+      }
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmMetaHeadSubjects'));
+  if (headRes.type === 'bindings') {
+    for (const row of headRes.bindings) {
+      const subject = row['s'];
+      if (subject && isIriTerm(subject)) subjects.add(subject);
+    }
+  }
+  return subjects;
+}
+
+function subjectValues(subjects: readonly string[]): string {
+  return subjects.map((subject) => `<${assertSafeIri(subject)}>`).join(' ');
+}
+
+async function countFreshSwmMetaSubjectRows(
+  store: TripleStore,
+  graph: string,
+  subjects: readonly string[],
+  signal?: AbortSignal,
+): Promise<FreshSwmMetaSubjectEntry[]> {
+  const countsBySubject = new Map<string, number>();
+  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_SUBJECT_CHUNK)) {
+    const res = await store.query(`
+      SELECT ?s (COUNT(*) AS ?count) WHERE {
+        VALUES ?s { ${subjectValues(chunk)} }
+        GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+      }
+      GROUP BY ?s
+    `, syncResponderStoreOptions(signal, 'sync.responder.countFreshSwmMetaSubjectRows'));
+    if (res.type !== 'bindings') continue;
+    for (const row of res.bindings) {
+      const subject = row['s'];
+      if (subject) countsBySubject.set(subject, parseSparqlInteger(row['count']));
+    }
+  }
+  return subjects
+    .map((subject) => ({ subject, rowCount: countsBySubject.get(subject) ?? 0 }))
+    .filter((entry) => entry.rowCount > 0);
+}
+
+/**
+ * Build the tiny, stable pagination plan for a TTL-filtered SWM meta phase.
+ * Only graph/subject/count scalars are computed and cached; the payload rows
+ * stay in the store until a page (or the bounded snapshot) addresses its own
+ * subject window. Subjects are compareCodePoint-sorted so the plan's prefix
+ * sums agree with the compareRows order used when window rows are sorted
+ * in-process — no store-side ORDER BY or OFFSET is ever needed.
+ */
+async function buildFreshSwmMetaPlan(
+  store: TripleStore,
+  swmMetaGraphs: readonly string[],
+  cutoffIso: string,
+  signal?: AbortSignal,
+): Promise<FreshSwmMetaPlan> {
+  const entries: FreshSwmMetaGraphPlanEntry[] = [];
+  for (const graph of dedupeStrings(swmMetaGraphs).sort(compareCodePoint)) {
+    throwIfAborted(signal);
+    const admitted = await readFreshSwmMetaSubjects(store, graph, cutoffIso, signal);
+    if (admitted.size === 0) continue;
+    const subjects = await countFreshSwmMetaSubjectRows(
+      store,
+      graph,
+      [...admitted].sort(compareCodePoint),
+      signal,
+    );
+    if (subjects.length === 0) continue;
+    entries.push({
+      graph,
+      subjects,
+      rowCount: subjects.reduce((sum, entry) => sum + entry.rowCount, 0),
+    });
+  }
+  return {
+    entries,
+    totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
+  };
+}
+
+/**
+ * Read ALL rows of a whole-subject window in bounded VALUES chunks. Each
+ * chunk's row total is verified against the plan counts: the plan's prefix
+ * sums are the pagination cursor, so a mutated subject must fail the session
+ * (the requester restarts with a fresh plan) rather than silently skip or
+ * duplicate rows — and a seal/head subject is always read atomically within
+ * one chunk query, so its row-group can never be torn by a chunk boundary.
+ */
+async function readFreshSwmMetaSubjectWindowRows(
+  store: TripleStore,
+  graph: string,
+  subjects: readonly FreshSwmMetaSubjectEntry[],
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const rows: SyncRow[] = [];
+  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_SUBJECT_CHUNK)) {
+    const expectedRows = chunk.reduce((sum, entry) => sum + entry.rowCount, 0);
+    const res = await store.query(`
+      SELECT ?s ?p ?o WHERE {
+        VALUES ?s { ${subjectValues(chunk.map((entry) => entry.subject))} }
+        GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+      }
+    `, {
+      ...syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmMetaSubjectRows'),
+      maxResponseBytes: snapshotResponseByteLimit(
+        SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+      ),
+    });
+    let added = 0;
+    if (res.type === 'bindings') {
+      for (const row of res.bindings) {
+        const s = row['s'];
+        const p = row['p'];
+        const o = row['o'];
+        if (!s || !p || !o) continue;
+        rows.push({ s, p, o, g: graph });
+        added += 1;
+      }
+    }
+    if (added !== expectedRows) {
+      throw new Error(
+        `Shared-memory meta sync plan changed while reading ${graph}: ` +
+        `expected ${expectedRows} rows for ${chunk.length} subjects, found ${added}`,
+      );
+    }
+  }
+  return rows.sort(compareRows);
+}
+
+/**
+ * Store-bounded page reader for an intrinsically-oversized TTL-filtered SWM
+ * meta phase. Pages advance across the plan's prefix sums; each page reads
+ * whole subjects (bounded by the page limit plus at most one subject's rows)
+ * and slices precisely. A single SUBJECT larger than the HARD build cap
+ * (SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS — deliberately the fixed constant,
+ * not the test/operator-shrinkable session budget, so a shrunken budget forces
+ * paged mode without refusing ordinary multi-row subjects) is the one
+ * remaining bounded refusal: it cannot be served as a coherent row-group
+ * within any budget, and unlike the graph-level cap it can only be a
+ * pathological writer, never organic operation history.
+ */
+async function readFreshSwmMetaRowsPageFromPlan(
+  store: TripleStore,
+  plan: FreshSwmMetaPlan,
+  offset: number,
+  limit: number,
+  budgetKey: string,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  let skip = Math.max(0, Math.floor(offset));
+  let remaining = Math.max(0, Math.floor(limit));
+  if (remaining === 0 || skip >= plan.totalRows) return [];
+  const rows: SyncRow[] = [];
+  for (const entry of plan.entries) {
+    if (skip >= entry.rowCount) {
+      skip -= entry.rowCount;
+      continue;
+    }
+    // Select the whole-subject window covering [skip, skip + remaining).
+    const window: FreshSwmMetaSubjectEntry[] = [];
+    let windowStart = 0;
+    let windowRows = 0;
+    let beforeWindow = 0;
+    for (const subject of entry.subjects) {
+      if (beforeWindow + subject.rowCount <= skip && window.length === 0) {
+        beforeWindow += subject.rowCount;
+        continue;
+      }
+      if (window.length === 0) windowStart = beforeWindow;
+      if (subject.rowCount > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS) {
+        throw snapshotBudgetError({
+          key: budgetKey,
+          reason: 'snapshot_rows',
+          rows: subject.rowCount,
+          bytesEstimate: 0,
+          limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+        });
+      }
+      window.push(subject);
+      windowRows += subject.rowCount;
+      if (windowStart + windowRows >= skip + remaining) break;
+    }
+    if (window.length === 0) {
+      skip = 0;
+      continue;
+    }
+    const windowRowsRead = await readFreshSwmMetaSubjectWindowRows(
+      store,
+      entry.graph,
+      window,
+      signal,
+    );
+    const page = windowRowsRead.slice(skip - windowStart, skip - windowStart + remaining);
+    for (const row of page) rows.push(row);
+    remaining -= page.length;
+    if (remaining <= 0) break;
+    skip = 0;
+  }
+  return rows;
+}
+
+/**
+ * TTL-filtered bounded snapshot (#1847). The per-snapshot budget binds on the
+ * plan's ADMITTED row total — what will actually be served — instead of the
+ * raw graph size, so a 64,000-row `_meta` history with a small fresh subset
+ * takes the ordinary memoized-snapshot path. The collected rows then pass
+ * through {@link filterSwmMetaSnapshotRows}, the canonical in-process
+ * admission filter, exactly as the raw-graph snapshot always has; the plan's
+ * SPARQL discovery is a candidate superset of that filter for the canonical
+ * typed-literal meta writes, so both stages agree in production.
+ */
+async function readBoundedFreshSwmMetaSnapshot(
+  store: TripleStore,
+  plan: FreshSwmMetaPlan,
+  cutoffIso: string,
+  cache: RowListCache,
+): Promise<readonly SyncRow[]> {
+  const limits = cache.memo.snapshotLoadLimits ?? {
+    maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+    maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+    pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
+  };
+  if (plan.totalRows > limits.maxRows) {
+    throw snapshotBudgetError({
+      key: cache.key,
+      reason: 'snapshot_rows',
+      rows: plan.totalRows,
+      bytesEstimate: 0,
+      limit: limits.maxRows,
+    });
+  }
+  const rows: SyncRow[] = [];
+  let bytesEstimate = 0;
+  for (const entry of plan.entries) {
+    const graphRows = await readFreshSwmMetaSubjectWindowRows(
+      store,
+      entry.graph,
+      entry.subjects,
+    );
+    for (const row of graphRows) {
+      const nextBytes = bytesEstimate + estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+      if (nextBytes > limits.maxBytesEstimate) {
+        throw snapshotBudgetError({
+          key: cache.key,
+          reason: 'snapshot_bytes',
+          rows: rows.length + 1,
+          bytesEstimate: nextBytes,
+          limit: limits.maxBytesEstimate,
+        });
+      }
+      rows.push(row);
+      bytesEstimate = nextBytes;
+    }
+  }
+  return filterSwmMetaSnapshotRows(rows, cutoffIso);
 }
 
 // NOTE: keep in sync with its page-safe twin {@link readFreshSwmDataRowsPage} —
