@@ -180,6 +180,10 @@ async function main() {
 
       // The bug's signature: peer has metadata but ZERO content triples.
       // So count CONTENT triples specifically — those carrying the heading text.
+      // Markdown import skolemizes subjects (urn:dkg:ka-skolem:cN), so they cannot
+      // be bound with VALUES the way the scale/hold-out counts are.
+      // sparql-scan-allow: R2 -- devnet-only harness, never run by node runtime; one
+      // purpose-built devnet store holding only this run's fixtures
       const contentQuery = `SELECT (COUNT(*) AS ?n) WHERE {
         GRAPH ?g { ?s ?p ?o }
         FILTER(CONTAINS(STR(?g), "fx-md-${stamp}"))
@@ -197,6 +201,8 @@ async function main() {
           : `EMPTY on peer after ${onPeer.waitedMs}ms — this is the #1779 signature`);
 
       // Cross-check total graph population, author vs peer.
+      // sparql-scan-allow: R2 -- same devnet-only harness scope as above; this is the
+      // author-vs-peer population cross-check for one freshly created CG.
       const totalQ = `SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), "fx-md-${stamp}")) }`;
       const aN = Number(String((await sparql(1, author.token, totalQ))[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
       const pN = Number(String((await sparql(2, peer.token, totalQ))[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
