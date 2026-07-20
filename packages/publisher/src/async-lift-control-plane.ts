@@ -267,8 +267,18 @@ export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Q
   if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
   const jobRef = jobSubject(job.jobId);
   const publish = job.request.knowledgeAssetVmPublish;
+  let lifecycleKey: string;
+  try {
+    lifecycleKey = knowledgeAssetVmPublishLifecycleKey(publish);
+  } catch {
+    // A malformed legacy job (a component carrying the U+001F delimiter, admitted
+    // before the key guard existed) is left un-indexed rather than throwing — never
+    // let one bad persisted job abort a writeJob or the whole boot backfill. New
+    // writes are still rejected upstream (the incoming key is built fail-closed).
+    return [];
+  }
   return [
-    quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(knowledgeAssetVmPublishLifecycleKey(publish)), graphUri),
+    quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(lifecycleKey), graphUri),
   ];
 }
 

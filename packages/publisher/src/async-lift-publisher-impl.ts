@@ -721,6 +721,11 @@ export class TripleStoreAsyncLiftPublisher
   private async findActiveKnowledgeAssetVmPublishJob(
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<{ job: LiftJob; compatible: boolean } | null> {
+    // Build the INCOMING key up front so a delimiter in the incoming facts fails the
+    // admission closed. A malformed PERSISTED job (e.g. a legacy pre-guard admission
+    // whose name carries U+001F) must NOT abort this scan and block an unrelated
+    // admission, so each persisted job's key is built defensively.
+    const requestKey = knowledgeAssetVmPublishLifecycleKey(request);
     const jobs = await this.list();
     for (const job of jobs) {
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
@@ -730,9 +735,13 @@ export class TripleStoreAsyncLiftPublisher
       // are superseded).
       if (!isOccupyingLifecycleJob(job)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      const sameLifecycleSubject =
-        knowledgeAssetVmPublishLifecycleKey(publish) === knowledgeAssetVmPublishLifecycleKey(request);
-      if (!sameLifecycleSubject) continue;
+      let jobKey: string;
+      try {
+        jobKey = knowledgeAssetVmPublishLifecycleKey(publish);
+      } catch {
+        continue; // skip a malformed legacy job rather than failing this admission
+      }
+      if (jobKey !== requestKey) continue;
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;

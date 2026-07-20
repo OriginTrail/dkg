@@ -137,6 +137,69 @@ describe('#1828 async lift intent lookup', () => {
     ).rejects.toThrow(/U\+001F delimiter/);
   });
 
+  // #1828 review (otReviewAgent): the fail-closed key guard must reject bad INCOMING
+  // requests without letting one malformed PERSISTED job (a legacy pre-guard
+  // admission whose name carries U+001F) poison unrelated admissions or abort the
+  // boot backfill.
+  it('a legacy delimiter-bearing job does not poison an unrelated admission or the backfill', async () => {
+    const publisher = createPublisher();
+    const sep = String.fromCharCode(0x1f);
+
+    // Persist a pre-guard legacy job directly (bypassing the now-guarded enqueue),
+    // built from a real accepted job's shape so it is well-formed apart from the
+    // delimiter. serializeJob leaves it un-indexed (the defensive index skip).
+    const seedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'seed' }));
+    const seed = await publisher.getStatus(seedId);
+    if (!seed || seed.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('seed missing');
+    const legacyBad: LiftJob = {
+      ...seed,
+      jobId: 'legacy-bad',
+      request: {
+        ...seed.request,
+        knowledgeAssetVmPublish: { ...seed.request.knowledgeAssetVmPublish, name: `bad${sep}name` },
+      },
+    };
+    await store.insert(serializeJob(legacyBad, DEFAULT_CONTROL_GRAPH_URI));
+
+    // Unrelated valid admission still succeeds (the malformed legacy job is skipped
+    // in the dedup scan, not thrown on).
+    const okId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'albums' }));
+    expect(typeof okId).toBe('string');
+
+    // Boot backfill does not abort on the malformed job.
+    const indexed = await publisher.ensureVmPublishIntentIndex();
+    expect(indexed).toBeGreaterThanOrEqual(0);
+  });
+
+  // #1828 review (otReviewAgent): writeJob deletes the job subject BEFORE serializing
+  // the replacement, so if the key guard threw inside serializeJob a legacy
+  // delimiter-bearing job would be ERASED on its next transition (data loss). The
+  // defensive index skip keeps serializeJob total, so writeJob's re-insert restores it.
+  it('claiming a legacy delimiter-bearing job does not erase it (writeJob delete-then-insert)', async () => {
+    const publisher = createPublisher();
+    const sep = String.fromCharCode(0x1f);
+    const seedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'seed' }));
+    const seed = await publisher.getStatus(seedId);
+    if (!seed || seed.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('seed missing');
+    // Make the injected legacy job the only claimable one, then inject it directly.
+    await publisher.cancel(seedId);
+    const legacyBad: LiftJob = {
+      ...seed,
+      jobId: 'legacy-bad',
+      request: {
+        ...seed.request,
+        knowledgeAssetVmPublish: { ...seed.request.knowledgeAssetVmPublish, name: `bad${sep}name` },
+      },
+    };
+    await store.insert(serializeJob(legacyBad, DEFAULT_CONTROL_GRAPH_URI));
+
+    // claimNext runs writeJob (delete subject, then serialize + insert) on it.
+    const claimed = await publisher.claimNext('wallet-1');
+    expect(claimed?.jobId).toBe('legacy-bad');
+    // The record survived the delete-then-insert (not erased by a mid-serialize throw).
+    expect(await publisher.getStatus('legacy-bad')).not.toBeNull();
+  });
+
   it('recovers the live in-flight job from facts alone (AC1)', async () => {
     const publisher = createPublisher();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
