@@ -192,20 +192,27 @@ export interface HardenPlanInput {
  *  nothing new is pulled). Temp-file + `mv` makes the seed itself
  *  resumable: a crashed copy leaves `.seed.tmp`, never a torn journal.
  *
- *  The volume journal is OVERWRITTEN whenever its size differs from the
- *  current export (not only when missing): after a rollback the volume
- *  holds a stale copy, and a resumed run may carry a fresh export — a
- *  skip-if-present seed would then fail the size predicate forever.
- *  Overwriting is safe here because the volume copy is never the only
- *  copy (the export file and the backup/legacy container both still
- *  exist at this point) and only goes live after verify passes. */
+ *  The volume journal is ALWAYS overwritten from the current export —
+ *  there is deliberately NO skip-if-present / skip-if-same-size fast
+ *  path. Equal byte size does not imply equal content: Blazegraph's
+ *  RWStore recycles pages in place, so after a verify-failure rollback
+ *  (which leaves the seeded volume behind) the legacy container can keep
+ *  writing WITHOUT the journal size ever changing. A size-match skip
+ *  would then carry the stale attempt-1 copy into the hardened container
+ *  on the next run, and verification cannot catch it — the identity tag
+ *  and the size predicate hold for the stale copy too. Silent data loss.
+ *
+ *  Overwriting unconditionally is safe here: the volume copy is never
+ *  the only copy (the export file and the backup/legacy container both
+ *  still exist at this point) and only goes live after verify passes.
+ *  The whole chain is `&&`-linked so a failed cp/mv/chown fails the
+ *  step's exit code instead of falling through to echoing a (possibly
+ *  stale) journal size. */
 function seedScript(): string {
   return (
-    `if [ ! -f ${BLAZEGRAPH_JOURNAL_FILE} ] || ` +
-    `[ "$(stat -c %s ${BLAZEGRAPH_JOURNAL_FILE})" != "$(stat -c %s /seed/${HARDEN_EXPORT_FILENAME})" ]; then ` +
     `cp /seed/${HARDEN_EXPORT_FILENAME} ${BLAZEGRAPH_DATA_DIR}/.seed.tmp && ` +
     `mv ${BLAZEGRAPH_DATA_DIR}/.seed.tmp ${BLAZEGRAPH_JOURNAL_FILE} && ` +
-    `chown ${BLAZEGRAPH_TOMCAT_UID_GID} ${BLAZEGRAPH_JOURNAL_FILE}; fi; ` +
+    `chown ${BLAZEGRAPH_TOMCAT_UID_GID} ${BLAZEGRAPH_JOURNAL_FILE} && ` +
     `stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`
   );
 }
@@ -243,8 +250,8 @@ export function planHardenMigration(input: HardenPlanInput): HardenStep[] {
     id: 'seed-volume',
     description:
       `seed the volume from ${exportPath} via a helper container (same pinned image; ` +
-      `overwrites a stale volume copy whose size differs from the current export; ` +
-      `chown ${BLAZEGRAPH_TOMCAT_UID_GID})`,
+      `the volume journal is ALWAYS overwritten from the current export — equal size ` +
+      `does not imply equal content; chown ${BLAZEGRAPH_TOMCAT_UID_GID})`,
     dockerArgs: seedRunArgs(input),
     predicate: 'seed helper stdout (journal size in volume) equals the CURRENT exported size',
   };
@@ -774,10 +781,11 @@ export async function executeHardenMigration(
     );
 
     // (7) Seed the volume via a helper container from the SAME pinned image
-    // (nothing new pulled). The script copies whenever the volume journal is
-    // missing OR its size differs from the current export (stale copy after
-    // a rollback / a resumed run with a fresh export), and always echoes the
-    // in-volume size for validation against the CURRENT export.
+    // (nothing new pulled). The script ALWAYS overwrites the volume journal
+    // from the current export — a size-match skip would silently reuse a
+    // rollback-stale copy whose size happens to equal the fresh export's
+    // (RWStore rewrites pages in place) — and echoes the in-volume size for
+    // validation against the CURRENT export.
     log(`Seeding volume ${blazegraphVolumeName(containerName)} from the export…`);
     const seedOut = await mustRun(
       docker,

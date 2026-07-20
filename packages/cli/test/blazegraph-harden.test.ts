@@ -283,20 +283,27 @@ describe('planHardenMigration', () => {
     expect(planHardenMigration({ ...input, state: 'absent' })).toEqual([]);
   });
 
-  it('seed script OVERWRITES the volume journal when its size differs from the current export (MAJOR-3)', () => {
+  it('seed script ALWAYS overwrites the volume journal — no size-match or if-present skip', () => {
     const steps = planHardenMigration(input);
     const script = steps.find((s) => s.id === 'seed-volume')!.dockerArgs!.at(-1)!;
-    // Copy when the journal is missing OR its size mismatches the export —
-    // a rollback-stale volume copy must never dead-end the re-run.
-    expect(script).toContain(`if [ ! -f ${BLAZEGRAPH_JOURNAL_FILE} ] || `);
-    expect(script).toContain(
-      `[ "$(stat -c %s ${BLAZEGRAPH_JOURNAL_FILE})" != "$(stat -c %s /seed/${HARDEN_EXPORT_FILENAME})" ]`,
-    );
+    // No conditional skip of ANY kind. Equal byte size does not imply equal
+    // content: RWStore rewrites pages in place, so a verify-failure rollback
+    // leaves a stale volume copy that can share its exact size with the next
+    // run's fresh export — a size-match skip would put the STALE copy live
+    // and verification (identity tag + size >= export) cannot tell them
+    // apart. The script must therefore start with the copy itself.
+    expect(script.startsWith(`cp /seed/${HARDEN_EXPORT_FILENAME} `)).toBe(true);
+    expect(script).not.toContain('if ');
+    expect(script).not.toContain('!=');
     // Still atomic (copy-to-tmp && mv) and still chowns to the tomcat uid:gid.
     expect(script).toContain(`.seed.tmp && mv ${BLAZEGRAPH_DATA_DIR}/.seed.tmp ${BLAZEGRAPH_JOURNAL_FILE}`);
     expect(script).toContain('chown 100:1000');
-    // Final size echo is unconditional so the executor validates against
-    // the CURRENT export.
+    // The whole chain is &&-linked: a failed cp/mv/chown must fail the step's
+    // exit code, never fall through to echoing a (possibly stale) journal
+    // size that the executor would then validate as a successful seed.
+    expect(script).toContain(
+      `chown 100:1000 ${BLAZEGRAPH_JOURNAL_FILE} && stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`,
+    );
     expect(script.trimEnd().endsWith(`stat -c %s ${BLAZEGRAPH_JOURNAL_FILE}`)).toBe(true);
   });
 });
