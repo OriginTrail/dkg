@@ -393,6 +393,34 @@
         "u64"
       ]
     },
+    "RdfPolicyV1": {
+      "fields": [
+        "version",
+        "adapterVersion",
+        "allowedGraphPrefixes",
+        "maxQuadsPerMutation",
+        "maxWalObjectBytes",
+        "singleValuedPredicates",
+        "multiValuedPredicates",
+        "sharedWriteLogicalKeys",
+        "resolverAddresses",
+        "expiryAuthorityAddresses",
+        "allowedPayloadKinds"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16",
+        "sorted-unique<nfc-tstr>",
+        "u64",
+        "u64",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<bytes32>",
+        "sorted-unique<address20>",
+        "sorted-unique<address20>",
+        "sorted-unique<u16>"
+      ]
+    },
     "ChainBindingV1": {
       "fields": [
         "chainId",

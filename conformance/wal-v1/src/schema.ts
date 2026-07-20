@@ -191,6 +191,10 @@ export const TUPLES = Object.freeze({
     ['graphIri', 'subjectIri', 'canonicalNQuadsBytes', 'quadCount'],
     ['nfc-tstr', 'nfc-tstr', 'bstr', 'u64']
   ),
+  RdfPolicyV1: tuple(
+    ['version', 'adapterVersion', 'allowedGraphPrefixes', 'maxQuadsPerMutation', 'maxWalObjectBytes', 'singleValuedPredicates', 'multiValuedPredicates', 'sharedWriteLogicalKeys', 'resolverAddresses', 'expiryAuthorityAddresses', 'allowedPayloadKinds'],
+    ['literal-1', 'u16', 'sorted-unique<nfc-tstr>', 'u64', 'u64', 'sorted-unique<nfc-tstr>', 'sorted-unique<nfc-tstr>', 'sorted-unique<bytes32>', 'sorted-unique<address20>', 'sorted-unique<address20>', 'sorted-unique<u16>']
+  ),
   ChainBindingV1: tuple(
     ['chainId', 'contextGraphOnChainId', 'kaId', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
     ['u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16', 'u32']

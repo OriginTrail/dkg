@@ -30,6 +30,12 @@ import {
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot, verifyMembershipProof, type SetMembershipProof } from '../src/set-commitment.js';
 import { DOMAINS, SCHEMA, TUPLES } from '../src/schema.js';
+import {
+  independentCanonicalNQuads,
+  independentRdfLogicalKey,
+  independentRdfStateDigest,
+  independentRdfTouchedKey
+} from '../src/rdf.js';
 import { decodeUnsignedVarint, decodeWireFrame, encodeWireFrame, wireFramesEqual } from '../src/wire.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -307,6 +313,63 @@ describe('ProtocolV1IbltReconciliationAlgorithm', () => {
 });
 
 describe('adapter, reducer, privacy, and finality vectors', () => {
+  it('independently reproduces canonical RDF, state, logical-key, touched-key, policy, and mutation bytes', () => {
+    const rdf = vectors.rdfAdapter;
+    const canonical = independentCanonicalNQuads(rdf.canonicalization.input);
+    expect(hex(canonical)).toBe(rdf.canonicalization.canonicalBytes);
+    expect(new TextDecoder().decode(canonical)).toBe(rdf.canonicalization.canonical);
+    expect(hex(independentRdfStateDigest(canonical))).toBe(rdf.canonicalization.stateDigest);
+    expect(hex(independentRdfLogicalKey({
+      contextGraphId: rdf.logicalKey.contextGraphId,
+      subGraphName: rdf.logicalKey.subGraphName,
+      authorAddress: fromHex(rdf.logicalKey.authorAddress, 20),
+      entity: rdf.logicalKey.knowledgeAssetUalOrRootEntity
+    }))).toBe(rdf.logicalKey.digest);
+    for (const item of rdf.touchedKeys) {
+      expect(hex(independentRdfTouchedKey(item.graphIri, item.subjectIri, item.predicateIri)))
+        .toBe(item.digest);
+    }
+    const policy = [
+      1n,
+      BigInt(rdf.policy.adapterVersion),
+      rdf.policy.allowedGraphPrefixes,
+      BigInt(rdf.policy.maxQuadsPerMutation),
+      BigInt(rdf.policy.maxWalObjectBytes),
+      rdf.policy.singleValuedPredicates,
+      rdf.policy.multiValuedPredicates,
+      [],
+      [],
+      [],
+      rdf.policy.allowedPayloadKinds.map(BigInt)
+    ] as const;
+    expect(hex(encodeCanonical(policy))).toBe(rdf.policy.canonicalBytes);
+    const touched = rdf.publishReplace.touchedKeys.map((value: string) => fromHex(value, 32));
+    const mutation = [
+      1n,
+      0n,
+      independentRdfStateDigest(new Uint8Array()),
+      fromHex(rdf.publishReplace.resultStateDigest, 32),
+      [[rdf.publishReplace.graphIri, canonical, 2n]],
+      [],
+      new Uint8Array(),
+      new Uint8Array(),
+      touched,
+      null
+    ] as const;
+    expect(hex(encodeCanonical(mutation))).toBe(rdf.publishReplace.rdfMutationBytes);
+    expect(hex(encodeCanonical([
+      1n,
+      0n,
+      fromHex(rdf.logicalKey.digest, 32),
+      [],
+      [],
+      fromHex(rdf.publishReplace.policyObjectId, 32),
+      mutation,
+      null,
+      null
+    ]))).toBe(rdf.publishReplace.dkgMutationBytes);
+  });
+
   it('decrypts the fixed AES-GCM vector in independent implementations', async () => {
     const epochKey = fromHex(vectors.encryption.epochKey, 32);
     const coordinates = {

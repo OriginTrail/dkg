@@ -814,17 +814,17 @@ SPARQL execution.
 
 ### Acceptance area
 
-- [ ] Canonicalization fixtures produce byte-identical N-Quads and state digests
+- [x] Canonicalization fixtures produce byte-identical N-Quads and state digests
       across supported runtimes and stores.
-- [ ] Existing DKG publish/share/update/delete golden cases compile to results
+- [x] Existing DKG publish/share/update/delete golden cases compile to results
       with identical canonical RDF and authorization outcomes.
-- [ ] Unsupported/nondeterministic SPARQL and graph-scope escape attempts fail
+- [x] Unsupported/nondeterministic SPARQL and graph-scope escape attempts fail
       before WAL commit with stable reason codes.
-- [ ] `parents`, `baseHeads`, `baseStateDigest`, `resultStateDigest`, touched keys,
+- [x] `parents`, `baseHeads`, `baseStateDigest`, `resultStateDigest`, touched keys,
       and graph/subject replacement scopes satisfy frozen reducer relations.
-- [ ] Remote nodes receive only explicit canonical result bytes and never execute
+- [x] Remote nodes receive only explicit canonical result bytes and never execute
       the source SPARQL audit text.
-- [ ] Policy substitution, unknown adapter version, oversized mutation, blank
+- [x] Policy substitution, unknown adapter version, oversized mutation, blank
       node, and shared-writer authorization negatives pass.
 
 ---

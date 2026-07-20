@@ -50,6 +50,11 @@
       "import": "./dist/admission/index.js",
       "default": "./dist/admission/index.js"
     },
+    "./rdf": {
+      "types": "./dist/rdf/index.d.ts",
+      "import": "./dist/rdf/index.js",
+      "default": "./dist/rdf/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

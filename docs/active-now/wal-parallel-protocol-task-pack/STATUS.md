@@ -14,8 +14,9 @@
 | `WAL-009` | Implemented and verified | The same branch contains all three authenticated raw protocol families, byte-exact varint/canonical-CBOR framing and independent vectors, the complete method/error catalog, proof/response binding, replay/freshness/cancellation/deadline/resource bounds, 69 unchanged-router regressions, 397 WAL tests at 100% coverage, and 49 conformance tests. See `WAL-009-EVIDENCE.md`. |
 | `WAL-010` | Implemented and verified | The same branch contains real-authority-lifecycle public/private cold start, canonical threshold-signed provider manifests, member-private tickets without discovery metadata leakage, existing `PeerResolver` integration, durable hints/backoff/retries, bounded scoring/fan-out, and verified cross-provider symbol/fallback/whole-object-range switching. All 419 WAL tests pass at 100% coverage. See `WAL-010-EVIDENCE.md`. |
 | `WAL-011` | Implemented and verified | The same branch contains one opaque fail-closed admission pipeline for local validation, network, backfill, and replay; bounded causal closure; atomic closed-batch admission; durable blocking/retry/quarantine; stable reason codes; and the first real three-node daemon WAL capability/restart smoke. All 462 WAL tests pass at 100% coverage. See `WAL-011-EVIDENCE.md`. |
+| `WAL-012` | Implemented and verified | The same branch contains canonical blank-node-free N-Quads, deterministic state/logical/touched keys, signed RDF-policy admission, a bounded local SPARQL compiler, explicit mutation bytes for remote application, independent TypeScript vectors, Oxigraph/Blazegraph parity tests, unchanged DKG semantic-oracle results, and the cumulative real-daemon restart smoke. All 552 WAL tests pass at 100% coverage. See `WAL-012-EVIDENCE.md`. |
 
-WAL-001 through WAL-011 now share one linear implementation history, one worktree,
+WAL-001 through WAL-012 now share one linear implementation history, one worktree,
 and one authoritative branch. No Go/Rust/Python conformance implementation is
 required. The exact-integer mapping is retained only as named A/B experiment
 evidence; protocol version 1 uses the benchmarked exact binary64 evaluation

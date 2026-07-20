@@ -30,11 +30,25 @@ import {
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot } from '../src/set-commitment.js';
 import { DOMAINS, ENUMS, IBLT_ALGORITHM, LIMITS, SCHEMA } from '../src/schema.js';
+import {
+  independentCanonicalNQuads,
+  independentRdfLogicalKey,
+  independentRdfStateDigest,
+  independentRdfTouchedKey
+} from '../src/rdf.js';
 import { decodeUnsignedVarint, encodeUnsignedVarint, encodeWireFrame } from '../src/wire.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const vectorsPath = resolve(here, '../vectors/protocol-v1.json');
 const schemaPath = resolve(here, '../vectors/protocol-v1.schema.json');
+const normativeVectorsPath = resolve(
+  here,
+  '../../../docs/active-now/wal-parallel-protocol-task-pack/vectors/OT-RFC-65-protocol-v1.json'
+);
+const normativeSchemaPath = resolve(
+  here,
+  '../../../docs/active-now/wal-parallel-protocol-task-pack/vectors/OT-RFC-65-protocol-v1.schema.json'
+);
 
 function fixtureId(label: string): Uint8Array {
   return hash('dkg-wal-fixture-id-v1\0', utf8(label));
@@ -96,6 +110,60 @@ async function buildVectors() {
   ] as const;
   const collection = collectionId(collectionKey);
   const namespace = namespaceId(viewKey);
+  const rdfCanonicalInput = '  <urn:s:z> <urn:p:name> "Cafe\\u0301"@EN <urn:g> .\r\n'
+    + '<urn:s:a> <urn:p:link> <urn:o> <urn:g> .\n'
+    + '<urn:s:z> <urn:p:name> "Caf\\u00E9"@en <urn:g> . # duplicate\n';
+  const rdfCanonical = independentCanonicalNQuads(rdfCanonicalInput);
+  const rdfAuthorAddress = byteRange(0xa0, 20);
+  const rdfLogicalCoordinates = {
+    contextGraphId: 'urn:cg:fixture',
+    subGraphName: 'main',
+    authorAddress: rdfAuthorAddress,
+    entity: 'did:dkg:otp:2043/0xabc/1'
+  } as const;
+  const rdfLogicalKey = independentRdfLogicalKey(rdfLogicalCoordinates);
+  const rdfTouchedKeys = [
+    independentRdfTouchedKey('urn:g', 'urn:s:a', 'urn:p:link'),
+    independentRdfTouchedKey('urn:g', 'urn:s:z', 'urn:p:name')
+  ].sort(compareBytes);
+  const rdfPolicyObjectId = fixtureId('rdf-policy-v1');
+  const rdfPolicy = [
+    1n,
+    1n,
+    ['urn:g'],
+    100n,
+    1_000_000n,
+    ['urn:p:name'],
+    ['urn:p:link'],
+    [],
+    [],
+    [],
+    [BigInt(ENUMS.payloadKind.DKG_MUTATION), BigInt(ENUMS.payloadKind.RDF_POLICY)]
+  ] as const;
+  const rdfResultDigest = independentRdfStateDigest(rdfCanonical);
+  const rdfReplaceMutation = [
+    1n,
+    BigInt(ENUMS.mutationMode.REPLACE),
+    independentRdfStateDigest(new Uint8Array()),
+    rdfResultDigest,
+    [['urn:g', rdfCanonical, 2n]],
+    [],
+    new Uint8Array(),
+    new Uint8Array(),
+    rdfTouchedKeys,
+    null
+  ] as const;
+  const rdfDkgMutation = [
+    1n,
+    BigInt(ENUMS.mutationOperation.PUT),
+    rdfLogicalKey,
+    [],
+    [],
+    rdfPolicyObjectId,
+    rdfReplaceMutation,
+    null,
+    null
+  ] as const;
   const logicalKey = fixtureId('logical-key');
   const policyObjectId = fixtureId('rdf-policy');
   const baseStateDigest = fixtureId('base-state');
@@ -595,6 +663,44 @@ async function buildVectors() {
       keyCbor: hex(encodeCanonical(viewKey)),
       namespaceId: hex(namespace)
     },
+    rdfAdapter: {
+      canonicalization: {
+        input: rdfCanonicalInput,
+        canonical: new TextDecoder().decode(rdfCanonical),
+        canonicalBytes: hex(rdfCanonical),
+        stateDigest: hex(rdfResultDigest)
+      },
+      logicalKey: {
+        contextGraphId: rdfLogicalCoordinates.contextGraphId,
+        subGraphName: rdfLogicalCoordinates.subGraphName,
+        authorAddress: hex(rdfLogicalCoordinates.authorAddress),
+        knowledgeAssetUalOrRootEntity: rdfLogicalCoordinates.entity,
+        digest: hex(rdfLogicalKey)
+      },
+      touchedKeys: [
+        { graphIri: 'urn:g', subjectIri: 'urn:s:a', predicateIri: 'urn:p:link' },
+        { graphIri: 'urn:g', subjectIri: 'urn:s:z', predicateIri: 'urn:p:name' }
+      ].map((value) => ({ ...value, digest: hex(independentRdfTouchedKey(value.graphIri, value.subjectIri, value.predicateIri)) })),
+      policy: {
+        adapterVersion: '1',
+        allowedGraphPrefixes: ['urn:g'],
+        maxQuadsPerMutation: '100',
+        maxWalObjectBytes: '1000000',
+        singleValuedPredicates: ['urn:p:name'],
+        multiValuedPredicates: ['urn:p:link'],
+        allowedPayloadKinds: [ENUMS.payloadKind.DKG_MUTATION, ENUMS.payloadKind.RDF_POLICY],
+        canonicalBytes: hex(encodeCanonical(rdfPolicy))
+      },
+      publishReplace: {
+        operation: 'PUT',
+        graphIri: 'urn:g',
+        policyObjectId: hex(rdfPolicyObjectId),
+        resultStateDigest: hex(rdfResultDigest),
+        touchedKeys: rdfTouchedKeys.map(hex),
+        rdfMutationBytes: hex(encodeCanonical(rdfReplaceMutation)),
+        dkgMutationBytes: hex(encodeCanonical(rdfDkgMutation))
+      }
+    },
     walObjects: {
       first: {
         unsignedTupleCbor: hex(encodeCanonical(unsigned)),
@@ -793,16 +899,25 @@ async function buildVectors() {
 const { schemaText, vectorsText } = await buildVectors();
 const check = process.argv.includes('--check');
 if (check) {
-  const [existingSchema, existingVectors] = await Promise.all([
+  const [existingSchema, existingVectors, normativeSchema, normativeVectors] = await Promise.all([
     readFile(schemaPath, 'utf8'),
-    readFile(vectorsPath, 'utf8')
+    readFile(vectorsPath, 'utf8'),
+    readFile(normativeSchemaPath, 'utf8'),
+    readFile(normativeVectorsPath, 'utf8')
   ]);
-  if (existingSchema !== schemaText || existingVectors !== vectorsText) {
+  if (
+    existingSchema !== schemaText
+    || existingVectors !== vectorsText
+    || normativeSchema !== schemaText
+    || normativeVectors !== vectorsText
+  ) {
     throw new Error('checked-in WAL protocol v1 schema or vectors are stale');
   }
 } else {
   await Promise.all([
     writeFile(schemaPath, schemaText),
-    writeFile(vectorsPath, vectorsText)
+    writeFile(vectorsPath, vectorsText),
+    writeFile(normativeSchemaPath, schemaText),
+    writeFile(normativeVectorsPath, vectorsText)
   ]);
 }

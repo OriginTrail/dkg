@@ -320,6 +320,66 @@
     "keyCbor": "87686f74703a323034337675726e3a646b673a63673a77616c2d66697874757265f6000007f6",
     "namespaceId": "a723b15aeee4dc7a8b6149fe00c2455ff11c13a7e40f5c2667ad471367d09430"
   },
+  "rdfAdapter": {
+    "canonicalization": {
+      "input": "  <urn:s:z> <urn:p:name> \"Cafe\\u0301\"@EN <urn:g> .\r\n<urn:s:a> <urn:p:link> <urn:o> <urn:g> .\n<urn:s:z> <urn:p:name> \"Caf\\u00E9\"@en <urn:g> . # duplicate\n",
+      "canonical": "<urn:s:a> <urn:p:link> <urn:o> <urn:g> .\n<urn:s:z> <urn:p:name> \"Café\"@en <urn:g> .\n",
+      "canonicalBytes": "3c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a",
+      "stateDigest": "b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b7"
+    },
+    "logicalKey": {
+      "contextGraphId": "urn:cg:fixture",
+      "subGraphName": "main",
+      "authorAddress": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3",
+      "knowledgeAssetUalOrRootEntity": "did:dkg:otp:2043/0xabc/1",
+      "digest": "48ce76e46fd4c89c9572ea9ad55226f2f5734fbba3b02251a61772a3c5577fb3"
+    },
+    "touchedKeys": [
+      {
+        "graphIri": "urn:g",
+        "subjectIri": "urn:s:a",
+        "predicateIri": "urn:p:link",
+        "digest": "8ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a8"
+      },
+      {
+        "graphIri": "urn:g",
+        "subjectIri": "urn:s:z",
+        "predicateIri": "urn:p:name",
+        "digest": "f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585b"
+      }
+    ],
+    "policy": {
+      "adapterVersion": "1",
+      "allowedGraphPrefixes": [
+        "urn:g"
+      ],
+      "maxQuadsPerMutation": "100",
+      "maxWalObjectBytes": "1000000",
+      "singleValuedPredicates": [
+        "urn:p:name"
+      ],
+      "multiValuedPredicates": [
+        "urn:p:link"
+      ],
+      "allowedPayloadKinds": [
+        0,
+        1
+      ],
+      "canonicalBytes": "8b0101816575726e3a6718641a000f4240816a75726e3a703a6e616d65816a75726e3a703a6c696e6b808080820001"
+    },
+    "publishReplace": {
+      "operation": "PUT",
+      "graphIri": "urn:g",
+      "policyObjectId": "22ea8317fdc7e05da8bee434b103dee1f2259eb57f6acb40b6d88441117f46a5",
+      "resultStateDigest": "b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b7",
+      "touchedKeys": [
+        "8ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a8",
+        "f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585b"
+      ],
+      "rdfMutationBytes": "8a01005820570fff616e93c7fde210c46e68cd9b2a3a6500aeff11cefc22a7f90cdbe344195820b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b781836575726e3a6758553c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a028040408258208ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a85820f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585bf6",
+      "dkgMutationBytes": "890100582048ce76e46fd4c89c9572ea9ad55226f2f5734fbba3b02251a61772a3c5577fb38080582022ea8317fdc7e05da8bee434b103dee1f2259eb57f6acb40b6d88441117f46a58a01005820570fff616e93c7fde210c46e68cd9b2a3a6500aeff11cefc22a7f90cdbe344195820b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b781836575726e3a6758553c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a028040408258208ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a85820f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585bf6f6f6"
+    }
+  },
   "walObjects": {
     "first": {
       "unsignedTupleCbor": "87015820a723b15aeee4dc7a8b6149fe00c2455ff11c13a7e40f5c2667ad471367d094305470997970c51812dc3a010c7d01b50e0d17dc79c80300f659017886010000782d6170706c69636174696f6e2f766e642e6f726967696e747261696c2e646b672d6d75746174696f6e2b63626f72f65901418901015820244271074185adceabc59f3ad47051bbe2ff31b9250925007453660e6334459f80805820974de10ad27f3c212590a4e44e60343eb72cda085baa0f1f035994b830b06b448a01015820ae334052c1d2b86a03699f32fd9bac7356a405a5b2f73c0e03bf334ae16904735820d9fe3522e130e36ae7bfd94886db8ccadd04071b398ec157c9df3e689f4a0c9280804058333c75726e3a646b673a733e203c75726e3a646b673a703a6e616d653e2022416c69636522203c75726e3a646b673a673e202e0a815820d31a48bebfb2ba6ec6991bf25fd3e19cc8688581ac13a577e62e9f2ea045821f584a494e534552542044415441207b204752415048203c75726e3a646b673a673e207b203c75726e3a646b673a733e203c75726e3a646b673a703a6e616d653e2022416c69636522207d207df61b000001977420dc00",
