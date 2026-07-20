@@ -1090,11 +1090,25 @@ export class SharedMemoryHandler {
       // member->curator SWM share on a public/curated CG. Both sides now read
       // the same live on-chain predicate, and both fail closed when it cannot
       // prove public.
+      // LAZY probe — only when the CG is agent-gated. The helper consumes
+      // provenPublicOnChain exclusively behind `isAgentGated`, so for an
+      // ungated CG the probe's answer is irrelevant; awaiting it anyway puts a
+      // live chain RPC (resolveOnChainAccessPolicyState, network + timeout
+      // machinery) on the hot path of EVERY SWM gossip receive. Measured on a
+      // 6-node devnet this took receive-apply from ~3ms to ~33ms and flipped
+      // the public-CG sync gate red: the author's next poll slipped one 3s
+      // cycle, the VM publish then landed AFTER the live receiver's queued
+      // catch-up had already run, and the receiver starved until the periodic
+      // sweep (~5min). The pre-refactor code short-circuited exactly this way
+      // (`agentGateAddresses !== null && !(await probe())`); keep that
+      // evaluation order while preserving the must-vs-may split.
       const { requiresEncryptedPayload, supportsEncryptedPayload } =
         resolveWorkspaceEncryptionRequirement({
           hasPrivateAccessPolicy,
           agentGateAddresses,
-          provenPublicOnChain: await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx),
+          provenPublicOnChain: agentGateAddresses !== null
+            ? await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx)
+            : false,
         });
       // MUST-be-encrypted and MAY-be-encrypted are different questions, and
       // conflating them turns a public+agent-gated CG into a permanent failure
