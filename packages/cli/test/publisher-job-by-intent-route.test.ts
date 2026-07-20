@@ -165,6 +165,27 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
     expect(body.result).toBe('active');
     expect(body.job?.jobId).toBe(research);
   });
+
+  // #1828 (otReviewAgent + branarakic): admission rejects an empty subGraphName
+  // (validateOptionalSubGraphName), and the lifecycle key collapses '' and undefined
+  // to the same root lane (`subGraphName ?? ''`). An explicit `subGraphName=` must be
+  // a 400 — not silently alias and recover the root job.
+  it('400s on an explicit empty subGraphName (does not alias the root job)', async () => {
+    const { control, jobId } = await newControlWithJob(); // root-lane job (no subGraphName)
+    const ctx = createContext(
+      '/api/publisher/job-by-intent?contextGraphId=music-social&name=albums&subGraphName=',
+      control,
+    );
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(400);
+
+    // Sanity: the same facts WITHOUT the empty param recover the root job, proving
+    // the 400 is specifically the empty-string guard, not a facts mismatch.
+    const ok = createContext('/api/publisher/job-by-intent?contextGraphId=music-social&name=albums', control);
+    await handlePublisherRoutes(ok);
+    expect(responseStatus(ok)).toBe(200);
+    expect((responseBody(ok) as { result: string; job?: { jobId: string } }).job?.jobId).toBe(jobId);
+  });
 });
 
 function createContext(

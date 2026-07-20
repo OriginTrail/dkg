@@ -417,7 +417,14 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     //    identical chain (resolveAgentAddress) admission used — instead of the empty
     //    lane, which would never match. An explicit query param still wins.
     const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
-    const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
+    // Admission rejects an empty subGraphName (validateOptionalSubGraphName): the
+    // root lane is addressed by OMITTING the param, not by an empty value. Reuse the
+    // same validator so an explicit `subGraphName=` is a 400 rather than silently
+    // aliasing the root job — knowledgeAssetVmPublishLifecycleKey collapses '' and
+    // undefined to the same lane (`subGraphName ?? ''`). #1828 review.
+    const rawSubGraphName = url.searchParams.get("subGraphName");
+    if (!validateOptionalSubGraphName(rawSubGraphName, res)) return;
+    const subGraphName = rawSubGraphName ?? undefined;
     const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
     const agentAddress = explicitAgentAddress ?? requestAgentAddress;
     // The lifecycle key joins these facts with a U+001F control char (matching the

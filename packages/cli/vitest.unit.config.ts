@@ -93,6 +93,9 @@ export default defineConfig({
           // #1836 — config→construction wiring seam (runDaemonInner forwards
           // config.publisher.maxRetries into both admission constructors).
           'test/publisher-maxretries-wiring-1836.test.ts',
+          // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
+          // intent-index backfill with the admission publisher control).
+          'test/publisher-backfill-wiring-1828.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
