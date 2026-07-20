@@ -530,23 +530,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
       if (!executorReturned && current?.status === 'broadcast') {
-        // The write-ahead hook durably recorded 'broadcast' (the fsync succeeded)
-        // before the adapter sent the tx, then confirmation was interrupted.
-        // Reconcile on chain — never resend.
+        // The tx send happens strictly AFTER the write-ahead durably records
+        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
+        // failure rolls the transition back). So a durable 'broadcast' here means
+        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend. A
+        // pre-send failure (fsync failed → rolled back to 'validated', or an error
+        // before the write-ahead) does NOT reach here and is recorded as 'failed'
+        // below; a failed KA VM job is never chain-recovery-chased
+        // (canRetryFailedRecovery === false), and its code comes from the publish
+        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
         return current;
       }
-      // The publish tx is sent strictly AFTER the write-ahead record is fsync-durable
-      // (the adapter fails closed on a hook error, evm-adapter-base.dispatchSerializedV10Write).
-      // So if the executor never returned and the durable status is not 'broadcast'
-      // (e.g. the write-ahead fsync failed and rolled the transition back), no tx
-      // reached the wire — fail from the pre-broadcast ('validated') state, off the
-      // chain-recovery track (which chases an on-chain tx that never landed).
-      // Failures after the executor returned keep the precondition heuristic.
-      const failedFromState: LiftJobState = !executorReturned
+      const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
         ? 'validated'
-        : this.isKnowledgeAssetPublishPreconditionFailure(error)
-          ? 'validated'
-          : 'broadcast';
+        : 'broadcast';
       return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
     }
   }

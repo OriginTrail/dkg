@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
@@ -251,21 +252,52 @@ describe('async lift publisher broadcast durability', () => {
 
     // The tx was never sent.
     expect(sent).toBe(false);
-    // The job is not left or reported as 'broadcast'.
+    // The job is not left or reported as 'broadcast' (the rollback is what makes
+    // this hold — see the mutation-check below).
     expect(processed?.status).toBe('failed');
     expect(processed?.status).not.toBe('broadcast');
-    expect(processed?.failure?.failedFromState).toBe('validated');
 
     const persisted = await publisher.getStatus(jobId);
     expect(persisted?.status).toBe('failed');
     expect(persisted?.status).not.toBe('broadcast');
 
-    // Recovery must NOT treat it as an on-chain tx: a broadcast/included failure
-    // would be a retry_recovery job that chases a tx hash that never landed. A
-    // pre-broadcast failure is resolved off the chain-recovery track.
+    // Treated as never-sent: retryable and reset to accepted, NOT the
+    // chain-recovery track (retry_recovery / check-chain) that would chase a tx
+    // hash that never landed.
+    expect(processed?.failure?.retryable).toBe(true);
+    expect(processed?.failure?.resolution).toBe('reset_to_accepted');
     expect(processed?.failure?.resolution).not.toBe('retry_recovery');
     const recovered = await publisher.recover();
     expect(recovered).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  it('classifies a pre-onPhase funding failure as insufficient_funds, off the recovery track', async () => {
+    // Regression (#1851 review): a NO_FUNDED_PUBLISHER_WALLET thrown by the
+    // executor BEFORE the write-ahead onPhase must keep its structured code
+    // (insufficient_funds via the publish mapper), not be relabelled a generic
+    // validation failure. No tx is ever sent, so it must not enter chain recovery.
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => {
+          // Mirrors dkg-chain's funded-wallet selection failing before any send.
+          throw Object.assign(
+            new Error('No operational wallet has enough funds to publish'),
+            { code: NO_FUNDED_PUBLISHER_WALLET_CODE },
+          );
+        },
+      },
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+    // Terminal funding failure, off the chain-recovery track (no tx was sent).
+    expect(processed?.failure?.resolution).not.toBe('retry_recovery');
+    expect(await publisher.recover()).toBe(0);
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
   });
 });
