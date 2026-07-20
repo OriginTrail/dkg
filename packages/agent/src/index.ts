@@ -67,6 +67,12 @@ export {
   type DkgWalPublisherShadowWriterOptions,
 } from './wal/local-commit.js';
 export {
+  DkgWalReplayCoreAdapterV1,
+  replayAdmittedWalSetWithDkgCoreV1,
+  type DkgWalReplayCoreAdapterOptionsV1,
+  type ReplayAdmittedWalSetWithDkgCoreOptionsV1,
+} from './wal/replay-conflict-adapter.js';
+export {
   DkgWalLocalAuthoringBundleError,
   SignedDkgWalLocalAuthoringResolverV1,
   loadSignedDkgWalLocalAuthoringResolverV1,

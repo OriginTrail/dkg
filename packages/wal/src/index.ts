@@ -8,4 +8,5 @@ export * from './privacy/index.js';
 export * from './discovery/index.js';
 export * from './admission/index.js';
 export * from './rdf/index.js';
+export * from './replay/index.js';
 export * from './local-commit.js';

@@ -33,7 +33,17 @@ export type DkgSemanticDriver =
 export type DkgSemanticEntryPoint =
   | 'verified-graph-scoped-materialization'
   | 'verified-swm-recovery'
-  | 'vm-reconciliation';
+  | 'vm-reconciliation'
+  | 'wal-replay-initial-state'
+  | 'wal-replay-transition'
+  | 'wal-replay-compatible-merge';
+
+export type DkgWalReplaySemanticEntryPoint = Extract<
+  DkgSemanticEntryPoint,
+  | 'wal-replay-initial-state'
+  | 'wal-replay-transition'
+  | 'wal-replay-compatible-merge'
+>;
 
 export interface DkgSemanticCoreTraceEvent {
   readonly driver: DkgSemanticDriver;
@@ -155,6 +165,20 @@ export class DkgSemanticCore {
         params.onChainContextGraphId,
       ),
     );
+  }
+
+  /**
+   * Trace and invoke one WAL replay call through this same shared boundary.
+   * The supplied operation is an existing semantic-core implementation; this
+   * method does not interpret the candidate or select a different function by
+   * synchronization driver.
+   */
+  async invokeWalReplaySemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
+    entryPoint: DkgWalReplaySemanticEntryPoint,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, entryPoint, operation);
   }
 
   private async invoke<T>(

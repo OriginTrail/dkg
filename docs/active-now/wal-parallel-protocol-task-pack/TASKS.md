@@ -953,27 +953,27 @@ orders inputs to the one existing DKG/SWM/VM implementation.
 
 ### Acceptance area
 
-- [ ] Every replay/conflict scenario obtains its decision from the shared
+- [x] Every replay/conflict scenario obtains its decision from the shared
       semantic core and then produces identical active-head, state, and
       conflict digests under all WAL-object-arrival and provider permutations.
 - [ ] Instrumented current-sync and WAL-replay scenarios invoke the same semantic
       entry points and return the same outcomes; static/code review finds no
       duplicated DKG/SWM/VM/verified-memory/finality/crypto implementation.
-- [ ] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
+- [x] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
       delete/update, tier movement, multi-base, resolution, and equivocation
       vectors match the normative fixtures. Those fixtures consume
       semantic-core outcomes as inputs; they do not contain a DKG decision table.
-- [ ] No incompatible branch is dropped or made active by wall clock, arrival
+- [x] No incompatible branch is dropped or made active by wall clock, arrival
       order, provider identity, or lexical `WalObjectId` winner selection.
-- [ ] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
+- [x] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
       without changing active/conflict state.
-- [ ] Resource limits bound causal depth, conflict heads, touched keys, and
+- [x] Resource limits bound causal depth, conflict heads, touched keys, and
       recomputation work with stable blocked/quarantine outcomes.
 - [ ] Replay output matches the shared semantic oracle for all previously
       defined behavior. There is no permitted RFC divergence from established
       DKG semantics in this task; a desired semantic change belongs in the
       semantic core and applies to both synchronization mechanisms.
-- [ ] Naming, APIs, package boundaries, and operator output call this a
+- [x] Naming, APIs, package boundaries, and operator output call this a
       replay/conflict adapter, never a DKG reducer or WAL semantic engine.
 
 ---

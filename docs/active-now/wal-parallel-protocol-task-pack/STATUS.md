@@ -15,9 +15,13 @@
 | `WAL-010` | Implemented and verified | The same branch contains real-authority-lifecycle public/private cold start, canonical threshold-signed provider manifests, member-private tickets without discovery metadata leakage, existing `PeerResolver` integration, durable hints/backoff/retries, bounded scoring/fan-out, and verified cross-provider symbol/fallback/whole-object-range switching. All 419 WAL tests pass at 100% coverage. See `WAL-010-EVIDENCE.md`. |
 | `WAL-011` | Implemented and verified | The same branch contains one opaque fail-closed admission pipeline for local validation, network, backfill, and replay; bounded causal closure; atomic closed-batch admission; durable blocking/retry/quarantine; stable reason codes; and the first real three-node daemon WAL capability/restart smoke. All 462 WAL tests pass at 100% coverage. See `WAL-011-EVIDENCE.md`. |
 | `WAL-012` | Implemented and verified | Canonical N-Quads, deterministic state/logical/touched keys, signed replay-policy admission, explicit accepted-outcome bytes, independent TypeScript vectors, and store parity are implemented. The WAL-only SPARQL evaluator is removed. Legacy-sync graph materialization, verified SWM recovery, and VM reconciliation now enter one driver-independent `DkgSemanticCore` adapter, while static tests prevent bypasses. Actual WAL replay delegation remains a `WAL-014` acceptance gate. See `WAL-012-EVIDENCE.md`. |
+| `WAL-013` | Implementation increment pushed; acceptance open | Namespace-scoped authoring, packed-store/control transaction integration, replay outbox, per-view privacy isolation, existing Sender Key epoch reuse, publisher capture, CLI wiring, devnet scripts, and benchmark receipts are implemented at `418b8faf0`. The measured shadow overhead exceeds the RFC latency/CPU limits, the network workload gate is not yet valid, and signed expiry/rebuild materialization remain open; current sync is not used as a correctness baseline. |
+| `WAL-014` | Core implementation verified; integration acceptance open | Deterministic causal replay, protocol-level compatibility/conflict handling, equivocation blocking, bounded work, complete resolution checks, and the narrow shared-core bridge are implemented. All 598 WAL tests pass at 100% package coverage and all 1,215 agent unit tests pass. Full production cross-path semantic-oracle coverage remains open in acceptance items 2 and 7. See `WAL-014-EVIDENCE.md`. |
 
-WAL-000 through WAL-012 now share one linear implementation history, one worktree,
-and one authoritative branch. No Go/Rust/Python conformance implementation is
-required. The exact-integer mapping is retained only as named A/B experiment
-evidence; protocol version 1 uses the benchmarked exact binary64 evaluation
-profile and its regenerated language-neutral vectors.
+All work through the current WAL-014 increment shares one linear implementation
+history, one worktree, and one authoritative branch. WAL-013 and WAL-014 are not
+declared complete while their explicitly listed acceptance gates remain open.
+No Go/Rust/Python conformance implementation is required. The exact-integer
+mapping is retained only as named A/B experiment evidence; protocol version 1
+uses the benchmarked exact binary64 evaluation profile and its regenerated
+language-neutral vectors.
