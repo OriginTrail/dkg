@@ -73,6 +73,18 @@ export {
   type ReplayAdmittedWalSetWithDkgCoreOptionsV1,
 } from './wal/replay-conflict-adapter.js';
 export {
+  DkgWalProjectionMaterializerError,
+  DkgWalProjectionMaterializerV1,
+  type DkgWalProjectionApplyResultV1,
+  type DkgWalProjectionMaterializerErrorCode,
+  type DkgWalProjectionMaterializerOptionsV1,
+  type DkgWalProjectionRecoveryAuditV1,
+  type DkgWalProjectionRecalculateV1,
+  type DkgWalSemanticProjectionOutcomeV1,
+  type LocalWalProjectionRebuildSourceV1,
+  type WalProjectionScopeV1,
+} from './wal/projection-materializer.js';
+export {
   DkgWalLocalAuthoringBundleError,
   SignedDkgWalLocalAuthoringResolverV1,
   loadSignedDkgWalLocalAuthoringResolverV1,

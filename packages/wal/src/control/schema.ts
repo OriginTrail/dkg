@@ -1,4 +1,4 @@
-export const WAL_CONTROL_SCHEMA_VERSION = 5;
+export const WAL_CONTROL_SCHEMA_VERSION = 6;
 export const WAL_ROLLBACK_SCHEMA_VERSION = 1;
 
 /**
@@ -319,16 +319,26 @@ export const WAL_CONTROL_SCHEMA_SQL = `
   CREATE INDEX admission_state ON admission(state, updated_at_ms);
 
   CREATE TABLE materialization (
-    logical_key BLOB PRIMARY KEY CHECK (length(logical_key) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
     desired_heads_digest BLOB NOT NULL CHECK (length(desired_heads_digest) = 32),
+    desired_conflict_heads_digest BLOB NOT NULL CHECK (length(desired_conflict_heads_digest) = 32),
     desired_state_digest BLOB NOT NULL CHECK (length(desired_state_digest) = 32),
+    source_vector_id BLOB NOT NULL CHECK (length(source_vector_id) = 32),
     applied_heads_digest BLOB CHECK (applied_heads_digest IS NULL OR length(applied_heads_digest) = 32),
+    applied_conflict_heads_digest BLOB CHECK (
+      applied_conflict_heads_digest IS NULL OR length(applied_conflict_heads_digest) = 32
+    ),
     applied_state_digest BLOB CHECK (applied_state_digest IS NULL OR length(applied_state_digest) = 32),
     status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'BLOCKED')),
     attempts INTEGER NOT NULL CHECK (attempts >= 0),
     retry_at_ms INTEGER NOT NULL CHECK (retry_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (namespace_id, logical_key)
   ) WITHOUT ROWID;
+  CREATE INDEX materialization_status_v6
+    ON materialization(status, retry_at_ms, updated_at_ms, namespace_id, logical_key);
 
   CREATE TABLE peer_state (
     peer_id BLOB PRIMARY KEY,
@@ -427,6 +437,38 @@ export const WAL_CONTROL_MIGRATION_4_TO_5_SQL = `
   ALTER TABLE local_logical_heads_v5 RENAME TO local_logical_heads;
   CREATE INDEX local_commit_work_state ON local_commit_work(state, updated_at_ms, object_id);
   UPDATE wal_control_schema SET version = 5 WHERE singleton = 1 AND version = 4;
+`;
+
+/**
+ * The pre-WAL-015 materialization table was an unused provisional shape keyed
+ * only by logical_key, so it could not preserve namespace isolation. It is
+ * derived/rebuildable state and is deliberately replaced rather than copied
+ * ambiguously into one or more namespaces.
+ */
+export const WAL_CONTROL_MIGRATION_5_TO_6_SQL = `
+  DROP TABLE materialization;
+  CREATE TABLE materialization (
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    desired_heads_digest BLOB NOT NULL CHECK (length(desired_heads_digest) = 32),
+    desired_conflict_heads_digest BLOB NOT NULL CHECK (length(desired_conflict_heads_digest) = 32),
+    desired_state_digest BLOB NOT NULL CHECK (length(desired_state_digest) = 32),
+    source_vector_id BLOB NOT NULL CHECK (length(source_vector_id) = 32),
+    applied_heads_digest BLOB CHECK (applied_heads_digest IS NULL OR length(applied_heads_digest) = 32),
+    applied_conflict_heads_digest BLOB CHECK (
+      applied_conflict_heads_digest IS NULL OR length(applied_conflict_heads_digest) = 32
+    ),
+    applied_state_digest BLOB CHECK (applied_state_digest IS NULL OR length(applied_state_digest) = 32),
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'BLOCKED')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    retry_at_ms INTEGER NOT NULL CHECK (retry_at_ms >= 0),
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (namespace_id, logical_key)
+  ) WITHOUT ROWID;
+  CREATE INDEX materialization_status_v6
+    ON materialization(status, retry_at_ms, updated_at_ms, namespace_id, logical_key);
+  UPDATE wal_control_schema SET version = 6 WHERE singleton = 1 AND version = 5;
 `;
 
 export const WAL_ROLLBACK_SCHEMA_SQL = `

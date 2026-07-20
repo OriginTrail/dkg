@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.11
+version: 0.12
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -27,8 +27,10 @@ deterministic causal/conflict adapter schedules those bytes and invokes the
 same existing DKG semantic core used by the current synchronization path. It
 does not reimplement publish, share, update, deletion, expiry, SWM/VM,
 verified-memory, membership, finality, or cryptographic behavior. WAL-015 only
-persists the semantic core's resulting projection and WAL marker atomically
-through the existing storage adapter.
+commits the semantic core's resulting projection and exact WAL marker through
+one graph-database transaction in the existing storage adapter. That
+transaction is a projection persistence guarantee, not another synchronization
+atom.
 
 Each author signs its own WAL records and checkpoints. A curator signs
 membership and bounded-freshness vectors naming the exact author checkpoints a
@@ -42,7 +44,7 @@ Protocol version 1 fixes exact-arity deterministic CBOR tuples, BLAKE3 object
 identities, a signed deterministic set commitment, rateless IBLT reconciliation
 over 32-byte `WalObjectId` values, bounded deterministic full-ID fallback,
 whole-object range transfer, three raw libp2p protocol families, durable SQLite
-WAL control state, and one atomic graph-storage operation. The transport
+WAL control state, and one transactional graph-storage capability. The transport
 design takes inspiration from Iroh's separation of content identity, provider
 choice, resumable byte transfer, and transport path selection, but does not
 require an Iroh runtime. IBLT decoding discovers differences efficiently; it is
@@ -781,7 +783,7 @@ passed length, ID, signature, and policy verification and is durably
 recoverable. WAL-006 defines the crash-safe store/control transaction and
 recovery protocol that provides this property.
 
-WAL-015's all-or-nothing graph-database write is a different storage guarantee,
+WAL-015's all-or-nothing graph-database transaction is a different storage guarantee,
 not another synchronization atom. It receives the existing semantic core's
 already-decided result and stores that result plus its replay marker in one
 transaction. No RDF graph, quad, conflict record, marker, transaction, payload,
@@ -1561,7 +1563,7 @@ Minimum tables:
 | `local_logical_heads` | Exact `(namespaceId, logicalKey)` causal frontier used by local authoring compare-and-swap. |
 | `local_commit_work` | Durable `(namespaceId, logicalKey, WalObjectId)` replay/materialization outbox. |
 | `admission` | Proof, closure, validation, quarantine, and reason state. |
-| `materialization` | Per-logical-key desired and applied head/state digests. |
+| `materialization` | Per-`(namespaceId, logicalKey)` desired/applied active-head, conflict-head, and state digests plus source vector, retry, and error state. |
 | `peer_state` | Provider success, failures, backoff, and availability hints. |
 
 The rollback-resistant vector high-water is stored in a separate small SQLite
@@ -1629,8 +1631,8 @@ sequenceDiagram
     W->>A: Queue affected logical key
     A->>S: Replay explicit transition against shadow state
     S-->>M: Semantic projection outcome
-    M->>G: applyWalProjectionAtomic(...)
-    G-->>M: APPLIED or GUARD_FAILED
+    M->>G: commitWalProjectionV1(...)
+    G-->>M: COMMITTED or GUARD_FAILED
     M-->>W: Materialization status
     W-->>C: WalObjectId and materialization status
     W-->>H: Best-effort checkpoint nudge
@@ -1831,7 +1833,7 @@ sequenceDiagram
     R->>S: Validate/apply candidate branch transitions
     S-->>R: Existing semantic outcomes
     alt Mutations are compatible under signed policy
-        R->>G: Persist semantic outcome atomically
+        R->>G: Commit semantic projection transactionally
     else Mutations are incompatible
         R->>G: Keep maximal common base active
         R->>G: Materialize both reserved conflict branches
@@ -1840,14 +1842,16 @@ sequenceDiagram
         W->>R: Admit resolution and re-evaluate DAG
         R->>S: Validate/apply resolution
         S-->>R: Existing semantic outcome
-        R->>G: Persist resolved projection atomically
+        R->>G: Commit resolved projection transactionally
     end
 ```
 
-## 14. Persisting the resulting projection atomically
+## 14. Transactional commit of the resulting projection
 
-WAL and graph do not share a distributed transaction. Only the graph projection
-operation itself must be atomic.
+WAL and graph do not share a distributed transaction. The complete
+`WalObjectV1` remains the sole durable content-addressed synchronization atom.
+Separately, one graph projection commit must be an all-or-nothing database
+transaction so content, conflicts, and its exact marker cannot tear.
 
 WAL-015 receives a complete projection outcome from the shared DKG semantic
 core and passes it to the existing storage adapter. The storage operation may
@@ -1858,7 +1862,10 @@ apply separate SWM/VM, verified-memory, authorization, or cryptographic rules.
 Each logical key has a marker in `urn:dkg:wal:projection` containing:
 
 - adapter version;
+- namespace ID;
+- logical key;
 - active-head-set digest;
+- conflict-head-set digest;
 - projected state digest;
 - source vector ID;
 - materialization status.
@@ -1866,25 +1873,46 @@ Each logical key has a marker in `urn:dkg:wal:projection` containing:
 The storage package exposes one required capability:
 
 ```text
-applyWalProjectionAtomic({
+commitWalProjectionV1({
+  adapterVersion: 1,
+  mode: CAS | REBUILD,
+  namespaceId,
   logicalKey,
-  expectedHeadDigest,
+  expectedActiveHeadsDigest,
   replaceGraphs,
   replaceSubjects,
   deleteQuads,
   insertQuads,
   conflictGraphs,
-  newHeadDigest,
+  newActiveHeadsDigest,
+  newConflictHeadsDigest,
   newStateDigest,
-  vectorId
-}) -> APPLIED | GUARD_FAILED
+  sourceVectorId,
+  materializationStatus
+}) -> COMMITTED(exactMarker) | GUARD_FAILED(currentExactMarker)
 ```
+
+`materializationStatus` is WAL-015 persistence bookkeeping, not a DKG semantic
+output. The shared semantic core returns the complete projection data and
+digests without this field; the materializer stamps `APPLIED` when constructing
+the successful storage commit. `PENDING` and `BLOCKED` remain durable control
+states and API/readiness results, but cannot be supplied as semantic decisions
+by the core or written as the marker of a successfully applied projection.
 
 The backend must commit content, conflict graphs, and marker all-or-none. A lost
 response is resolved by reading the marker. `GUARD_FAILED` causes the
 replay/conflict adapter to invoke the semantic core again from the current
 guarded base and retry. Content/marker disagreement blocks readiness and forces
-rebuild of that logical key.
+rebuild of that logical key. Normal replay uses `CAS`. Explicit `REBUILD` is a
+complete graph-only replacement derived from locally admitted WAL state; it has
+no network input and repairs a missing or corrupt marker while removing stale
+shadow graphs for that exact `(namespaceId, logicalKey)` scope.
+
+Projection graphs use the isolated
+`urn:dkg:wal:shadow:v1:<namespaceId>:<logicalKey>:` prefix. The marker graph and
+all shadow graphs are hidden from production graph enumeration. Neither a
+graph, quad, marker, transaction, nor materialization row receives a
+`WalObjectId` or an independent synchronization lifecycle.
 
 Initial authoritative support is limited to backends that pass fault-injection
 atomicity tests. Oxigraph is the reference implementation. Blazegraph becomes

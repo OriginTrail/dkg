@@ -92,6 +92,28 @@ export {
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
+  WAL_PROJECTION_ADAPTER_VERSION_V1,
+  WAL_PROJECTION_MARKER_GRAPH,
+  WAL_PROJECTION_SHADOW_GRAPH_PREFIX,
+  WAL_PROJECTION_TRANSACTION_VERSION,
+  WalProjectionIntegrityError,
+  buildWalProjectionCommitPlanV1,
+  isWalProjectionInternalGraph,
+  readWalProjectionMarkerV1,
+  tryCommitWalProjectionV1,
+  walProjectionMarkerEqualsV1,
+  walProjectionMarkerSubjectV1,
+  walProjectionShadowGraphV1,
+  walProjectionStoreCapabilityV1,
+  type WalProjectionCommitInputV1,
+  type WalProjectionCommitPlanV1,
+  type WalProjectionCommitResultV1,
+  type WalProjectionGraphReplacementV1,
+  type WalProjectionMarkerV1,
+  type WalProjectionMaterializationStatusV1,
+  type WalProjectionSubjectReplacementV1,
+} from './wal-projection.js';
+export {
   resolveGraphScopedOrLegacyMetadata,
   type GraphScopedOrLegacyMetadata,
 } from './graph-knowledge-asset-metadata-loader.js';

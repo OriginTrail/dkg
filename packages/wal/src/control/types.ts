@@ -191,14 +191,19 @@ export interface VectorRecord {
 }
 
 export interface MaterializationRecord {
+  namespaceId: Uint8Array;
   logicalKey: Uint8Array;
   desiredHeadsDigest: Uint8Array;
+  desiredConflictHeadsDigest: Uint8Array;
   desiredStateDigest: Uint8Array;
+  sourceVectorId: Uint8Array;
   appliedHeadsDigest?: Uint8Array | null;
+  appliedConflictHeadsDigest?: Uint8Array | null;
   appliedStateDigest?: Uint8Array | null;
   status: 'PENDING' | 'APPLIED' | 'BLOCKED';
   attempts: number;
   retryAtMs: number;
+  lastError?: string | null;
   updatedAtMs: number;
 }
 

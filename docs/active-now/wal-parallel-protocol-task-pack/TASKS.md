@@ -44,7 +44,7 @@ only atomically store the resulting outcome.
 | `WAL-012` | Implement RDF canonicalization, mutation encoding, and signed replay policy | `WAL-001`, `WAL-003` | Deterministic encoding of shared-core outcomes without remote SPARQL execution. |
 | `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside production writes while legacy sync remains authoritative. |
 | `WAL-014` | Implement deterministic replay/conflict adapter over the existing semantic core | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent scheduling and conflicts with no second DKG implementation. |
-| `WAL-015` | Persist shared-core results atomically and support rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions. |
+| `WAL-015` | Commit shared-core projections transactionally and support rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions or another synchronization atom. |
 | `WAL-016` | Feed VM/finality/reorg events into the existing semantic core | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by WAL events without a second VM model. |
 | `WAL-017` | Implement deletion, expiry, snapshots, custody, and compaction | `WAL-004`–`WAL-007`, `WAL-011`, `WAL-014`, `WAL-015` | Bounded history with no resurrection. |
 | `WAL-018` | Implement genesis migration, backfill, and rebuild tooling | `WAL-016`, `WAL-017` | Authenticated bootstrap from existing SWM/VM state. |
@@ -978,27 +978,36 @@ orders inputs to the one existing DKG/SWM/VM implementation.
 
 ---
 
-## WAL-015 — Persist shared-core results atomically and support rebuild
+## WAL-015 — Commit shared-core projections transactionally and support rebuild
 
 **Focused RFC context:** Sections 2, 3, 14, 17, 19, and rebuild goals.
 
 ### Objective
 
 Persist the shared semantic core's complete projection outcome into isolated
-RDF graphs with an atomic content/conflict/marker commit, making the graph store
-rebuildable rather than a second replication or semantic truth.
+RDF graphs with one all-or-nothing content/conflict/marker database transaction,
+making the graph store rebuildable rather than a second replication or semantic
+truth. This database transaction is not a synchronization atom: complete
+`WalObjectV1` remains the sole durable content-addressed synchronization atom.
 
 ### Scope and deliverables
 
-- Add `applyWalProjectionAtomic` to the storage capability contract with guarded
-  expected/new head digests, content mutations, conflict graphs, state digest,
-  vector ID, and `APPLIED | GUARD_FAILED` outcome.
+- Add `commitWalProjectionV1` to the storage capability contract. Its complete
+  persistence plan contains `CAS | REBUILD` mode, `(namespaceId, logicalKey)`,
+  expected/new active-head digests, new conflict-head/state digests, content
+  mutations, conflict graphs, source vector ID, materialization status, and a
+  `COMMITTED | GUARD_FAILED` outcome with an exact marker.
 - Implement the Oxigraph reference path as one all-or-none transaction and exact
   marker post-read after lost responses.
-- Persist adapter version, active-head-set digest, state digest, source vector,
-  and materialization status in `urn:dkg:wal:projection`.
+- Persist exactly adapter version, namespace, logical key, active-head-set
+  digest, conflict-head-set digest, state digest, source vector, and
+  materialization status in `urn:dkg:wal:projection`.
+- Keep materialization status out of the shared semantic-core outcome. WAL-015
+  alone stamps `APPLIED` when it constructs the storage commit, so graph and
+  control markers cannot disagree about a successfully committed projection.
 - Implement per-key locking, persistent retry, guard-failure recalculation,
-  corruption detection, and full/selective projection rebuild from WAL.
+  corruption detection, and full/selective graph-only projection rebuild from
+  locally complete WAL state with no peer/network source.
 - Keep the storage boundary semantically passive: it may validate guards and
   persistence integrity, but it must not choose heads, interpret DKG operations,
   resolve conflicts, or implement SWM/VM, verified-memory, authorization,
@@ -1011,20 +1020,20 @@ rebuildable rather than a second replication or semantic truth.
 
 ### Acceptance area
 
-- [ ] Fault injection proves content, conflict graphs, and marker are always all
+- [x] Fault injection proves content, conflict graphs, and marker are always all
       old or all new; no partial canonical projection is observable.
-- [ ] Lost response is resolved by exact marker/state post-read; a different
+- [x] Lost response is resolved by exact marker/state post-read; a different
       value blocks/recalculates instead of being treated as success.
-- [ ] Opposite replay scheduling and process restart reach identical markers and
+- [x] Opposite replay scheduling and process restart reach identical markers and
       RDF state.
-- [ ] Tests pass deliberately different complete semantic outcomes through the
+- [x] Tests pass deliberately different complete semantic outcomes through the
       same persistence method and prove the persistence boundary stores or
       rejects them only by atomic guard/integrity rules, never by a second
       semantic decision.
-- [ ] A locally complete WAL rebuilds an empty/corrupt shadow projection with
+- [x] A locally complete WAL rebuilds an empty/corrupt shadow projection with
       zero network payload transfer and exact semantic digests.
-- [ ] Production reads never include shadow graphs in `parallel` mode.
-- [ ] Backend capability tests explicitly mark Oxigraph eligible and keep every
+- [x] Production reads never include shadow graphs in `parallel` mode.
+- [x] Backend capability tests explicitly mark Oxigraph eligible and keep every
       failing backend ineligible for authoritative `wal` mode.
 
 ---

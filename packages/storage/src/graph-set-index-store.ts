@@ -16,6 +16,10 @@ import {
   isReplaceGraphCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import type {
+  WalProjectionCommitInputV1,
+  WalProjectionCommitResultV1,
+} from './wal-projection.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -171,6 +175,10 @@ export class GraphSetIndexStore implements TripleStore {
 
   getPressureSnapshot(): StorePressureSnapshot | undefined {
     return this.inner.getPressureSnapshot?.();
+  }
+
+  get walProjectionTransactions(): 'v1' | undefined {
+    return this.inner.walProjectionTransactions;
   }
 
   private readonly inner: TripleStore;
@@ -403,6 +411,24 @@ export class GraphSetIndexStore implements TripleStore {
       'replaceGraphAndSubject',
       options,
     );
+  }
+
+  async commitWalProjectionV1(
+    input: WalProjectionCommitInputV1,
+    options?: QueryOptions,
+  ): Promise<WalProjectionCommitResultV1> {
+    if (
+      this.inner.walProjectionTransactions !== 'v1'
+      || typeof this.inner.commitWalProjectionV1 !== 'function'
+    ) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'commitWalProjectionV1',
+        'GraphSetIndexStore',
+      );
+    }
+    // The inner adapter hides WAL marker/shadow graphs from enumeration. Do
+    // not add derived projection graphs to the production graph-set cache.
+    return this.inner.commitWalProjectionV1(input, options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

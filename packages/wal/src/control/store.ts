@@ -33,6 +33,7 @@ import {
   WAL_CONTROL_MIGRATION_2_TO_3_SQL,
   WAL_CONTROL_MIGRATION_3_TO_4_SQL,
   WAL_CONTROL_MIGRATION_4_TO_5_SQL,
+  WAL_CONTROL_MIGRATION_5_TO_6_SQL,
   WAL_ROLLBACK_SCHEMA_SQL,
   WAL_ROLLBACK_SCHEMA_VERSION,
 } from './schema.js';
@@ -91,6 +92,22 @@ interface CountRow { count: number; bytes?: number | null }
 interface GuardRow { guard_id: Buffer }
 interface VersionRow { version: number }
 interface IntegrityRow { quick_check: string }
+interface MaterializationRow {
+  namespace_id: Buffer;
+  logical_key: Buffer;
+  desired_heads_digest: Buffer;
+  desired_conflict_heads_digest: Buffer;
+  desired_state_digest: Buffer;
+  source_vector_id: Buffer;
+  applied_heads_digest: Buffer | null;
+  applied_conflict_heads_digest: Buffer | null;
+  applied_state_digest: Buffer | null;
+  status: MaterializationRecord['status'];
+  attempts: number;
+  retry_at_ms: number;
+  last_error: string | null;
+  updated_at_ms: number;
+}
 
 export type WalControlTransactionPoint =
   | 'after-object-file-sync'
@@ -211,6 +228,27 @@ function assertRelativePath(value: string | null | undefined): string | null {
 
 function copy(value: Uint8Array): Uint8Array {
   return new Uint8Array(value);
+}
+
+function materializationRecord(row: MaterializationRow): MaterializationRecord {
+  return {
+    namespaceId: copy(row.namespace_id),
+    logicalKey: copy(row.logical_key),
+    desiredHeadsDigest: copy(row.desired_heads_digest),
+    desiredConflictHeadsDigest: copy(row.desired_conflict_heads_digest),
+    desiredStateDigest: copy(row.desired_state_digest),
+    sourceVectorId: copy(row.source_vector_id),
+    appliedHeadsDigest: row.applied_heads_digest === null ? null : copy(row.applied_heads_digest),
+    appliedConflictHeadsDigest: row.applied_conflict_heads_digest === null
+      ? null
+      : copy(row.applied_conflict_heads_digest),
+    appliedStateDigest: row.applied_state_digest === null ? null : copy(row.applied_state_digest),
+    status: row.status,
+    attempts: row.attempts,
+    retryAtMs: row.retry_at_ms,
+    lastError: row.last_error,
+    updatedAtMs: row.updated_at_ms,
+  };
 }
 
 function decodeCheckpoint(bytes: Uint8Array): ProtocolTuple<'AuthorCheckpointV1'> {
@@ -1246,6 +1284,15 @@ export class WalControlStore {
     }
   }
 
+  /** Remove queued/blocked work after an exact post-read proves it completed. */
+  cancelRetry(key: string): boolean {
+    this.assertUsable();
+    const value = assertText(key, 'retry key');
+    return this.database.prepare(
+      "DELETE FROM retry_queue WHERE queue_key = ? AND state IN ('READY', 'BLOCKED')",
+    ).run(value).changes === 1;
+  }
+
   failRetry(key: string, error: string, availableAtMs: number): RetryState {
     this.assertUsable();
     assertText(error, 'retry error');
@@ -1585,36 +1632,96 @@ export class WalControlStore {
 
   putMaterialization(input: MaterializationRecord): void {
     this.assertUsable();
+    const error = input.lastError === undefined || input.lastError === null
+      ? null
+      : assertText(input.lastError, 'materialization error');
     this.database.prepare(`
       INSERT INTO materialization(
-        logical_key, desired_heads_digest, desired_state_digest,
-        applied_heads_digest, applied_state_digest, status,
-        attempts, retry_at_ms, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(logical_key) DO UPDATE SET
+        namespace_id, logical_key, desired_heads_digest,
+        desired_conflict_heads_digest, desired_state_digest, source_vector_id,
+        applied_heads_digest, applied_conflict_heads_digest,
+        applied_state_digest, status, attempts, retry_at_ms, last_error,
+        updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(namespace_id, logical_key) DO UPDATE SET
         desired_heads_digest = excluded.desired_heads_digest,
+        desired_conflict_heads_digest = excluded.desired_conflict_heads_digest,
         desired_state_digest = excluded.desired_state_digest,
+        source_vector_id = excluded.source_vector_id,
         applied_heads_digest = excluded.applied_heads_digest,
+        applied_conflict_heads_digest = excluded.applied_conflict_heads_digest,
         applied_state_digest = excluded.applied_state_digest,
         status = excluded.status,
         attempts = excluded.attempts,
         retry_at_ms = excluded.retry_at_ms,
+        last_error = excluded.last_error,
         updated_at_ms = excluded.updated_at_ms
     `).run(
+      fixedBytes(input.namespaceId, 32, 'namespaceId'),
       fixedBytes(input.logicalKey, 32, 'logicalKey'),
       fixedBytes(input.desiredHeadsDigest, 32, 'desiredHeadsDigest'),
+      fixedBytes(input.desiredConflictHeadsDigest, 32, 'desiredConflictHeadsDigest'),
       fixedBytes(input.desiredStateDigest, 32, 'desiredStateDigest'),
+      fixedBytes(input.sourceVectorId, 32, 'sourceVectorId'),
       input.appliedHeadsDigest === undefined || input.appliedHeadsDigest === null
         ? null
         : fixedBytes(input.appliedHeadsDigest, 32, 'appliedHeadsDigest'),
+      input.appliedConflictHeadsDigest === undefined || input.appliedConflictHeadsDigest === null
+        ? null
+        : fixedBytes(input.appliedConflictHeadsDigest, 32, 'appliedConflictHeadsDigest'),
       input.appliedStateDigest === undefined || input.appliedStateDigest === null
         ? null
         : fixedBytes(input.appliedStateDigest, 32, 'appliedStateDigest'),
       input.status,
       safeInteger(input.attempts, 'materialization attempts'),
       safeInteger(input.retryAtMs, 'materialization retryAtMs'),
+      error,
       safeInteger(input.updatedAtMs, 'materialization updatedAtMs'),
     );
+  }
+
+  getMaterialization(namespaceId: Uint8Array, logicalKey: Uint8Array): MaterializationRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT namespace_id, logical_key, desired_heads_digest,
+             desired_conflict_heads_digest, desired_state_digest,
+             source_vector_id, applied_heads_digest,
+             applied_conflict_heads_digest, applied_state_digest, status,
+             attempts, retry_at_ms, last_error, updated_at_ms
+      FROM materialization WHERE namespace_id = ? AND logical_key = ?
+    `).get(
+      fixedBytes(namespaceId, 32, 'namespaceId'),
+      fixedBytes(logicalKey, 32, 'logicalKey'),
+    ) as MaterializationRow | undefined;
+    return row === undefined ? null : materializationRecord(row);
+  }
+
+  listMaterializations(
+    statuses: readonly MaterializationRecord['status'][] = ['PENDING', 'BLOCKED'],
+    limit = 1_000,
+  ): readonly MaterializationRecord[] {
+    this.assertUsable();
+    safeInteger(limit, 'materialization limit', 1);
+    if (limit > this.maximumQueueEntries) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'materialization limit exceeds the queue bound');
+    }
+    if (
+      statuses.length === 0
+      || statuses.some(status => !['PENDING', 'APPLIED', 'BLOCKED'].includes(status))
+    ) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'materialization statuses are invalid');
+    }
+    const placeholders = statuses.map(() => '?').join(', ');
+    const rows = this.database.prepare(`
+      SELECT namespace_id, logical_key, desired_heads_digest,
+             desired_conflict_heads_digest, desired_state_digest,
+             source_vector_id, applied_heads_digest,
+             applied_conflict_heads_digest, applied_state_digest, status,
+             attempts, retry_at_ms, last_error, updated_at_ms
+      FROM materialization WHERE status IN (${placeholders})
+      ORDER BY retry_at_ms, updated_at_ms, namespace_id, logical_key LIMIT ?
+    `).all(...statuses, limit) as MaterializationRow[];
+    return rows.map(materializationRecord);
   }
 
   getLocalCommitWork(objectId: Uint8Array): LocalCommitWorkRecord | null {
@@ -1717,6 +1824,40 @@ export class WalControlStore {
       this.database.prepare(`
         UPDATE idempotency SET status = 'MATERIALIZED' WHERE object_id = ?
       `).run(objectId);
+    }
+  }
+
+  completeLocalCommitWorkForScope(
+    namespaceId: Uint8Array,
+    logicalKey: Uint8Array,
+    updatedAtMs = nowValue(this.now),
+  ): number {
+    this.assertUsable();
+    const namespace = fixedBytes(namespaceId, 32, 'namespaceId');
+    const logical = fixedBytes(logicalKey, 32, 'logicalKey');
+    safeInteger(updatedAtMs, 'updatedAtMs');
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const objectRows = this.database.prepare(`
+        SELECT object_id FROM local_commit_work
+        WHERE namespace_id = ? AND logical_key = ?
+          AND state IN ('PENDING', 'QUEUED')
+      `).all(namespace, logical) as Array<{ object_id: Buffer }>;
+      const result = this.database.prepare(`
+        UPDATE local_commit_work
+        SET state = 'MATERIALIZED', last_error = NULL, updated_at_ms = ?
+        WHERE namespace_id = ? AND logical_key = ?
+          AND state IN ('PENDING', 'QUEUED')
+      `).run(updatedAtMs, namespace, logical);
+      const updateIdempotency = this.database.prepare(
+        "UPDATE idempotency SET status = 'MATERIALIZED' WHERE object_id = ?",
+      );
+      for (const row of objectRows) updateIdempotency.run(row.object_id);
+      this.database.exec('COMMIT');
+      return result.changes;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      return this.wrapIo('failed to complete local materialization work', error);
     }
   }
 
@@ -2007,6 +2148,7 @@ export class WalControlStore {
         { from: 2, sql: WAL_CONTROL_MIGRATION_2_TO_3_SQL },
         { from: 3, sql: WAL_CONTROL_MIGRATION_3_TO_4_SQL },
         { from: 4, sql: WAL_CONTROL_MIGRATION_4_TO_5_SQL },
+        { from: 5, sql: WAL_CONTROL_MIGRATION_5_TO_6_SQL },
       ]) {
         if (version !== migration.from) continue;
         this.database.exec('BEGIN IMMEDIATE');

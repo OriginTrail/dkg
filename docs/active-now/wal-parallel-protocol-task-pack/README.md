@@ -15,7 +15,7 @@ checkout.
 | Authoritative branch | `codex/wal-005-iblt-lab` |
 | Worktree | `/private/tmp/dkg-v9-wal-005-iblt-lab` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `3fae6958fd7875b2f435344f59bbbdd588430125` |
+| RFC source commit | `4761c3947b972fe56e70728be45ab8925e040d0c` |
 | RFC version | `0.11` |
 | RFC SHA-256 | `8add36bf5f84c27a181ad5695610dc8e386615d10f537257c0defe4c132c5b1c` |
 | Schema SHA-256 | `98e1dbf857a9287dac8af780a0715d01b9b1af6b00ae708ac868f18305a159cd` |
@@ -70,8 +70,9 @@ synchronization mechanism, never to those shared semantics. WAL reconciliation
 handles authenticated control bytes, `WalObjectId` sets, and complete
 `WalObjectV1` byte ranges only. The deterministic replay/conflict adapter
 invokes the existing semantic core; it does not reproduce DKG behavior. WAL-015
-only persists the resulting projection atomically through the existing storage
-adapter, and VM, finality, and reorg events enter that same core.
+only commits the resulting projection through one graph-database transaction in
+the existing storage adapter; that transaction is not a synchronization atom.
+VM, finality, and reorg events enter the same semantic core.
 
 ## Execution waves
 

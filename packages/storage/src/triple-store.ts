@@ -18,6 +18,10 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  WalProjectionCommitInputV1,
+  WalProjectionCommitResultV1,
+} from './wal-projection.js';
 
 export interface Quad {
   subject: string;
@@ -117,6 +121,13 @@ export interface TripleStore {
    */
   getPressureSnapshot?(): StorePressureSnapshot | undefined;
 
+  /**
+   * Explicit capability token for the WAL-v1 transactional projection commit.
+   * A generic SPARQL update method is not sufficient for authoritative WAL
+   * projection because the backend must prove one all-or-nothing boundary.
+   */
+  readonly walProjectionTransactions?: 'v1';
+
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
@@ -149,6 +160,16 @@ export interface TripleStore {
     metadataQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * Transactionally commit a complete storage plan already returned by the
+   * shared DKG semantic core. This operation is semantically passive and does
+   * not define another synchronization atom; `WalObjectV1` remains the only
+   * durable content-addressed synchronization atom.
+   */
+  commitWalProjectionV1?(
+    input: WalProjectionCommitInputV1,
+    options?: QueryOptions,
+  ): Promise<WalProjectionCommitResultV1>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
