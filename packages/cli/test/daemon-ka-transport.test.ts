@@ -268,3 +268,50 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
     });
   });
 });
+
+describe('WAL-013 knowledge-assets receipt transport', () => {
+  it('forwards the exact local WAL receipt from graph-scoped SWM share', async () => {
+    const wal = {
+      mode: 'parallel',
+      status: 'committed',
+      objects: [{
+        logicalResource: 'did:dkg:31337/0x1111111111111111111111111111111111111111/1',
+        walObjectId: `0x${'11'.repeat(32)}`,
+        checkpointId: `0x${'22'.repeat(32)}`,
+        walStatus: 'committed',
+        materializationStatus: 'pending',
+        nudgeStatus: 'not-configured',
+        propagationStatus: 'not-claimed',
+        sequence: '0',
+        objectCount: '1',
+        objectSetRoot: `0x${'33'.repeat(32)}`,
+      }],
+      failures: [],
+      propagationStatus: 'not-claimed',
+    };
+    const agent = publishAgent({
+      assertion: {
+        promote: async () => ({
+          promotedCount: 1,
+          shareOperationId: 'wal-share-operation',
+          wal,
+        }),
+      },
+    });
+    const { res, done } = runKaCtx(
+      'POST',
+      '/api/knowledge-assets/wal-share/swm/share',
+      agent,
+      { contextGraphId: 'wal-cg' },
+    );
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      swmShared: true,
+      promotedCount: 1,
+      shareOperationId: 'wal-share-operation',
+      wal,
+    });
+  });
+});

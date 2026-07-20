@@ -7,7 +7,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from './page-fetch.js';
 import type { SyncPhase } from '../auth/request-build.js';
-import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js';
+import type { SwmRecoveryStore } from './swm-recovery-apply.js';
+import { dkgSemanticCore } from '../../semantic/dkg-semantic-core.js';
 import {
   sharedMemoryOwnershipKeyFromGraph,
   syncPublicSnapshotsForMeta,
@@ -452,7 +453,7 @@ export async function recoverContextGraphSwm(
   await deps.ensureContextGraph(deps.contextGraphId);
 
   // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
-  const applied = await applySwmRecovery({
+  const applied = await dkgSemanticCore.applyVerifiedSwmRecovery('legacy-sync', {
     store: deps.store,
     verifiedData: processed.verifiedData,
     roots: processed.entityCreators,

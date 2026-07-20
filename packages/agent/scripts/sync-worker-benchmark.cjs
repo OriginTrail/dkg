@@ -78,7 +78,8 @@ async function run() {
     const workerMs = performance.now() - workerStart;
 
     console.log(JSON.stringify({
-      dataset: { lines: nquads.split('\n').length, kept: mainResult.length },
+      dataset: { lines: nquads.split('\n').length, kept: mainResult.length, bytes: Buffer.byteLength(nquads) },
+      operations: { workerRequests: 1, triplestoreOperations: 0 },
       mainThreadMs: Number(mainMs.toFixed(2)),
       workerMs: Number(workerMs.toFixed(2)),
       workerKept: workerResult.quads.length,

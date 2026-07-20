@@ -107,6 +107,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
+  type PublisherWalShadowBatchReceiptV1,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -859,6 +860,7 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
+      walShadowWriter: config.walShadowWriter,
     });
 
     try {
@@ -2435,7 +2437,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string; wal?: PublisherWalShadowBatchReceiptV1 }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         if (opts?.skipSeal) {
           throw Object.assign(
@@ -2532,7 +2534,7 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
-        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
+        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId, wal } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -2561,7 +2563,13 @@ export class DKGAgent extends DKGAgentBase {
         // shareOperationId. It is just as publish-ready as the first response;
         // a VM no-op has no share operation id and remains false here.
         const publishReady = sealed && promotedAllRoots && !!shareOperationId;
-        return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
+        return {
+          promotedCount,
+          sealed,
+          publishReady,
+          ...(shareOperationId ? { shareOperationId } : {}),
+          ...(wal === undefined ? {} : { wal }),
+        };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
         const discardAgentAddress = opts?.agentAddress ?? agentAddress;

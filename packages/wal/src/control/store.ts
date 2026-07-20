@@ -10,12 +10,20 @@ import {
   openSync,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { encodeCanonicalCbor } from '../protocol/canonical-cbor.js';
 import { decodeProtocolTuple, encodeProtocolTuple } from '../protocol/codec.js';
 import { protocolTupleId } from '../protocol/hashes.js';
-import { verifySingleSignedProtocolTuple } from '../protocol/signatures.js';
+import { signSingleProtocolTuple, verifySingleSignedProtocolTuple } from '../protocol/signatures.js';
 import type { ProtocolTuple } from '../protocol/schema.js';
-import type { WalObjectV1 } from '../protocol/wal-object.js';
+import { createWalObjectV1, type WalObjectV1 } from '../protocol/wal-object.js';
+import { walObjectId } from '../reconciliation/ids.js';
 import { MutableSetCommitment } from '../reconciliation/set-commitment.js';
+import {
+  PACKED_DEFAULT_SEGMENT_TARGET_BYTES,
+  PACKED_HARD_MAXIMUM_OBJECT_BYTES,
+  PackedObjectTransactionAppend,
+  packedWriteMutexFor,
+} from '../store/packed-transaction.js';
 import { controlError, WalControlStoreError } from './errors.js';
 import { blobU64, bytesEqual, fixedBytes, MAX_U64, safeInteger, u64Blob } from './integers.js';
 import {
@@ -23,24 +31,33 @@ import {
   WAL_CONTROL_SCHEMA_VERSION,
   WAL_CONTROL_MIGRATION_1_TO_2_SQL,
   WAL_CONTROL_MIGRATION_2_TO_3_SQL,
+  WAL_CONTROL_MIGRATION_3_TO_4_SQL,
+  WAL_CONTROL_MIGRATION_4_TO_5_SQL,
   WAL_ROLLBACK_SCHEMA_SQL,
   WAL_ROLLBACK_SCHEMA_VERSION,
 } from './schema.js';
 import type {
+  AdmissionState,
+  AdmissionRecord,
   ClaimPrivatePayloadNonceInput,
+  CommitLocalWalInput,
   FinalizeLocalWalInput,
   FinalizeLocalWalResult,
   GcQueueRecord,
   IbltCacheRecord,
+  LocalCommitWorkRecord,
+  LocalCommitWorkState,
   MaterializationRecord,
   ObjectRangeRecord,
   PeerStateRecord,
+  QuarantineRecord,
   RetryState,
   RetryQueueEntry,
   RollbackHighWater,
   RollbackProtectionStatus,
   VectorRecord,
   WalControlIntegrity,
+  WalObjectMetadataRecord,
   WalObjectOrigin,
 } from './types.js';
 
@@ -76,9 +93,17 @@ interface VersionRow { version: number }
 interface IntegrityRow { quick_check: string }
 
 export type WalControlTransactionPoint =
+  | 'after-object-file-sync'
+  | 'after-packed-index-insert'
   | 'after-object-insert'
   | 'after-set-update'
   | 'after-checkpoint-insert'
+  | 'after-local-work-insert'
+  | 'after-remote-object-insert'
+  | 'after-remote-object-admit'
+  | 'after-replay-enqueue'
+  | 'after-quarantine-insert'
+  | 'after-quarantine-state'
   | 'before-commit'
   | 'after-commit'
   | 'after-rollback';
@@ -86,6 +111,8 @@ export type WalControlTransactionPoint =
 export interface WalControlStoreOptions {
   root: string;
   busyTimeoutMs?: number;
+  segmentTargetBytes?: number;
+  maximumObjectBytes?: bigint;
   maximumQueueEntries?: number;
   maximumQueueBytes?: number;
   maximumQuarantineEntriesPerPeer?: number;
@@ -109,6 +136,7 @@ export interface AdmitRemoteObjectInput {
   object: WalObjectV1;
   canonicalLength: number;
   origin?: Exclude<WalObjectOrigin, 'LOCAL'>;
+  logicalKeys?: readonly Uint8Array[];
 }
 
 export interface EnqueueRetryInput {
@@ -130,31 +158,12 @@ export interface QuarantineInput {
   expiresAtMs?: number;
 }
 
-class AsyncMutex {
-  private tail = Promise.resolve();
-
-  async run<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>(resolvePromise => { release = resolvePromise; });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-}
-
-const mutexes = new Map<string, AsyncMutex>();
-
-function mutexFor(path: string): AsyncMutex {
-  let mutex = mutexes.get(path);
-  if (mutex === undefined) {
-    mutex = new AsyncMutex();
-    mutexes.set(path, mutex);
-  }
-  return mutex;
+export interface QuarantineAdmissionInput extends QuarantineInput {
+  /** Defaults to entryId; kept explicit for malformed bytes whose claimed ID is quarantined. */
+  admissionObjectId?: Uint8Array;
+  /** When a dependency is quarantined, atomically block the root that referenced it. */
+  blockedRootObjectId?: Uint8Array | null;
+  updatedAtMs?: number;
 }
 
 function fsyncDirectory(path: string): void {
@@ -235,7 +244,10 @@ function verifyObjectMetadata(
 export class WalControlStore {
   readonly root: string;
   readonly indexPath: string;
+  readonly segmentsRoot: string;
   readonly rollbackPath: string;
+  readonly segmentTargetBytes: number;
+  readonly maximumObjectBytes: bigint;
   readonly maximumQueueEntries: number;
   readonly maximumQueueBytes: number;
   readonly maximumQuarantineEntriesPerPeer: number;
@@ -243,7 +255,7 @@ export class WalControlStore {
   readonly quarantineRetentionMs: number;
   private readonly database!: Database.Database;
   private rollbackDatabase?: Database.Database;
-  private readonly mutex: AsyncMutex;
+  private readonly mutex: ReturnType<typeof packedWriteMutexFor>;
   private readonly now: () => number;
   private readonly busyTimeoutMs: number;
   private readonly transactionHook?: WalControlStoreOptions['transactionHook'];
@@ -256,7 +268,17 @@ export class WalControlStore {
     }
     this.root = resolve(options.root);
     this.indexPath = join(this.root, 'objects.sqlite');
+    this.segmentsRoot = join(this.root, 'segments');
     this.rollbackPath = join(this.root, 'rollback-high-water.sqlite');
+    this.segmentTargetBytes = safeInteger(
+      options.segmentTargetBytes ?? PACKED_DEFAULT_SEGMENT_TARGET_BYTES,
+      'segmentTargetBytes',
+      128,
+    );
+    this.maximumObjectBytes = options.maximumObjectBytes ?? 1_073_741_824n;
+    if (this.maximumObjectBytes < 1n || this.maximumObjectBytes > PACKED_HARD_MAXIMUM_OBJECT_BYTES) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'maximumObjectBytes must be within the WAL v1 hard limit');
+    }
     this.maximumQueueEntries = safeInteger(
       options.maximumQueueEntries ?? DEFAULT_MAXIMUM_QUEUE_ENTRIES,
       'maximumQueueEntries',
@@ -286,7 +308,7 @@ export class WalControlStore {
     this.busyTimeoutMs = busyTimeoutMs;
     this.now = options.now ?? Date.now;
     this.transactionHook = options.transactionHook;
-    this.mutex = mutexFor(this.indexPath);
+    this.mutex = packedWriteMutexFor(this.root);
     assertRegularFile(this.indexPath, 'packed object index');
     let opened: Database.Database | undefined;
     try {
@@ -313,6 +335,355 @@ export class WalControlStore {
     this.closed = true;
     this.rollbackDatabase?.close();
     this.database.close();
+  }
+
+  /**
+   * Allocate, sign, append, index, checkpoint, and idempotently acknowledge one
+   * complete local WalObjectV1 in a single SQLite transaction. Public inline
+   * payload bytes are copied before the writer mutex. A private payload builder
+   * may only finalize sequence-bound encryption after allocation and claim its
+   * nonce in this same transaction; it performs no network, RDF-store, or
+   * semantic work.
+   */
+  async commitLocal(input: CommitLocalWalInput): Promise<FinalizeLocalWalResult> {
+    this.assertUsable();
+    const namespace = fixedBytes(input.namespaceId, 32, 'namespaceId');
+    const writer = fixedBytes(input.writerId, 20, 'writerId');
+    const epoch = u64Blob(input.writerEpoch, 'writerEpoch');
+    const hasPayloadBytes = input.payloadBytes instanceof Uint8Array;
+    const hasPayloadBuilder = typeof input.buildPayloadBytes === 'function';
+    if (hasPayloadBytes === hasPayloadBuilder) {
+      controlError(
+        'WAL_CONTROL_INVALID_CONFIGURATION',
+        'exactly one of payloadBytes or buildPayloadBytes is required',
+      );
+    }
+    // Public bytes are frozen before waiting on the author/packed lane. A
+    // private envelope cannot be finalized until the lane sequence is known;
+    // its callback is invoked synchronously below after allocation.
+    const frozenPayloadBytes = hasPayloadBytes ? copy(input.payloadBytes!) : null;
+    const requestDigest = fixedBytes(input.requestDigest, 32, 'requestDigest');
+    const key = assertText(input.idempotencyKey, 'idempotencyKey');
+    const policyObjectId = input.policyObjectId === undefined || input.policyObjectId === null
+      ? null
+      : fixedBytes(input.policyObjectId, 32, 'policyObjectId');
+    const baseline = input.baselineSnapshotObjectId === undefined || input.baselineSnapshotObjectId === null
+      ? null
+      : fixedBytes(input.baselineSnapshotObjectId, 32, 'baselineSnapshotObjectId');
+    const compactionFloor = input.compactionFloor ?? 0n;
+    u64Blob(compactionFloor, 'compactionFloor');
+    const createdAtMs = input.createdAtMs === undefined
+      ? nowValue(this.now)
+      : safeInteger(input.createdAtMs, 'createdAtMs');
+    const status = input.status ?? 'MATERIALIZATION_PENDING';
+    const maximumObjectBytes = input.maximumObjectBytes ?? this.maximumObjectBytes;
+    if (maximumObjectBytes < 1n || maximumObjectBytes > this.maximumObjectBytes) {
+      controlError(
+        'WAL_CONTROL_INVALID_CONFIGURATION',
+        'maximumObjectBytes must be positive and no greater than the configured packed-store limit',
+      );
+    }
+    const logicalKey = input.logicalKey === undefined
+      ? null
+      : fixedBytes(input.logicalKey, 32, 'logicalKey');
+    const baseHeads = (input.baseHeads ?? [])
+      .map((head, index) => Buffer.from(fixedBytes(head, 32, `baseHeads[${index}]`)))
+      .sort(Buffer.compare);
+    for (let index = 1; index < baseHeads.length; index += 1) {
+      if (bytesEqual(baseHeads[index - 1]!, baseHeads[index]!)) {
+        controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'baseHeads contains a duplicate object ID');
+      }
+    }
+    if (logicalKey === null && baseHeads.length > 0) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'baseHeads requires a logicalKey');
+    }
+
+    return this.mutex.run(async () => {
+      const readExisting = (): FinalizeLocalWalResult | null => {
+        const existing = this.database.prepare(`
+          SELECT i.request_digest, i.object_id, i.checkpoint_id,
+                 c.object_set_root, c.object_count, w.sequence
+          FROM idempotency i
+          JOIN checkpoints c ON c.checkpoint_id = i.checkpoint_id
+          JOIN wal_objects w ON w.object_id = i.object_id
+          WHERE i.namespace_id = ? AND i.writer_id = ? AND i.idempotency_key = ?
+        `).get(namespace, writer, key) as IdempotencyRow | undefined;
+        if (existing === undefined) return null;
+        if (!bytesEqual(existing.request_digest, requestDigest)) {
+          controlError('WAL_CONTROL_IDEMPOTENCY_CONFLICT', 'idempotency key was already used with another request digest');
+        }
+        return {
+          status: 'already-committed',
+          objectId: copy(existing.object_id),
+          checkpointId: copy(existing.checkpoint_id),
+          objectSetRoot: copy(existing.object_set_root),
+          objectCount: blobU64(existing.object_count, 'idempotency object count'),
+          sequence: blobU64(existing.sequence, 'idempotency sequence'),
+        };
+      };
+
+      const existing = readExisting();
+      if (existing !== null) return existing;
+
+      this.database.exec('BEGIN IMMEDIATE');
+      let append: PackedObjectTransactionAppend | undefined;
+      let committed = false;
+      try {
+        // A second process can commit between the optimistic read and BEGIN.
+        const concurrent = readExisting();
+        if (concurrent !== null) {
+          this.database.exec('COMMIT');
+          committed = true;
+          return concurrent;
+        }
+
+        if (logicalKey !== null) {
+          const currentHeads = this.database.prepare(`
+            SELECT object_id FROM local_logical_heads
+            WHERE namespace_id = ? AND logical_key = ? ORDER BY object_id
+          `).all(namespace, logicalKey) as Array<{ object_id: Buffer }>;
+          if (
+            currentHeads.length !== baseHeads.length
+            || currentHeads.some((row, index) => !bytesEqual(row.object_id, baseHeads[index]!))
+          ) {
+            controlError(
+              'WAL_CONTROL_STALE_BASE',
+              'logical-key heads changed after accepted-outcome encoding',
+            );
+          }
+        }
+
+        const lane = this.database.prepare(`
+          SELECT next_sequence, next_checkpoint_number, previous_object_id,
+                 current_checkpoint_id, current_set_root, object_count
+          FROM author_lanes WHERE namespace_id = ? AND writer_id = ? AND writer_epoch = ?
+        `).get(namespace, writer, epoch) as LaneRow | undefined;
+        const sequence = lane === undefined ? 0n : blobU64(lane.next_sequence, 'lane next sequence');
+        const checkpointNumber = lane === undefined
+          ? 0n
+          : blobU64(lane.next_checkpoint_number, 'lane next checkpoint number');
+        if (sequence === MAX_U64 || checkpointNumber === MAX_U64) {
+          controlError('WAL_CONTROL_LIMIT_EXCEEDED', 'author lane exhausted protocol u64 sequence space');
+        }
+
+        let payloadBytes: Uint8Array;
+        if (frozenPayloadBytes !== null) {
+          payloadBytes = frozenPayloadBytes;
+        } else {
+          const built = input.buildPayloadBytes!({
+            namespaceId: copy(namespace),
+            writerId: copy(writer),
+            writerEpoch: input.writerEpoch,
+            sequence,
+            previousObjectId: lane?.previous_object_id == null
+              ? null
+              : copy(lane.previous_object_id),
+          });
+          if (!(built instanceof Uint8Array)) {
+            controlError(
+              'WAL_CONTROL_INVALID_CONFIGURATION',
+              'buildPayloadBytes must synchronously return complete encoded bytes',
+            );
+          }
+          payloadBytes = copy(built);
+        }
+
+        const authored = await createWalObjectV1([
+          1n,
+          namespace,
+          writer,
+          input.writerEpoch,
+          sequence,
+          lane?.previous_object_id ?? null,
+          payloadBytes,
+        ], input.signer);
+        if (BigInt(authored.canonicalBytes.length) > maximumObjectBytes) {
+          controlError('WAL_CONTROL_LIMIT_EXCEEDED', 'complete signed WalObjectV1 exceeds its byte limit');
+        }
+        const metadata = verifyObjectMetadata(
+          authored.walObjectId,
+          authored.tuple,
+          authored.canonicalBytes.length,
+        );
+        const commitment = lane === undefined
+          ? new MutableSetCommitment()
+          : this.restoreCommitment(namespace, writer, epoch, lane.current_set_root);
+        commitment.insert(metadata.id as never);
+        const root = commitment.root;
+        const count = BigInt(commitment.size);
+
+        const checkpoint = await signSingleProtocolTuple('AuthorCheckpointV1', [
+          1n,
+          namespace,
+          writer,
+          input.writerEpoch,
+          checkpointNumber,
+          1n,
+          root,
+          count,
+          sequence,
+          lane?.current_checkpoint_id ?? null,
+          baseline,
+          compactionFloor,
+        ], input.signer);
+        const checkpointBytes = encodeProtocolTuple('AuthorCheckpointV1', checkpoint);
+        const checkpointId = protocolTupleId('AuthorCheckpointV1', checkpoint);
+
+        append = new PackedObjectTransactionAppend({
+          database: this.database,
+          segmentsRoot: this.segmentsRoot,
+          id: walObjectId(authored.walObjectId),
+          source: { kind: 'bytes', bytes: authored.canonicalBytes },
+          segmentTargetBytes: this.segmentTargetBytes,
+          hook: async point => {
+            await this.transactionHook?.(
+              point === 'segment-file-synced' ? 'after-object-file-sync' : 'after-packed-index-insert',
+            );
+          },
+        });
+        await append.append();
+
+        this.database.prepare(`
+          INSERT INTO wal_objects(
+            object_id, namespace_id, writer_id, writer_epoch, sequence,
+            previous_object_id, payload_length, canonical_length, origin, admitted_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'LOCAL', ?)
+        `).run(
+          metadata.id,
+          namespace,
+          writer,
+          epoch,
+          metadata.sequence,
+          metadata.previous,
+          payloadBytes.length,
+          authored.canonicalBytes.length,
+          createdAtMs,
+        );
+        await this.transactionHook?.('after-object-insert');
+
+        this.database.prepare(`
+          INSERT INTO set_commitment_nodes(
+            namespace_id, writer_id, writer_epoch, root_hash, node_key,
+            node_bytes, object_count, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          namespace,
+          writer,
+          epoch,
+          Buffer.from(root),
+          EMPTY_NODE_KEY,
+          Buffer.from(commitment.serialize()),
+          u64Blob(count, 'objectCount'),
+          createdAtMs,
+        );
+        await this.transactionHook?.('after-set-update');
+
+        this.database.prepare(`
+          INSERT INTO checkpoints(
+            checkpoint_id, canonical_bytes, namespace_id, writer_id, writer_epoch,
+            checkpoint_number, object_set_root, root_node_key, object_count,
+            max_sequence, compaction_floor, tip_object_id, previous_checkpoint_id,
+            policy_object_id, baseline_snapshot_object_id, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          checkpointId,
+          checkpointBytes,
+          namespace,
+          writer,
+          epoch,
+          u64Blob(checkpointNumber, 'checkpointNumber'),
+          Buffer.from(root),
+          EMPTY_NODE_KEY,
+          u64Blob(count, 'objectCount'),
+          u64Blob(sequence, 'maxSequence'),
+          u64Blob(compactionFloor, 'compactionFloor'),
+          metadata.id,
+          lane?.current_checkpoint_id ?? null,
+          policyObjectId,
+          baseline,
+          createdAtMs,
+        );
+        await this.transactionHook?.('after-checkpoint-insert');
+
+        this.database.prepare(`
+          INSERT INTO author_lanes(
+            namespace_id, writer_id, writer_epoch, next_sequence,
+            next_checkpoint_number, previous_object_id, current_checkpoint_id,
+            current_set_root, root_node_key, object_count, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(namespace_id, writer_id, writer_epoch) DO UPDATE SET
+            next_sequence = excluded.next_sequence,
+            next_checkpoint_number = excluded.next_checkpoint_number,
+            previous_object_id = excluded.previous_object_id,
+            current_checkpoint_id = excluded.current_checkpoint_id,
+            current_set_root = excluded.current_set_root,
+            root_node_key = excluded.root_node_key,
+            object_count = excluded.object_count,
+            updated_at_ms = excluded.updated_at_ms
+        `).run(
+          namespace,
+          writer,
+          epoch,
+          u64Blob(sequence + 1n, 'nextSequence'),
+          u64Blob(checkpointNumber + 1n, 'nextCheckpointNumber'),
+          metadata.id,
+          checkpointId,
+          Buffer.from(root),
+          EMPTY_NODE_KEY,
+          u64Blob(count, 'objectCount'),
+          createdAtMs,
+        );
+        this.database.prepare(`
+          INSERT INTO idempotency(
+            namespace_id, writer_id, idempotency_key, request_digest,
+            object_id, checkpoint_id, status, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          namespace,
+          writer,
+          key,
+          requestDigest,
+          metadata.id,
+          checkpointId,
+          status,
+          createdAtMs,
+        );
+        if (logicalKey !== null) {
+          this.database.prepare(`
+            INSERT INTO local_commit_work(
+              object_id, namespace_id, logical_key, state, last_error, updated_at_ms
+            ) VALUES (?, ?, ?, 'PENDING', NULL, ?)
+          `).run(metadata.id, namespace, logicalKey, createdAtMs);
+          this.database.prepare(`
+            DELETE FROM local_logical_heads WHERE namespace_id = ? AND logical_key = ?
+          `).run(namespace, logicalKey);
+          this.database.prepare(`
+            INSERT INTO local_logical_heads(namespace_id, logical_key, object_id) VALUES (?, ?, ?)
+          `).run(namespace, logicalKey, metadata.id);
+          await this.transactionHook?.('after-local-work-insert');
+        }
+        await this.transactionHook?.('before-commit');
+        this.database.exec('COMMIT');
+        committed = true;
+        append.markCommitted();
+        await this.transactionHook?.('after-commit');
+        return {
+          status: 'committed',
+          objectId: copy(metadata.id),
+          checkpointId: copy(checkpointId),
+          objectSetRoot: copy(root),
+          objectCount: count,
+          sequence,
+        };
+      } catch (error) {
+        if (!committed && this.database.inTransaction) this.database.exec('ROLLBACK');
+        if (!committed) append?.rollback();
+        if (!committed) await this.transactionHook?.('after-rollback');
+        if (error instanceof WalControlStoreError) throw error;
+        if (committed) throw error;
+        return this.wrapIo('failed to commit complete local WAL object', error);
+      }
+    });
   }
 
   async finalizeLocal(input: FinalizeLocalWalInput): Promise<FinalizeLocalWalResult> {
@@ -537,11 +908,13 @@ export class WalControlStore {
         INSERT INTO admission(object_id, state, proof_bytes, closure_bytes, provider_peer_id, reason_code, updated_at_ms)
         VALUES (?, 'STAGED', ?, ?, ?, NULL, ?)
         ON CONFLICT(object_id) DO UPDATE SET
+          state = 'STAGED',
           proof_bytes = excluded.proof_bytes,
           closure_bytes = excluded.closure_bytes,
           provider_peer_id = excluded.provider_peer_id,
+          reason_code = NULL,
           updated_at_ms = excluded.updated_at_ms
-        WHERE admission.state = 'STAGED'
+        WHERE admission.state IN ('STAGED', 'BLOCKED')
       `).run(
         id,
         input.proofBytes === undefined || input.proofBytes === null ? null : Buffer.from(input.proofBytes),
@@ -557,54 +930,226 @@ export class WalControlStore {
     }
   }
 
-  admitRemoteBatch(inputs: readonly AdmitRemoteObjectInput[], updatedAtMs = nowValue(this.now)): void {
+  getAdmission(objectId: Uint8Array): AdmissionRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT object_id, state, proof_bytes, closure_bytes, provider_peer_id,
+             reason_code, updated_at_ms
+      FROM admission WHERE object_id = ?
+    `).get(fixedBytes(objectId, 32, 'objectId')) as {
+      object_id: Buffer;
+      state: AdmissionState;
+      proof_bytes: Buffer | null;
+      closure_bytes: Buffer | null;
+      provider_peer_id: Buffer | null;
+      reason_code: string | null;
+      updated_at_ms: number;
+    } | undefined;
+    return row === undefined ? null : {
+      objectId: copy(row.object_id),
+      state: row.state,
+      proofBytes: row.proof_bytes === null ? null : copy(row.proof_bytes),
+      closureBytes: row.closure_bytes === null ? null : copy(row.closure_bytes),
+      providerPeerId: row.provider_peer_id === null ? null : copy(row.provider_peer_id),
+      reasonCode: row.reason_code,
+      updatedAtMs: row.updated_at_ms,
+    };
+  }
+
+  setAdmissionState(
+    objectId: Uint8Array,
+    state: Extract<AdmissionState, 'BLOCKED' | 'QUARANTINED'>,
+    reasonCode: string,
+    updatedAtMs = nowValue(this.now),
+  ): void {
+    this.assertUsable();
+    const id = fixedBytes(objectId, 32, 'objectId');
+    const reason = assertText(reasonCode, 'admission reason');
+    safeInteger(updatedAtMs, 'updatedAtMs');
+    const current = this.getAdmission(id);
+    if (current === null) controlError('WAL_CONTROL_NOT_FOUND', 'admission record is not staged');
+    if (current.state === 'QUARANTINED') {
+      if (state === 'QUARANTINED' && current.reasonCode === reason) return;
+      controlError('WAL_CONTROL_LANE_CONFLICT', 'quarantined admission state is immutable');
+    }
+    if (current.state === 'ADMITTED') controlError('WAL_CONTROL_LANE_CONFLICT', 'admitted state is immutable');
+    if (this.database.prepare(`
+      UPDATE admission SET state = ?, reason_code = ?, updated_at_ms = ?
+      WHERE object_id = ? AND state IN ('STAGED', 'BLOCKED')
+    `).run(state, reason, updatedAtMs, id).changes !== 1) {
+      controlError('WAL_CONTROL_LANE_CONFLICT', 'admission state changed concurrently');
+    }
+  }
+
+  getWalObjectMetadata(objectId: Uint8Array): WalObjectMetadataRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT object_id, namespace_id, writer_id, writer_epoch, sequence,
+             previous_object_id, payload_length, canonical_length, origin,
+             admitted_at_ms
+      FROM wal_objects WHERE object_id = ?
+    `).get(fixedBytes(objectId, 32, 'objectId')) as {
+      object_id: Buffer;
+      namespace_id: Buffer;
+      writer_id: Buffer;
+      writer_epoch: Buffer;
+      sequence: Buffer;
+      previous_object_id: Buffer | null;
+      payload_length: number;
+      canonical_length: number;
+      origin: WalObjectOrigin;
+      admitted_at_ms: number;
+    } | undefined;
+    return row === undefined ? null : {
+      objectId: copy(row.object_id),
+      namespaceId: copy(row.namespace_id),
+      writerId: copy(row.writer_id),
+      writerEpoch: blobU64(row.writer_epoch, 'writerEpoch'),
+      sequence: blobU64(row.sequence, 'sequence'),
+      previousObjectId: row.previous_object_id === null ? null : copy(row.previous_object_id),
+      payloadLength: row.payload_length,
+      canonicalLength: row.canonical_length,
+      origin: row.origin,
+      admittedAtMs: row.admitted_at_ms,
+    };
+  }
+
+  findWalObjectAtPosition(
+    namespaceId: Uint8Array,
+    writerId: Uint8Array,
+    writerEpoch: bigint,
+    sequence: bigint,
+  ): WalObjectMetadataRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT object_id FROM wal_objects
+      WHERE namespace_id = ? AND writer_id = ? AND writer_epoch = ? AND sequence = ?
+    `).get(
+      fixedBytes(namespaceId, 32, 'namespaceId'),
+      fixedBytes(writerId, 20, 'writerId'),
+      u64Blob(writerEpoch, 'writerEpoch'),
+      u64Blob(sequence, 'sequence'),
+    ) as { object_id: Buffer } | undefined;
+    return row === undefined ? null : this.getWalObjectMetadata(row.object_id);
+  }
+
+  async admitRemoteBatch(inputs: readonly AdmitRemoteObjectInput[], updatedAtMs = nowValue(this.now)): Promise<void> {
     this.assertUsable();
     safeInteger(updatedAtMs, 'updatedAtMs');
     if (inputs.length === 0) controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'remote admission batch cannot be empty');
     const verified = inputs.map(input => ({
       input,
       metadata: verifyObjectMetadata(input.objectId, input.object, input.canonicalLength),
+      logicalKeys: (input.logicalKeys ?? []).map((key, index) => fixedBytes(key, 32, `logicalKeys[${index}]`)),
     }));
-    this.database.exec('BEGIN IMMEDIATE');
-    try {
-      const present = this.database.prepare('SELECT object_length FROM objects WHERE object_id = ?');
-      const insert = this.database.prepare(`
-        INSERT OR IGNORE INTO wal_objects(
-          object_id, namespace_id, writer_id, writer_epoch, sequence,
-          previous_object_id, payload_length, canonical_length, origin, admitted_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const admit = this.database.prepare(`
-        UPDATE admission SET state = 'ADMITTED', reason_code = NULL, updated_at_ms = ?
-        WHERE object_id = ? AND state = 'STAGED'
-      `);
-      for (const { input, metadata } of verified) {
-        const physical = present.get(metadata.id) as { object_length: number } | undefined;
-        if (physical === undefined || physical.object_length !== input.canonicalLength) {
-          controlError('WAL_CONTROL_NOT_FOUND', 'remote WalObject bytes are not durably present');
-        }
-        insert.run(
-          metadata.id,
-          metadata.namespace,
-          metadata.writer,
-          metadata.epoch,
-          metadata.sequence,
-          metadata.previous,
-          input.object[6].length,
-          input.canonicalLength,
-          input.origin ?? 'REMOTE',
-          updatedAtMs,
-        );
-        if (admit.run(updatedAtMs, metadata.id).changes !== 1) {
-          controlError('WAL_CONTROL_LANE_CONFLICT', 'remote WalObject was not in staged admission state');
-        }
+    const logicalKeys = new Map<string, { namespaceId: Uint8Array; logicalKey: Uint8Array }>();
+    for (const item of verified) {
+      const namespaceHex = Buffer.from(item.metadata.namespace).toString('hex');
+      for (const key of item.logicalKeys) {
+        const logicalHex = Buffer.from(key).toString('hex');
+        logicalKeys.set(`${namespaceHex}:${logicalHex}`, {
+          namespaceId: item.metadata.namespace,
+          logicalKey: key,
+        });
       }
-      this.database.exec('COMMIT');
-    } catch (error) {
-      this.database.exec('ROLLBACK');
-      if (error instanceof WalControlStoreError) throw error;
-      return this.wrapIo('failed to admit remote WAL batch', error);
     }
+    return this.mutex.run(async () => {
+      let committed = false;
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const present = this.database.prepare('SELECT object_length FROM objects WHERE object_id = ?');
+        const insert = this.database.prepare(`
+          INSERT OR IGNORE INTO wal_objects(
+            object_id, namespace_id, writer_id, writer_epoch, sequence,
+            previous_object_id, payload_length, canonical_length, origin, admitted_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const position = this.database.prepare(`
+          SELECT object_id FROM wal_objects
+          WHERE namespace_id = ? AND writer_id = ? AND writer_epoch = ? AND sequence = ?
+        `);
+        const admit = this.database.prepare(`
+          UPDATE admission SET state = 'ADMITTED', reason_code = NULL, updated_at_ms = ?
+          WHERE object_id = ? AND state = 'STAGED'
+        `);
+        for (const { input, metadata } of verified) {
+          const physical = present.get(metadata.id) as { object_length: number } | undefined;
+          if (physical === undefined || physical.object_length !== input.canonicalLength) {
+            controlError('WAL_CONTROL_NOT_FOUND', 'remote WalObject bytes are not durably present');
+          }
+          const inserted = insert.run(
+            metadata.id,
+            metadata.namespace,
+            metadata.writer,
+            metadata.epoch,
+            metadata.sequence,
+            metadata.previous,
+            input.object[6].length,
+            input.canonicalLength,
+            input.origin ?? 'REMOTE',
+            updatedAtMs,
+          );
+          if (inserted.changes !== 1) {
+            const occupant = position.get(
+              metadata.namespace,
+              metadata.writer,
+              metadata.epoch,
+              metadata.sequence,
+            ) as { object_id: Buffer } | undefined;
+            if (occupant === undefined || !bytesEqual(occupant.object_id, metadata.id)) {
+              controlError('WAL_CONTROL_LANE_CONFLICT', 'remote author position is already occupied by another WalObject');
+            }
+          }
+          await this.transactionHook?.('after-remote-object-insert');
+          if (admit.run(updatedAtMs, metadata.id).changes !== 1) {
+            controlError('WAL_CONTROL_LANE_CONFLICT', 'remote WalObject was not in staged admission state');
+          }
+          await this.transactionHook?.('after-remote-object-admit');
+        }
+
+        const existingRetry = this.database.prepare('SELECT kind, payload FROM retry_queue WHERE queue_key = ?');
+        const insertRetry = this.database.prepare(`
+          INSERT INTO retry_queue(
+            queue_key, kind, payload, priority, attempts, maximum_attempts,
+            available_at_ms, lease_until_ms, state, last_error, created_at_ms, updated_at_ms
+          ) VALUES (?, 'WAL_REPLAY_LOGICAL_KEY', ?, 0, 0, 32, ?, NULL, 'READY', NULL, ?, ?)
+        `);
+        const totals = this.database.prepare(
+          'SELECT count(*) AS count, coalesce(sum(length(payload)), 0) AS bytes FROM retry_queue',
+        ).get() as CountRow;
+        let addedCount = 0;
+        let addedBytes = 0;
+        for (const [scopedKey, work] of [...logicalKeys].sort(([left], [right]) => left.localeCompare(right))) {
+          const queueKey = `wal-replay:${scopedKey}`;
+          const payload = encodeCanonicalCbor([1n, work.namespaceId, work.logicalKey]);
+          const current = existingRetry.get(queueKey) as { kind: string; payload: Buffer } | undefined;
+          if (current !== undefined) {
+            if (current.kind !== 'WAL_REPLAY_LOGICAL_KEY' || !bytesEqual(current.payload, payload)) {
+              controlError('WAL_CONTROL_IDEMPOTENCY_CONFLICT', 'logical-key retry entry has another payload');
+            }
+            continue;
+          }
+          addedCount += 1;
+          addedBytes += payload.length;
+          if (
+            totals.count + addedCount > this.maximumQueueEntries
+            || totals.bytes! + addedBytes > this.maximumQueueBytes
+          ) controlError('WAL_CONTROL_LIMIT_EXCEEDED', 'persistent retry queue limit exceeded');
+          insertRetry.run(queueKey, Buffer.from(payload), updatedAtMs, updatedAtMs, updatedAtMs);
+          await this.transactionHook?.('after-replay-enqueue');
+        }
+        await this.transactionHook?.('before-commit');
+        this.database.exec('COMMIT');
+        committed = true;
+        await this.transactionHook?.('after-commit');
+      } catch (error) {
+        if (!committed && this.database.inTransaction) this.database.exec('ROLLBACK');
+        if (!committed) await this.transactionHook?.('after-rollback');
+        if (error instanceof WalControlStoreError) throw error;
+        if (committed) throw error;
+        return this.wrapIo('failed to admit remote WAL batch', error);
+      }
+    });
   }
 
   enqueueRetry(input: EnqueueRetryInput): void {
@@ -732,6 +1277,9 @@ export class WalControlStore {
       controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'quarantine expiry must be after creation');
     }
     this.cleanupExpired(createdAtMs);
+    if (this.database.prepare('SELECT 1 FROM wal_objects WHERE object_id = ?').get(entryId) !== undefined) {
+      controlError('WAL_CONTROL_LANE_CONFLICT', 'an admitted canonical WalObject cannot be quarantined');
+    }
     const existing = this.database.prepare('SELECT 1 FROM quarantine WHERE entry_id = ?').get(entryId);
     if (existing !== undefined) return;
     const totals = this.database.prepare(`
@@ -749,6 +1297,110 @@ export class WalControlStore {
         byte_length, created_at_ms, expires_at_ms
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(entryId, peerId, reason, path, byteLength, createdAtMs, expiresAtMs);
+  }
+
+  async quarantineAdmission(input: QuarantineAdmissionInput): Promise<void> {
+    this.assertUsable();
+    const admissionObjectId = fixedBytes(input.admissionObjectId ?? input.entryId, 32, 'admissionObjectId');
+    const blockedRootObjectId = input.blockedRootObjectId === undefined || input.blockedRootObjectId === null
+      ? null
+      : fixedBytes(input.blockedRootObjectId, 32, 'blockedRootObjectId');
+    const updatedAtMs = input.updatedAtMs === undefined
+      ? nowValue(this.now)
+      : safeInteger(input.updatedAtMs, 'updatedAtMs');
+    return this.mutex.run(async () => {
+      let committed = false;
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        this.quarantine(input);
+        await this.transactionHook?.('after-quarantine-insert');
+        this.setAdmissionState(admissionObjectId, 'QUARANTINED', input.reasonCode, updatedAtMs);
+        if (blockedRootObjectId !== null && !bytesEqual(blockedRootObjectId, admissionObjectId)) {
+          this.setAdmissionState(blockedRootObjectId, 'BLOCKED', 'DEPENDENCY_INVALID', updatedAtMs);
+        }
+        await this.transactionHook?.('after-quarantine-state');
+        await this.transactionHook?.('before-commit');
+        this.database.exec('COMMIT');
+        committed = true;
+        await this.transactionHook?.('after-commit');
+      } catch (error) {
+        if (!committed && this.database.inTransaction) this.database.exec('ROLLBACK');
+        if (!committed) await this.transactionHook?.('after-rollback');
+        if (error instanceof WalControlStoreError) throw error;
+        if (committed) throw error;
+        return this.wrapIo('failed to quarantine remote WAL admission', error);
+      }
+    });
+  }
+
+  getQuarantine(entryId: Uint8Array): QuarantineRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT entry_id, provider_peer_id, reason_code, relative_path,
+             byte_length, created_at_ms, expires_at_ms
+      FROM quarantine WHERE entry_id = ?
+    `).get(fixedBytes(entryId, 32, 'entryId')) as {
+      entry_id: Buffer;
+      provider_peer_id: Buffer;
+      reason_code: string;
+      relative_path: string | null;
+      byte_length: number;
+      created_at_ms: number;
+      expires_at_ms: number;
+    } | undefined;
+    return row === undefined ? null : {
+      entryId: copy(row.entry_id),
+      providerPeerId: copy(row.provider_peer_id),
+      reasonCode: row.reason_code,
+      relativePath: row.relative_path,
+      byteLength: row.byte_length,
+      createdAtMs: row.created_at_ms,
+      expiresAtMs: row.expires_at_ms,
+    };
+  }
+
+  listQuarantine(providerPeerId?: Uint8Array, limit?: number): readonly QuarantineRecord[] {
+    this.assertUsable();
+    const effectiveLimit = limit ?? Math.min(1_000, this.maximumQuarantineEntriesPerPeer);
+    safeInteger(effectiveLimit, 'quarantine list limit', 1);
+    if (effectiveLimit > this.maximumQuarantineEntriesPerPeer) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'quarantine list limit exceeds the configured per-peer bound');
+    }
+    let rows: Array<{
+      entry_id: Buffer;
+      provider_peer_id: Buffer;
+      reason_code: string;
+      relative_path: string | null;
+      byte_length: number;
+      created_at_ms: number;
+      expires_at_ms: number;
+    }>;
+    if (providerPeerId === undefined) {
+      rows = this.database.prepare(`
+        SELECT entry_id, provider_peer_id, reason_code, relative_path,
+               byte_length, created_at_ms, expires_at_ms
+        FROM quarantine ORDER BY created_at_ms, entry_id LIMIT ?
+      `).all(effectiveLimit) as typeof rows;
+    } else {
+      if (!(providerPeerId instanceof Uint8Array) || providerPeerId.length === 0) {
+        controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'providerPeerId cannot be empty');
+      }
+      rows = this.database.prepare(`
+        SELECT entry_id, provider_peer_id, reason_code, relative_path,
+               byte_length, created_at_ms, expires_at_ms
+        FROM quarantine WHERE provider_peer_id = ?
+        ORDER BY created_at_ms, entry_id LIMIT ?
+      `).all(Buffer.from(providerPeerId), effectiveLimit) as typeof rows;
+    }
+    return rows.map(row => ({
+      entryId: copy(row.entry_id),
+      providerPeerId: copy(row.provider_peer_id),
+      reasonCode: row.reason_code,
+      relativePath: row.relative_path,
+      byteLength: row.byte_length,
+      createdAtMs: row.created_at_ms,
+      expiresAtMs: row.expires_at_ms,
+    }));
   }
 
   cleanupExpired(now = nowValue(this.now)): { ranges: number; cache: number; quarantine: number } {
@@ -963,6 +1615,109 @@ export class WalControlStore {
       safeInteger(input.retryAtMs, 'materialization retryAtMs'),
       safeInteger(input.updatedAtMs, 'materialization updatedAtMs'),
     );
+  }
+
+  getLocalCommitWork(objectId: Uint8Array): LocalCommitWorkRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT object_id, namespace_id, logical_key, state, last_error, updated_at_ms
+      FROM local_commit_work WHERE object_id = ?
+    `).get(fixedBytes(objectId, 32, 'objectId')) as {
+      object_id: Buffer;
+      namespace_id: Buffer;
+      logical_key: Buffer;
+      state: LocalCommitWorkState;
+      last_error: string | null;
+      updated_at_ms: number;
+    } | undefined;
+    return row === undefined ? null : {
+      objectId: copy(row.object_id),
+      namespaceId: copy(row.namespace_id),
+      logicalKey: copy(row.logical_key),
+      state: row.state,
+      lastError: row.last_error,
+      updatedAtMs: row.updated_at_ms,
+    };
+  }
+
+  /** Exact local logical-key frontier used as the encoder's compare-and-swap base. */
+  getLocalLogicalHeads(namespaceId: Uint8Array, logicalKey: Uint8Array): readonly Uint8Array[] {
+    this.assertUsable();
+    const rows = this.database.prepare(`
+      SELECT object_id FROM local_logical_heads
+      WHERE namespace_id = ? AND logical_key = ? ORDER BY object_id
+    `).all(
+      fixedBytes(namespaceId, 32, 'namespaceId'),
+      fixedBytes(logicalKey, 32, 'logicalKey'),
+    ) as Array<{ object_id: Buffer }>;
+    return rows.map(row => copy(row.object_id));
+  }
+
+  listLocalCommitWork(
+    states: readonly LocalCommitWorkState[] = ['PENDING', 'QUEUED'],
+    limit = 1_000,
+  ): readonly LocalCommitWorkRecord[] {
+    this.assertUsable();
+    safeInteger(limit, 'local commit work limit', 1);
+    if (limit > this.maximumQueueEntries) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'local commit work limit exceeds the queue bound');
+    }
+    if (states.length === 0 || states.some(state =>
+      !['PENDING', 'QUEUED', 'MATERIALIZED', 'BLOCKED'].includes(state))) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'local commit work states are invalid');
+    }
+    const placeholders = states.map(() => '?').join(', ');
+    const rows = this.database.prepare(`
+      SELECT object_id, namespace_id, logical_key, state, last_error, updated_at_ms
+      FROM local_commit_work WHERE state IN (${placeholders})
+      ORDER BY updated_at_ms, object_id LIMIT ?
+    `).all(...states, limit) as Array<{
+      object_id: Buffer;
+      namespace_id: Buffer;
+      logical_key: Buffer;
+      state: LocalCommitWorkState;
+      last_error: string | null;
+      updated_at_ms: number;
+    }>;
+    return rows.map(row => ({
+      objectId: copy(row.object_id),
+      namespaceId: copy(row.namespace_id),
+      logicalKey: copy(row.logical_key),
+      state: row.state,
+      lastError: row.last_error,
+      updatedAtMs: row.updated_at_ms,
+    }));
+  }
+
+  setLocalCommitWorkState(input: {
+    objectId: Uint8Array;
+    expected: readonly LocalCommitWorkState[];
+    state: LocalCommitWorkState;
+    lastError?: string | null;
+    updatedAtMs?: number;
+  }): void {
+    this.assertUsable();
+    if (input.expected.length === 0) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'expected local work states cannot be empty');
+    }
+    const objectId = fixedBytes(input.objectId, 32, 'objectId');
+    const error = input.lastError === undefined || input.lastError === null
+      ? null
+      : assertText(input.lastError, 'local commit work error');
+    const updatedAtMs = safeInteger(input.updatedAtMs ?? nowValue(this.now), 'updatedAtMs');
+    const placeholders = input.expected.map(() => '?').join(', ');
+    const result = this.database.prepare(`
+      UPDATE local_commit_work SET state = ?, last_error = ?, updated_at_ms = ?
+      WHERE object_id = ? AND state IN (${placeholders})
+    `).run(input.state, error, updatedAtMs, objectId, ...input.expected);
+    if (result.changes !== 1) {
+      controlError('WAL_CONTROL_LANE_CONFLICT', 'local commit work is absent or changed concurrently');
+    }
+    if (input.state === 'MATERIALIZED') {
+      this.database.prepare(`
+        UPDATE idempotency SET status = 'MATERIALIZED' WHERE object_id = ?
+      `).run(objectId);
+    }
   }
 
   putPeerState(input: PeerStateRecord): void {
@@ -1250,6 +2005,8 @@ export class WalControlStore {
       for (const migration of [
         { from: 1, sql: WAL_CONTROL_MIGRATION_1_TO_2_SQL },
         { from: 2, sql: WAL_CONTROL_MIGRATION_2_TO_3_SQL },
+        { from: 3, sql: WAL_CONTROL_MIGRATION_3_TO_4_SQL },
+        { from: 4, sql: WAL_CONTROL_MIGRATION_4_TO_5_SQL },
       ]) {
         if (version !== migration.from) continue;
         this.database.exec('BEGIN IMMEDIATE');

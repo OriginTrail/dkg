@@ -15,6 +15,7 @@ import {
   type WalControlTransactionPoint,
 } from '../../src/control/index.js';
 import { encodeProtocolTuple } from '../../src/protocol/codec.js';
+import { encodeCanonicalCbor } from '../../src/protocol/canonical-cbor.js';
 import { protocolTupleId } from '../../src/protocol/hashes.js';
 import {
   recoverEip191Address,
@@ -64,6 +65,16 @@ function object(name: 'first' | 'second' = 'first'): VerifiedWalObjectV1 {
 
 async function* source(value: Uint8Array): AsyncIterable<Uint8Array> {
   for (let offset = 0; offset < value.length; offset += 31) yield value.slice(offset, offset + 31);
+}
+
+async function collect(value: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for await (const chunk of value) { chunks.push(chunk); length += chunk.length; }
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
+  return output;
 }
 
 async function temporary(label: string): Promise<string> {
@@ -175,6 +186,8 @@ describe('WalControlStore schema and rollback guard', () => {
       'gc_queue',
       'iblt_cache',
       'idempotency',
+      'local_commit_work',
+      'local_logical_heads',
       'materialization',
       'membership_checkpoints',
       'object_ranges',
@@ -214,7 +227,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let value = control(root);
     closeControl(value);
     database = new Database(join(root, 'objects.sqlite'));
-    database.prepare('UPDATE wal_control_schema SET version = 4').run();
+    database.prepare('UPDATE wal_control_schema SET version = 6').run();
     database.close();
     await expectCode(() => control(root), 'WAL_CONTROL_UNSUPPORTED_SCHEMA');
 
@@ -237,7 +250,7 @@ describe('WalControlStore schema and rollback guard', () => {
     await expectCode(() => control(missingObjects), 'WAL_CONTROL_INVALID_CONFIGURATION');
   });
 
-  it('migrates schema version 1 through authority-aware version 2 to private-payload version 3 transactionally', async () => {
+  it('migrates schema version 1 through namespace-scoped local-work version 5 transactionally', async () => {
     const root = await temporary('migration-v1-v2');
     await prepare(root);
     let value = control(root);
@@ -245,6 +258,8 @@ describe('WalControlStore schema and rollback guard', () => {
     let database = new Database(join(root, 'objects.sqlite'));
     database.pragma('foreign_keys = OFF');
     for (const table of [
+      'local_logical_heads',
+      'local_commit_work',
       'private_payload_nonces',
       'collection_vector_heads',
       'collection_vector_conflicts',
@@ -269,20 +284,24 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(2);
+    expect(hookCalls).toBe(4);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(3);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
     database.close();
   });
 
-  it('migrates schema version 2 to private-payload version 3 transactionally', async () => {
+  it('migrates schema version 2 through namespace-scoped local-work version 5 transactionally', async () => {
     const root = await temporary('migration-v2-v3');
     await prepare(root);
     let value = control(root);
     closeControl(value);
     let database = new Database(join(root, 'objects.sqlite'));
+    database.exec('DROP TABLE local_logical_heads');
+    database.exec('DROP TABLE local_commit_work');
     database.exec('DROP TABLE private_payload_nonces');
     database.prepare('UPDATE wal_control_schema SET version = 2').run();
     database.close();
@@ -298,10 +317,111 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(1);
+    expect(hookCalls).toBe(3);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(3);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
+    database.close();
+  });
+
+  it('migrates schema version 3 through namespace-scoped local work transactionally', async () => {
+    const root = await temporary('migration-v3-v4');
+    await prepare(root);
+    let value = control(root);
+    closeControl(value);
+    let database = new Database(join(root, 'objects.sqlite'));
+    database.exec('DROP TABLE local_logical_heads');
+    database.exec('DROP TABLE local_commit_work');
+    database.prepare('UPDATE wal_control_schema SET version = 3').run();
+    database.close();
+
+    await expectCode(
+      () => control(root, { migrationHook: () => { throw new Error('v3 to v4 migration crash'); } }),
+      'WAL_CONTROL_IO',
+    );
+    database = new Database(join(root, 'objects.sqlite'));
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(3);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeUndefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeUndefined();
+    database.close();
+
+    value = control(root);
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
+    database.close();
+  });
+
+  it('migrates version 4 local heads to the exact WalObject namespace without losing work', async () => {
+    const root = await temporary('migration-v4-v5');
+    await prepare(root);
+    let value = control(root, { now: () => 4_000 });
+    const input = {
+      namespaceId: bytes('migration-v4-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: encodeCanonicalCbor([1n, 'migration-v4-payload']),
+      signer,
+      idempotencyKey: 'migration-v4-request',
+      requestDigest: bytes('migration-v4-request'),
+      logicalKey: bytes('migration-v4-logical-key'),
+    } as const;
+    const committed = await value.commitLocal(input);
+    closeControl(value);
+
+    let database = new Database(join(root, 'objects.sqlite'));
+    database.pragma('foreign_keys = OFF');
+    database.exec(`
+      CREATE TABLE local_commit_work_v4 (
+        object_id BLOB PRIMARY KEY CHECK (length(object_id) = 32),
+        logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+        state TEXT NOT NULL CHECK (state IN ('PENDING', 'QUEUED', 'MATERIALIZED', 'BLOCKED')),
+        last_error TEXT,
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+        FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+      ) WITHOUT ROWID;
+      INSERT INTO local_commit_work_v4(object_id, logical_key, state, last_error, updated_at_ms)
+        SELECT object_id, logical_key, state, last_error, updated_at_ms FROM local_commit_work;
+      CREATE TABLE local_logical_heads_v4 (
+        logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+        object_id BLOB NOT NULL UNIQUE CHECK (length(object_id) = 32),
+        PRIMARY KEY (logical_key, object_id),
+        FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+      ) WITHOUT ROWID;
+      INSERT INTO local_logical_heads_v4(logical_key, object_id)
+        SELECT logical_key, object_id FROM local_logical_heads;
+      DROP TABLE local_logical_heads;
+      DROP TABLE local_commit_work;
+      ALTER TABLE local_commit_work_v4 RENAME TO local_commit_work;
+      ALTER TABLE local_logical_heads_v4 RENAME TO local_logical_heads;
+      CREATE INDEX local_commit_work_state ON local_commit_work(state, updated_at_ms, object_id);
+      UPDATE wal_control_schema SET version = 4 WHERE singleton = 1;
+    `);
+    database.close();
+
+    await expectCode(
+      () => control(root, { migrationHook: () => { throw new Error('v4 to v5 migration crash'); } }),
+      'WAL_CONTROL_IO',
+    );
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(4);
+    expect((database.pragma('table_info(local_logical_heads)') as Array<{ name: string }>)
+      .map(column => column.name)).not.toContain('namespace_id');
+    database.close();
+
+    value = control(root);
+    expect(value.getLocalCommitWork(committed.objectId)).toEqual(expect.objectContaining({
+      objectId: committed.objectId,
+      namespaceId: input.namespaceId,
+      logicalKey: input.logicalKey,
+      state: 'PENDING',
+    }));
+    expect(value.getLocalLogicalHeads(input.namespaceId, input.logicalKey)).toEqual([committed.objectId]);
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
     database.close();
   });
 
@@ -551,6 +671,431 @@ describe('WalControlStore schema and rollback guard', () => {
 });
 
 describe('WalControlStore atomic finalization and admission', () => {
+  it('rejects invalid local-commit configuration, payload, limits, and causal bases', async () => {
+    const invalidRoot = await temporary('invalid-local-config');
+    for (const maximumObjectBytes of [0n, 8_589_934_593n]) {
+      expect(() => new WalControlStore({ root: invalidRoot, maximumObjectBytes })).toThrowError(
+        expect.objectContaining({ code: 'WAL_CONTROL_INVALID_CONFIGURATION' }),
+      );
+    }
+
+    const root = await temporary('invalid-local-input');
+    packed(root);
+    const value = control(root, { maximumObjectBytes: 1_000n });
+    const common = {
+      namespaceId: bytes('invalid-local-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      signer,
+      idempotencyKey: 'invalid-local',
+      requestDigest: bytes('invalid-local'),
+    } as const;
+    await expectCode(value.commitLocal({
+      ...common,
+      payloadBytes: 'not-bytes' as never,
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.commitLocal({
+      ...common,
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(1),
+      buildPayloadBytes: () => Uint8Array.of(2),
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.commitLocal({
+      ...common,
+      buildPayloadBytes: () => 'not-bytes' as never,
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    for (const maximumObjectBytes of [0n, 1_001n]) {
+      await expectCode(value.commitLocal({
+        ...common,
+        payloadBytes: Uint8Array.of(1),
+        maximumObjectBytes,
+      }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    }
+    await expectCode(value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(1),
+      logicalKey: bytes('duplicate-head-key'),
+      baseHeads: [bytes('duplicate-head'), bytes('duplicate-head')],
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(1),
+      logicalKey: bytes('distinct-head-key'),
+      baseHeads: [bytes('distinct-head-a'), bytes('distinct-head-b')],
+    }), 'WAL_CONTROL_STALE_BASE');
+    await expectCode(value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(1),
+      baseHeads: [bytes('head-without-key')],
+    }), 'WAL_CONTROL_INVALID_CONFIGURATION');
+
+    const explicitNull = await value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(2),
+      idempotencyKey: 'explicit-null-baseline',
+      requestDigest: bytes('explicit-null-baseline'),
+      logicalKey: bytes('explicit-null-key'),
+      baselineSnapshotObjectId: null,
+      createdAtMs: 123,
+    });
+    expect(explicitNull.status).toBe('committed');
+    const explicitBaseline = await value.commitLocal({
+      ...common,
+      payloadBytes: Uint8Array.of(3),
+      idempotencyKey: 'explicit-baseline',
+      requestDigest: bytes('explicit-baseline'),
+      logicalKey: bytes('explicit-baseline-key'),
+      baselineSnapshotObjectId: explicitNull.objectId,
+      createdAtMs: 124,
+    });
+    expect(explicitBaseline.status).toBe('committed');
+  });
+
+  it('authors the complete local object, packed bytes, checkpoint, lane, and idempotency result atomically', async () => {
+    const root = await temporary('local-commit');
+    const physical = packed(root);
+    let value = control(root, { now: () => 7_000 });
+    const namespaceId = bytes('local-namespace');
+    const writerId = object().tuple[2];
+    const firstInput = {
+      namespaceId,
+      writerId,
+      writerEpoch: 3n,
+      payloadBytes: encodeCanonicalCbor([1n, 'first-local-payload']),
+      signer,
+      idempotencyKey: 'local-request-1',
+      requestDigest: bytes('local-request-1'),
+      logicalKey: bytes('local-logical-key'),
+    } as const;
+    const first = await value.commitLocal(firstInput);
+    expect(first).toEqual(expect.objectContaining({
+      status: 'committed', objectCount: 1n, sequence: 0n,
+    }));
+    const firstBytes = await collect(physical.read(walObjectId(first.objectId)));
+    const firstObject = verifyWalObjectV1(firstBytes);
+    expect(firstObject.tuple.slice(1, 7)).toEqual([
+      namespaceId,
+      writerId,
+      3n,
+      0n,
+      null,
+      firstInput.payloadBytes,
+    ]);
+    expect(value.getLocalCommitWork(first.objectId)).toEqual({
+      objectId: first.objectId,
+      namespaceId: firstInput.namespaceId,
+      logicalKey: firstInput.logicalKey,
+      state: 'PENDING',
+      lastError: null,
+      updatedAtMs: 7_000,
+    });
+    value.setLocalCommitWorkState({
+      objectId: first.objectId,
+      expected: ['PENDING'],
+      state: 'QUEUED',
+      updatedAtMs: 7_001,
+    });
+
+    const second = await value.commitLocal({
+      ...firstInput,
+      payloadBytes: encodeCanonicalCbor([1n, 'second-local-payload']),
+      idempotencyKey: 'local-request-2',
+      requestDigest: bytes('local-request-2'),
+      baseHeads: [first.objectId],
+    });
+    expect(second).toEqual(expect.objectContaining({
+      status: 'committed', objectCount: 2n, sequence: 1n,
+    }));
+    const secondObject = verifyWalObjectV1(await collect(physical.read(walObjectId(second.objectId))));
+    expect(secondObject.tuple[5]).toEqual(first.objectId);
+    expect(value.listLocalCommitWork()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ objectId: first.objectId, state: 'QUEUED' }),
+      expect.objectContaining({ objectId: second.objectId, state: 'PENDING' }),
+    ]));
+    value.setLocalCommitWorkState({
+      objectId: second.objectId,
+      expected: ['PENDING'],
+      state: 'MATERIALIZED',
+      updatedAtMs: 7_002,
+    });
+    expect(value.getLocalCommitWork(second.objectId)?.state).toBe('MATERIALIZED');
+    expect(value.getLocalLogicalHeads(firstInput.namespaceId, firstInput.logicalKey))
+      .toEqual([second.objectId]);
+    expect(value.integrityScan()).toEqual(expect.objectContaining({
+      state: 'complete', objects: 2, checkpoints: 2,
+    }));
+
+    closeControl(value);
+    value = control(root);
+    expect(await value.commitLocal(firstInput)).toEqual({ ...first, status: 'already-committed' });
+    await expectCode(value.commitLocal({
+      ...firstInput,
+      requestDigest: bytes('different-local-request'),
+    }), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
+  });
+
+  it('finalizes a sequence-bound payload synchronously inside the durable author lane', async () => {
+    const root = await temporary('local-sequence-bound-payload');
+    const physical = packed(root);
+    const value = control(root);
+    const namespaceId = bytes('sequence-bound-namespace');
+    const writerId = object().tuple[2];
+    const seen: Array<{ sequence: bigint; previousObjectId: Uint8Array | null }> = [];
+    const write = (idempotencyKey: string, requestDigest: Uint8Array) => value.commitLocal({
+      namespaceId,
+      writerId,
+      writerEpoch: 4n,
+      buildPayloadBytes: coordinates => {
+        seen.push({
+          sequence: coordinates.sequence,
+          previousObjectId: coordinates.previousObjectId,
+        });
+        return encodeCanonicalCbor([coordinates.sequence, coordinates.previousObjectId]);
+      },
+      signer,
+      idempotencyKey,
+      requestDigest,
+    });
+
+    const first = await write('sequence-bound-1', bytes('sequence-bound-1'));
+    const second = await write('sequence-bound-2', bytes('sequence-bound-2'));
+    expect(seen).toEqual([
+      { sequence: 0n, previousObjectId: null },
+      { sequence: 1n, previousObjectId: first.objectId },
+    ]);
+    expect(verifyWalObjectV1(await collect(physical.read(walObjectId(first.objectId)))).payloadBytes)
+      .toEqual(encodeCanonicalCbor([0n, null]));
+    expect(verifyWalObjectV1(await collect(physical.read(walObjectId(second.objectId)))).payloadBytes)
+      .toEqual(encodeCanonicalCbor([1n, first.objectId]));
+
+    expect((await write('sequence-bound-1', bytes('sequence-bound-1'))).objectId).toEqual(first.objectId);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('serializes independent local requests on one author lane without preallocating sequence numbers', async () => {
+    const root = await temporary('local-concurrent');
+    packed(root);
+    const value = control(root);
+    const common = {
+      namespaceId: bytes('concurrent-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      signer,
+      logicalKey: bytes('concurrent-logical-key'),
+    } as const;
+    const results = await Promise.all(Array.from({ length: 12 }, (_, index) => value.commitLocal({
+      ...common,
+      logicalKey: bytes(`concurrent-logical-key-${index}`),
+      payloadBytes: encodeCanonicalCbor([1n, BigInt(index)]),
+      idempotencyKey: `concurrent-${index}`,
+      requestDigest: bytes(`concurrent-${index}`),
+    })));
+    expect(results.map(result => result.sequence).sort((left, right) => Number(left - right)))
+      .toEqual(Array.from({ length: 12 }, (_, index) => BigInt(index)));
+    expect(new Set(results.map(result => Buffer.from(result.objectId).toString('hex'))).size).toBe(12);
+    expect(value.integrityScan()).toEqual(expect.objectContaining({
+      state: 'complete', objects: 12, checkpoints: 12,
+    }));
+  });
+
+  it('rejects a stale logical base and an exhausted author lane before appending bytes', async () => {
+    const root = await temporary('local-stale-exhausted');
+    packed(root);
+    const value = control(root);
+    const namespaceId = bytes('stale-namespace');
+    const writerId = object().tuple[2];
+    const logicalKey = bytes('stale-key');
+    const first = await value.commitLocal({
+      namespaceId,
+      writerId,
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(1),
+      signer,
+      idempotencyKey: 'stale-first',
+      requestDigest: bytes('stale-first'),
+      logicalKey,
+    });
+    await expectCode(value.commitLocal({
+      namespaceId,
+      writerId,
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(2),
+      signer,
+      idempotencyKey: 'stale-second',
+      requestDigest: bytes('stale-second'),
+      logicalKey,
+      baseHeads: [],
+    }), 'WAL_CONTROL_STALE_BASE');
+
+    const database = (value as unknown as { database: Database.Database }).database;
+    database.prepare('UPDATE author_lanes SET next_sequence = ?').run(u64Blob((1n << 64n) - 1n, 'maximum'));
+    await expectCode(value.commitLocal({
+      namespaceId,
+      writerId,
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(3),
+      signer,
+      idempotencyKey: 'exhausted',
+      requestDigest: bytes('exhausted'),
+      logicalKey: bytes('exhausted-key'),
+    }), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(await collect(packedStores[0]!.read(walObjectId(first.objectId)))).toBeDefined();
+  });
+
+  it('handles an idempotent commit discovered after BEGIN as one transaction', async () => {
+    const root = await temporary('local-concurrent-idempotency');
+    packed(root);
+    const value = control(root);
+    const input = {
+      namespaceId: bytes('concurrent-idempotency-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(1),
+      signer,
+      idempotencyKey: 'concurrent-idempotency',
+      requestDigest: bytes('concurrent-idempotency'),
+      logicalKey: bytes('concurrent-idempotency-key'),
+    } as const;
+    const first = await value.commitLocal(input);
+    const database = (value as unknown as { database: Database.Database }).database;
+    const originalPrepare = database.prepare.bind(database);
+    let idempotencyReads = 0;
+    (database as unknown as { prepare: typeof database.prepare }).prepare = ((sql: string) => {
+      const statement = originalPrepare(sql);
+      if (!sql.includes('FROM idempotency')) return statement;
+      return new Proxy(statement, {
+        get(target, property, receiver) {
+          if (property !== 'get') return Reflect.get(target, property, receiver);
+          return (...parameters: unknown[]) => {
+            idempotencyReads += 1;
+            return idempotencyReads === 1 ? undefined : target.get(...parameters);
+          };
+        },
+      });
+    }) as typeof database.prepare;
+    const replay = await value.commitLocal(input);
+    expect(replay).toEqual({ ...first, status: 'already-committed' });
+    expect(idempotencyReads).toBe(2);
+  });
+
+  it('validates local outbox queries and compare-and-set transitions', async () => {
+    const root = await temporary('local-outbox-validation');
+    packed(root);
+    const value = control(root, { maximumQueueEntries: 2 });
+    const committed = await value.commitLocal({
+      namespaceId: bytes('outbox-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(1),
+      signer,
+      idempotencyKey: 'outbox-validation',
+      requestDigest: bytes('outbox-validation'),
+      logicalKey: bytes('outbox-key'),
+    });
+    expect(value.getLocalCommitWork(bytes('absent-local-work'))).toBeNull();
+    expect(() => value.listLocalCommitWork(['PENDING'], 3)).toThrowError(
+      expect.objectContaining({ code: 'WAL_CONTROL_INVALID_CONFIGURATION' }),
+    );
+    expect(() => value.listLocalCommitWork([], 1)).toThrowError(
+      expect.objectContaining({ code: 'WAL_CONTROL_INVALID_CONFIGURATION' }),
+    );
+    expect(() => value.listLocalCommitWork(['INVALID' as never], 1)).toThrowError(
+      expect.objectContaining({ code: 'WAL_CONTROL_INVALID_CONFIGURATION' }),
+    );
+    expect(() => value.setLocalCommitWorkState({
+      objectId: committed.objectId,
+      expected: [],
+      state: 'QUEUED',
+    })).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_INVALID_CONFIGURATION' }));
+    expect(() => value.setLocalCommitWorkState({
+      objectId: committed.objectId,
+      expected: ['MATERIALIZED'],
+      state: 'QUEUED',
+    })).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_LANE_CONFLICT' }));
+  });
+
+  it.each([
+    'after-object-file-sync',
+    'after-packed-index-insert',
+    'after-object-insert',
+    'after-set-update',
+    'after-checkpoint-insert',
+    'after-local-work-insert',
+    'before-commit',
+  ] satisfies WalControlTransactionPoint[])('rolls back the complete local-commit %s boundary', async point => {
+    const root = await temporary(`local-${point}`);
+    const physical = packed(root);
+    const value = control(root, {
+      transactionHook: current => { if (current === point) throw new Error(point); },
+    });
+    await expect(value.commitLocal({
+      namespaceId: bytes('rollback-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: encodeCanonicalCbor([1n, point]),
+      signer,
+      idempotencyKey: `rollback-${point}`,
+      requestDigest: bytes(`rollback-${point}`),
+      logicalKey: bytes('rollback-logical-key'),
+    })).rejects.toMatchObject({ code: 'WAL_CONTROL_IO' });
+    expect(value.integrityScan()).toEqual(expect.objectContaining({
+      state: 'complete', objects: 0, checkpoints: 0,
+    }));
+    const ids: Uint8Array[] = [];
+    for await (const id of physical.ids()) ids.push(id);
+    expect(ids).toEqual([]);
+    expect((await stat(join(root, 'segments', '0000000000000000.pack'))).size).toBe(32);
+  });
+
+  it('recovers the exact local result after a lost post-commit acknowledgement', async () => {
+    const root = await temporary('local-lost-ack');
+    packed(root);
+    let fail = true;
+    const value = control(root, {
+      transactionHook: point => {
+        if (point === 'after-commit' && fail) { fail = false; throw new Error('lost local acknowledgement'); }
+      },
+    });
+    const input = {
+      namespaceId: bytes('lost-ack-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: encodeCanonicalCbor([1n, 'lost-ack']),
+      signer,
+      idempotencyKey: 'lost-local-ack',
+      requestDigest: bytes('lost-local-ack'),
+      logicalKey: bytes('lost-ack-logical-key'),
+    } as const;
+    await expect(value.commitLocal(input)).rejects.toThrow('lost local acknowledgement');
+    const recovered = await value.commitLocal(input);
+    expect(recovered).toEqual(expect.objectContaining({
+      status: 'already-committed', sequence: 0n, objectCount: 1n,
+    }));
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 1, checkpoints: 1 }));
+  });
+
+  it('enforces the complete signed-object byte cap before any packed or logical state is committed', async () => {
+    const root = await temporary('local-byte-limit');
+    const physical = packed(root);
+    const value = control(root);
+    await expectCode(value.commitLocal({
+      namespaceId: bytes('limit-namespace'),
+      writerId: object().tuple[2],
+      writerEpoch: 0n,
+      payloadBytes: Uint8Array.of(1),
+      signer,
+      idempotencyKey: 'too-small-limit',
+      requestDigest: bytes('too-small-limit'),
+      maximumObjectBytes: 1n,
+    }), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    const ids: Uint8Array[] = [];
+    for await (const id of physical.ids()) ids.push(id);
+    expect(ids).toEqual([]);
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 0, checkpoints: 0 }));
+  });
+
   it('atomically finalizes author lanes and persists idempotency across restart', async () => {
     const root = await temporary('finalize');
     const { objects } = await prepare(root, ['first', 'second']);
@@ -700,7 +1245,7 @@ describe('WalControlStore atomic finalization and admission', () => {
       closureBytes: Uint8Array.of(3),
       updatedAtMs: 10,
     });
-    value.admitRemoteBatch(objects.map(item => ({
+    await value.admitRemoteBatch(objects.map(item => ({
       objectId: item.walObjectId,
       object: item.tuple,
       canonicalLength: item.canonicalBytes.length,
@@ -710,8 +1255,8 @@ describe('WalControlStore atomic finalization and admission', () => {
     expect(database.prepare("SELECT count(*) AS count FROM admission WHERE state = 'ADMITTED'").get()).toEqual({ count: 2 });
     database.close();
     await expectCode(() => value.stageAdmission({ objectId: objects[0]!.walObjectId }), 'WAL_CONTROL_LANE_CONFLICT');
-    await expectCode(() => value.admitRemoteBatch([]), 'WAL_CONTROL_INVALID_CONFIGURATION');
-    await expectCode(() => value.admitRemoteBatch([{
+    await expectCode(value.admitRemoteBatch([]), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.admitRemoteBatch([{
       objectId: objects[0]!.walObjectId,
       object: objects[0]!.tuple,
       canonicalLength: objects[0]!.canonicalBytes.length,
@@ -725,14 +1270,265 @@ describe('WalControlStore atomic finalization and admission', () => {
     value.stageAdmission({ objectId: objects[0]!.walObjectId });
     const second = object('second');
     value.stageAdmission({ objectId: second.walObjectId });
-    expect(() => value.admitRemoteBatch([
+    await expect(value.admitRemoteBatch([
       { objectId: objects[0]!.walObjectId, object: objects[0]!.tuple, canonicalLength: objects[0]!.canonicalBytes.length },
       { objectId: second.walObjectId, object: second.tuple, canonicalLength: second.canonicalBytes.length },
-    ])).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_NOT_FOUND' }));
+    ])).rejects.toMatchObject({ code: 'WAL_CONTROL_NOT_FOUND' });
     const database = new Database(join(root, 'objects.sqlite'), { readonly: true });
     expect(database.prepare('SELECT count(*) AS count FROM wal_objects').get()).toEqual({ count: 0 });
     expect(database.prepare("SELECT count(*) AS count FROM admission WHERE state = 'STAGED'").get()).toEqual({ count: 2 });
     database.close();
+  });
+
+  it('exposes immutable admission metadata and atomically deduplicates logical-key replay work', async () => {
+    const root = await temporary('remote-metadata');
+    const { objects } = await prepare(root, ['first', 'second']);
+    const value = control(root);
+    const logicalA = bytes('logical-a');
+    const logicalB = bytes('logical-b');
+    for (const item of objects) value.stageAdmission({
+      objectId: item.walObjectId,
+      providerPeerId: Uint8Array.of(7),
+      proofBytes: Uint8Array.of(8),
+      closureBytes: Uint8Array.of(9),
+      updatedAtMs: 10,
+    });
+    expect(value.getAdmission(objects[0]!.walObjectId)).toEqual(expect.objectContaining({
+      state: 'STAGED', providerPeerId: Uint8Array.of(7), proofBytes: Uint8Array.of(8),
+      closureBytes: Uint8Array.of(9), reasonCode: null, updatedAtMs: 10,
+    }));
+    await value.admitRemoteBatch([
+      {
+        objectId: objects[0]!.walObjectId,
+        object: objects[0]!.tuple,
+        canonicalLength: objects[0]!.canonicalBytes.length,
+        logicalKeys: [logicalA, logicalB],
+      },
+      {
+        objectId: objects[1]!.walObjectId,
+        object: objects[1]!.tuple,
+        canonicalLength: objects[1]!.canonicalBytes.length,
+        logicalKeys: [logicalA],
+      },
+    ], 11);
+    const metadata = value.getWalObjectMetadata(objects[0]!.walObjectId)!;
+    expect(metadata).toEqual(expect.objectContaining({
+      objectId: objects[0]!.walObjectId,
+      namespaceId: objects[0]!.tuple[1],
+      writerId: objects[0]!.tuple[2],
+      writerEpoch: objects[0]!.tuple[3],
+      sequence: objects[0]!.tuple[4],
+      canonicalLength: objects[0]!.canonicalBytes.length,
+      origin: 'REMOTE',
+      admittedAtMs: 11,
+    }));
+    expect(value.findWalObjectAtPosition(
+      objects[0]!.tuple[1], objects[0]!.tuple[2], objects[0]!.tuple[3], objects[0]!.tuple[4],
+    )?.objectId).toEqual(objects[0]!.walObjectId);
+    expect(value.findWalObjectAtPosition(
+      bytes('absent-namespace'), objects[0]!.tuple[2], objects[0]!.tuple[3], objects[0]!.tuple[4],
+    )).toBeNull();
+    expect(value.getWalObjectMetadata(bytes('absent-object'))).toBeNull();
+    expect(value.getAdmission(bytes('absent-admission'))).toBeNull();
+    expect(value.integrityScan().queued).toBe(2);
+
+    const leased = [value.leaseRetry(100, 11), value.leaseRetry(100, 11)];
+    expect(leased.map(entry => entry?.kind)).toEqual(['WAL_REPLAY_LOGICAL_KEY', 'WAL_REPLAY_LOGICAL_KEY']);
+    expect(new Set(leased.map(entry => entry?.key)).size).toBe(2);
+
+    const retry = bytes('blocked-retry');
+    value.stageAdmission({ objectId: retry, updatedAtMs: 12 });
+    value.setAdmissionState(retry, 'BLOCKED', 'DEPENDENCY_UNAVAILABLE', 13);
+    expect(value.getAdmission(retry)).toEqual(expect.objectContaining({
+      state: 'BLOCKED', reasonCode: 'DEPENDENCY_UNAVAILABLE', updatedAtMs: 13,
+    }));
+    value.stageAdmission({ objectId: retry, updatedAtMs: 14 });
+    expect(value.getAdmission(retry)).toEqual(expect.objectContaining({ state: 'STAGED', reasonCode: null }));
+    value.setAdmissionState(retry, 'QUARANTINED', 'INVALID_WAL_OBJECT', 15);
+    value.setAdmissionState(retry, 'QUARANTINED', 'INVALID_WAL_OBJECT', 16);
+    await expectCode(() => value.stageAdmission({ objectId: retry }), 'WAL_CONTROL_LANE_CONFLICT');
+    await expectCode(() => value.setAdmissionState(retry, 'BLOCKED', 'NO'), 'WAL_CONTROL_LANE_CONFLICT');
+    await expectCode(() => value.setAdmissionState(bytes('missing-state'), 'BLOCKED', 'NO'), 'WAL_CONTROL_NOT_FOUND');
+  });
+
+  it.each([
+    'after-remote-object-insert',
+    'after-remote-object-admit',
+    'after-replay-enqueue',
+    'before-commit',
+  ] satisfies WalControlTransactionPoint[])('leaves the entire remote batch staged after a crash at %s', async point => {
+    const root = await temporary(`remote-crash-${point}`);
+    const { objects } = await prepare(root, ['first', 'second']);
+    const value = control(root, {
+      transactionHook: current => { if (current === point) throw new Error(`crash:${point}`); },
+    });
+    for (const item of objects) value.stageAdmission({ objectId: item.walObjectId });
+    await expect(value.admitRemoteBatch(objects.map((item, index) => ({
+      objectId: item.walObjectId,
+      object: item.tuple,
+      canonicalLength: item.canonicalBytes.length,
+      logicalKeys: [bytes(`crash-logical-${index}`)],
+    })))).rejects.toMatchObject({ code: 'WAL_CONTROL_IO' });
+    for (const item of objects) {
+      expect(value.getAdmission(item.walObjectId)?.state).toBe('STAGED');
+      expect(value.getWalObjectMetadata(item.walObjectId)).toBeNull();
+    }
+    expect(value.leaseRetry(100, 1_000)).toBeNull();
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 0, queued: 0 }));
+  });
+
+  it('rejects an occupied author position instead of admitting an ignored conflicting insert', async () => {
+    const root = await temporary('remote-equivocation');
+    const { value: packedValue, objects } = await prepare(root, ['first']);
+    const first = objects[0]!;
+    const conflict = await createWalObjectV1([
+      1n,
+      first.tuple[1],
+      first.tuple[2],
+      first.tuple[3],
+      first.tuple[4],
+      first.tuple[5],
+      new TextEncoder().encode('different bytes at the same author position'),
+    ], signer);
+    await packedValue.put(walObjectId(conflict.walObjectId), source(conflict.canonicalBytes));
+    const controlValue = control(root);
+    controlValue.stageAdmission({ objectId: first.walObjectId });
+    await controlValue.admitRemoteBatch([{
+      objectId: first.walObjectId, object: first.tuple, canonicalLength: first.canonicalBytes.length,
+    }]);
+    controlValue.stageAdmission({ objectId: conflict.walObjectId });
+    await expectCode(controlValue.admitRemoteBatch([{
+      objectId: conflict.walObjectId,
+      object: conflict.tuple,
+      canonicalLength: conflict.canonicalBytes.length,
+    }]), 'WAL_CONTROL_LANE_CONFLICT');
+    expect(controlValue.getAdmission(conflict.walObjectId)?.state).toBe('STAGED');
+    expect(controlValue.getWalObjectMetadata(conflict.walObjectId)).toBeNull();
+    expect(controlValue.findWalObjectAtPosition(
+      first.tuple[1], first.tuple[2], first.tuple[3], first.tuple[4],
+    )?.objectId).toEqual(first.walObjectId);
+  });
+
+  it('reuses exact logical-key work and rejects retry substitution or queue overflow atomically', async () => {
+    const logical = bytes('preexisting-logical');
+    const retryCoordinates = (namespaceId: Uint8Array) => ({
+      queueKey: `wal-replay:${Buffer.from(namespaceId).toString('hex')}:${Buffer.from(logical).toString('hex')}`,
+      payload: encodeCanonicalCbor([1n, namespaceId, logical]),
+    });
+
+    let root = await temporary('remote-existing-retry');
+    let prepared = await prepare(root, ['first']);
+    let value = control(root);
+    let { queueKey, payload } = retryCoordinates(prepared.objects[0]!.tuple[1]);
+    value.enqueueRetry({ key: queueKey, kind: 'WAL_REPLAY_LOGICAL_KEY', payload });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]);
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 1, queued: 1 }));
+
+    root = await temporary('remote-retry-kind-conflict');
+    prepared = await prepare(root, ['first']);
+    value = control(root);
+    ({ queueKey, payload } = retryCoordinates(prepared.objects[0]!.tuple[1]));
+    value.enqueueRetry({ key: queueKey, kind: 'OTHER', payload });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+    expect(value.getWalObjectMetadata(prepared.objects[0]!.walObjectId)).toBeNull();
+
+    root = await temporary('remote-retry-payload-conflict');
+    prepared = await prepare(root, ['first']);
+    value = control(root);
+    ({ queueKey, payload } = retryCoordinates(prepared.objects[0]!.tuple[1]));
+    value.enqueueRetry({ key: queueKey, kind: 'WAL_REPLAY_LOGICAL_KEY', payload: Uint8Array.of(1) });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
+
+    root = await temporary('remote-retry-count-limit');
+    prepared = await prepare(root, ['first']);
+    value = control(root, { maximumQueueEntries: 1 });
+    value.enqueueRetry({ key: 'occupied', kind: 'OTHER', payload: Uint8Array.of(1) });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+
+    root = await temporary('remote-retry-byte-limit');
+    prepared = await prepare(root, ['first']);
+    value = control(root, { maximumQueueBytes: 1 });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+  });
+
+  it('fails closed if an admission-state update is suppressed and rejects state changes after admission', async () => {
+    const root = await temporary('admission-update-race');
+    const prepared = await prepare(root, ['first']);
+    const value = control(root);
+    const staged = bytes('suppressed-update');
+    value.stageAdmission({ objectId: staged });
+    const database = (value as unknown as { database: Database.Database }).database;
+    database.exec(`
+      CREATE TRIGGER suppress_admission_update BEFORE UPDATE ON admission
+      WHEN OLD.object_id = NEW.object_id BEGIN SELECT RAISE(IGNORE); END
+    `);
+    await expectCode(() => value.setAdmissionState(staged, 'BLOCKED', 'TEST'), 'WAL_CONTROL_LANE_CONFLICT');
+    database.exec('DROP TRIGGER suppress_admission_update');
+
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+    }]);
+    await expectCode(() => value.setAdmissionState(
+      prepared.objects[0]!.walObjectId, 'BLOCKED', 'TEST',
+    ), 'WAL_CONTROL_LANE_CONFLICT');
+  });
+
+  it('keeps committed remote admission when its post-commit acknowledgement is lost', async () => {
+    const root = await temporary('remote-lost-ack');
+    const prepared = await prepare(root, ['first']);
+    let fail = true;
+    const value = control(root, {
+      transactionHook: point => {
+        if (point === 'after-commit' && fail) {
+          fail = false;
+          throw new Error('lost remote acknowledgement');
+        }
+      },
+    });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expect(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+    }])).rejects.toThrow('lost remote acknowledgement');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('ADMITTED');
+    expect(value.getWalObjectMetadata(prepared.objects[0]!.walObjectId)).not.toBeNull();
   });
 
   it('maps SQLite failures to stable errors and rolls back every affected control transaction', async () => {
@@ -747,7 +1543,7 @@ describe('WalControlStore atomic finalization and admission', () => {
     value.stageAdmission({ objectId: objects[0]!.walObjectId });
 
     database.exec("CREATE TRIGGER reject_remote BEFORE INSERT ON wal_objects BEGIN SELECT RAISE(ABORT, 'remote'); END");
-    await expectCode(() => value.admitRemoteBatch([{
+    await expectCode(value.admitRemoteBatch([{
       objectId: objects[0]!.walObjectId,
       object: objects[0]!.tuple,
       canonicalLength: objects[0]!.canonicalBytes.length,
@@ -829,6 +1625,15 @@ describe('WalControlStore bounded durable work', () => {
     value.quarantine({ entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', byteLength: 2, relativePath: 'q/1' });
     value.quarantine({ entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', byteLength: 2 });
     value.quarantine({ entryId: bytes('q2'), providerPeerId: peer, reasonCode: 'BAD_SIG', byteLength: 3 });
+    expect(value.getQuarantine(bytes('q1'))).toEqual(expect.objectContaining({
+      entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', relativePath: 'q/1',
+      byteLength: 2, createdAtMs: 10, expiresAtMs: 110,
+    }));
+    expect(value.getQuarantine(bytes('missing-q'))).toBeNull();
+    expect(value.listQuarantine(peer).map(entry => entry.reasonCode)).toEqual(['BAD_ID', 'BAD_SIG']);
+    expect(value.listQuarantine(undefined, 1)).toHaveLength(1);
+    await expectCode(() => value.listQuarantine(new Uint8Array()), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(() => value.listQuarantine(undefined, 3), 'WAL_CONTROL_INVALID_CONFIGURATION');
     expect(value.integrityScan().quarantinedBytes).toBe(5);
     await expectCode(() => value.quarantine({
       entryId: bytes('q3'), providerPeerId: peer, reasonCode: 'OVER', byteLength: 1,
@@ -846,6 +1651,129 @@ describe('WalControlStore bounded durable work', () => {
     expect(value.cleanupExpired(109).quarantine).toBe(0);
     expect(value.cleanupExpired(110).quarantine).toBe(2);
     expect(value.integrityScan().quarantinedBytes).toBe(0);
+  });
+
+  it.each([
+    'after-quarantine-insert',
+    'after-quarantine-state',
+    'before-commit',
+  ] satisfies WalControlTransactionPoint[])('rolls back quarantine metadata and admission state after a crash at %s', async point => {
+    const root = await temporary(`quarantine-crash-${point}`);
+    await prepare(root);
+    const value = control(root, {
+      transactionHook: current => { if (current === point) throw new Error(`crash:${point}`); },
+    });
+    const id = bytes(`quarantine-crash-id-${point}`);
+    value.stageAdmission({ objectId: id });
+    await expect(value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 10,
+      createdAtMs: 10,
+      updatedAtMs: 10,
+    })).rejects.toMatchObject({ code: 'WAL_CONTROL_IO' });
+    expect(value.getAdmission(id)?.state).toBe('STAGED');
+    expect(value.getQuarantine(id)).toBeNull();
+  });
+
+  it('atomically quarantines an invalid dependency, blocks its root, and preserves the bounds across restart', async () => {
+    const root = await temporary('quarantine-admission');
+    const prepared = await prepare(root, ['first']);
+    let value = control(root, {
+      maximumQuarantineEntriesPerPeer: 1,
+      maximumQuarantineBytesPerPeer: 20,
+      quarantineRetentionMs: 100,
+      now: () => 10,
+    });
+    const dependency = bytes('bad-dependency');
+    const rootObject = bytes('blocked-root');
+    const peer = Uint8Array.of(1);
+    value.stageAdmission({ objectId: dependency });
+    value.stageAdmission({ objectId: rootObject });
+    await value.quarantineAdmission({
+      entryId: dependency,
+      providerPeerId: peer,
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 20,
+      blockedRootObjectId: rootObject,
+      createdAtMs: 10,
+      updatedAtMs: 11,
+    });
+    expect(value.getAdmission(dependency)).toEqual(expect.objectContaining({
+      state: 'QUARANTINED', reasonCode: 'INVALID_WAL_OBJECT', updatedAtMs: 11,
+    }));
+    expect(value.getAdmission(rootObject)).toEqual(expect.objectContaining({
+      state: 'BLOCKED', reasonCode: 'DEPENDENCY_INVALID', updatedAtMs: 11,
+    }));
+    closeControl(value);
+    value = control(root, {
+      maximumQuarantineEntriesPerPeer: 1,
+      maximumQuarantineBytesPerPeer: 20,
+      quarantineRetentionMs: 100,
+      now: () => 11,
+    });
+    expect(value.listQuarantine(peer)).toHaveLength(1);
+    const overflow = bytes('quarantine-overflow-after-restart');
+    value.stageAdmission({ objectId: overflow });
+    await expectCode(value.quarantineAdmission({
+      entryId: overflow,
+      providerPeerId: peer,
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 11,
+    }), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(overflow)?.state).toBe('STAGED');
+    expect(value.getQuarantine(overflow)).toBeNull();
+
+    const admitted = prepared.objects[0]!;
+    value.stageAdmission({ objectId: admitted.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: admitted.walObjectId,
+      object: admitted.tuple,
+      canonicalLength: admitted.canonicalBytes.length,
+    }]);
+    await expectCode(value.quarantineAdmission({
+      entryId: admitted.walObjectId,
+      providerPeerId: Uint8Array.of(2),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 11,
+    }), 'WAL_CONTROL_LANE_CONFLICT');
+    expect(value.getAdmission(admitted.walObjectId)?.state).toBe('ADMITTED');
+    expect(value.getQuarantine(admitted.walObjectId)).toBeNull();
+  });
+
+  it('keeps committed quarantine state when its post-commit acknowledgement is lost', async () => {
+    const root = await temporary('quarantine-lost-ack');
+    await prepare(root);
+    let fail = true;
+    const value = control(root, {
+      transactionHook: point => {
+        if (point === 'after-commit' && fail) {
+          fail = false;
+          throw new Error('lost quarantine acknowledgement');
+        }
+      },
+    });
+    const id = bytes('quarantine-lost-ack-id');
+    value.stageAdmission({ objectId: id });
+    await expect(value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 10,
+    })).rejects.toThrow('lost quarantine acknowledgement');
+    expect(value.getAdmission(id)?.state).toBe('QUARANTINED');
+    expect(value.getQuarantine(id)).not.toBeNull();
+    await value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 10,
+    });
   });
 
   it('persists bounded ranges, IBLT cache, vectors, materialization, peers, and GC work', async () => {
@@ -1064,7 +1992,7 @@ describe('WalControlStore integrity blocking', () => {
     const membershipCase = await finalized('membership-corruption');
     const second = membershipCase.prepared.objects[1]!;
     membershipCase.value.stageAdmission({ objectId: second.walObjectId });
-    membershipCase.value.admitRemoteBatch([{
+    await membershipCase.value.admitRemoteBatch([{
       objectId: second.walObjectId,
       object: second.tuple,
       canonicalLength: second.canonicalBytes.length,

@@ -24,8 +24,8 @@ export const WAL_V1_DOMAINS = Object.freeze({
   logicalKey: 'dkg-rdf-logical-key-v1\0',
   touchedKey: 'dkg-rdf-touched-key-v1\0',
   rdfState: 'dkg-rdf-state-v1\0',
-  reducerHeads: 'dkg-rdf-head-set-v1\0',
-  reducerConflict: 'dkg-rdf-conflict-v1\0',
+  replayHeads: 'dkg-rdf-head-set-v1\0',
+  replayConflict: 'dkg-rdf-conflict-v1\0',
   payloadAssociatedData: 'dkg-wal-payload-ad-v1\0',
   moveTierCommitment: 'dkg-wal-move-tier-v1\0',
   setEmpty: 'dkg-wal-set-empty-v1\0',
@@ -142,7 +142,7 @@ export const PROTOCOL_TUPLES = Object.freeze({
     { enumFields: { 1: 'mutationOperation' } },
   ),
   RdfMutationV1: tuple(
-    ['version', 'mode', 'baseStateDigest', 'resultStateDigest', 'replaceGraphs', 'replaceSubjects', 'deleteNQuadsBytes', 'insertNQuadsBytes', 'touchedKeys', 'sourceSparqlAuditBytesOrNull'],
+    ['version', 'mode', 'baseStateDigest', 'resultStateDigest', 'replaceGraphs', 'replaceSubjects', 'deleteNQuadsBytes', 'insertNQuadsBytes', 'touchedKeys', 'sourceSemanticAuditBytesOrNull'],
     ['literal-1', 'u8-enum', 'bytes32', 'bytes32', 'sorted-unique<GraphReplacementV1>', 'sorted-unique<SubjectReplacementV1>', 'bstr', 'bstr', 'sorted-unique<bytes32>', 'bstr|null'],
     { enumFields: { 1: 'mutationMode' } },
   ),
@@ -153,6 +153,10 @@ export const PROTOCOL_TUPLES = Object.freeze({
   SubjectReplacementV1: tuple(
     ['graphIri', 'subjectIri', 'canonicalNQuadsBytes', 'quadCount'],
     ['nfc-tstr', 'nfc-tstr', 'bstr', 'u64'],
+  ),
+  RdfPolicyV1: tuple(
+    ['version', 'adapterVersion', 'allowedGraphPrefixes', 'maxQuadsPerMutation', 'maxWalObjectBytes', 'singleValuedPredicates', 'multiValuedPredicates', 'sharedWriteLogicalKeys', 'resolverAddresses', 'expiryAuthorityAddresses', 'allowedPayloadKinds'],
+    ['literal-1', 'u16', 'sorted-unique<nfc-tstr>', 'u64', 'u64', 'sorted-unique<nfc-tstr>', 'sorted-unique<nfc-tstr>', 'sorted-unique<bytes32>', 'sorted-unique<address20>', 'sorted-unique<address20>', 'sorted-unique<u16>'],
   ),
   ChainBindingV1: tuple(
     ['chainId', 'contextGraphOnChainId', 'kaId', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],

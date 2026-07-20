@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PrivatePayloadNonceClaim, PrivatePayloadNonceRegistry } from '@origintrail-official/dkg-wal/privacy';
+import type { DKGAgent } from '../src/dkg-agent.js';
 import type { LocalSwmSenderKeySendState } from '../src/dkg-agent-types.js';
+import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import {
   deserializeSwmSenderSendState,
   serializeSwmSenderSendState,
+  swmSenderStateKey,
 } from '../src/dkg-agent-swm-state.js';
 import {
   decryptDkgWalPrivatePayload,
@@ -105,5 +108,50 @@ describe('current DKG Sender Key to WAL private-payload adapter', () => {
     expect(legacy.walEpochKey).toBeUndefined();
     expect(() => dkgWalSenderKeyEpoch(legacy)).toThrow(/rotate the Sender Key epoch/);
     expect(() => dkgWalSenderKeyEpoch(state({ createdAtMs: -1 }))).toThrow(/invalid WAL key epoch/);
+  });
+
+  it('resolves only the existing exact sender/view/epoch selected by the DKG agent', async () => {
+    const current = state();
+    const loadSwmSenderKeyState = vi.fn(async () => undefined);
+    const fakeAgent = {
+      loadSwmSenderKeyState,
+      swmSenderKeySendStates: new Map([[
+        swmSenderStateKey(
+          current.contextGraphId,
+          current.subGraphName,
+          current.senderAgentAddress,
+        ),
+        current,
+      ]]),
+    } as unknown as DKGAgent;
+    const resolve = WorkspaceCryptoMethods.prototype.resolveDkgWalPrivatePayload;
+    const writerId = new Uint8Array(Buffer.from(current.senderAgentAddress.slice(2), 'hex'));
+
+    await expect(resolve.call(
+      fakeAgent,
+      current.contextGraphId,
+      current.subGraphName,
+      writerId,
+      BigInt(current.createdAtMs),
+    )).resolves.toEqual({
+      epochKey: current.walEpochKey,
+      keyEpoch: BigInt(current.createdAtMs),
+    });
+    expect(loadSwmSenderKeyState).toHaveBeenCalledOnce();
+
+    await expect(resolve.call(
+      fakeAgent,
+      current.contextGraphId,
+      current.subGraphName,
+      writerId,
+      BigInt(current.createdAtMs + 1),
+    )).rejects.toThrow(/does not match signed private WAL view/);
+    await expect(resolve.call(
+      fakeAgent,
+      current.contextGraphId,
+      current.subGraphName,
+      new Uint8Array(20).fill(0x22),
+      BigInt(current.createdAtMs),
+    )).rejects.toThrow(/No existing Sender Key state/);
   });
 });

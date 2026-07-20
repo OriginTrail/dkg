@@ -12,7 +12,7 @@ evidence, and independently protected rollback high-water recovery.
 This changes replication authority bookkeeping only. Existing DKG membership,
 agent delegation, chain authorization, verified-memory/snapshot validation,
 RDF policy admission, SWM/VM behavior, and cryptographic authority remain the
-source of truth behind `DkgWalAuthorityAdapter`. The legacy graph-sync path
+source of truth behind `DkgWalAuthorityAdapter`. The legacy synchronization path
 remains production-authoritative and unchanged.
 
 ## Authority and completeness flow

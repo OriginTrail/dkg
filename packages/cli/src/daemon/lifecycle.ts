@@ -68,7 +68,7 @@ import {
   MockChainAdapter,
   mergeRpcUsageWindows,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
+import { DKGAgent, createDkgWalWireRuntime, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
@@ -145,6 +145,7 @@ import {
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { startDaemonWalRuntime } from '../wal-runtime.js';
+import { createDaemonWalPublisherShadowWriter } from '../wal-local-authoring.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
@@ -1162,7 +1163,7 @@ export async function runDaemonInner(
       const walStatus = walRuntime.status();
       log(
         `[WAL] mode=${walStatus.mode} lifecycle=${walStatus.lifecycle} ` +
-        `productionAuthority=${walStatus.productionAuthority} protocols=0 workers=0`,
+        `synchronizationAuthority=${walStatus.synchronizationAuthority} protocols=pending workers=0`,
       );
     }
   } catch (error) {
@@ -1692,8 +1693,27 @@ export async function runDaemonInner(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  let walPrivatePayloadAgent: DKGAgent | undefined;
+  const walShadowWriter = await createDaemonWalPublisherShadowWriter({
+    runtime: walRuntime ?? null,
+    networkId,
+    resolvePrivatePayload: async ({ mutation, writerId, expectedKeyEpoch }) => {
+      if (!walPrivatePayloadAgent) {
+        throw new Error('DKG agent is not ready to resolve the existing Sender Key epoch');
+      }
+      return walPrivatePayloadAgent.resolveDkgWalPrivatePayload(
+        mutation.contextGraphId,
+        mutation.subGraphName,
+        writerId,
+        expectedKeyEpoch,
+      );
+    },
+    log,
+  });
+
   const agent = await DKGAgent.create({
     kaNumberAllocator,
+    walShadowWriter,
     name: config.name,
     genesisId: network?.genesisId,
     networkIdentity: {
@@ -1965,6 +1985,10 @@ export async function runDaemonInner(
       });
     },
   });
+  // Bind private WAL authoring only after the production DKG agent, and thus
+  // its existing Sender Key state, exists. WAL must reuse that cryptographic
+  // implementation rather than create a parallel key-selection model.
+  walPrivatePayloadAgent = agent;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
@@ -2081,6 +2105,31 @@ export async function runDaemonInner(
   });
 
   await agent.start();
+
+  daemonState.walWireRuntime = null;
+  if (walRuntime) {
+    const walWireRuntime = createDkgWalWireRuntime({
+      router: agent.router,
+      localPeerId: agent.node.peerIdBytes,
+      protocolVersion: walRuntime.configuration.protocolVersion,
+      adapterVersion: walRuntime.configuration.adapterVersion,
+      authorizePeer: (peerId) => agent.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+    });
+    const unregister = walWireRuntime.start();
+    let release: (() => void) | undefined;
+    try {
+      release = walRuntime.registerProtocols(unregister);
+      await agent.node.pushProtocolAdvertisement();
+    } catch (error) {
+      (release ?? unregister)();
+      throw error;
+    }
+    daemonState.walWireRuntime = walWireRuntime;
+    log(
+      `[WAL] raw protocols registered; capability negotiation active; ` +
+      `synchronizationAuthority=${walRuntime.status().synchronizationAuthority}`,
+    );
+  }
 
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
@@ -3758,6 +3807,7 @@ export async function runDaemonInner(
           .catch((err: any) =>
             log(`WAL runtime stop error: ${err?.message ?? String(err)}`),
           );
+        daemonState.walWireRuntime = null;
         daemonState.walRuntime = null;
         server.close();
         await agent.stop();

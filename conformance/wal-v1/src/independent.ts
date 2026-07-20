@@ -4,7 +4,7 @@ import { compareBytes, concat, equalBytes, hash, hex, sortedUniqueBytes, u64be, 
 import type { SymbolV1 } from './iblt.js';
 import { independentSetCommitmentRoot } from './set-commitment.js';
 import { DOMAINS } from './schema.js';
-import type { ReducerCase, ReducerDecision } from './reference.js';
+import type { ReplayConflictProjection, ReplayConflictProjectionInput } from './reference.js';
 
 type Value = null | boolean | bigint | string | Uint8Array | Value[];
 
@@ -217,58 +217,21 @@ export async function independentDerivePrivateObjectKey(
   return new Uint8Array(bits);
 }
 
-function sameSet(left: readonly Uint8Array[], right: readonly Uint8Array[]): boolean {
-  if (left.length !== right.length) return false;
-  const a = sortedUniqueBytes(left);
-  const b = sortedUniqueBytes(right);
-  return a.every((value, index) => equalBytes(value, b[index]));
-}
-
-function overlap(left: readonly Uint8Array[], right: readonly Uint8Array[]): boolean {
-  const seen = new Set(left.map((entry) => hex(entry)));
-  for (const entry of right) if (seen.has(hex(entry))) return true;
-  return false;
-}
-
 function digest(domain: string, values: readonly Uint8Array[]): Uint8Array {
   const encoded = independentCborEncode(sortedUniqueBytes(values));
   return hash(domain, encoded);
 }
 
-export function independentReduceCase(input: ReducerCase): ReducerDecision {
-  const current = sortedUniqueBytes(input.currentHeads);
-  const base = sortedUniqueBytes(input.baseHeads);
-  let status: ReducerDecision['status'] = 'conflict';
-  let active = base;
-  let conflicts = current;
-
-  if (input.operation === 'MOVE_TIER_TARGET' && !input.hasTierReceipt) {
-    status = 'pending';
-    active = current;
-    conflicts = [];
-  } else if (input.operation === 'RESOLVE') {
-    if (sameSet(input.resolutionHeads ?? [], current)) {
-      status = 'apply';
-      active = base;
-      conflicts = [];
-    }
-  } else if (sameSet(current, base)) {
-    status = 'apply';
-    active = current;
-    conflicts = [];
-  } else if (input.operation === 'PATCH' && input.mode === 'PATCH' && !overlap(input.touchedKeys, input.concurrentTouchedKeys)) {
-    status = 'merge';
-    active = current;
-    conflicts = [];
-  }
-
-  active.sort(compareBytes);
-  conflicts.sort(compareBytes);
+export function independentEncodeReplayConflictProjection(
+  input: ReplayConflictProjectionInput,
+): ReplayConflictProjection {
+  const active = sortedUniqueBytes(input.semanticActiveHeads);
+  const conflicts = sortedUniqueBytes(input.semanticConflictHeads);
   return {
-    status,
+    status: input.semanticStatus,
     activeHeads: active,
     conflictHeads: conflicts,
-    headDigest: digest(DOMAINS.reducerHeads, active),
-    conflictDigest: digest(DOMAINS.reducerConflict, conflicts)
+    headDigest: digest(DOMAINS.replayHeads, active),
+    conflictDigest: digest(DOMAINS.replayConflict, conflicts)
   };
 }

@@ -320,6 +320,66 @@
     "keyCbor": "87686f74703a323034337675726e3a646b673a63673a77616c2d66697874757265f6000007f6",
     "namespaceId": "a723b15aeee4dc7a8b6149fe00c2455ff11c13a7e40f5c2667ad471367d09430"
   },
+  "rdfAdapter": {
+    "canonicalization": {
+      "input": "  <urn:s:z> <urn:p:name> \"Cafe\\u0301\"@EN <urn:g> .\r\n<urn:s:a> <urn:p:link> <urn:o> <urn:g> .\n<urn:s:z> <urn:p:name> \"Caf\\u00E9\"@en <urn:g> . # duplicate\n",
+      "canonical": "<urn:s:a> <urn:p:link> <urn:o> <urn:g> .\n<urn:s:z> <urn:p:name> \"Café\"@en <urn:g> .\n",
+      "canonicalBytes": "3c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a",
+      "stateDigest": "b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b7"
+    },
+    "logicalKey": {
+      "contextGraphId": "urn:cg:fixture",
+      "subGraphName": "main",
+      "authorAddress": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3",
+      "knowledgeAssetUalOrRootEntity": "did:dkg:otp:2043/0xabc/1",
+      "digest": "48ce76e46fd4c89c9572ea9ad55226f2f5734fbba3b02251a61772a3c5577fb3"
+    },
+    "touchedKeys": [
+      {
+        "graphIri": "urn:g",
+        "subjectIri": "urn:s:a",
+        "predicateIri": "urn:p:link",
+        "digest": "8ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a8"
+      },
+      {
+        "graphIri": "urn:g",
+        "subjectIri": "urn:s:z",
+        "predicateIri": "urn:p:name",
+        "digest": "f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585b"
+      }
+    ],
+    "policy": {
+      "adapterVersion": "1",
+      "allowedGraphPrefixes": [
+        "urn:g"
+      ],
+      "maxQuadsPerMutation": "100",
+      "maxWalObjectBytes": "1000000",
+      "singleValuedPredicates": [
+        "urn:p:name"
+      ],
+      "multiValuedPredicates": [
+        "urn:p:link"
+      ],
+      "allowedPayloadKinds": [
+        0,
+        1
+      ],
+      "canonicalBytes": "8b0101816575726e3a6718641a000f4240816a75726e3a703a6e616d65816a75726e3a703a6c696e6b808080820001"
+    },
+    "publishReplace": {
+      "operation": "PUT",
+      "graphIri": "urn:g",
+      "policyObjectId": "22ea8317fdc7e05da8bee434b103dee1f2259eb57f6acb40b6d88441117f46a5",
+      "resultStateDigest": "b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b7",
+      "touchedKeys": [
+        "8ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a8",
+        "f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585b"
+      ],
+      "rdfMutationBytes": "8a01005820570fff616e93c7fde210c46e68cd9b2a3a6500aeff11cefc22a7f90cdbe344195820b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b781836575726e3a6758553c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a028040408258208ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a85820f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585bf6",
+      "dkgMutationBytes": "890100582048ce76e46fd4c89c9572ea9ad55226f2f5734fbba3b02251a61772a3c5577fb38080582022ea8317fdc7e05da8bee434b103dee1f2259eb57f6acb40b6d88441117f46a58a01005820570fff616e93c7fde210c46e68cd9b2a3a6500aeff11cefc22a7f90cdbe344195820b049aa037bf823573c6f7a578b41f4e8f0465a6f66fdd86c27b2fd8a25f637b781836575726e3a6758553c75726e3a733a613e203c75726e3a703a6c696e6b3e203c75726e3a6f3e203c75726e3a673e202e0a3c75726e3a733a7a3e203c75726e3a703a6e616d653e2022436166c3a92240656e203c75726e3a673e202e0a028040408258208ca5c292ff0b199e44aa50c1356af04e698791cdff225bb2d17c18c1d5f5c5a85820f37a9a4a8ac77db4d87cbc45308d2a9d512e1b0c95db2a0d30e480bfeb4d585bf6f6f6"
+    }
+  },
   "walObjects": {
     "first": {
       "unsignedTupleCbor": "87015820a723b15aeee4dc7a8b6149fe00c2455ff11c13a7e40f5c2667ad471367d094305470997970c51812dc3a010c7d01b50e0d17dc79c80300f659017886010000782d6170706c69636174696f6e2f766e642e6f726967696e747261696c2e646b672d6d75746174696f6e2b63626f72f65901418901015820244271074185adceabc59f3ad47051bbe2ff31b9250925007453660e6334459f80805820974de10ad27f3c212590a4e44e60343eb72cda085baa0f1f035994b830b06b448a01015820ae334052c1d2b86a03699f32fd9bac7356a405a5b2f73c0e03bf334ae16904735820d9fe3522e130e36ae7bfd94886db8ccadd04071b398ec157c9df3e689f4a0c9280804058333c75726e3a646b673a733e203c75726e3a646b673a703a6e616d653e2022416c69636522203c75726e3a646b673a673e202e0a815820d31a48bebfb2ba6ec6991bf25fd3e19cc8688581ac13a577e62e9f2ea045821f584a494e534552542044415441207b204752415048203c75726e3a646b673a673e207b203c75726e3a646b673a733e203c75726e3a646b673a703a6e616d653e2022416c69636522207d207df61b000001977420dc00",
@@ -1213,288 +1273,201 @@
       "1a075bcd15"
     ]
   },
-  "reducer": [
+  "replayConflict": [
     {
-      "name": "causal-successor",
+      "name": "semantic-core-causal-successor",
       "input": {
-        "operation": "PATCH",
-        "currentHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+        "semanticStatus": "apply",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [],
-        "mode": "PATCH",
-        "resolutionHeads": null,
-        "hasTierReceipt": null
+        "semanticConflictHeads": []
       },
       "expected": {
         "status": "apply",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
         "conflictDigest": "f3c3ff58735dd67c9966114f7e9787f1ca047344c4c2d84b7fe147285781d7b0"
       }
     },
     {
-      "name": "concurrent-disjoint-patches",
+      "name": "semantic-core-disjoint-patches",
       "input": {
-        "operation": "PATCH",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "merge",
+        "semanticActiveHeads": [
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7",
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [
-          "aa9a212aa78dc9d2a459522b32ad64cd286306143f8f9621a72babe11e0a69d1"
-        ],
-        "mode": "PATCH",
-        "resolutionHeads": null,
-        "hasTierReceipt": null
+        "semanticConflictHeads": []
       },
       "expected": {
         "status": "merge",
         "activeHeads": [
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469",
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0",
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7"
         ],
         "conflictHeads": [],
-        "headDigest": "70deff5d95484fb393b11bb93e648df801e0f7ceedd5bf2572350e650e15880e",
+        "headDigest": "789bc952d2533147d3bfdd328490f7444c0e8a33a8147e386c626dd17642cf43",
         "conflictDigest": "f3c3ff58735dd67c9966114f7e9787f1ca047344c4c2d84b7fe147285781d7b0"
       }
     },
     {
-      "name": "concurrent-overlapping-patches",
+      "name": "semantic-core-overlapping-patches",
       "input": {
-        "operation": "PATCH",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "conflict",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "mode": "PATCH",
-        "resolutionHeads": null,
-        "hasTierReceipt": null
+        "semanticConflictHeads": [
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7",
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0"
+        ]
       },
       "expected": {
         "status": "conflict",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469",
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0",
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7"
         ],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
-        "conflictDigest": "ed7252a9fb532135f7fb4537f7add472d88d5f3a435d17f0ca9e7ae28b8186c4"
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
+        "conflictDigest": "f119c5e44d57da12e8ccf20de324f1c83c83c710fa51a96cb83d3ff3e982f8a3"
       }
     },
     {
-      "name": "replace-versus-patch",
+      "name": "semantic-core-replace-versus-patch",
       "input": {
-        "operation": "PUT",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "conflict",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [
-          "aa9a212aa78dc9d2a459522b32ad64cd286306143f8f9621a72babe11e0a69d1"
-        ],
-        "mode": "REPLACE",
-        "resolutionHeads": null,
-        "hasTierReceipt": null
+        "semanticConflictHeads": [
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7",
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0"
+        ]
       },
       "expected": {
         "status": "conflict",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469",
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0",
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7"
         ],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
-        "conflictDigest": "ed7252a9fb532135f7fb4537f7add472d88d5f3a435d17f0ca9e7ae28b8186c4"
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
+        "conflictDigest": "f119c5e44d57da12e8ccf20de324f1c83c83c710fa51a96cb83d3ff3e982f8a3"
       }
     },
     {
-      "name": "delete-versus-update",
+      "name": "semantic-core-delete-versus-update",
       "input": {
-        "operation": "DELETE",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "conflict",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [
-          "aa9a212aa78dc9d2a459522b32ad64cd286306143f8f9621a72babe11e0a69d1"
-        ],
-        "mode": "PATCH",
-        "resolutionHeads": null,
-        "hasTierReceipt": null
+        "semanticConflictHeads": [
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7",
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0"
+        ]
       },
       "expected": {
         "status": "conflict",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469",
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0",
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7"
         ],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
-        "conflictDigest": "ed7252a9fb532135f7fb4537f7add472d88d5f3a435d17f0ca9e7ae28b8186c4"
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
+        "conflictDigest": "f119c5e44d57da12e8ccf20de324f1c83c83c710fa51a96cb83d3ff3e982f8a3"
       }
     },
     {
-      "name": "resolve-all-heads",
+      "name": "semantic-core-complete-resolution",
       "input": {
-        "operation": "RESOLVE",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "apply",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [],
-        "mode": "REPLACE",
-        "resolutionHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
-        ],
-        "hasTierReceipt": null
+        "semanticConflictHeads": []
       },
       "expected": {
         "status": "apply",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
         "conflictDigest": "f3c3ff58735dd67c9966114f7e9787f1ca047344c4c2d84b7fe147285781d7b0"
       }
     },
     {
-      "name": "resolve-missing-head",
+      "name": "semantic-core-incomplete-resolution",
       "input": {
-        "operation": "RESOLVE",
-        "currentHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5",
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469"
+        "semanticStatus": "conflict",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [],
-        "mode": "REPLACE",
-        "resolutionHeads": [
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
-        ],
-        "hasTierReceipt": null
+        "semanticConflictHeads": [
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7",
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0"
+        ]
       },
       "expected": {
         "status": "conflict",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [
-          "3cf2801c9b465b0529190cbf28c78cb070f624247325dfdb7130d1bd16f15469",
-          "77ac2fe60dad714a910d374a804093565fcbb2b558638038eb37201b00c4f6e5"
+          "c8e4faefe1187081cb7f4125a8ad3cdf9c4da353e0337e02fb69a02f3a235ec0",
+          "ddf41e495d47cfcaf04904023e8320466d1cd2e7db90e963594fad545a5273e7"
         ],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
-        "conflictDigest": "ed7252a9fb532135f7fb4537f7add472d88d5f3a435d17f0ca9e7ae28b8186c4"
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
+        "conflictDigest": "f119c5e44d57da12e8ccf20de324f1c83c83c710fa51a96cb83d3ff3e982f8a3"
       }
     },
     {
-      "name": "move-tier-without-receipt",
+      "name": "semantic-core-tier-pending",
       "input": {
-        "operation": "MOVE_TIER_TARGET",
-        "currentHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+        "semanticStatus": "pending",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [],
-        "mode": "REPLACE",
-        "resolutionHeads": null,
-        "hasTierReceipt": false
+        "semanticConflictHeads": []
       },
       "expected": {
         "status": "pending",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
         "conflictDigest": "f3c3ff58735dd67c9966114f7e9787f1ca047344c4c2d84b7fe147285781d7b0"
       }
     },
     {
-      "name": "move-tier-with-receipt",
+      "name": "semantic-core-tier-active",
       "input": {
-        "operation": "MOVE_TIER_TARGET",
-        "currentHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+        "semanticStatus": "apply",
+        "semanticActiveHeads": [
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
-        "baseHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
-        ],
-        "touchedKeys": [
-          "1097058b8a94620b6037d8f0700907d573b1cce0aee9e04f7c1bb7f3799f004a"
-        ],
-        "concurrentTouchedKeys": [],
-        "mode": "REPLACE",
-        "resolutionHeads": null,
-        "hasTierReceipt": true
+        "semanticConflictHeads": []
       },
       "expected": {
         "status": "apply",
         "activeHeads": [
-          "1c13cac0cb166b5c61858eec7fb6f3135530a06c58a7fa7076b2622897b3168c"
+          "f978960db40fa256facfab4d1cecfc038d96f09bcac684cc23514df4dfb4ae1c"
         ],
         "conflictHeads": [],
-        "headDigest": "40f6bd8d5886d958fde2c5b334e3cec6a7ed908c88533b7f161f5da7c0c2ea2b",
+        "headDigest": "8bf06cf2c1661391201a2f9265bd6f171d7774de33e95552276d5fa6a25efe64",
         "conflictDigest": "f3c3ff58735dd67c9966114f7e9787f1ca047344c4c2d84b7fe147285781d7b0"
       }
     }

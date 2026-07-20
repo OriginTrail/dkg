@@ -12,64 +12,36 @@ import {
   readdirSync,
   readSync,
   rmSync,
-  writeSync,
 } from 'node:fs';
 import { open, rm } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { walObjectId, type WalObjectId } from '../reconciliation/ids.js';
 import { WalObjectStoreError, storeError } from './errors.js';
+import {
+  PACKED_DEFAULT_BUFFER_BYTES,
+  PACKED_DEFAULT_MAXIMUM_OBJECT_BYTES,
+  PACKED_DEFAULT_SEGMENT_TARGET_BYTES,
+  PACKED_HARD_MAXIMUM_OBJECT_BYTES,
+  PACKED_RECORD_HEADER_BYTES,
+  PACKED_SEGMENT_HEADER_BYTES,
+  PACKED_STORE_SCHEMA_VERSION,
+  PackedObjectTransactionAppend,
+  createPackedSegmentFile,
+  packedRecordMagicMatches,
+  packedSegmentMagicMatches,
+  packedSegmentName,
+  writePackedBytes,
+  packedWriteMutexFor,
+  type PackedSegmentRow,
+} from './packed-transaction.js';
 import { verifyWalObjectFile } from './streaming-verifier.js';
 import { WalObjectStore } from './types.js';
-
-const SCHEMA_VERSION = 1;
-const SEGMENT_HEADER_BYTES = 32;
-const RECORD_HEADER_BYTES = 48;
-const SEGMENT_MAGIC = Buffer.from('DKGWSEG1');
-const RECORD_MAGIC = Buffer.from('DKGWREC1');
-const DEFAULT_SEGMENT_TARGET_BYTES = 1_073_741_824;
-const DEFAULT_MAXIMUM_OBJECT_BYTES = 1_073_741_824n;
-const HARD_MAXIMUM_OBJECT_BYTES = 8_589_934_592n;
-const DEFAULT_BUFFER_BYTES = 65_536;
-
-interface SegmentRow {
-  segment_id: number;
-  committed_end: number;
-  record_count: number;
-  sealed: number;
-}
 
 interface ObjectRow {
   object_id: Buffer;
   segment_id: number;
   object_offset: number;
   object_length: number;
-}
-
-class AsyncMutex {
-  private tail = Promise.resolve();
-
-  async run<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>(resolvePromise => { release = resolvePromise; });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-}
-
-const rootMutexes = new Map<string, AsyncMutex>();
-
-function mutexFor(root: string): AsyncMutex {
-  let mutex = rootMutexes.get(root);
-  if (mutex === undefined) {
-    mutex = new AsyncMutex();
-    rootMutexes.set(root, mutex);
-  }
-  return mutex;
 }
 
 export type PackedWalObjectStoreDurabilityPoint =
@@ -137,53 +109,6 @@ function fsyncDirectory(path: string): void {
   }
 }
 
-function writeAllSync(descriptor: number, bytes: Uint8Array, position: number): void {
-  let written = 0;
-  while (written < bytes.length) {
-    const count = writeSync(descriptor, bytes, written, bytes.length - written, position + written);
-    /* v8 ignore start -- regular-file writes cannot make zero progress for non-empty input. */
-    if (count < 1) storeError('WAL_STORE_IO', 'packed segment write made no progress');
-    /* v8 ignore stop */
-    written += count;
-  }
-}
-
-async function writeAll(
-  handle: Awaited<ReturnType<typeof open>>,
-  bytes: Uint8Array,
-  position: number,
-): Promise<void> {
-  let written = 0;
-  while (written < bytes.length) {
-    const result = await handle.write(bytes, written, bytes.length - written, position + written);
-    /* v8 ignore start -- regular-file writes cannot make zero progress for non-empty input. */
-    if (result.bytesWritten < 1) storeError('WAL_STORE_IO', 'packed segment write made no progress');
-    /* v8 ignore stop */
-    written += result.bytesWritten;
-  }
-}
-
-function segmentName(id: number): string {
-  return `${id.toString(16).padStart(16, '0')}.pack`;
-}
-
-function segmentHeader(id: number): Uint8Array {
-  const header = new Uint8Array(SEGMENT_HEADER_BYTES);
-  header.set(SEGMENT_MAGIC);
-  const view = new DataView(header.buffer);
-  view.setUint32(8, SCHEMA_VERSION, false);
-  view.setBigUint64(16, BigInt(id), false);
-  return header;
-}
-
-function recordHeader(id: WalObjectId, length: number): Uint8Array {
-  const header = new Uint8Array(RECORD_HEADER_BYTES);
-  header.set(RECORD_MAGIC);
-  header.set(id, 8);
-  new DataView(header.buffer).setBigUint64(40, BigInt(length), false);
-  return header;
-}
-
 function validateInteger(name: string, value: number, minimum: number, maximum: number): void {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     storeError('WAL_STORE_INVALID_CONFIGURATION', `${name} must be an integer in ${minimum}..${maximum}`);
@@ -205,7 +130,7 @@ export class PackedWalObjectStore extends WalObjectStore {
   readonly readBufferBytes: number;
   readonly verificationBufferBytes: number;
   private readonly database!: Database.Database;
-  private readonly mutex: AsyncMutex;
+  private readonly mutex: ReturnType<typeof packedWriteMutexFor>;
   private readonly durabilityHook?: PackedWalObjectStoreOptions['durabilityHook'];
   private closed = false;
 
@@ -214,13 +139,13 @@ export class PackedWalObjectStore extends WalObjectStore {
     if (typeof options?.root !== 'string' || options.root.trim().length === 0 || !isAbsolute(options.root)) {
       storeError('WAL_STORE_INVALID_CONFIGURATION', 'packed WalObjectStore root must be an absolute path');
     }
-    const maximumObjectBytes = options.maximumObjectBytes ?? DEFAULT_MAXIMUM_OBJECT_BYTES;
-    if (maximumObjectBytes < 1n || maximumObjectBytes > HARD_MAXIMUM_OBJECT_BYTES) {
+    const maximumObjectBytes = options.maximumObjectBytes ?? PACKED_DEFAULT_MAXIMUM_OBJECT_BYTES;
+    if (maximumObjectBytes < 1n || maximumObjectBytes > PACKED_HARD_MAXIMUM_OBJECT_BYTES) {
       storeError('WAL_STORE_INVALID_CONFIGURATION', 'maximumObjectBytes must be within the WAL v1 hard limit');
     }
-    const segmentTargetBytes = options.segmentTargetBytes ?? DEFAULT_SEGMENT_TARGET_BYTES;
-    const readBufferBytes = options.readBufferBytes ?? DEFAULT_BUFFER_BYTES;
-    const verificationBufferBytes = options.verificationBufferBytes ?? DEFAULT_BUFFER_BYTES;
+    const segmentTargetBytes = options.segmentTargetBytes ?? PACKED_DEFAULT_SEGMENT_TARGET_BYTES;
+    const readBufferBytes = options.readBufferBytes ?? PACKED_DEFAULT_BUFFER_BYTES;
+    const verificationBufferBytes = options.verificationBufferBytes ?? PACKED_DEFAULT_BUFFER_BYTES;
     const busyTimeoutMs = options.busyTimeoutMs ?? 30_000;
     validateInteger('segmentTargetBytes', segmentTargetBytes, 128, 8_590_000_128);
     validateInteger('readBufferBytes', readBufferBytes, 1, 1_048_576);
@@ -236,7 +161,7 @@ export class PackedWalObjectStore extends WalObjectStore {
     this.readBufferBytes = readBufferBytes;
     this.verificationBufferBytes = verificationBufferBytes;
     this.durabilityHook = options.durabilityHook;
-    this.mutex = mutexFor(this.root);
+    this.mutex = packedWriteMutexFor(this.root);
 
     let opened: Database.Database | undefined;
     try {
@@ -307,11 +232,11 @@ export class PackedWalObjectStore extends WalObjectStore {
       if (!details.isFile() || details.size < row.object_offset + row.object_length) {
         return storeError('WAL_STORE_CORRUPT', 'packed segment is truncated or not a regular file');
       }
-      const header = new Uint8Array(RECORD_HEADER_BYTES);
-      const headerRead = await handle.read(header, 0, header.length, row.object_offset - RECORD_HEADER_BYTES);
+      const header = new Uint8Array(PACKED_RECORD_HEADER_BYTES);
+      const headerRead = await handle.read(header, 0, header.length, row.object_offset - PACKED_RECORD_HEADER_BYTES);
       if (
         headerRead.bytesRead !== header.length
-        || !equalBytes(header.subarray(0, 8), RECORD_MAGIC)
+        || !packedRecordMagicMatches(header)
         || !equalBytes(header.subarray(8, 40), id)
         || new DataView(header.buffer).getBigUint64(40, false) !== BigInt(row.object_length)
       ) {
@@ -354,7 +279,7 @@ export class PackedWalObjectStore extends WalObjectStore {
         if (total > this.maximumObjectBytes) {
           return storeError('WAL_STORE_OBJECT_TOO_LARGE', 'WalObject source exceeds the configured object limit');
         }
-        await writeAll(candidate, chunk, Number(total) - chunk.length);
+        await writePackedBytes(candidate, chunk, Number(total) - chunk.length);
       }
       await candidate.sync();
       await this.durabilityHook?.('candidate-file-synced');
@@ -405,15 +330,15 @@ export class PackedWalObjectStore extends WalObjectStore {
 
   private initializeSchema(): void {
     const version = this.database.pragma('user_version', { simple: true }) as number;
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version !== 0 && version !== PACKED_STORE_SCHEMA_VERSION) {
       storeError('WAL_STORE_INVALID_CONFIGURATION', `unsupported packed store schema version ${version}`);
     }
-    if (version === SCHEMA_VERSION) return;
+    if (version === PACKED_STORE_SCHEMA_VERSION) return;
     this.database.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE segments (
         segment_id INTEGER PRIMARY KEY,
-        committed_end INTEGER NOT NULL CHECK (committed_end >= ${SEGMENT_HEADER_BYTES}),
+        committed_end INTEGER NOT NULL CHECK (committed_end >= ${PACKED_SEGMENT_HEADER_BYTES}),
         record_count INTEGER NOT NULL CHECK (record_count >= 0),
         sealed INTEGER NOT NULL CHECK (sealed IN (0, 1))
       );
@@ -421,11 +346,11 @@ export class PackedWalObjectStore extends WalObjectStore {
       CREATE TABLE objects (
         object_id BLOB PRIMARY KEY CHECK (length(object_id) = 32),
         segment_id INTEGER NOT NULL REFERENCES segments(segment_id),
-        object_offset INTEGER NOT NULL CHECK (object_offset >= ${SEGMENT_HEADER_BYTES + RECORD_HEADER_BYTES}),
+        object_offset INTEGER NOT NULL CHECK (object_offset >= ${PACKED_SEGMENT_HEADER_BYTES + PACKED_RECORD_HEADER_BYTES}),
         object_length INTEGER NOT NULL CHECK (object_length >= 1)
       ) WITHOUT ROWID;
       CREATE INDEX objects_by_segment_offset ON objects(segment_id, object_offset);
-      PRAGMA user_version = ${SCHEMA_VERSION};
+      PRAGMA user_version = ${PACKED_STORE_SCHEMA_VERSION};
       COMMIT;
     `);
   }
@@ -435,15 +360,15 @@ export class PackedWalObjectStore extends WalObjectStore {
       SELECT 1 FROM objects AS o LEFT JOIN segments AS s ON s.segment_id = o.segment_id
       WHERE s.segment_id IS NULL
          OR o.object_offset + o.object_length > s.committed_end
-         OR o.object_offset - ${RECORD_HEADER_BYTES} < ${SEGMENT_HEADER_BYTES}
+         OR o.object_offset - ${PACKED_RECORD_HEADER_BYTES} < ${PACKED_SEGMENT_HEADER_BYTES}
       LIMIT 1
     `).get();
     if (invalid !== undefined) storeError('WAL_STORE_CORRUPT', 'packed index points outside committed segments');
 
     const rows = this.database.prepare(
       'SELECT segment_id, committed_end, record_count, sealed FROM segments ORDER BY segment_id',
-    ).all() as SegmentRow[];
-    const referenced = new Set(rows.map(row => segmentName(row.segment_id)));
+    ).all() as PackedSegmentRow[];
+    const referenced = new Set(rows.map(row => packedSegmentName(row.segment_id)));
     for (const row of rows) this.recoverSegment(row);
     let removed = false;
     for (const entry of readdirSync(this.segmentsRoot, { withFileTypes: true })) {
@@ -463,7 +388,7 @@ export class PackedWalObjectStore extends WalObjectStore {
     if (active.length === 0) this.createInitialSegment((rows.at(-1)?.segment_id ?? -1) + 1);
   }
 
-  private recoverSegment(row: SegmentRow): void {
+  private recoverSegment(row: PackedSegmentRow): void {
     const path = this.segmentPath(row.segment_id);
     if (kind(path) !== 'file') storeError('WAL_STORE_CORRUPT', 'packed index references a missing segment');
     const descriptor = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
@@ -472,11 +397,11 @@ export class PackedWalObjectStore extends WalObjectStore {
       if (!details.isFile() || details.size < row.committed_end) {
         storeError('WAL_STORE_CORRUPT', 'packed segment is shorter than its committed boundary');
       }
-      const header = new Uint8Array(SEGMENT_HEADER_BYTES);
+      const header = new Uint8Array(PACKED_SEGMENT_HEADER_BYTES);
       if (
         readSync(descriptor, header, 0, header.length, 0) !== header.length
-        || !equalBytes(header.subarray(0, 8), SEGMENT_MAGIC)
-        || new DataView(header.buffer).getUint32(8, false) !== SCHEMA_VERSION
+        || !packedSegmentMagicMatches(header)
+        || new DataView(header.buffer).getUint32(8, false) !== PACKED_STORE_SCHEMA_VERSION
         || new DataView(header.buffer).getBigUint64(16, false) !== BigInt(row.segment_id)
       ) {
         storeError('WAL_STORE_CORRUPT', 'packed segment header is invalid');
@@ -495,7 +420,7 @@ export class PackedWalObjectStore extends WalObjectStore {
     try {
       this.database.prepare(
         'INSERT INTO segments(segment_id, committed_end, record_count, sealed) VALUES (?, ?, 0, 0)',
-      ).run(segmentId, SEGMENT_HEADER_BYTES);
+      ).run(segmentId, PACKED_SEGMENT_HEADER_BYTES);
     } catch (error) {
       rmSync(this.segmentPath(segmentId), { force: true });
       fsyncDirectory(this.segmentsRoot);
@@ -507,93 +432,33 @@ export class PackedWalObjectStore extends WalObjectStore {
     if (!Number.isSafeInteger(segmentId) || segmentId < 0) {
       storeError('WAL_STORE_CORRUPT', 'packed segment identifier is outside the safe range');
     }
-    const descriptor = openSync(this.segmentPath(segmentId), 'wx', 0o600);
-    try {
-      writeAllSync(descriptor, segmentHeader(segmentId), 0);
-      fsyncSync(descriptor);
-    } finally {
-      closeSync(descriptor);
-    }
-    fsyncDirectory(this.segmentsRoot);
+    createPackedSegmentFile(this.segmentsRoot, segmentId);
   }
 
   private async appendVerified(id: WalObjectId, candidatePath: string, objectLength: number): Promise<void> {
     this.database.exec('BEGIN IMMEDIATE');
-    let segment: SegmentRow | undefined;
-    let originalEnd = 0;
-    let createdSegmentId: number | undefined;
+    const append = new PackedObjectTransactionAppend({
+      database: this.database,
+      segmentsRoot: this.segmentsRoot,
+      id,
+      source: { kind: 'file', path: candidatePath, length: objectLength },
+      segmentTargetBytes: this.segmentTargetBytes,
+      bufferBytes: this.readBufferBytes,
+      hook: async point => {
+        if (point === 'segment-file-synced') await this.durabilityHook?.('segment-file-synced');
+      },
+    });
     let committed = false;
     try {
-      segment = this.database.prepare(
-        'SELECT segment_id, committed_end, record_count, sealed FROM segments WHERE sealed = 0',
-      ).get() as SegmentRow | undefined;
-      /* v8 ignore start -- startup recovery creates exactly one active segment before append. */
-      if (segment === undefined) storeError('WAL_STORE_CORRUPT', 'packed index has no active segment');
-      /* v8 ignore stop */
-      const recordBytes = RECORD_HEADER_BYTES + objectLength;
-      if (segment.record_count > 0 && segment.committed_end + recordBytes > this.segmentTargetBytes) {
-        const nextId = segment.segment_id + 1;
-        this.createSegmentFile(nextId);
-        createdSegmentId = nextId;
-        this.database.prepare('UPDATE segments SET sealed = 1 WHERE segment_id = ?').run(segment.segment_id);
-        this.database.prepare(
-          'INSERT INTO segments(segment_id, committed_end, record_count, sealed) VALUES (?, ?, 0, 0)',
-        ).run(nextId, SEGMENT_HEADER_BYTES);
-        segment = { segment_id: nextId, committed_end: SEGMENT_HEADER_BYTES, record_count: 0, sealed: 0 };
-      }
-      originalEnd = segment.committed_end;
-      const objectOffset = originalEnd + RECORD_HEADER_BYTES;
-      const newEnd = objectOffset + objectLength;
-      const segmentHandle = await open(this.segmentPath(segment.segment_id), constants.O_RDWR | constants.O_NOFOLLOW);
-      const candidateHandle = await open(candidatePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        const details = await segmentHandle.stat();
-        if (!details.isFile() || details.size !== originalEnd) {
-          return storeError('WAL_STORE_CORRUPT', 'active segment does not match its committed boundary');
-        }
-        await writeAll(segmentHandle, recordHeader(id, objectLength), originalEnd);
-        let copied = 0;
-        while (copied < objectLength) {
-          const chunk = new Uint8Array(Math.min(this.readBufferBytes, objectLength - copied));
-          const read = await candidateHandle.read(chunk, 0, chunk.length, copied);
-          /* v8 ignore start -- the candidate was closed and verified immediately before locking. */
-          if (read.bytesRead !== chunk.length) return storeError('WAL_STORE_IO', 'verified candidate changed before append');
-          /* v8 ignore stop */
-          await writeAll(segmentHandle, chunk, objectOffset + copied);
-          copied += chunk.length;
-        }
-        await segmentHandle.sync();
-        await this.durabilityHook?.('segment-file-synced');
-      } finally {
-        await candidateHandle.close();
-        await segmentHandle.close();
-      }
-      this.database.prepare(
-        'INSERT INTO objects(object_id, segment_id, object_offset, object_length) VALUES (?, ?, ?, ?)',
-      ).run(idBuffer(id), segment.segment_id, objectOffset, objectLength);
-      this.database.prepare(
-        'UPDATE segments SET committed_end = ?, record_count = record_count + 1 WHERE segment_id = ?',
-      ).run(newEnd, segment.segment_id);
+      await append.append();
       await this.durabilityHook?.('before-index-commit');
       this.database.exec('COMMIT');
       committed = true;
+      append.markCommitted();
       await this.durabilityHook?.('index-committed');
     } catch (error) {
       if (this.database.inTransaction) this.database.exec('ROLLBACK');
-      if (!committed && segment !== undefined) {
-        if (createdSegmentId !== undefined) {
-          rmSync(this.segmentPath(createdSegmentId), { force: true });
-          fsyncDirectory(this.segmentsRoot);
-        } else {
-          const descriptor = openSync(this.segmentPath(segment.segment_id), constants.O_RDWR | constants.O_NOFOLLOW);
-          try {
-            ftruncateSync(descriptor, originalEnd);
-            fsyncSync(descriptor);
-          } finally {
-            closeSync(descriptor);
-          }
-        }
-      }
+      if (!committed) append.rollback();
       throw error;
     }
   }
@@ -602,6 +467,6 @@ export class PackedWalObjectStore extends WalObjectStore {
     if (!Number.isSafeInteger(segmentId) || segmentId < 0) {
       storeError('WAL_STORE_CORRUPT', 'packed segment identifier is outside the safe range');
     }
-    return join(this.segmentsRoot, segmentName(segmentId));
+    return join(this.segmentsRoot, packedSegmentName(segmentId));
   }
 }

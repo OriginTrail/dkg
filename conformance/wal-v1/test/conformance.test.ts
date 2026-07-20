@@ -11,7 +11,7 @@ import {
   independentDecryptAesGcm,
   independentDerivePrivateObjectKey,
   independentMappingIndexForState,
-  independentReduceCase,
+  independentEncodeReplayConflictProjection,
   independentRoot,
   independentSymbols,
   independentVerifyWalObject
@@ -22,21 +22,27 @@ import {
   derivePrivateObjectKey,
   decryptAes256Gcm,
   parseWalObject,
-  reduceCase,
+  encodeReplayConflictProjection,
   validateRangeFrame,
   verifyTupleSignature,
   type RangeFrame,
-  type ReducerCase
+  type ReplayConflictProjectionInput
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot, verifyMembershipProof, type SetMembershipProof } from '../src/set-commitment.js';
 import { DOMAINS, SCHEMA, TUPLES } from '../src/schema.js';
+import {
+  independentCanonicalNQuads,
+  independentRdfLogicalKey,
+  independentRdfStateDigest,
+  independentRdfTouchedKey
+} from '../src/rdf.js';
 import { decodeUnsignedVarint, decodeWireFrame, encodeWireFrame, wireFramesEqual } from '../src/wire.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const vectors = JSON.parse(await readFile(resolve(here, '../vectors/protocol-v1.json'), 'utf8'));
 const invalidWalObjects = vectors.invalidWalObjects as Array<{ name: string; bytes: string; error: string }>;
 const invalidWireFrames = vectors.wire.invalid as Array<{ name: string; expected: string; frame: string }>;
-const reducerVectorCases = vectors.reducer as Array<{ name: string; input: any; expected: any }>;
+const replayConflictVectorCases = vectors.replayConflict as Array<{ name: string; input: any; expected: any }>;
 
 function frame(name: 'first' | 'middle' | 'final' | 'eof'): RangeFrame {
   const value = vectors.ranges.valid[name];
@@ -48,17 +54,12 @@ function frame(name: 'first' | 'middle' | 'final' | 'eof'): RangeFrame {
   };
 }
 
-function reducerInput(value: (typeof vectors.reducer)[number]): ReducerCase {
+function replayConflictInput(value: (typeof vectors.replayConflict)[number]): ReplayConflictProjectionInput {
   return {
     name: value.name,
-    operation: value.input.operation,
-    currentHeads: value.input.currentHeads.map((entry: string) => fromHex(entry, 32)),
-    baseHeads: value.input.baseHeads.map((entry: string) => fromHex(entry, 32)),
-    touchedKeys: value.input.touchedKeys.map((entry: string) => fromHex(entry, 32)),
-    concurrentTouchedKeys: value.input.concurrentTouchedKeys.map((entry: string) => fromHex(entry, 32)),
-    mode: value.input.mode,
-    resolutionHeads: value.input.resolutionHeads?.map((entry: string) => fromHex(entry, 32)),
-    hasTierReceipt: value.input.hasTierReceipt ?? undefined
+    semanticStatus: value.input.semanticStatus,
+    semanticActiveHeads: value.input.semanticActiveHeads.map((entry: string) => fromHex(entry, 32)),
+    semanticConflictHeads: value.input.semanticConflictHeads.map((entry: string) => fromHex(entry, 32))
   };
 }
 
@@ -306,7 +307,64 @@ describe('ProtocolV1IbltReconciliationAlgorithm', () => {
   });
 });
 
-describe('adapter, reducer, privacy, and finality vectors', () => {
+describe('adapter, replay/conflict, privacy, and finality vectors', () => {
+  it('independently reproduces canonical RDF, state, logical-key, touched-key, policy, and mutation bytes', () => {
+    const rdf = vectors.rdfAdapter;
+    const canonical = independentCanonicalNQuads(rdf.canonicalization.input);
+    expect(hex(canonical)).toBe(rdf.canonicalization.canonicalBytes);
+    expect(new TextDecoder().decode(canonical)).toBe(rdf.canonicalization.canonical);
+    expect(hex(independentRdfStateDigest(canonical))).toBe(rdf.canonicalization.stateDigest);
+    expect(hex(independentRdfLogicalKey({
+      contextGraphId: rdf.logicalKey.contextGraphId,
+      subGraphName: rdf.logicalKey.subGraphName,
+      authorAddress: fromHex(rdf.logicalKey.authorAddress, 20),
+      entity: rdf.logicalKey.knowledgeAssetUalOrRootEntity
+    }))).toBe(rdf.logicalKey.digest);
+    for (const item of rdf.touchedKeys) {
+      expect(hex(independentRdfTouchedKey(item.graphIri, item.subjectIri, item.predicateIri)))
+        .toBe(item.digest);
+    }
+    const policy = [
+      1n,
+      BigInt(rdf.policy.adapterVersion),
+      rdf.policy.allowedGraphPrefixes,
+      BigInt(rdf.policy.maxQuadsPerMutation),
+      BigInt(rdf.policy.maxWalObjectBytes),
+      rdf.policy.singleValuedPredicates,
+      rdf.policy.multiValuedPredicates,
+      [],
+      [],
+      [],
+      rdf.policy.allowedPayloadKinds.map(BigInt)
+    ] as const;
+    expect(hex(encodeCanonical(policy))).toBe(rdf.policy.canonicalBytes);
+    const touched = rdf.publishReplace.touchedKeys.map((value: string) => fromHex(value, 32));
+    const mutation = [
+      1n,
+      0n,
+      independentRdfStateDigest(new Uint8Array()),
+      fromHex(rdf.publishReplace.resultStateDigest, 32),
+      [[rdf.publishReplace.graphIri, canonical, 2n]],
+      [],
+      new Uint8Array(),
+      new Uint8Array(),
+      touched,
+      null
+    ] as const;
+    expect(hex(encodeCanonical(mutation))).toBe(rdf.publishReplace.rdfMutationBytes);
+    expect(hex(encodeCanonical([
+      1n,
+      0n,
+      fromHex(rdf.logicalKey.digest, 32),
+      [],
+      [],
+      fromHex(rdf.publishReplace.policyObjectId, 32),
+      mutation,
+      null,
+      null
+    ]))).toBe(rdf.publishReplace.dkgMutationBytes);
+  });
+
   it('decrypts the fixed AES-GCM vector in independent implementations', async () => {
     const epochKey = fromHex(vectors.encryption.epochKey, 32);
     const coordinates = {
@@ -335,16 +393,36 @@ describe('adapter, reducer, privacy, and finality vectors', () => {
     await expect(independentDecryptAesGcm(key, nonce, ciphertext, wrong)).rejects.toThrow();
   });
 
-  it.each(reducerVectorCases)('matches reducer decision $name in both implementations', (value) => {
-    const input = reducerInput(value);
-    const reference = reduceCase(input);
-    const independent = independentReduceCase(input);
+  it.each(replayConflictVectorCases)('encodes shared-core replay/conflict projection $name in both implementations', (value) => {
+    expect(Object.keys(value.input).sort()).toEqual([
+      'semanticActiveHeads',
+      'semanticConflictHeads',
+      'semanticStatus',
+    ]);
+    const input = replayConflictInput(value);
+    const reference = encodeReplayConflictProjection(input);
+    const independent = independentEncodeReplayConflictProjection(input);
     expect(reference.status).toBe(value.expected.status);
     expect(independent.status).toBe(value.expected.status);
     expect(hex(reference.headDigest)).toBe(value.expected.headDigest);
     expect(hex(independent.headDigest)).toBe(value.expected.headDigest);
     expect(hex(reference.conflictDigest)).toBe(value.expected.conflictDigest);
     expect(hex(independent.conflictDigest)).toBe(value.expected.conflictDigest);
+  });
+
+  it('does not infer a DKG decision from a replay fixture name or head shape', () => {
+    const head = fromHex('11'.repeat(32), 32);
+    const statuses = ['apply', 'merge', 'conflict', 'pending'] as const;
+    for (const semanticStatus of statuses) {
+      const input: ReplayConflictProjectionInput = {
+        name: 'same-protocol-shape',
+        semanticStatus,
+        semanticActiveHeads: [head],
+        semanticConflictHeads: [],
+      };
+      expect(encodeReplayConflictProjection(input).status).toBe(semanticStatus);
+      expect(independentEncodeReplayConflictProjection(input).status).toBe(semanticStatus);
+    }
   });
 
   it('keeps private MOVE_TIER data out of the public target bytes', () => {

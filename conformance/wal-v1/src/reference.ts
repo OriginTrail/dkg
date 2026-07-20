@@ -29,19 +29,14 @@ export interface RangeFrame {
   bytes: Uint8Array;
 }
 
-export interface ReducerCase {
+export interface ReplayConflictProjectionInput {
   name: string;
-  operation: 'PUT' | 'PATCH' | 'DELETE' | 'RESOLVE' | 'MOVE_TIER_TARGET';
-  currentHeads: Uint8Array[];
-  baseHeads: Uint8Array[];
-  touchedKeys: Uint8Array[];
-  concurrentTouchedKeys: Uint8Array[];
-  mode: 'REPLACE' | 'PATCH';
-  resolutionHeads?: Uint8Array[];
-  hasTierReceipt?: boolean;
+  semanticStatus: 'apply' | 'merge' | 'conflict' | 'pending';
+  semanticActiveHeads: Uint8Array[];
+  semanticConflictHeads: Uint8Array[];
 }
 
-export interface ReducerDecision {
+export interface ReplayConflictProjection {
   status: 'apply' | 'merge' | 'conflict' | 'pending';
   activeHeads: Uint8Array[];
   conflictHeads: Uint8Array[];
@@ -282,58 +277,21 @@ export function assembleRanges(frames: readonly RangeFrame[]): Uint8Array {
   return output;
 }
 
-function intersects(left: readonly Uint8Array[], right: readonly Uint8Array[]): boolean {
-  const rightSet = new Set(right.map(hex));
-  return left.some((value) => rightSet.has(hex(value)));
-}
-
 function digestIds(domain: string, ids: readonly Uint8Array[]): Uint8Array {
   return hash(domain, encodeCanonical(sortedUniqueBytes(ids)));
 }
 
-export function reduceCase(input: ReducerCase): ReducerDecision {
-  const current = sortedUniqueBytes(input.currentHeads);
-  const base = sortedUniqueBytes(input.baseHeads);
-  let status: ReducerDecision['status'];
-  let activeHeads: Uint8Array[];
-  let conflictHeads: Uint8Array[] = [];
-
-  if (input.operation === 'MOVE_TIER_TARGET' && input.hasTierReceipt !== true) {
-    status = 'pending';
-    activeHeads = current;
-  } else if (input.operation === 'RESOLVE') {
-    const resolution = sortedUniqueBytes(input.resolutionHeads ?? []);
-    const coversAll = resolution.length === current.length && resolution.every((id, index) => equalBytes(id, current[index]));
-    if (!coversAll) {
-      status = 'conflict';
-      activeHeads = base;
-      conflictHeads = current;
-    } else {
-      status = 'apply';
-      activeHeads = base;
-    }
-  } else if (current.length === base.length && current.every((id, index) => equalBytes(id, base[index]))) {
-    status = 'apply';
-    activeHeads = current;
-  } else if (
-    input.operation === 'PATCH' &&
-    input.mode === 'PATCH' &&
-    !intersects(input.touchedKeys, input.concurrentTouchedKeys)
-  ) {
-    status = 'merge';
-    activeHeads = current;
-  } else {
-    status = 'conflict';
-    activeHeads = base;
-    conflictHeads = current;
-  }
-
+export function encodeReplayConflictProjection(
+  input: ReplayConflictProjectionInput,
+): ReplayConflictProjection {
+  const activeHeads = sortedUniqueBytes(input.semanticActiveHeads);
+  const conflictHeads = sortedUniqueBytes(input.semanticConflictHeads);
   return {
-    status,
+    status: input.semanticStatus,
     activeHeads,
     conflictHeads,
-    headDigest: digestIds(DOMAINS.reducerHeads, activeHeads),
-    conflictDigest: digestIds(DOMAINS.reducerConflict, conflictHeads)
+    headDigest: digestIds(DOMAINS.replayHeads, activeHeads),
+    conflictDigest: digestIds(DOMAINS.replayConflict, conflictHeads)
   };
 }
 

@@ -13,11 +13,15 @@ const SQLITE_EXEC_ARGV = [
 export default defineConfig({
   test: {
     include: [
+      "test/wal-local-authoring-bundle.test.ts",
+      "test/wal-local-commit.test.ts",
+      "test/dkg-semantic-core-boundary.test.ts",
       "test/agent-delegation.test.ts",
       "test/request-authorize.test.ts",
       "test/wal-authority-adapter.test.ts",
       "test/wal-private-payload-adapter.test.ts",
       "test/wal-wire-protocol.test.ts",
+      "test/wal-wire-runtime.test.ts",
       "test/wal-provider-resolution-adapter.test.ts",
       "test/swm-sender-key-parallel-fanout.test.ts",
       "test/swm-sender-key-pending-by-agent.test.ts",

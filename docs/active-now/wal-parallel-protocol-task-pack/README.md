@@ -1,6 +1,6 @@
 # WAL parallel-protocol implementation task pack
 
-This directory turns OT-RFC-65 v0.7 into an implementation backlog for
+This directory turns OT-RFC-65 v0.11 into an implementation backlog for
 OriginTrail DKG. It is intentionally created in an isolated worktree based on
 the current remote `main`; it does not reuse or modify the dirty primary
 checkout.
@@ -15,11 +15,11 @@ checkout.
 | Authoritative branch | `codex/wal-005-iblt-lab` |
 | Worktree | `/private/tmp/dkg-v9-wal-005-iblt-lab` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `897ddeb06f2cff76c0fa622aa6a213b271170106` |
-| RFC version | `0.7` |
-| RFC SHA-256 | `63c90587cc67ce8bd1b34a34843bab08de283020712bc35653bef39da9582229` |
-| Schema SHA-256 | `ea5b7479fb04df7f3633cd0c9763ac4d2204a0c8df13aac32693f8ea486964fa` |
-| Vectors SHA-256 | `71b650aaca282359464684e9a2d4070fc4e4e82a9f63efcbc8eb9a9ccb023543` |
+| RFC source commit | `3fae6958fd7875b2f435344f59bbbdd588430125` |
+| RFC version | `0.11` |
+| RFC SHA-256 | `8add36bf5f84c27a181ad5695610dc8e386615d10f537257c0defe4c132c5b1c` |
+| Schema SHA-256 | `98e1dbf857a9287dac8af780a0715d01b9b1af6b00ae708ac868f18305a159cd` |
+| Vectors SHA-256 | `c5221143d889461f13811e89c8f17f3405be14b6247dc94915d4bea5015bcde6` |
 
 ## Mandatory system-context contract
 
@@ -52,7 +52,8 @@ informative context. It preserves the separate comparison with OT-RFC-64 / PR
 
 Until the final cutover tasks are accepted:
 
-- the existing graph-sync and graph-write path remains production-authoritative;
+- the current synchronization mechanism (`legacy`) remains
+  production-authoritative;
 - WAL records, reconciliation, and RDF projection run only under explicit
   `parallel` configuration;
 - WAL network traffic uses separate versioned protocols and durable state;
@@ -62,10 +63,15 @@ Until the final cutover tasks are accepted:
 - no task may introduce per-collection mixed authority;
 - no legacy handler is removed before the signed hard-cutover gate.
 
-The implementation preserves existing SWM/VM, membership, authorship,
-private-access, Sender Key, KA identity, chain-finality, and reorg semantics.
-The WAL changes replication, durability, replay, and projection mechanics. It
-must not silently redefine DKG business or cryptographic authority.
+There are two synchronization mechanisms during the parallel run, but exactly
+one DKG semantic implementation, one SWM/VM model, and one verified-memory and
+cryptographic implementation. The `legacy` label applies only to the current
+synchronization mechanism, never to those shared semantics. WAL reconciliation
+handles authenticated control bytes, `WalObjectId` sets, and complete
+`WalObjectV1` byte ranges only. The deterministic replay/conflict adapter
+invokes the existing semantic core; it does not reproduce DKG behavior. WAL-015
+only persists the resulting projection atomically through the existing storage
+adapter, and VM, finality, and reorg events enter that same core.
 
 ## Execution waves
 
@@ -73,7 +79,7 @@ must not silently redefine DKG business or cryptographic authority.
 flowchart TD
     A["Wave 0: baseline and specification freeze"] --> B["Wave 1: byte primitives and durable stores"]
     B --> C["Wave 2: authority, privacy, transport, and admission"]
-    C --> D["Wave 3: RDF compiler, reducer, materializer, and VM lifecycle"]
+    C --> D["Wave 3: mutation encoder, shared-core replay adapter, projection persistence, and VM event wiring"]
     D --> E["Wave 4: snapshots, backfill, and parallel runtime wiring"]
     E --> F["Wave 5: observability, fault injection, security, and benchmarks"]
     F --> G["Wave 6: signed cutover rehearsal and legacy retirement"]
@@ -84,8 +90,8 @@ flowchart TD
 | 0 | `WAL-000`–`WAL-002` | Baseline receipts, frozen wire decisions, safe feature/config skeleton. |
 | 1 | `WAL-003`–`WAL-006` | Canonical objects, whole-object range storage, rateless IBLT reconciliation, signed set commitments, and crash-safe WAL storage pass conformance tests. |
 | 2 | `WAL-007`–`WAL-011` | Authority, private crypto adapter, wire protocols, provider discovery, and closed admission work fail-closed. |
-| 3 | `WAL-012`–`WAL-016` | Local commits and identical admitted sets produce deterministic SWM/VM projections without semantic drift. |
-| 4 | `WAL-017`–`WAL-020` | Snapshot/delta backfill and the complete network shadow protocol run beside legacy authority. |
+| 3 | `WAL-012`–`WAL-016` | Local commits and identical admitted sets invoke the same existing semantic core and produce deterministic SWM/VM projections without duplicated behavior. |
+| 4 | `WAL-017`–`WAL-020` | Snapshot/delta backfill and the complete network shadow protocol run beside legacy-sync authority while sharing one semantic core. |
 | 5 | `WAL-021`–`WAL-022` | Security, crash, scale, and measurable-goal evidence gates pass. |
 | 6 | `WAL-023`–`WAL-024` | Full-inventory cutover rehearsal passes; only then may WAL become authoritative and legacy sync be retired. |
 
@@ -104,7 +110,7 @@ For every task:
 - attach exact commands, commit, environment, raw digests, and relevant metrics;
 - store large/generated receipts as CI artifacts or under a task-specific `/tmp`
   result directory, not as accidental repository changes;
-- keep the authoritative legacy path unchanged unless the task explicitly owns
+- keep the authoritative legacy-sync path unchanged unless the task explicitly owns
   cutover or retirement;
 - leave the worktree clean when handing off.
 

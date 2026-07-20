@@ -48,8 +48,8 @@
     "logicalKey": "dkg-rdf-logical-key-v1\u0000",
     "touchedKey": "dkg-rdf-touched-key-v1\u0000",
     "rdfState": "dkg-rdf-state-v1\u0000",
-    "reducerHeads": "dkg-rdf-head-set-v1\u0000",
-    "reducerConflict": "dkg-rdf-conflict-v1\u0000",
+    "replayHeads": "dkg-rdf-head-set-v1\u0000",
+    "replayConflict": "dkg-rdf-conflict-v1\u0000",
     "payloadAssociatedData": "dkg-wal-payload-ad-v1\u0000",
     "moveTierCommitment": "dkg-wal-move-tier-v1\u0000",
     "setEmpty": "dkg-wal-set-empty-v1\u0000",
@@ -352,7 +352,7 @@
         "deleteNQuadsBytes",
         "insertNQuadsBytes",
         "touchedKeys",
-        "sourceSparqlAuditBytesOrNull"
+        "sourceSemanticAuditBytesOrNull"
       ],
       "fieldTypes": [
         "literal-1",
@@ -391,6 +391,34 @@
         "nfc-tstr",
         "bstr",
         "u64"
+      ]
+    },
+    "RdfPolicyV1": {
+      "fields": [
+        "version",
+        "adapterVersion",
+        "allowedGraphPrefixes",
+        "maxQuadsPerMutation",
+        "maxWalObjectBytes",
+        "singleValuedPredicates",
+        "multiValuedPredicates",
+        "sharedWriteLogicalKeys",
+        "resolverAddresses",
+        "expiryAuthorityAddresses",
+        "allowedPayloadKinds"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16",
+        "sorted-unique<nfc-tstr>",
+        "u64",
+        "u64",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<bytes32>",
+        "sorted-unique<address20>",
+        "sorted-unique<address20>",
+        "sorted-unique<u16>"
       ]
     },
     "ChainBindingV1": {

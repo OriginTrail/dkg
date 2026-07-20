@@ -37,6 +37,7 @@ describe('WAL runtime configuration', () => {
       protocolVersion: WAL_PROTOCOL_VERSION,
       adapterVersion: WAL_ADAPTER_VERSION,
       cutoverId: undefined,
+      localAuthoring: undefined,
       paths: {
         root: join(dkgHome, WAL_RUNTIME_ROOT_DIRECTORY),
         objectStore: join(dkgHome, WAL_RUNTIME_ROOT_DIRECTORY, 'objects'),
@@ -70,6 +71,10 @@ describe('WAL runtime configuration', () => {
     [{ sync: { wal: { adapterVersion: '1' } } }, 'WAL_UNSUPPORTED_ADAPTER_VERSION'],
     [{ sync: { wal: { cutoverId: null } } }, 'WAL_INVALID_CUTOVER_ID'],
     [{ sync: { wal: { cutoverId: 'A'.repeat(64) } } }, 'WAL_INVALID_CUTOVER_ID'],
+    [{ sync: { wal: { localAuthoring: 'bad' } } }, 'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION'],
+    [{ sync: { wal: { localAuthoring: {} } } }, 'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION'],
+    [{ sync: { wal: { localAuthoring: { bundlePath: '', curatorAuthoritySetId: '01'.repeat(32) } } } }, 'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION'],
+    [{ sync: { wal: { localAuthoring: { bundlePath: 'bundle.json', curatorAuthoritySetId: 'A'.repeat(64) } } } }, 'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION'],
     [{ sync: { wal: { paths: { objectStore: 1 } } } }, 'WAL_INVALID_PATH'],
     [{ sync: { wal: { paths: { objectStore: '  ' } } } }, 'WAL_INVALID_PATH'],
   ])('rejects malformed configuration %# with a stable reason', async (value, code) => {
@@ -103,6 +108,32 @@ describe('WAL runtime configuration', () => {
       })).toThrow(expect.objectContaining({ code: 'WAL_PATH_OVERLAP' }));
     }
   });
+
+  it('resolves an explicit signed local-authoring evidence bundle below the WAL root', async () => {
+    const dkgHome = await home();
+    const curatorAuthoritySetId = '01'.repeat(32);
+    const resolved = resolveWalRuntimeConfiguration({
+      dkgHome,
+      sync: {
+        mode: 'parallel',
+        wal: { localAuthoring: { bundlePath: 'local-authoring.json', curatorAuthoritySetId } },
+      },
+    });
+    expect(resolved.localAuthoring).toEqual({
+      bundlePath: join(dkgHome, WAL_RUNTIME_ROOT_DIRECTORY, 'local-authoring.json'),
+      curatorAuthoritySetId,
+    });
+    for (const bundlePath of ['.', '../outside.json', 'objects/bundle.json']) {
+      expect(() => resolveWalRuntimeConfiguration({
+        dkgHome,
+        sync: {
+          wal: { localAuthoring: { bundlePath, curatorAuthoritySetId } },
+        },
+      })).toThrow(expect.objectContaining({
+        code: bundlePath === 'objects/bundle.json' ? 'WAL_PATH_OVERLAP' : 'WAL_PATH_OUTSIDE_ROOT',
+      }));
+    }
+  });
 });
 
 describe('WAL runtime lifecycle', () => {
@@ -127,7 +158,7 @@ describe('WAL runtime lifecycle', () => {
       mode: 'legacy',
       lifecycle: 'disabled',
       ready: true,
-      productionAuthority: 'legacy',
+      synchronizationAuthority: 'legacy',
       shadowEnabled: false,
       runtimeRegistered: false,
       protocolsRegistered: false,
@@ -157,7 +188,7 @@ describe('WAL runtime lifecycle', () => {
       mode: 'parallel',
       lifecycle: 'ready',
       ready: true,
-      productionAuthority: 'legacy',
+      synchronizationAuthority: 'legacy',
       shadowEnabled: true,
       runtimeRegistered: true,
       protocolsRegistered: false,
@@ -167,6 +198,9 @@ describe('WAL runtime lifecycle', () => {
     expect(await runtime.start()).toEqual(ready);
     for (const path of Object.values(resolved.paths)) expect(existsSync(path)).toBe(true);
     expect(await runtime.replay()).toEqual({ pending: 0 });
+    expect(runtime.localWriter()).toBeDefined();
+    expect(runtime.localControlStore()).toBeDefined();
+    expect(runtime.localObjectStore()).toBeDefined();
     expect((await runtime.drain()).lifecycle).toBe('draining');
     expect((await runtime.drain()).lifecycle).toBe('draining');
     expect(await runtime.replay()).toEqual({ pending: 0 });
@@ -175,6 +209,9 @@ describe('WAL runtime lifecycle', () => {
     expect(listenSpy).not.toHaveBeenCalled();
     expect(intervalSpy).not.toHaveBeenCalled();
     await expect(runtime.replay()).rejects.toMatchObject({ code: 'WAL_RUNTIME_NOT_READY' });
+    expect(() => runtime.localWriter()).toThrow(expect.objectContaining({ code: 'WAL_RUNTIME_NOT_READY' }));
+    expect(() => runtime.localControlStore()).toThrow(expect.objectContaining({ code: 'WAL_RUNTIME_NOT_READY' }));
+    expect(() => runtime.localObjectStore()).toThrow(expect.objectContaining({ code: 'WAL_RUNTIME_NOT_READY' }));
     await expect(runtime.start()).rejects.toMatchObject({ code: 'WAL_RUNTIME_STOPPED' });
 
     const persisted = JSON.parse(await readFile(join(resolved.paths.control, 'runtime.json'), 'utf8'));
@@ -192,6 +229,34 @@ describe('WAL runtime lifecycle', () => {
     await expect(runtime.replay()).rejects.toMatchObject({ code: 'WAL_RUNTIME_NOT_READY' });
     expect((await runtime.stop()).lifecycle).toBe('stopped');
     expect(existsSync(resolved.paths.root)).toBe(false);
+  });
+
+  it('tracks daemon-owned protocol registration and unregisters it before stop', async () => {
+    const resolved = await configuration('parallel');
+    const runtime = createWalRuntime(resolved)!;
+    expect(() => runtime.registerProtocols(() => {})).toThrowError(expect.objectContaining({
+      code: 'WAL_RUNTIME_NOT_READY',
+    }));
+    await runtime.start();
+    expect(() => runtime.registerProtocols(undefined as never)).toThrowError(expect.objectContaining({
+      code: 'WAL_INVALID_RUNTIME_CONFIGURATION',
+    }));
+    const unregister = vi.fn();
+    const release = runtime.registerProtocols(unregister);
+    expect(runtime.status().protocolsRegistered).toBe(true);
+    expect(() => runtime.registerProtocols(() => {})).toThrowError(expect.objectContaining({
+      code: 'WAL_RUNTIME_BLOCKED',
+    }));
+    release();
+    release();
+    expect(unregister).toHaveBeenCalledTimes(1);
+    expect(runtime.status().protocolsRegistered).toBe(false);
+
+    const unregisterAtStop = vi.fn();
+    runtime.registerProtocols(unregisterAtStop);
+    await runtime.stop();
+    expect(unregisterAtStop).toHaveBeenCalledTimes(1);
+    expect(runtime.status().protocolsRegistered).toBe(false);
   });
 
   it('rejects a symlinked WAL root before writing through it', async () => {
@@ -213,9 +278,9 @@ describe('WAL runtime lifecycle', () => {
 
   it('fails wal authority closed without every cutover prerequisite', async () => {
     const missing = createWalRuntime(await configuration('wal'))!;
-    expect(missing.status().productionAuthority).toBe('legacy');
+    expect(missing.status().synchronizationAuthority).toBe('legacy');
     await expect(missing.start()).rejects.toMatchObject({ code: 'WAL_CUTOVER_ID_REQUIRED' });
-    expect(missing.status()).toMatchObject({ productionAuthority: 'legacy', lifecycle: 'blocked' });
+    expect(missing.status()).toMatchObject({ synchronizationAuthority: 'legacy', lifecycle: 'blocked' });
 
     const id = 'ab'.repeat(32);
     const unavailable = createWalRuntime(await configuration('wal', id))!;
@@ -235,7 +300,7 @@ describe('WAL runtime lifecycle', () => {
     })!;
     expect(await runtime.start()).toMatchObject({
       lifecycle: 'ready',
-      productionAuthority: 'wal',
+      synchronizationAuthority: 'wal',
       shadowEnabled: false,
     });
     await runtime.stop();

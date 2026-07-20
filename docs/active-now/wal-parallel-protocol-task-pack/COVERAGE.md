@@ -12,7 +12,7 @@ not replacements for the RFC.
 | RFC section | Primary task ownership | Acceptance owner |
 |---|---|---|
 | Abstract | `WAL-000`, `WAL-002`, `WAL-019`, `WAL-024` | `WAL-024` proves the complete boundary. |
-| 0. Decision | `WAL-002`, `WAL-019`, `WAL-023`, `WAL-024` | `WAL-023` proves one authority; `WAL-024` retires legacy only afterward. |
+| 0. Decision | `WAL-002`, `WAL-019`, `WAL-023`, `WAL-024` | `WAL-023` proves one synchronization authority; `WAL-024` retires legacy sync only afterward while retaining the shared semantic core. |
 | 1. Scope and measurable criteria | `WAL-000`, `WAL-021`, `WAL-022`, `WAL-024` | `WAL-022` produces evidence; `WAL-024` gates release. |
 | 2. Architecture | `WAL-002`–`WAL-020` | Integration in `WAL-019`; end-to-end in `WAL-024`. |
 | 3. Required invariants | All tasks; detailed below | `WAL-021` adversarial suite and `WAL-024` final gate. |
@@ -23,10 +23,10 @@ not replacements for the RFC.
 | 8. Rateless IBLT set reconciliation | `WAL-005`, `WAL-009`, `WAL-019` | 100% reconciliation-unit coverage and conformance in `WAL-005`; completeness/scaling proof in `WAL-022`. |
 | 9. Transport protocol | `WAL-009`, `WAL-010`, `WAL-019` | Framing/auth/abuse suite in `WAL-009` and `WAL-021`. |
 | 10. Durable storage | `WAL-006`, `WAL-011`, `WAL-013` | Crash suite in `WAL-006`, `WAL-013`, `WAL-021`. |
-| 11. RDF canonicalization/compiler | `WAL-012` | Semantic parity in `WAL-000`, `WAL-012`, `WAL-022`. |
+| 11. RDF canonicalization/mutation encoder | `WAL-012` | Shared-core use and semantic parity in `WAL-000`, `WAL-012`, `WAL-022`. |
 | 12. Signed RDF policy | `WAL-007`, `WAL-011`, `WAL-012`, `WAL-014` | Policy negative suite in `WAL-012`/`WAL-021`. |
-| 13. Reducer and conflicts | `WAL-014` | All-permutation fixtures in `WAL-014`/`WAL-021`. |
-| 14. Atomic materialization | `WAL-015` | Backend fault capability suite in `WAL-015`/`WAL-021`. |
+| 13. Replay/conflict adapter | `WAL-014` | Shared-core delegation and all-permutation fixtures in `WAL-014`/`WAL-021`. |
+| 14. Store the semantic-core result atomically | `WAL-015` | Semantically passive backend fault capability suite in `WAL-015`/`WAL-021`. |
 | 15. Private payloads | `WAL-001`, `WAL-008` | Non-disclosure/crypto parity in `WAL-008`, `WAL-021`, `WAL-022`. |
 | 16. VM activation and reorgs | `WAL-016` | Existing chain corpus plus reorg suite in `WAL-016`/`WAL-021`. |
 | 17. Deletion, expiry, snapshots, compaction, genesis, backfill | `WAL-017`, `WAL-018` | No-resurrection/backfill evidence in `WAL-017`, `WAL-018`, `WAL-022`. |
@@ -34,7 +34,7 @@ not replacements for the RFC.
 | 19. Implementation layout/concurrency/limits | `WAL-002`–`WAL-020` | Bounds suite in `WAL-009`, `WAL-019`, `WAL-021`. |
 | 20. API and readiness | `WAL-013`, `WAL-020` | Forced-state diagnostic suite in `WAL-020`/`WAL-022`. |
 | 21. Acceptance tests | `WAL-021`, `WAL-022`, `WAL-024` | Final release gate in `WAL-024`. |
-| 22. Protocol-version-1 freeze resolution | `WAL-001` plus specialized owners below | `WAL-001` proves the v0.7 resolutions and blocks dependent work until the normative schema/vectors pass. |
+| 22. Protocol-version-1 freeze resolution | `WAL-001` plus specialized owners below | `WAL-001` proves the v0.8 resolutions and blocks dependent work until the normative schema/vectors pass. |
 | 23. Fixed version-1 decisions | `WAL-001`–`WAL-023` | Conformance and full protocol proof in `WAL-021`/`WAL-024`. |
 | 24. References | System context and informative comparison | Provenance/checksum in `README.md`. |
 
@@ -47,11 +47,12 @@ not replacements for the RFC.
 | Explicit completeness | `WAL-005`, `WAL-007`, `WAL-019` | Exact vector/checkpoint/root/count convergence. |
 | Pull is correctness | `WAL-010`, `WAL-019` | Lost-nudge/offline tests still converge. |
 | WAL before RDF | `WAL-006`, `WAL-011`, `WAL-013`, `WAL-015` | Crash tests show no RDF before durable closed WAL state. |
-| Deterministic projection | `WAL-012`–`WAL-016` | All arrival/provider permutations yield identical digests. |
+| One semantic implementation | `WAL-012`–`WAL-016`, `WAL-019`, `WAL-021` | Current sync and WAL replay call the same DKG/SWM/VM/verified-memory/crypto code; reconciliation has no semantic dependencies. |
+| Deterministic projection | `WAL-012`–`WAL-016` | All arrival/provider permutations yield identical shared-core outcomes and digests. |
 | Deletion is an object | `WAL-014`, `WAL-017` | Absence never deletes; tombstone/no-resurrection tests pass. |
 | No silent conflict loss | `WAL-014`, `WAL-015` | Every incompatible branch and resolution head is explicit. |
 | Bounded resources | `WAL-004`–`WAL-011`, `WAL-014`, `WAL-019`, `WAL-021` | Frame/symbol/decode/fallback/range/staging/closure/conflict/queue resource attack tests. |
-| One authoritative switch | `WAL-002`, `WAL-023`, `WAL-024` | Legacy before cutover; WAL after one signed persistent ID; never both. |
+| One synchronization-authority switch | `WAL-002`, `WAL-023`, `WAL-024` | Legacy sync before cutover; WAL sync after one signed persistent ID; never both; semantic core unchanged. |
 
 ## Implementation-freeze item coverage
 
@@ -61,7 +62,7 @@ not replacements for the RFC.
 | 1. Signed adapter payload envelope | `WAL-001` | `WAL-003`, `WAL-008` | Envelope remains inline in `WalObjectV1.payloadBytes`; signed/AEAD metadata vectors and unsigned-side-information negatives; no independent payload identity. |
 | 2. Snapshot wire schema and closure | `WAL-001` | `WAL-017`, `WAL-018` | Below-floor bootstrap, custody, GC, and closure tests. |
 | 3. WalObject/set-commitment/rateless-IBLT conformance | `WAL-001` | `WAL-003`–`WAL-005` | Exact object bytes, set roots, seeds, symbols, peel traces, decoded differences, reconstructed-root checks, fallback pages, and range/reassembly vectors; 100% dedicated reconciliation-module unit coverage and two independent vector consumers; static proof that algorithm/symbol/cache/range data cannot become synchronization atoms. |
-| 4. Reducer conformance | `WAL-001` | `WAL-012`, `WAL-014` | Normative fixtures under all permutations. |
+| 4. Replay/conflict conformance | `WAL-001` | `WAL-012`, `WAL-014` | Normative fixtures under all permutations plus proof of shared-core delegation. |
 | 5. Cross-view `MOVE_TIER` privacy | `WAL-001` | `WAL-008`, `WAL-016` | Public target contains no private source metadata. |
 | 6. Authority lifecycle/availability | `WAL-001` | `WAL-007`, `WAL-023` | Rotation, HA, revocation, rollback guard, and recovery cases. |
 | 7. Provider discovery/cold start | `WAL-001` | `WAL-010`, `WAL-018` | Empty-node public/private authorized bootstrap. |
@@ -73,7 +74,7 @@ not replacements for the RFC.
 
 | Goal | Implementation tasks | Measurement task |
 |---|---|---|
-| SWM/VM semantic compatibility | `WAL-012`–`WAL-019` | `WAL-000`, `WAL-022`, `WAL-024` |
+| SWM/VM semantic identity | `WAL-012`–`WAL-019` | `WAL-000`, `WAL-021`, `WAL-022`, `WAL-024` |
 | Existing crypto compatibility | `WAL-003`, `WAL-007`, `WAL-008`, `WAL-016` | `WAL-000`, `WAL-021`, `WAL-022` |
 | Exact convergence | `WAL-005`, `WAL-007`, `WAL-019` | `WAL-021`, `WAL-022` |
 | Equal-set cost | `WAL-005`, `WAL-019` | `WAL-022` |

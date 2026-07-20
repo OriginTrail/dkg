@@ -17,10 +17,10 @@ None of those facts is a content-set, object-byte, or completeness proof.
 Manifests, tickets, paths, scores, backoff rows, range parts, and IBLT symbols
 remain signed control evidence or bounded local/ephemeral state.
 
-The implementation is additive. It does not alter legacy graph sync, SWM/VM
+The implementation is additive. It does not alter legacy synchronization, SWM/VM
 semantics, verified memory, membership, delegation, chain checks, private
 crypto, or the `/dkg/10.0.x/*` protocols. The current stack remains
-authoritative in `legacy` and `parallel` modes.
+synchronization-authoritative in `legacy` and `parallel` modes.
 
 ## Trust and path boundary
 

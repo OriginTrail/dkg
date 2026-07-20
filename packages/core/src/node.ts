@@ -7,7 +7,7 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
-import { identify } from '@libp2p/identify';
+import { identify, identifyPush, type IdentifyPush } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
@@ -30,6 +30,7 @@ export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
   pubsub: GossipSub;
   identify: unknown;
+  identifyPush: IdentifyPush;
   ping: Ping;
   dcutr: unknown;
   autoNAT?: unknown;
@@ -1065,6 +1066,10 @@ export class DKGNode {
 
     const services: Record<string, any> = {
       identify: identify(),
+      // WAL and other opt-in protocol families can be registered after the
+      // base agent has started. Identify Push makes that registrar change
+      // visible to already-connected peers without reconnecting them.
+      identifyPush: identifyPush(),
       ping: ping(),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
@@ -1911,6 +1916,11 @@ export class DKGNode {
 
   get libp2p(): Libp2p<DKGServices> {
     return this.requireNode();
+  }
+
+  /** Publish the current libp2p registrar protocol set to connected peers. */
+  async pushProtocolAdvertisement(): Promise<void> {
+    await this.requireNode().services.identifyPush.push();
   }
 
   get isStarted(): boolean {

@@ -12,7 +12,8 @@ no payload, plaintext, ciphertext, nonce, or range synchronization atom.
 This does not replace DKG membership, Sender Key distribution, delegation,
 SWM/VM lifecycle, verified-memory checks, or chain crypto. The WAL bridge only
 projects a currently authorized existing Sender Key state into crypto inputs.
-The legacy graph-sync path remains production-authoritative and unchanged.
+The legacy synchronization path remains production-authoritative and unchanged;
+the shared semantic and cryptographic implementations are not legacy.
 
 ## Private payload write and read flow
 
