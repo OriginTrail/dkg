@@ -5,6 +5,39 @@ export type IdempotencyStatus = 'COMMITTED' | 'MATERIALIZATION_PENDING' | 'MATER
 export type AdmissionState = 'STAGED' | 'ADMITTED' | 'BLOCKED' | 'QUARANTINED';
 export type RetryState = 'READY' | 'LEASED' | 'BLOCKED';
 
+export interface AdmissionRecord {
+  objectId: Uint8Array;
+  state: AdmissionState;
+  proofBytes: Uint8Array | null;
+  closureBytes: Uint8Array | null;
+  providerPeerId: Uint8Array | null;
+  reasonCode: string | null;
+  updatedAtMs: number;
+}
+
+export interface WalObjectMetadataRecord {
+  objectId: Uint8Array;
+  namespaceId: Uint8Array;
+  writerId: Uint8Array;
+  writerEpoch: bigint;
+  sequence: bigint;
+  previousObjectId: Uint8Array | null;
+  payloadLength: number;
+  canonicalLength: number;
+  origin: WalObjectOrigin;
+  admittedAtMs: number;
+}
+
+export interface QuarantineRecord {
+  entryId: Uint8Array;
+  providerPeerId: Uint8Array;
+  reasonCode: string;
+  relativePath: string | null;
+  byteLength: number;
+  createdAtMs: number;
+  expiresAtMs: number;
+}
+
 export interface FinalizeLocalWalInput {
   objectId: Uint8Array;
   object: WalObjectV1;

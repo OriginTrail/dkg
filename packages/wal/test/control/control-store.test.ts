@@ -15,6 +15,7 @@ import {
   type WalControlTransactionPoint,
 } from '../../src/control/index.js';
 import { encodeProtocolTuple } from '../../src/protocol/codec.js';
+import { encodeCanonicalCbor } from '../../src/protocol/canonical-cbor.js';
 import { protocolTupleId } from '../../src/protocol/hashes.js';
 import {
   recoverEip191Address,
@@ -700,7 +701,7 @@ describe('WalControlStore atomic finalization and admission', () => {
       closureBytes: Uint8Array.of(3),
       updatedAtMs: 10,
     });
-    value.admitRemoteBatch(objects.map(item => ({
+    await value.admitRemoteBatch(objects.map(item => ({
       objectId: item.walObjectId,
       object: item.tuple,
       canonicalLength: item.canonicalBytes.length,
@@ -710,8 +711,8 @@ describe('WalControlStore atomic finalization and admission', () => {
     expect(database.prepare("SELECT count(*) AS count FROM admission WHERE state = 'ADMITTED'").get()).toEqual({ count: 2 });
     database.close();
     await expectCode(() => value.stageAdmission({ objectId: objects[0]!.walObjectId }), 'WAL_CONTROL_LANE_CONFLICT');
-    await expectCode(() => value.admitRemoteBatch([]), 'WAL_CONTROL_INVALID_CONFIGURATION');
-    await expectCode(() => value.admitRemoteBatch([{
+    await expectCode(value.admitRemoteBatch([]), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(value.admitRemoteBatch([{
       objectId: objects[0]!.walObjectId,
       object: objects[0]!.tuple,
       canonicalLength: objects[0]!.canonicalBytes.length,
@@ -725,14 +726,260 @@ describe('WalControlStore atomic finalization and admission', () => {
     value.stageAdmission({ objectId: objects[0]!.walObjectId });
     const second = object('second');
     value.stageAdmission({ objectId: second.walObjectId });
-    expect(() => value.admitRemoteBatch([
+    await expect(value.admitRemoteBatch([
       { objectId: objects[0]!.walObjectId, object: objects[0]!.tuple, canonicalLength: objects[0]!.canonicalBytes.length },
       { objectId: second.walObjectId, object: second.tuple, canonicalLength: second.canonicalBytes.length },
-    ])).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_NOT_FOUND' }));
+    ])).rejects.toMatchObject({ code: 'WAL_CONTROL_NOT_FOUND' });
     const database = new Database(join(root, 'objects.sqlite'), { readonly: true });
     expect(database.prepare('SELECT count(*) AS count FROM wal_objects').get()).toEqual({ count: 0 });
     expect(database.prepare("SELECT count(*) AS count FROM admission WHERE state = 'STAGED'").get()).toEqual({ count: 2 });
     database.close();
+  });
+
+  it('exposes immutable admission metadata and atomically deduplicates logical-key reduction work', async () => {
+    const root = await temporary('remote-metadata');
+    const { objects } = await prepare(root, ['first', 'second']);
+    const value = control(root);
+    const logicalA = bytes('logical-a');
+    const logicalB = bytes('logical-b');
+    for (const item of objects) value.stageAdmission({
+      objectId: item.walObjectId,
+      providerPeerId: Uint8Array.of(7),
+      proofBytes: Uint8Array.of(8),
+      closureBytes: Uint8Array.of(9),
+      updatedAtMs: 10,
+    });
+    expect(value.getAdmission(objects[0]!.walObjectId)).toEqual(expect.objectContaining({
+      state: 'STAGED', providerPeerId: Uint8Array.of(7), proofBytes: Uint8Array.of(8),
+      closureBytes: Uint8Array.of(9), reasonCode: null, updatedAtMs: 10,
+    }));
+    await value.admitRemoteBatch([
+      {
+        objectId: objects[0]!.walObjectId,
+        object: objects[0]!.tuple,
+        canonicalLength: objects[0]!.canonicalBytes.length,
+        logicalKeys: [logicalA, logicalB],
+      },
+      {
+        objectId: objects[1]!.walObjectId,
+        object: objects[1]!.tuple,
+        canonicalLength: objects[1]!.canonicalBytes.length,
+        logicalKeys: [logicalA],
+      },
+    ], 11);
+    const metadata = value.getWalObjectMetadata(objects[0]!.walObjectId)!;
+    expect(metadata).toEqual(expect.objectContaining({
+      objectId: objects[0]!.walObjectId,
+      namespaceId: objects[0]!.tuple[1],
+      writerId: objects[0]!.tuple[2],
+      writerEpoch: objects[0]!.tuple[3],
+      sequence: objects[0]!.tuple[4],
+      canonicalLength: objects[0]!.canonicalBytes.length,
+      origin: 'REMOTE',
+      admittedAtMs: 11,
+    }));
+    expect(value.findWalObjectAtPosition(
+      objects[0]!.tuple[1], objects[0]!.tuple[2], objects[0]!.tuple[3], objects[0]!.tuple[4],
+    )?.objectId).toEqual(objects[0]!.walObjectId);
+    expect(value.findWalObjectAtPosition(
+      bytes('absent-namespace'), objects[0]!.tuple[2], objects[0]!.tuple[3], objects[0]!.tuple[4],
+    )).toBeNull();
+    expect(value.getWalObjectMetadata(bytes('absent-object'))).toBeNull();
+    expect(value.getAdmission(bytes('absent-admission'))).toBeNull();
+    expect(value.integrityScan().queued).toBe(2);
+
+    const leased = [value.leaseRetry(100, 11), value.leaseRetry(100, 11)];
+    expect(leased.map(entry => entry?.kind)).toEqual(['WAL_REDUCE_LOGICAL_KEY', 'WAL_REDUCE_LOGICAL_KEY']);
+    expect(new Set(leased.map(entry => entry?.key)).size).toBe(2);
+
+    const retry = bytes('blocked-retry');
+    value.stageAdmission({ objectId: retry, updatedAtMs: 12 });
+    value.setAdmissionState(retry, 'BLOCKED', 'DEPENDENCY_UNAVAILABLE', 13);
+    expect(value.getAdmission(retry)).toEqual(expect.objectContaining({
+      state: 'BLOCKED', reasonCode: 'DEPENDENCY_UNAVAILABLE', updatedAtMs: 13,
+    }));
+    value.stageAdmission({ objectId: retry, updatedAtMs: 14 });
+    expect(value.getAdmission(retry)).toEqual(expect.objectContaining({ state: 'STAGED', reasonCode: null }));
+    value.setAdmissionState(retry, 'QUARANTINED', 'INVALID_WAL_OBJECT', 15);
+    value.setAdmissionState(retry, 'QUARANTINED', 'INVALID_WAL_OBJECT', 16);
+    await expectCode(() => value.stageAdmission({ objectId: retry }), 'WAL_CONTROL_LANE_CONFLICT');
+    await expectCode(() => value.setAdmissionState(retry, 'BLOCKED', 'NO'), 'WAL_CONTROL_LANE_CONFLICT');
+    await expectCode(() => value.setAdmissionState(bytes('missing-state'), 'BLOCKED', 'NO'), 'WAL_CONTROL_NOT_FOUND');
+  });
+
+  it.each([
+    'after-remote-object-insert',
+    'after-remote-object-admit',
+    'after-reduction-enqueue',
+    'before-commit',
+  ] satisfies WalControlTransactionPoint[])('leaves the entire remote batch staged after a crash at %s', async point => {
+    const root = await temporary(`remote-crash-${point}`);
+    const { objects } = await prepare(root, ['first', 'second']);
+    const value = control(root, {
+      transactionHook: current => { if (current === point) throw new Error(`crash:${point}`); },
+    });
+    for (const item of objects) value.stageAdmission({ objectId: item.walObjectId });
+    await expect(value.admitRemoteBatch(objects.map((item, index) => ({
+      objectId: item.walObjectId,
+      object: item.tuple,
+      canonicalLength: item.canonicalBytes.length,
+      logicalKeys: [bytes(`crash-logical-${index}`)],
+    })))).rejects.toMatchObject({ code: 'WAL_CONTROL_IO' });
+    for (const item of objects) {
+      expect(value.getAdmission(item.walObjectId)?.state).toBe('STAGED');
+      expect(value.getWalObjectMetadata(item.walObjectId)).toBeNull();
+    }
+    expect(value.leaseRetry(100, 1_000)).toBeNull();
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 0, queued: 0 }));
+  });
+
+  it('rejects an occupied author position instead of admitting an ignored conflicting insert', async () => {
+    const root = await temporary('remote-equivocation');
+    const { value: packedValue, objects } = await prepare(root, ['first']);
+    const first = objects[0]!;
+    const conflict = await createWalObjectV1([
+      1n,
+      first.tuple[1],
+      first.tuple[2],
+      first.tuple[3],
+      first.tuple[4],
+      first.tuple[5],
+      new TextEncoder().encode('different bytes at the same author position'),
+    ], signer);
+    await packedValue.put(walObjectId(conflict.walObjectId), source(conflict.canonicalBytes));
+    const controlValue = control(root);
+    controlValue.stageAdmission({ objectId: first.walObjectId });
+    await controlValue.admitRemoteBatch([{
+      objectId: first.walObjectId, object: first.tuple, canonicalLength: first.canonicalBytes.length,
+    }]);
+    controlValue.stageAdmission({ objectId: conflict.walObjectId });
+    await expectCode(controlValue.admitRemoteBatch([{
+      objectId: conflict.walObjectId,
+      object: conflict.tuple,
+      canonicalLength: conflict.canonicalBytes.length,
+    }]), 'WAL_CONTROL_LANE_CONFLICT');
+    expect(controlValue.getAdmission(conflict.walObjectId)?.state).toBe('STAGED');
+    expect(controlValue.getWalObjectMetadata(conflict.walObjectId)).toBeNull();
+    expect(controlValue.findWalObjectAtPosition(
+      first.tuple[1], first.tuple[2], first.tuple[3], first.tuple[4],
+    )?.objectId).toEqual(first.walObjectId);
+  });
+
+  it('reuses exact logical-key work and rejects retry substitution or queue overflow atomically', async () => {
+    const logical = bytes('preexisting-logical');
+    const queueKey = `wal-reduce:${Buffer.from(logical).toString('hex')}`;
+    const payload = encodeCanonicalCbor([1n, logical]);
+
+    let root = await temporary('remote-existing-retry');
+    let prepared = await prepare(root, ['first']);
+    let value = control(root);
+    value.enqueueRetry({ key: queueKey, kind: 'WAL_REDUCE_LOGICAL_KEY', payload });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]);
+    expect(value.integrityScan()).toEqual(expect.objectContaining({ objects: 1, queued: 1 }));
+
+    root = await temporary('remote-retry-kind-conflict');
+    prepared = await prepare(root, ['first']);
+    value = control(root);
+    value.enqueueRetry({ key: queueKey, kind: 'OTHER', payload });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+    expect(value.getWalObjectMetadata(prepared.objects[0]!.walObjectId)).toBeNull();
+
+    root = await temporary('remote-retry-payload-conflict');
+    prepared = await prepare(root, ['first']);
+    value = control(root);
+    value.enqueueRetry({ key: queueKey, kind: 'WAL_REDUCE_LOGICAL_KEY', payload: Uint8Array.of(1) });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
+
+    root = await temporary('remote-retry-count-limit');
+    prepared = await prepare(root, ['first']);
+    value = control(root, { maximumQueueEntries: 1 });
+    value.enqueueRetry({ key: 'occupied', kind: 'OTHER', payload: Uint8Array.of(1) });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+
+    root = await temporary('remote-retry-byte-limit');
+    prepared = await prepare(root, ['first']);
+    value = control(root, { maximumQueueBytes: 1 });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expectCode(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+      logicalKeys: [logical],
+    }]), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('STAGED');
+  });
+
+  it('fails closed if an admission-state update is suppressed and rejects state changes after admission', async () => {
+    const root = await temporary('admission-update-race');
+    const prepared = await prepare(root, ['first']);
+    const value = control(root);
+    const staged = bytes('suppressed-update');
+    value.stageAdmission({ objectId: staged });
+    const database = (value as unknown as { database: Database.Database }).database;
+    database.exec(`
+      CREATE TRIGGER suppress_admission_update BEFORE UPDATE ON admission
+      WHEN OLD.object_id = NEW.object_id BEGIN SELECT RAISE(IGNORE); END
+    `);
+    await expectCode(() => value.setAdmissionState(staged, 'BLOCKED', 'TEST'), 'WAL_CONTROL_LANE_CONFLICT');
+    database.exec('DROP TRIGGER suppress_admission_update');
+
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+    }]);
+    await expectCode(() => value.setAdmissionState(
+      prepared.objects[0]!.walObjectId, 'BLOCKED', 'TEST',
+    ), 'WAL_CONTROL_LANE_CONFLICT');
+  });
+
+  it('keeps committed remote admission when its post-commit acknowledgement is lost', async () => {
+    const root = await temporary('remote-lost-ack');
+    const prepared = await prepare(root, ['first']);
+    let fail = true;
+    const value = control(root, {
+      transactionHook: point => {
+        if (point === 'after-commit' && fail) {
+          fail = false;
+          throw new Error('lost remote acknowledgement');
+        }
+      },
+    });
+    value.stageAdmission({ objectId: prepared.objects[0]!.walObjectId });
+    await expect(value.admitRemoteBatch([{
+      objectId: prepared.objects[0]!.walObjectId,
+      object: prepared.objects[0]!.tuple,
+      canonicalLength: prepared.objects[0]!.canonicalBytes.length,
+    }])).rejects.toThrow('lost remote acknowledgement');
+    expect(value.getAdmission(prepared.objects[0]!.walObjectId)?.state).toBe('ADMITTED');
+    expect(value.getWalObjectMetadata(prepared.objects[0]!.walObjectId)).not.toBeNull();
   });
 
   it('maps SQLite failures to stable errors and rolls back every affected control transaction', async () => {
@@ -747,7 +994,7 @@ describe('WalControlStore atomic finalization and admission', () => {
     value.stageAdmission({ objectId: objects[0]!.walObjectId });
 
     database.exec("CREATE TRIGGER reject_remote BEFORE INSERT ON wal_objects BEGIN SELECT RAISE(ABORT, 'remote'); END");
-    await expectCode(() => value.admitRemoteBatch([{
+    await expectCode(value.admitRemoteBatch([{
       objectId: objects[0]!.walObjectId,
       object: objects[0]!.tuple,
       canonicalLength: objects[0]!.canonicalBytes.length,
@@ -829,6 +1076,15 @@ describe('WalControlStore bounded durable work', () => {
     value.quarantine({ entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', byteLength: 2, relativePath: 'q/1' });
     value.quarantine({ entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', byteLength: 2 });
     value.quarantine({ entryId: bytes('q2'), providerPeerId: peer, reasonCode: 'BAD_SIG', byteLength: 3 });
+    expect(value.getQuarantine(bytes('q1'))).toEqual(expect.objectContaining({
+      entryId: bytes('q1'), providerPeerId: peer, reasonCode: 'BAD_ID', relativePath: 'q/1',
+      byteLength: 2, createdAtMs: 10, expiresAtMs: 110,
+    }));
+    expect(value.getQuarantine(bytes('missing-q'))).toBeNull();
+    expect(value.listQuarantine(peer).map(entry => entry.reasonCode)).toEqual(['BAD_ID', 'BAD_SIG']);
+    expect(value.listQuarantine(undefined, 1)).toHaveLength(1);
+    await expectCode(() => value.listQuarantine(new Uint8Array()), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(() => value.listQuarantine(undefined, 3), 'WAL_CONTROL_INVALID_CONFIGURATION');
     expect(value.integrityScan().quarantinedBytes).toBe(5);
     await expectCode(() => value.quarantine({
       entryId: bytes('q3'), providerPeerId: peer, reasonCode: 'OVER', byteLength: 1,
@@ -846,6 +1102,129 @@ describe('WalControlStore bounded durable work', () => {
     expect(value.cleanupExpired(109).quarantine).toBe(0);
     expect(value.cleanupExpired(110).quarantine).toBe(2);
     expect(value.integrityScan().quarantinedBytes).toBe(0);
+  });
+
+  it.each([
+    'after-quarantine-insert',
+    'after-quarantine-state',
+    'before-commit',
+  ] satisfies WalControlTransactionPoint[])('rolls back quarantine metadata and admission state after a crash at %s', async point => {
+    const root = await temporary(`quarantine-crash-${point}`);
+    await prepare(root);
+    const value = control(root, {
+      transactionHook: current => { if (current === point) throw new Error(`crash:${point}`); },
+    });
+    const id = bytes(`quarantine-crash-id-${point}`);
+    value.stageAdmission({ objectId: id });
+    await expect(value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 10,
+      createdAtMs: 10,
+      updatedAtMs: 10,
+    })).rejects.toMatchObject({ code: 'WAL_CONTROL_IO' });
+    expect(value.getAdmission(id)?.state).toBe('STAGED');
+    expect(value.getQuarantine(id)).toBeNull();
+  });
+
+  it('atomically quarantines an invalid dependency, blocks its root, and preserves the bounds across restart', async () => {
+    const root = await temporary('quarantine-admission');
+    const prepared = await prepare(root, ['first']);
+    let value = control(root, {
+      maximumQuarantineEntriesPerPeer: 1,
+      maximumQuarantineBytesPerPeer: 20,
+      quarantineRetentionMs: 100,
+      now: () => 10,
+    });
+    const dependency = bytes('bad-dependency');
+    const rootObject = bytes('blocked-root');
+    const peer = Uint8Array.of(1);
+    value.stageAdmission({ objectId: dependency });
+    value.stageAdmission({ objectId: rootObject });
+    await value.quarantineAdmission({
+      entryId: dependency,
+      providerPeerId: peer,
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 20,
+      blockedRootObjectId: rootObject,
+      createdAtMs: 10,
+      updatedAtMs: 11,
+    });
+    expect(value.getAdmission(dependency)).toEqual(expect.objectContaining({
+      state: 'QUARANTINED', reasonCode: 'INVALID_WAL_OBJECT', updatedAtMs: 11,
+    }));
+    expect(value.getAdmission(rootObject)).toEqual(expect.objectContaining({
+      state: 'BLOCKED', reasonCode: 'DEPENDENCY_INVALID', updatedAtMs: 11,
+    }));
+    closeControl(value);
+    value = control(root, {
+      maximumQuarantineEntriesPerPeer: 1,
+      maximumQuarantineBytesPerPeer: 20,
+      quarantineRetentionMs: 100,
+      now: () => 11,
+    });
+    expect(value.listQuarantine(peer)).toHaveLength(1);
+    const overflow = bytes('quarantine-overflow-after-restart');
+    value.stageAdmission({ objectId: overflow });
+    await expectCode(value.quarantineAdmission({
+      entryId: overflow,
+      providerPeerId: peer,
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 11,
+    }), 'WAL_CONTROL_LIMIT_EXCEEDED');
+    expect(value.getAdmission(overflow)?.state).toBe('STAGED');
+    expect(value.getQuarantine(overflow)).toBeNull();
+
+    const admitted = prepared.objects[0]!;
+    value.stageAdmission({ objectId: admitted.walObjectId });
+    await value.admitRemoteBatch([{
+      objectId: admitted.walObjectId,
+      object: admitted.tuple,
+      canonicalLength: admitted.canonicalBytes.length,
+    }]);
+    await expectCode(value.quarantineAdmission({
+      entryId: admitted.walObjectId,
+      providerPeerId: Uint8Array.of(2),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 11,
+    }), 'WAL_CONTROL_LANE_CONFLICT');
+    expect(value.getAdmission(admitted.walObjectId)?.state).toBe('ADMITTED');
+    expect(value.getQuarantine(admitted.walObjectId)).toBeNull();
+  });
+
+  it('keeps committed quarantine state when its post-commit acknowledgement is lost', async () => {
+    const root = await temporary('quarantine-lost-ack');
+    await prepare(root);
+    let fail = true;
+    const value = control(root, {
+      transactionHook: point => {
+        if (point === 'after-commit' && fail) {
+          fail = false;
+          throw new Error('lost quarantine acknowledgement');
+        }
+      },
+    });
+    const id = bytes('quarantine-lost-ack-id');
+    value.stageAdmission({ objectId: id });
+    await expect(value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 10,
+    })).rejects.toThrow('lost quarantine acknowledgement');
+    expect(value.getAdmission(id)?.state).toBe('QUARANTINED');
+    expect(value.getQuarantine(id)).not.toBeNull();
+    await value.quarantineAdmission({
+      entryId: id,
+      providerPeerId: Uint8Array.of(1),
+      reasonCode: 'INVALID_WAL_OBJECT',
+      byteLength: 1,
+      createdAtMs: 10,
+    });
   });
 
   it('persists bounded ranges, IBLT cache, vectors, materialization, peers, and GC work', async () => {
@@ -1064,7 +1443,7 @@ describe('WalControlStore integrity blocking', () => {
     const membershipCase = await finalized('membership-corruption');
     const second = membershipCase.prepared.objects[1]!;
     membershipCase.value.stageAdmission({ objectId: second.walObjectId });
-    membershipCase.value.admitRemoteBatch([{
+    await membershipCase.value.admitRemoteBatch([{
       objectId: second.walObjectId,
       object: second.tuple,
       canonicalLength: second.canonicalBytes.length,
