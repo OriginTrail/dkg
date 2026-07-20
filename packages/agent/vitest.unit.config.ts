@@ -43,6 +43,7 @@ export default defineConfig({
       "test/discovery-subscription-boundary.test.ts",
       "test/core-fills-gap.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
+      "test/swm-plaintext-oracle-wiring.test.ts",
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
