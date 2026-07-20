@@ -139,6 +139,11 @@ export default defineConfig({
           'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
+          // Store-survivability wiring guard: runDaemonInner actually invokes
+          // boot recovery / installs+stops daemonState.storeMonitor under the
+          // real resolveManagedBlazegraphContainer criteria. Fully mocked
+          // (agent/http/store boundary) — no hardhat, no docker.
+          'test/daemon-store-monitor-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],
