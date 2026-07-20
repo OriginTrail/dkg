@@ -182,8 +182,6 @@ async function main() {
       // So count CONTENT triples specifically — those carrying the heading text.
       // Markdown import skolemizes subjects (urn:dkg:ka-skolem:cN), so they cannot
       // be bound with VALUES the way the scale/hold-out counts are.
-      // sparql-scan-allow: R2 -- devnet-only harness, never run by node runtime; one
-      // purpose-built devnet store holding only this run's fixtures
       // Must match ONLY imported markdown body text. The previous filter also
       // matched anything carrying the run stamp — including the context graph's
       // own name literal ("FX md <stamp>") — so it could report
@@ -191,6 +189,8 @@ async function main() {
       // metadata and zero imported content: exactly the #1779 signature this
       // check exists to detect. Bind distinctive body strings that appear only
       // in the document, and exclude the CG/operation metadata graphs.
+      // sparql-scan-allow: R2 -- devnet-only harness, never run by node runtime; one
+      // purpose-built devnet store holding only this run's fixtures
       const contentQuery = `SELECT (COUNT(*) AS ?n) WHERE {
         GRAPH ?g { ?s ?p ?o }
         FILTER(CONTAINS(STR(?g), "fx-md-${stamp}"))
