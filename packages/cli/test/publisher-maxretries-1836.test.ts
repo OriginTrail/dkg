@@ -2,16 +2,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 
-// GH #1836 — the daemon HTTP admission path builds its async-lift publisher via
-// createPublisherControlFromStore(). That constructor used to drop maxRetries,
-// so a node configured `publisher.maxRetries: 0` still stamped the built-in
-// default (10) onto every API-admitted VM-publish job. These regressions pin
-// the value end to end: enqueue admits through the fixed function and the
-// assertion reads the value back off the PERSISTED job (serialize → readJob),
-// so a literal 0 must survive the constructor's `?? DEFAULT_MAX_RETRIES` guard
-// and the JSON round-trip.
+// GH #1836 — this suite proves the DESERIALIZATION half of the fix: a configured
+// maxRetries (including a literal 0) that reaches createPublisherControlFromStore
+// is stamped onto the admitted job and survives the constructor's
+// `?? DEFAULT_MAX_RETRIES` guard + the JSON serialize→readJob round-trip.
+// The CONFIG→CONSTRUCTION wiring (that runDaemonInner actually forwards
+// config.publisher.maxRetries into this helper and into DKGAgent.create) is
+// covered separately in publisher-maxretries-wiring-1836.test.ts, so neither
+// half can regress silently.
 
-describe('#1836 publisher.maxRetries propagation through createPublisherControlFromStore', () => {
+describe('#1836 publisher.maxRetries round-trips through createPublisherControlFromStore', () => {
   const stores: OxigraphStore[] = [];
 
   afterEach(async () => {
@@ -63,21 +63,21 @@ describe('#1836 publisher.maxRetries propagation through createPublisherControlF
   }
 
   it('stamps a configured literal 0 (never the default) onto admitted jobs', async () => {
-    const control = createPublisherControlFromStore(newStore(), undefined, 0);
+    const control = createPublisherControlFromStore(newStore(), { maxRetries: 0 });
     const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const job = await control.getStatus(jobId);
     expect(job?.retries.maxRetries).toBe(0);
   });
 
   it('preserves the built-in default (10) when maxRetries is omitted', async () => {
-    const control = createPublisherControlFromStore(newStore(), undefined);
+    const control = createPublisherControlFromStore(newStore());
     const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const job = await control.getStatus(jobId);
     expect(job?.retries.maxRetries).toBe(10);
   });
 
   it('propagates an arbitrary configured budget', async () => {
-    const control = createPublisherControlFromStore(newStore(), undefined, 3);
+    const control = createPublisherControlFromStore(newStore(), { maxRetries: 3 });
     const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const job = await control.getStatus(jobId);
     expect(job?.retries.maxRetries).toBe(3);

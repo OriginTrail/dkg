@@ -1957,14 +1957,13 @@ export async function runDaemonInner(
   let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
   let shuttingDown = false;
 
-  const publisherControl = createPublisherControlFromStore(
-    agent.store,
-    createPublicSnapshotStore(dkgDir(), config),
+  const publisherControl = createPublisherControlFromStore(agent.store, {
+    publicSnapshotStore: createPublicSnapshotStore(dkgDir(), config),
     // #1836 — the daemon admission instance MUST carry the operator's retry
     // budget; without it every API-admitted VM-publish job was stamped with the
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
-    config.publisher?.maxRetries,
-  );
+    maxRetries: config.publisher?.maxRetries,
+  });
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
     log(
