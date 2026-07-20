@@ -145,6 +145,26 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
     expect(body.result).toBe('active');
     expect(body.job?.jobId).toBe(jobId);
   });
+
+  // #1828 (otReviewAgent): subGraphName is part of the recovery identity, so the
+  // route must forward it and recover only the matching lane.
+  it('respects subGraphName as part of the recovery identity', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const control = createPublisherControlFromStore(store);
+    const research = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ subGraphName: 'research' }));
+    await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ subGraphName: 'production' }));
+
+    const ctx = createContext(
+      '/api/publisher/job-by-intent?contextGraphId=music-social&name=albums&subGraphName=research',
+      control,
+    );
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(200);
+    const body = responseBody(ctx) as { result: string; job?: { jobId: string } };
+    expect(body.result).toBe('active');
+    expect(body.job?.jobId).toBe(research);
+  });
 });
 
 function createContext(

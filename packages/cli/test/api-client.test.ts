@@ -370,6 +370,46 @@ describe('ApiClient', () => {
       expect(url).toContain('contextType=review');
       expect(url).toContain('includeBody=true');
     });
+
+    // #1828 (otReviewAgent): the recovery-lookup client wrapper is the public
+    // surface callers use — assert endpoint spelling, param encoding, optional
+    // forwarding, and response passthrough at the client boundary.
+    it('publisherJobByIntent() GETs /api/publisher/job-by-intent with all facts encoded', async () => {
+      const body = { result: 'active', job: { jobId: 'job-1' }, superseded: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.publisherJobByIntent({
+        contextGraphId: 'music social',
+        name: 'albums/2026',
+        subGraphName: 'research',
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      });
+
+      expect(result).toEqual(body);
+      expect(calls).toHaveLength(1);
+      const url = calls[0].url;
+      expect(url.startsWith(`http://127.0.0.1:${PORT}/api/publisher/job-by-intent?`)).toBe(true);
+      expect(url).toContain('contextGraphId=music+social');
+      expect(url).toContain('name=albums%2F2026');
+      expect(url).toContain('subGraphName=research');
+      expect(url).toContain('agentAddress=0x1111111111111111111111111111111111111111');
+      expect(url).toContain(`intentKey=sha256%3A${'ab'.repeat(32)}`);
+    });
+
+    it('publisherJobByIntent() omits optional facts when not provided', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: 'none' } });
+      globalThis.fetch = fetch;
+      await client.publisherJobByIntent({ contextGraphId: 'cg', name: 'albums' });
+
+      const url = calls[0].url;
+      expect(url).toContain('contextGraphId=cg');
+      expect(url).toContain('name=albums');
+      expect(url).not.toContain('subGraphName=');
+      expect(url).not.toContain('agentAddress=');
+      expect(url).not.toContain('intentKey=');
+    });
   });
 
   describe('PUT endpoints', () => {

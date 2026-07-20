@@ -343,8 +343,15 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null);
     if (jobs.length === 0) return { kind: 'none' };
-    const active = jobs.filter((job) => !isTerminalLiftJobState(job.status));
-    const terminal = jobs.filter((job) => isTerminalLiftJobState(job.status));
+    // Partition on lifecycle-subject OCCUPANCY, identically to admission dedup
+    // (findActiveKnowledgeAssetVmPublishJob): a job occupies the subject while it
+    // is non-terminal OR a retryable failed job with retries remaining — admission
+    // would reaccept the latter, so it is the live job to bind, NOT superseded.
+    const occupiesLifecycleSubject = (job: LiftJob): boolean =>
+      !isTerminalLiftJobState(job.status)
+      || (isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries);
+    const active = jobs.filter(occupiesLifecycleSubject);
+    const superseded = jobs.filter((job) => !occupiesLifecycleSubject(job));
     const intentKeyOf = (job: LiftJob): string | undefined =>
       isKnowledgeAssetVmPublishJobRequest(job.request)
         ? job.request.knowledgeAssetVmPublish.intentKey
@@ -355,9 +362,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         : { exactIntentMatch: candidates.some((job) => intentKeyOf(job) === facts.intentKey) };
     if (active.length > 1) return { kind: 'conflict', jobs: active };
     if (active.length === 1) {
-      return { kind: 'active', job: active[0]!, superseded: terminal, ...exact(active) };
+      return { kind: 'active', job: active[0]!, superseded, ...exact(active) };
     }
-    return { kind: 'superseded', jobs: terminal, ...exact(terminal) };
+    return { kind: 'superseded', jobs: superseded, ...exact(superseded) };
   }
 
   /**

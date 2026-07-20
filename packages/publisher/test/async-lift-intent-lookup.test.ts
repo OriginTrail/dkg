@@ -182,6 +182,63 @@ describe('#1828 async lift intent lookup', () => {
     expect(result.superseded.map((j) => j.jobId)).toEqual([failedId]);
   });
 
+  it('classifies a retryable failed job as active (admission still owns the subject)', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const accepted = (await publisher.getStatus(jobId))!;
+    // A failed-but-retryable job (retries remaining) is exactly what admission's
+    // findActive would reaccept, so recovery must surface it as the live job.
+    const failureBase = {
+      code: 'workspace_unavailable',
+      phase: 'validation',
+      mode: 'retryable',
+      resolution: 'reset_to_accepted',
+      message: 'transient store outage',
+      errorPayloadRef: `urn:dkg:publisher:error:${jobId}`,
+      failedFromState: 'validated',
+    };
+    const insertFailed = async (retryable: boolean, retryCount: number): Promise<void> => {
+      await store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      const failed = {
+        ...accepted,
+        status: 'failed',
+        failure: { ...failureBase, retryable },
+        retries: { retryCount, maxRetries: 10 },
+      } as unknown as LiftJob;
+      await store.insert(serializeJob(failed, DEFAULT_CONTROL_GRAPH_URI));
+    };
+
+    await insertFailed(true, 0);
+    const recoverable = await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts);
+    expect(recoverable.kind).toBe('active');
+    if (recoverable.kind === 'active') expect(recoverable.job.jobId).toBe(jobId);
+
+    // Exhausted retries → genuinely superseded (admission would not reaccept it).
+    await insertFailed(true, 10);
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+
+    // Non-retryable failure → superseded even with retries nominally remaining.
+    await insertFailed(false, 0);
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+  });
+
+  it('partitions the recovery identity by subGraphName (Chunk 1)', async () => {
+    const publisher = createPublisher();
+    const research = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ subGraphName: 'research' }));
+    const production = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ subGraphName: 'production' }));
+
+    const r = await publisher.lookupKnowledgeAssetVmPublishJobByIntent({ ...facts, subGraphName: 'research' });
+    expect(r.kind).toBe('active');
+    if (r.kind === 'active') expect(r.job.jobId).toBe(research);
+
+    const p = await publisher.lookupKnowledgeAssetVmPublishJobByIntent({ ...facts, subGraphName: 'production' });
+    expect(p.kind).toBe('active');
+    if (p.kind === 'active') expect(p.job.jobId).toBe(production);
+
+    // The no-subGraphName lane is a distinct lifecycle subject from both.
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('none');
+  });
+
   it('classifies more than one active job as a conflict (broken invariant, AC2)', async () => {
     const publisher = createPublisher();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
