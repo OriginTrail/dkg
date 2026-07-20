@@ -149,6 +149,39 @@ describe('UpdateHandler graph-scoped updates', () => {
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('materializes canonical Markdown section entities from a verified update', async () => {
+    await seedPriorMetadata();
+    const document = 'urn:document:construction-notes';
+    const section = 'urn:dkg:ka-skolem:c14n0';
+    const publicQuads: Quad[] = [
+      {
+        subject: document,
+        predicate: 'http://dkg.io/ontology/hasSection',
+        object: section,
+        graph: '',
+      },
+      {
+        subject: section,
+        predicate: 'http://schema.org/name',
+        object: '"Safety"',
+        graph: '',
+      },
+    ];
+
+    await handler.handle(message(publicQuads), 'forwarding-peer');
+
+    const rows = await store.query(
+      `SELECT ?section ?name WHERE { GRAPH <${vmGraph}> {
+        <${document}> <http://dkg.io/ontology/hasSection> ?section .
+        ?section <http://schema.org/name> ?name .
+      } }`,
+    );
+    expect(rows).toMatchObject({
+      type: 'bindings',
+      bindings: [{ section, name: '"Safety"' }],
+    });
+  });
+
   it('supports a fully private update with no public placeholder triple', async () => {
     await seedPriorMetadata();
     await store.insert([{
