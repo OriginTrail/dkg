@@ -105,26 +105,15 @@ export interface FreshSwmDataGraphPlanMemo {
 }
 
 interface FreshSwmMetaSubjectEntry {
-  subject: string;
-  rowCount: number;
-  /**
-   * Content binding for the subject's whole row-group, established on the
-   * FIRST window read of this session and verified on every REREAD. Row counts
-   * alone pass on same-count replacements, and a reread sliced at the plan's
-   * prefix sums could then combine rows of two different versions of one
-   * subject across response pages; the digest makes any content or ordering
-   * change of an already-served subject fail the session instead (the
-   * requester restarts with a fresh plan). A subject read exactly once needs
-   * no binding: its row-group is served whole from a single query.
-   */
-  contentDigest?: string;
+  readonly subject: string;
+  readonly rowCount: number;
 }
 
 interface FreshSwmMetaGraphPlanEntry {
-  graph: string;
+  readonly graph: string;
   /** TTL-admitted subjects, compareCodePoint-sorted; row counts are exact at plan build. */
-  subjects: readonly FreshSwmMetaSubjectEntry[];
-  rowCount: number;
+  readonly subjects: readonly FreshSwmMetaSubjectEntry[];
+  readonly rowCount: number;
 }
 
 /**
@@ -136,12 +125,47 @@ interface FreshSwmMetaGraphPlanEntry {
  * cap, so plan building can never materialize an unbounded store result. The
  * retained estimate is additionally charged to the process-wide responder
  * snapshot budget by the memo (see createResponderFreshSwmMetaPlanMemo).
+ *
+ * The plan is IMMUTABLE once built — every reader treats it as a frozen
+ * pagination description. The mutable per-session content-digest bindings that
+ * used to live on subject entries are held in a sidecar keyed by plan instance
+ * (see {@link sessionDigestBindingsFor}), so nothing that "reads a plan" can
+ * change it.
  */
 interface FreshSwmMetaPlan {
-  entries: readonly FreshSwmMetaGraphPlanEntry[];
-  totalRows: number;
+  readonly entries: readonly FreshSwmMetaGraphPlanEntry[];
+  readonly totalRows: number;
   /** Estimated retained heap bytes of the plan's subject/count scalars. */
-  bytesEstimate: number;
+  readonly bytesEstimate: number;
+}
+
+/**
+ * Sidecar for the mutable per-session digest state of a TTL meta plan (#1868
+ * review): content bindings for whole subject row-groups, established on a
+ * subject's FIRST window read of the session and verified on every REREAD. Row
+ * counts alone pass on same-count replacements, and a reread sliced at the
+ * plan's prefix sums could then combine rows of two different versions of one
+ * subject across response pages; the digest makes any content or ordering
+ * change of an already-served subject fail the session instead (the requester
+ * restarts with a fresh plan). A subject read exactly once needs no binding:
+ * its row-group is served whole from a single query.
+ *
+ * Keyed WEAKLY by plan object identity, which is exactly the binding's
+ * intended lifetime: the memoized plan IS the session (offset>0 requires the
+ * existing plan; refresh/rebuild produces a NEW plan object and therefore a
+ * fresh, empty binding map), and evicting or expiring the plan releases its
+ * digests with it. Map keys are `graph U+0000 subject` (NUL cannot appear
+ * in an IRI, so the composite key cannot collide).
+ */
+const freshSwmMetaSessionDigests = new WeakMap<FreshSwmMetaPlan, Map<string, string>>();
+
+function sessionDigestBindingsFor(plan: FreshSwmMetaPlan): Map<string, string> {
+  let bindings = freshSwmMetaSessionDigests.get(plan);
+  if (!bindings) {
+    bindings = new Map();
+    freshSwmMetaSessionDigests.set(plan, bindings);
+  }
+  return bindings;
 }
 
 export interface FreshSwmMetaPlanMemo {
@@ -2625,11 +2649,16 @@ function digestSubjectRows(rows: readonly SyncRow[]): string {
  *     single query, so a same-count change before its only read serves the
  *     NEWER coherent group (bounded freshness skew, like any keyset pager),
  *     never a hybrid.
+ *
+ * `digestBindings` is the plan's session sidecar (see
+ * {@link sessionDigestBindingsFor}); this reader is the only writer to it, and
+ * the plan itself is never mutated.
  */
 async function readFreshSwmMetaSubjectWindowRows(
   store: TripleStore,
   graph: string,
   subjects: readonly FreshSwmMetaSubjectEntry[],
+  digestBindings: Map<string, string>,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const rows: SyncRow[] = [];
@@ -2666,9 +2695,11 @@ async function readFreshSwmMetaSubjectWindowRows(
         );
       }
       const digest = digestSubjectRows(subjectRows);
-      if (entry.contentDigest === undefined) {
-        entry.contentDigest = digest;
-      } else if (entry.contentDigest !== digest) {
+      const digestKey = `${graph}\u0000${entry.subject}`;
+      const boundDigest = digestBindings.get(digestKey);
+      if (boundDigest === undefined) {
+        digestBindings.set(digestKey, digest);
+      } else if (boundDigest !== digest) {
         throw new Error(
           `Shared-memory meta sync plan changed while reading ${graph}: ` +
           `subject ${entry.subject} content changed within an active session`,
@@ -2703,6 +2734,7 @@ async function readFreshSwmMetaRowsPageFromPlan(
   let skip = Math.max(0, Math.floor(offset));
   let remaining = Math.max(0, Math.floor(limit));
   if (remaining === 0 || skip >= plan.totalRows) return [];
+  const digestBindings = sessionDigestBindingsFor(plan);
   const rows: SyncRow[] = [];
   for (const entry of plan.entries) {
     if (skip >= entry.rowCount) {
@@ -2741,6 +2773,7 @@ async function readFreshSwmMetaRowsPageFromPlan(
       store,
       entry.graph,
       window,
+      digestBindings,
       signal,
     );
     const page = windowRowsRead.slice(skip - windowStart, skip - windowStart + remaining);
@@ -2784,6 +2817,7 @@ async function readBoundedFreshSwmMetaSnapshot(
   }
   const rows: SyncRow[] = [];
   let bytesEstimate = 0;
+  const digestBindings = sessionDigestBindingsFor(plan);
   for (const entry of plan.entries) {
     let graphRows;
     try {
@@ -2791,6 +2825,7 @@ async function readBoundedFreshSwmMetaSnapshot(
         store,
         entry.graph,
         entry.subjects,
+        digestBindings,
       );
     } catch (error) {
       // The store's response byte cap firing during SNAPSHOT materialization is

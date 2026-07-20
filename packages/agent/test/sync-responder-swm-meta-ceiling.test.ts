@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
@@ -562,6 +562,48 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   }, 120_000);
 
+  it('applies the plan cardinality cap in AGGREGATE across root and subgraph meta graphs, not per graph (#1868 review)', async () => {
+    const cgId = 'meta-ceiling-aggregate';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const rootMeta = `${cgPrefix}/_shared_memory_meta`;
+    const subMeta = `${cgPrefix}/subagg/_shared_memory_meta`;
+    const fresh = freshIso();
+    const store = new OxigraphStore();
+    // Exactly the cap in the ROOT bucket plus ONE more fresh subject in a
+    // registered subgraph bucket. The subject allowance is cumulative across
+    // the phase's candidate graphs; a regression that reset it per graph would
+    // happily admit both buckets (retaining up to #graphs x cap plan entries)
+    // and serve this session — so it must fail this test, which demands the
+    // same typed bounded refusal as the single-graph overflow.
+    const quads: Quad[] = [...subGraphRegistrationQuads(cgId, 'subagg')];
+    for (let index = 0; index < FRESH_SWM_META_PLAN_MAX_SUBJECTS; index += 1) {
+      quads.push({
+        graph: rootMeta,
+        subject: `urn:agg:${String(index).padStart(6, '0')}`,
+        predicate: `${DKG_NS}publishedAt`,
+        object: `"${fresh}"^^<${XSD_DT}>`,
+      });
+    }
+    quads.push({
+      graph: subMeta,
+      subject: 'urn:agg:one-over-in-the-subgraph',
+      predicate: `${DKG_NS}publishedAt`,
+      object: `"${fresh}"^^<${XSD_DT}>`,
+    });
+    await insertChunked(store, quads);
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'aggregate-cap-session',
+    })).rejects.toThrow(/per-snapshot rows budget/);
+    await store.close();
+  }, 120_000);
+
   it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard 64,000-row build cap', async () => {
     const cgId = 'meta-ceiling-monster';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -693,6 +735,43 @@ describe('TTL meta session plans are charged to the responder snapshot budget (#
     await memo.get('c', async () => plan(1_000));
     expect(budget.stats().snapshots).toBe(2);
     expect(budget.stats().bytesEstimate).toBe(2_000);
+  });
+
+  it('time-based TTL expiry prunes a plan AND releases its global charge, distinct from maxEntries eviction (#1868 review)', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 1_000,
+      maxBytesEstimate: 100_000,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: 1,
+    });
+    // maxEntries is deliberately roomy so ONLY the clock can remove entries: a
+    // regression in the time-based prune path ('expired') cannot hide behind
+    // the LRU/maxEntries eviction the previous test already proves.
+    const memo = createResponderFreshSwmMetaPlanMemo(60_000, 8, budget);
+    const nowSpy = vi.spyOn(Date, 'now');
+    const epoch = 1_800_000_000_000;
+    try {
+      nowSpy.mockReturnValue(epoch);
+      await memo.get('a', async () => plan(1_000));
+      expect(budget.stats().bytesEstimate).toBe(1_000);
+
+      // One tick BEFORE the TTL boundary an unrelated get must NOT prune 'a'.
+      nowSpy.mockReturnValue(epoch + 59_999);
+      await memo.get('b', async () => plan(2_000));
+      expect(budget.stats().snapshots).toBe(2);
+      expect(budget.stats().bytesEstimate).toBe(3_000);
+
+      // AT the TTL boundary 'a' (still cached at epoch) must be pruned AND its
+      // global charge released; 'b' (age 1ms) must survive with its charge.
+      nowSpy.mockReturnValue(epoch + 60_000);
+      await memo.get('c', async () => plan(4_000));
+      expect(budget.stats().snapshots).toBe(2);
+      expect(budget.stats().bytesEstimate).toBe(6_000);
+      expect(await memo.get('a', async () => plan(1), { requireExisting: true })).toBeNull();
+      expect(await memo.get('b', async () => plan(1), { requireExisting: true })).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('the sync handler wires the responder budget through to plan admission', async () => {
