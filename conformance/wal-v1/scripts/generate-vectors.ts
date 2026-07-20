@@ -163,6 +163,7 @@ async function buildVectors() {
     rdfPolicyObjectId,
     rdfReplaceMutation,
     null,
+    null,
     null
   ] as const;
   const logicalKey = fixtureId('logical-key');
@@ -191,6 +192,7 @@ async function buildVectors() {
     [],
     policyObjectId,
     rdfMutation,
+    null,
     null,
     1_750_000_000_000n
   ] as const;
@@ -364,6 +366,7 @@ async function buildVectors() {
     policyObjectId,
     targetRdfMutation,
     targetChainBinding,
+    null,
     null
   ] as const;
   const targetMutationDigest = moveTierTargetMutationDigest(targetDkgMutation);
@@ -388,7 +391,22 @@ async function buildVectors() {
   ]);
   assertPublicMoveTierSafe(publicMoveTier, [sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult]);
 
-  const snapshotEntry = [logicalKey, [secondObject.id], resultStateDigest, insertNQuads] as const;
+  const snapshotEntry = [
+    logicalKey,
+    BigInt(ENUMS.snapshotEntryState.LIVE),
+    [secondObject.id],
+    resultStateDigest,
+    insertNQuads
+  ] as const;
+  const snapshotTombstone = [
+    fixtureId('deleted-logical-key'),
+    BigInt(ENUMS.snapshotEntryState.TOMBSTONE),
+    [fixtureId('delete-head')],
+    independentRdfStateDigest(new Uint8Array()),
+    new Uint8Array()
+  ] as const;
+  const snapshotEntries = [snapshotEntry, snapshotTombstone]
+    .sort((left, right) => compareBytes(encodeCanonical(left), encodeCanonical(right)));
   const snapshotManifest = [
     1n,
     namespace,
@@ -399,7 +417,7 @@ async function buildVectors() {
     setCommitmentRoot([firstObject.id, secondObject.id]),
     2n,
     2n,
-    [snapshotEntry],
+    snapshotEntries,
     [],
     policyObjectId,
     1n,
@@ -526,6 +544,31 @@ async function buildVectors() {
   const vectorSignature = signTuple(DOMAINS.vectorSignature, vectorUnsigned);
   const vectorBytes = encodeCanonical([...vectorUnsigned, [signatureEntryBytes(vectorSignature)]]);
   const vectorId = hash(DOMAINS.vectorId, vectorBytes);
+  const expiryDeleteRdfMutation = [
+    1n,
+    BigInt(ENUMS.mutationMode.PATCH),
+    rdfResultDigest,
+    independentRdfStateDigest(new Uint8Array()),
+    [],
+    [],
+    rdfCanonical,
+    new Uint8Array(),
+    rdfTouchedKeys,
+    null
+  ] as const;
+  const expiryDeleteBasis = [1_750_000_004_000n, vectorId, null] as const;
+  const expiryDeleteMutation = [
+    1n,
+    BigInt(ENUMS.mutationOperation.DELETE),
+    rdfLogicalKey,
+    [firstObject.id],
+    [firstObject.id],
+    rdfPolicyObjectId,
+    expiryDeleteRdfMutation,
+    null,
+    expiryDeleteBasis,
+    null
+  ] as const;
   const tierReceiptUnsigned = [
     1n,
     transitionCommitment,
@@ -739,6 +782,14 @@ async function buildVectors() {
         touchedKeys: rdfTouchedKeys.map(hex),
         rdfMutationBytes: hex(encodeCanonical(rdfReplaceMutation)),
         dkgMutationBytes: hex(encodeCanonical(rdfDkgMutation))
+      },
+      expiryDelete: {
+        expiresAtMs: expiryDeleteBasis[0].toString(),
+        curatorVectorId: hex(vectorId),
+        finalizedChainFrontier: null,
+        deleteBasisBytes: hex(encodeCanonical(expiryDeleteBasis)),
+        dkgMutationBytes: hex(encodeCanonical(expiryDeleteMutation)),
+        invalid: ['both-vector-and-chain', 'neither-vector-nor-chain', 'local-wall-time-only']
       }
     },
     walObjects: {
@@ -889,8 +940,10 @@ async function buildVectors() {
     snapshot: {
       manifestBytes: hex(snapshotBytes),
       custodyReceiptBytes: hex(custodyReceiptBytes),
-      parents: [],
-      baseHeads: [],
+      envelopePayloadKind: ENUMS.payloadKind.SNAPSHOT_MANIFEST,
+      envelopeCodec: ENUMS.codec.DETERMINISTIC_CBOR,
+      mediaType: 'application/vnd.origintrail.wal-snapshot-manifest+cbor',
+      entryStates: { LIVE: ENUMS.snapshotEntryState.LIVE, TOMBSTONE: ENUMS.snapshotEntryState.TOMBSTONE },
       baselineRule: 'A SNAPSHOT starts the new writer epoch at sequence zero with previousObjectId null; the signed manifest and covered checkpoint close the compacted lane.',
       externalConflictRule: 'External conflict heads must remain available through their own current checkpoint or baseline and are never re-authored by the snapshot author.'
     },

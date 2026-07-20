@@ -11,3 +11,4 @@ export * from './rdf/index.js';
 export * from './replay/index.js';
 export * from './local-commit.js';
 export * from './vm/index.js';
+export * from './retention/index.js';

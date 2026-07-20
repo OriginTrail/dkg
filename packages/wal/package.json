@@ -65,6 +65,11 @@
       "import": "./dist/vm/index.js",
       "default": "./dist/vm/index.js"
     },
+    "./retention": {
+      "types": "./dist/retention/index.d.ts",
+      "import": "./dist/retention/index.js",
+      "default": "./dist/retention/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

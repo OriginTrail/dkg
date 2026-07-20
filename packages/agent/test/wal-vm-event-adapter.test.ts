@@ -79,6 +79,7 @@ function mutation(): ProtocolTuple<'DkgMutationV1'> {
     ],
     chainBinding(),
     null,
+    null,
   ];
 }
 

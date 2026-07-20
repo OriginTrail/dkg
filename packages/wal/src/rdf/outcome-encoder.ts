@@ -246,6 +246,20 @@ export function encodeAcceptedRdfMutationV1(
   if (!sameIds(parents, baseHeads)) {
     rdfError('WAL_RDF_CAUSAL_RELATION', 'ordinary mutation parents must equal the exact baseHeads set');
   }
+  const deleteBasis = input.deleteBasis ?? null;
+  if (input.operation !== 'DELETE' && deleteBasis !== null) {
+    rdfError('WAL_RDF_POLICY_INVALID', 'deleteBasisOrNull is available only for DELETE');
+  }
+  if (deleteBasis !== null) {
+    const hasVector = deleteBasis[1] !== null;
+    const hasChain = deleteBasis[2] !== null;
+    if (hasVector === hasChain) {
+      rdfError(
+        'WAL_RDF_POLICY_INVALID',
+        'expiry DELETE must bind exactly one signed vector or finalized chain frontier',
+      );
+    }
+  }
 
   let mode: bigint;
   let replaceGraphs: readonly ProtocolTuple<'GraphReplacementV1'>[] = [];
@@ -315,6 +329,7 @@ export function encodeAcceptedRdfMutationV1(
     policyObjectId,
     rdfMutation,
     input.chainBinding ?? null,
+    deleteBasis,
     input.nonConsensusTimestampMs ?? null,
   ];
   let contentBytes: Uint8Array;
@@ -463,6 +478,19 @@ export function decodeDkgMutationCandidateV1(input: {
     && mutation[1] !== OPERATION.PATCH
     && mutation[1] !== OPERATION.DELETE
   ) rdfError('WAL_RDF_POLICY_INVALID', 'this encoder accepts only PUT, PATCH, and DELETE mutations');
+  if (mutation[1] !== OPERATION.DELETE && mutation[8] !== null) {
+    rdfError('WAL_RDF_POLICY_INVALID', 'deleteBasisOrNull is available only for DELETE');
+  }
+  if (mutation[8] !== null) {
+    const hasVector = mutation[8][1] !== null;
+    const hasChain = mutation[8][2] !== null;
+    if (hasVector === hasChain) {
+      rdfError(
+        'WAL_RDF_POLICY_INVALID',
+        'expiry DELETE must bind exactly one signed vector or finalized chain frontier',
+      );
+    }
+  }
   if (mutation[6] === null) rdfError('WAL_RDF_POLICY_INVALID', 'RDF mutation payload cannot be null');
   if (!input.policy[10].includes(DKG_MUTATION_KIND)) {
     rdfError('WAL_RDF_UNAUTHORIZED', 'signed policy does not permit DKG mutation payloads');

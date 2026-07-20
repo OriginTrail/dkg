@@ -43,13 +43,23 @@ export type DkgSemanticEntryPoint =
   | 'vm-evidence-application'
   | 'wal-replay-initial-state'
   | 'wal-replay-transition'
-  | 'wal-replay-compatible-merge';
+  | 'wal-replay-compatible-merge'
+  | 'wal-delete-expiry-authorization'
+  | 'wal-snapshot-baseline-entry-validation'
+  | 'wal-snapshot-baseline-conflict-validation';
 
 export type DkgWalReplaySemanticEntryPoint = Extract<
   DkgSemanticEntryPoint,
   | 'wal-replay-initial-state'
   | 'wal-replay-transition'
   | 'wal-replay-compatible-merge'
+>;
+
+export type DkgWalRetentionSemanticEntryPoint = Extract<
+  DkgSemanticEntryPoint,
+  | 'wal-delete-expiry-authorization'
+  | 'wal-snapshot-baseline-entry-validation'
+  | 'wal-snapshot-baseline-conflict-validation'
 >;
 
 export interface DkgSemanticCoreTraceEvent {
@@ -208,6 +218,18 @@ export class DkgSemanticCore {
   async invokeWalReplaySemanticEntryPoint<T>(
     driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
     entryPoint: DkgWalReplaySemanticEntryPoint,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, entryPoint, operation);
+  }
+
+  /**
+   * Trace and invoke existing delete/expiry and snapshot-baseline semantics.
+   * WAL supplies authenticated protocol inputs but owns no DKG decision.
+   */
+  async invokeWalRetentionSemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
+    entryPoint: DkgWalRetentionSemanticEntryPoint,
     operation: () => Promise<T>,
   ): Promise<T> {
     return this.invoke(driver, entryPoint, operation);

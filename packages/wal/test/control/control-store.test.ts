@@ -194,6 +194,9 @@ describe('WalControlStore schema and rollback guard', () => {
       'peer_state',
       'private_payload_nonces',
       'quarantine',
+      'retention_custody_receipts',
+      'retention_epochs',
+      'retention_gc_objects',
       'retry_queue',
       'rollback_guard',
       'set_commitment_nodes',
@@ -227,7 +230,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let value = control(root);
     closeControl(value);
     database = new Database(join(root, 'objects.sqlite'));
-    database.prepare('UPDATE wal_control_schema SET version = 7').run();
+    database.prepare('UPDATE wal_control_schema SET version = 8').run();
     database.close();
     await expectCode(() => control(root), 'WAL_CONTROL_UNSUPPORTED_SCHEMA');
 
@@ -250,7 +253,7 @@ describe('WalControlStore schema and rollback guard', () => {
     await expectCode(() => control(missingObjects), 'WAL_CONTROL_INVALID_CONFIGURATION');
   });
 
-  it('migrates schema version 1 through namespace-scoped materialization version 6 transactionally', async () => {
+  it('migrates schema version 1 through retention-journal version 7 transactionally', async () => {
     const root = await temporary('migration-v1-v2');
     await prepare(root);
     let value = control(root);
@@ -284,9 +287,9 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(5);
+    expect(hookCalls).toBe(6);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(6);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
@@ -294,7 +297,7 @@ describe('WalControlStore schema and rollback guard', () => {
     database.close();
   });
 
-  it('migrates schema version 2 through namespace-scoped materialization version 6 transactionally', async () => {
+  it('migrates schema version 2 through retention-journal version 7 transactionally', async () => {
     const root = await temporary('migration-v2-v3');
     await prepare(root);
     let value = control(root);
@@ -317,9 +320,9 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(4);
+    expect(hookCalls).toBe(5);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(6);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
@@ -349,7 +352,7 @@ describe('WalControlStore schema and rollback guard', () => {
 
     value = control(root);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(6);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
     database.close();
@@ -421,7 +424,7 @@ describe('WalControlStore schema and rollback guard', () => {
     }));
     expect(value.getLocalLogicalHeads(input.namespaceId, input.logicalKey)).toEqual([committed.objectId]);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(6);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     database.close();
   });
 
@@ -470,7 +473,7 @@ describe('WalControlStore schema and rollback guard', () => {
 
     value = control(root);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(6);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect((database.prepare('SELECT count(*) AS count FROM materialization').get() as { count: number }).count).toBe(0);
     expect((database.pragma('table_info(materialization)') as Array<{ name: string }>)
       .map(column => column.name)).toContain('namespace_id');

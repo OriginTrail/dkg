@@ -1111,16 +1111,16 @@ conflicts, forging authorship, or resurrecting stale state.
 
 ### Acceptance area
 
-- [ ] Offline/restart/compaction tests never resurrect deleted or expired state.
-- [ ] Local-clock-only expiry, unauthorized expiry, missing base heads, and stale
+- [x] Offline/restart/compaction tests never resurrect deleted or expired state.
+- [x] Local-clock-only expiry, unauthorized expiry, missing base heads, and stale
       frontier fail without hiding state.
-- [ ] Snapshot bytes, authorship, covered checkpoint/root, policy, adapter, VM
+- [x] Snapshot bytes, authorship, covered checkpoint/root, policy, adapter, VM
       frontier, tombstones, and conflicts verify against normative vectors.
-- [ ] A peer below the floor installs the author baseline before delta
+- [x] A peer below the floor installs the author baseline before delta
       reconciliation and validates closure without fetching removed history.
-- [ ] GC is impossible before required durable replicas/receipts and grace; stale,
+- [x] GC is impossible before required durable replicas/receipts and grace; stale,
       expired, removed, or forged custody evidence cannot authorize deletion.
-- [ ] Crash tests at snapshot install, epoch rotation, receipt persistence, floor
+- [x] Crash tests at snapshot install, epoch rotation, receipt persistence, floor
       advance, and physical GC retain one safe authoritative WAL state.
 
 ---

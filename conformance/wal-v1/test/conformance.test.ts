@@ -361,8 +361,37 @@ describe('adapter, replay/conflict, privacy, and finality vectors', () => {
       fromHex(rdf.publishReplace.policyObjectId, 32),
       mutation,
       null,
+      null,
       null
     ]))).toBe(rdf.publishReplace.dkgMutationBytes);
+  });
+
+  it('freezes explicit expiry evidence and snapshot tombstones', () => {
+    const expiryMutation = decodeCanonical(fromHex(vectors.rdfAdapter.expiryDelete.dkgMutationBytes)) as any[];
+    expect(expiryMutation).toHaveLength(10);
+    expect(expiryMutation[1]).toBe(BigInt(SCHEMA.enums.mutationOperation.DELETE));
+    expect(expiryMutation[8]).toEqual([
+      BigInt(vectors.rdfAdapter.expiryDelete.expiresAtMs),
+      fromHex(vectors.rdfAdapter.expiryDelete.curatorVectorId, 32),
+      null,
+    ]);
+
+    const manifest = decodeCanonical(fromHex(vectors.snapshot.manifestBytes)) as any[];
+    const entries = manifest[9] as any[][];
+    expect(TUPLES.SnapshotEntryV1.fields).toEqual([
+      'logicalKey',
+      'stateKind',
+      'activeHeadIds',
+      'stateDigest',
+      'canonicalGraphBytes',
+    ]);
+    expect(entries.map(entry => Number(entry[1])).sort()).toEqual([
+      vectors.snapshot.entryStates.LIVE,
+      vectors.snapshot.entryStates.TOMBSTONE,
+    ]);
+    const tombstone = entries.find(entry => Number(entry[1]) === vectors.snapshot.entryStates.TOMBSTONE)!;
+    expect(tombstone[4]).toEqual(new Uint8Array());
+    expect(vectors.snapshot.envelopePayloadKind).toBe(SCHEMA.enums.payloadKind.SNAPSHOT_MANIFEST);
   });
 
   it('decrypts the fixed AES-GCM vector in independent implementations', async () => {

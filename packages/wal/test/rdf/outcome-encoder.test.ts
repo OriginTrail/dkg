@@ -236,12 +236,56 @@ describe('accepted semantic-outcome RDF encoder', () => {
       nonConsensusTimestampMs: 123n,
     }));
     expect(encoded.dkgMutation[1]).toBe(BigInt(WAL_V1_ENUMS.mutationOperation.DELETE));
-    expect(encoded.dkgMutation[8]).toBe(123n);
+    expect(encoded.dkgMutation[8]).toBeNull();
+    expect(encoded.dkgMutation[9]).toBe(123n);
     expect(encoded.rdfMutation[1]).toBe(BigInt(WAL_V1_ENUMS.mutationMode.PATCH));
     expect(encoded.rdfMutation[6]).toEqual(encoded.base.bytes);
     expect(encoded.rdfMutation[7]).toHaveLength(0);
     expect(encoded.result.quadCount).toBe(0);
     expect(decodeDkgMutationCandidateV1(remoteInput(encoded)).result.quadCount).toBe(0);
+  });
+
+  it('binds expiry deletes to exactly one vector or chain frontier locally and remotely', () => {
+    const vectorBasis: ProtocolTuple<'DeleteBasisV1'> = [5_000n, bytes(32, 0x55), null];
+    const chainBasis: ProtocolTuple<'DeleteBasisV1'> = [5_000n, null, [2043n, 99n, bytes(32, 0x66)]];
+    expect(() => encodeAcceptedRdfMutationV1(input({ deleteBasis: vectorBasis })))
+      .toThrow(expect.objectContaining({ code: 'WAL_RDF_POLICY_INVALID' }));
+    expect(() => encodeAcceptedRdfMutationV1(input({
+      operation: 'DELETE',
+      source: { kind: 'delete-logical-key' },
+      deleteBasis: [5_000n, null, null],
+    }))).toThrow(expect.objectContaining({ code: 'WAL_RDF_POLICY_INVALID' }));
+    expect(() => encodeAcceptedRdfMutationV1(input({
+      operation: 'DELETE',
+      source: { kind: 'delete-logical-key' },
+      deleteBasis: [5_000n, bytes(32, 0x55), [2043n, 99n, bytes(32, 0x66)]],
+    }))).toThrow(expect.objectContaining({ code: 'WAL_RDF_POLICY_INVALID' }));
+
+    const vectorDelete = encodeAcceptedRdfMutationV1(input({
+      operation: 'DELETE',
+      source: { kind: 'delete-logical-key' },
+      deleteBasis: vectorBasis,
+    }));
+    const chainDelete = encodeAcceptedRdfMutationV1(input({
+      operation: 'DELETE',
+      source: { kind: 'delete-logical-key' },
+      deleteBasis: chainBasis,
+    }));
+    expect(decodeDkgMutationCandidateV1(remoteInput(vectorDelete)).dkgMutation[8]).toEqual(vectorBasis);
+    expect(decodeDkgMutationCandidateV1(remoteInput(chainDelete)).dkgMutation[8]).toEqual(chainBasis);
+    expect(() => decodeDkgMutationCandidateV1(remoteInput(vectorDelete, {
+      contentBytes: withDkgMutation(vectorDelete, tuple => {
+        tuple[1] = BigInt(WAL_V1_ENUMS.mutationOperation.PATCH);
+      }),
+    }))).toThrow(expect.objectContaining({ code: 'WAL_RDF_POLICY_INVALID' }));
+    for (const invalidBasis of [
+      [5_000n, null, null],
+      [5_000n, bytes(32, 0x55), [2043n, 99n, bytes(32, 0x66)]],
+    ]) {
+      expect(() => decodeDkgMutationCandidateV1(remoteInput(vectorDelete, {
+        contentBytes: withDkgMutation(vectorDelete, tuple => { tuple[8] = invalidBasis; }),
+      }))).toThrow(expect.objectContaining({ code: 'WAL_RDF_POLICY_INVALID' }));
+    }
   });
 
   it('authorizes a current member on an explicitly shared logical key only', () => {

@@ -99,6 +99,8 @@ export interface EncodeAcceptedRdfMutationInputV1 {
   readonly policy: ProtocolTuple<'RdfPolicyV1'>;
   readonly source: RdfCompileSourceV1;
   readonly chainBinding?: ProtocolTuple<'ChainBindingV1'> | null;
+  /** Null for owner deletes; non-null only for policy-authorized expiry. */
+  readonly deleteBasis?: ProtocolTuple<'DeleteBasisV1'> | null;
   readonly nonConsensusTimestampMs?: bigint | null;
 }
 

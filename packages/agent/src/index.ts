@@ -73,6 +73,13 @@ export {
   type ReplayAdmittedWalSetWithDkgCoreOptionsV1,
 } from './wal/replay-conflict-adapter.js';
 export {
+  DkgWalRetentionSemanticAdapterV1,
+  createDkgWalRetentionSemanticAdapterV1,
+  createDkgWalEpochSnapshotValidatorV1,
+  type DkgWalRetentionSemanticAdapterOptionsV1,
+  type DkgWalEpochSnapshotValidatorOptionsV1,
+} from './wal/retention-semantic-adapter.js';
+export {
   DkgWalProjectionMaterializerError,
   DkgWalProjectionMaterializerV1,
   type DkgWalProjectionApplyResultV1,

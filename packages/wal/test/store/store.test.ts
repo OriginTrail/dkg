@@ -339,7 +339,7 @@ describe('resumable whole-object ranges', () => {
       { offset: 180n, maximumLength: 100 },
       { offset: 280n, maximumLength: 100 },
       { offset: 380n, maximumLength: 100 },
-      { offset: 480n, maximumLength: 26 },
+      { offset: 480n, maximumLength: Number(total - 480n) },
     ]);
     for (const range of (await restarted.missing(first.id, total, 100)).filter(range => range.offset > 0n)) {
       expect(await restarted.accept({

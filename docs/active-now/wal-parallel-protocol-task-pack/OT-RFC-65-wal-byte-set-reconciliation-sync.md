@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.13
+version: 0.14
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -461,6 +461,7 @@ DkgMutationV1 = [
   policyObjectId,
   rdfMutationOrNull,
   chainBindingOrNull,
+  deleteBasisOrNull,
   nonConsensusTimestampMsOrNull
 ]
 ```
@@ -473,6 +474,26 @@ These positions are application semantics, not generic replication metadata.
 `DELETE` contains a deterministic deletion mutation, `RESOLVE` references every
 conflicting active head, and VM activation requires `chainBindingOrNull` to be
 non-null.
+
+`deleteBasisOrNull` is null for every non-`DELETE` operation and for an ordinary
+owner-initiated delete. A policy-authorized expiry delete carries:
+
+```text
+DeleteBasisV1 = [
+  expiresAtMs,
+  curatorVectorIdOrNull,
+  finalizedChainFrontierOrNull
+]
+```
+
+Exactly one of `curatorVectorIdOrNull` and `finalizedChainFrontierOrNull` is
+non-null. The current semantic core verifies that the enclosing `WalObjectV1`
+writer is the owner or an expiry authority named by `policyObjectId`. For a
+vector basis, the referenced current signed vector must have
+`issuedAtMs >= expiresAtMs`; for a chain basis, the existing chain adapter must
+verify the exact finalized block and that block's timestamp is at or after
+`expiresAtMs`. Local wall time may enqueue the request but is never sufficient
+to apply or hide the delete.
 
 ### 6.4 RDF logical key
 
@@ -2091,7 +2112,7 @@ SnapshotManifestV1 = [
 ]
 
 SnapshotEntryV1 = [
-  logicalKey, activeHeadIds, stateDigest, canonicalGraphBytes
+  logicalKey, stateKind, activeHeadIds, stateDigest, canonicalGraphBytes
 ]
 
 SnapshotConflictV1 = [
@@ -2111,14 +2132,33 @@ SnapshotCustodyReceiptV1 = [
 ]
 ```
 
-A snapshot is sequence zero of `newWriterEpoch`, has
-`previousObjectIdOrNull=null`, and its enclosing `DkgMutationV1` has empty
-`parents` and `baseHeads`. The same-author snapshot signature plus the covered
-signed checkpoint, exact covered root/count, and complete inline manifest form
-the new baseline; a post-floor receiver does not fetch an artificial parent
-below the floor. External conflict heads are not re-authored: every referenced
-external head must remain reachable through that author's current retained set
-or authenticated baseline before this snapshot is eligible for compaction.
+`stateKind` is the frozen enum `LIVE=0`, `TOMBSTONE=1`. A tombstone has empty
+`canonicalGraphBytes` and retains the delete head IDs and deleted-state digest;
+a live entry may also have an empty canonical dataset, so the explicit enum is
+required to prevent resurrection. Every manifest entry is validated through
+the existing semantic core's baseline-validation entry point; snapshot install
+does not add a WAL-specific state reducer.
+
+A snapshot is encoded directly as canonical `SnapshotManifestV1` bytes in a
+`DkgPayloadEnvelopeV1` whose kind is `SNAPSHOT_MANIFEST`, codec is
+`DETERMINISTIC_CBOR`, and media type is
+`application/vnd.origintrail.wal-snapshot-manifest+cbor`. There is no enclosing
+`DkgMutationV1` and no JSON representation. The enclosing complete
+`WalObjectV1` is sequence zero of `newWriterEpoch`, has
+`previousObjectIdOrNull=null`, and its namespace/writer/epoch coordinates equal
+the manifest. The same-author WAL-object signature plus the covered signed
+checkpoint, exact covered root/count, and complete inline manifest form the new
+baseline; a post-floor receiver does not fetch an artificial parent below the
+floor. External conflict heads are not re-authored: every referenced external
+head must remain reachable through that author's current retained set or
+authenticated baseline before this snapshot is eligible for compaction.
+
+Protocol version 1 defines `compactionFloor == coveredObjectCount`: it is the
+exclusive count of the covered old-epoch object prefix that may eventually stop
+being served. A receiver whose retained lane is absent, has an earlier epoch,
+or has fewer than `compactionFloor` objects in `coveredWriterEpoch` installs the
+baseline before post-snapshot delta reconciliation. The first checkpoint of
+`newWriterEpoch` carries the same baseline snapshot ID and compaction floor.
 
 Default snapshot trigger is 100,000 authored records or 30 days, whichever
 comes first. The thresholds are configurable but are signed into network policy.

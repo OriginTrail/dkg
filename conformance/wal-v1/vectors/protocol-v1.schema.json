@@ -105,6 +105,10 @@
       "REPLACE": 0,
       "PATCH": 1
     },
+    "snapshotEntryState": {
+      "LIVE": 0,
+      "TOMBSTONE": 1
+    },
     "chainEventType": {
       "PUBLISH": 0,
       "UPDATE": 1
@@ -332,6 +336,7 @@
         "policyObjectId",
         "rdfMutationOrNull",
         "chainBindingOrNull",
+        "deleteBasisOrNull",
         "nonConsensusTimestampMsOrNull"
       ],
       "fieldTypes": [
@@ -343,7 +348,20 @@
         "bytes32",
         "RdfMutationV1|null",
         "ChainBindingV1|null",
+        "DeleteBasisV1|null",
         "u64|null"
+      ]
+    },
+    "DeleteBasisV1": {
+      "fields": [
+        "expiresAtMs",
+        "curatorVectorIdOrNull",
+        "finalizedChainFrontierOrNull"
+      ],
+      "fieldTypes": [
+        "u64",
+        "bytes32|null",
+        "ChainFrontierV1|null"
       ]
     },
     "RdfMutationV1": {
@@ -997,16 +1015,21 @@
     "SnapshotEntryV1": {
       "fields": [
         "logicalKey",
+        "stateKind",
         "activeHeadIds",
         "stateDigest",
         "canonicalGraphBytes"
       ],
       "fieldTypes": [
         "bytes32",
+        "u8-enum",
         "sorted-unique<bytes32>",
         "bytes32",
         "bstr"
-      ]
+      ],
+      "enumFields": {
+        "1": "snapshotEntryState"
+      }
     },
     "SnapshotConflictV1": {
       "fields": [
