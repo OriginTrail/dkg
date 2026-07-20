@@ -635,35 +635,19 @@ export async function readSwmMetaPage(params: {
   // pages from the same plan instead of failing permanently.
   const cutoffIso = params.cutoffIso;
   const budgetKey = cache?.key ?? `swm-meta:${params.contextGraphId}`;
-  // Consume the explicit session refresh once: when the snapshot build crosses
-  // its budget, the immediate page-zero fallback must reuse the just-built plan
-  // instead of rebuilding (and re-counting) it against a moving store.
-  let planRefreshPending = params.refreshRowList === true;
-  const getPlan = async (
-    pageOffset: number,
-    pageSignal: AbortSignal | undefined,
-  ): Promise<FreshSwmMetaPlan> => {
-    const loadPlan = () => buildFreshSwmMetaPlan(
+  const getPlan = createSessionPlanGetter(
+    params.freshMetaPlanMemo,
+    params.rowListCacheKey,
+    params.refreshRowList === true,
+    (signal) => buildFreshSwmMetaPlan(
       params.store,
       candidateGraphs,
       cutoffIso,
       budgetKey,
-      pageSignal,
-    );
-    const refreshPlan = pageOffset === 0 && planRefreshPending;
-    if (refreshPlan) planRefreshPending = false;
-    const plan = params.freshMetaPlanMemo && params.rowListCacheKey
-      ? await params.freshMetaPlanMemo.get(params.rowListCacheKey, loadPlan, {
-        refresh: refreshPlan,
-        requireExisting: pageOffset > 0,
-        signal: pageSignal,
-      })
-      : await loadPlan();
-    if (!plan) {
-      throw new Error('Shared-memory meta sync session graph plan expired before page completion');
-    }
-    return plan;
-  };
+      signal,
+    ),
+    'Shared-memory meta sync session graph plan expired before page completion',
+  );
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) =>
     readFreshSwmMetaRowsPageFromPlan(
       params.store,
@@ -1463,36 +1447,18 @@ async function readPagedRowsFromExactGraphPlanLoader(
   planMemo: ExactGraphPagePlanMemo | undefined,
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
 ): Promise<SyncRow[]> {
-  // A small snapshot is first assembled into the row cache. If that build
-  // crosses its cap, readResponderRowsPage immediately retries page zero via
-  // the store-bounded path. Consume the explicit session refresh only once so
-  // that fallback reuses the exact graph/count plan instead of counting every
-  // graph twice.
-  let planRefreshPending = cache?.refresh === true;
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
     maxBytesEstimate: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
     pageRows: SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
   };
-  const getPlan = async (
-    pageOffset: number,
-    pageSignal: AbortSignal | undefined,
-  ): Promise<ExactGraphPagePlan> => {
-    const loadPlan = () => loadExactGraphPlan(pageSignal);
-    const refreshPlan = pageOffset === 0 && planRefreshPending;
-    if (refreshPlan) planRefreshPending = false;
-    const plan = planMemo && cache
-      ? await planMemo.get(cache.key, loadPlan, {
-        refresh: refreshPlan,
-        requireExisting: pageOffset > 0,
-        signal: pageSignal,
-      })
-      : await loadPlan();
-    if (!plan) {
-      throw new Error('Sync session exact-graph plan expired before page completion');
-    }
-    return plan;
-  };
+  const getPlan = createSessionPlanGetter(
+    planMemo,
+    cache?.key,
+    cache?.refresh === true,
+    (planSignal) => loadExactGraphPlan(planSignal),
+    'Sync session exact-graph plan expired before page completion',
+  );
   const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
     const plan = await getPlan(pageOffset, pageSignal);
     return readRowsPageFromExactGraphPlan(
@@ -1790,6 +1756,51 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
 function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudgetError {
   return error instanceof SyncRowSnapshotBudgetError &&
     (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
+}
+
+/**
+ * Session-plan getter shared by the plan-backed lanes (exact-graph and TTL SWM
+ * meta), owning the one lifecycle both must agree on:
+ *
+ *  - the explicit session refresh is consumed exactly ONCE, so when a snapshot
+ *    build crosses its budget, the immediate page-zero fallback reuses the
+ *    just-built plan instead of rebuilding (and re-counting) it against a
+ *    moving store;
+ *  - offset>0 REQUIRES the existing plan — silently rebuilding against moved
+ *    data would make the numeric offset skip or duplicate rows;
+ *  - memo expiry becomes the lane's session-expired error.
+ *
+ * The SWM data lane intentionally does not use this helper: it has no snapshot
+ * lane, so a single plan access per page means per-call refresh semantics are
+ * equivalent and simpler there.
+ */
+function createSessionPlanGetter<T>(
+  memo: {
+    get(
+      key: string,
+      load: () => Promise<T>,
+      options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    ): Promise<T | null>;
+  } | undefined,
+  cacheKey: string | undefined,
+  initialRefreshPending: boolean,
+  loadPlan: (signal?: AbortSignal) => Promise<T>,
+  expiredMessage: string,
+): (pageOffset: number, pageSignal: AbortSignal | undefined) => Promise<T> {
+  let planRefreshPending = initialRefreshPending;
+  return async (pageOffset, pageSignal) => {
+    const refreshPlan = pageOffset === 0 && planRefreshPending;
+    if (refreshPlan) planRefreshPending = false;
+    const plan = memo && cacheKey
+      ? await memo.get(cacheKey, () => loadPlan(pageSignal), {
+        refresh: refreshPlan,
+        requireExisting: pageOffset > 0,
+        signal: pageSignal,
+      })
+      : await loadPlan(pageSignal);
+    if (!plan) throw new Error(expiredMessage);
+    return plan;
+  };
 }
 
 /**
