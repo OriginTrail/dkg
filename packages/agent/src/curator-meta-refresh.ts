@@ -359,12 +359,17 @@ async function fetchAuthoritativeMetaSnapshot(
     contextGraphId,
     controlMetaQuads,
   );
+  // Supplying memberProof selects the fail-closed private post-approval
+  // contract. A public-only snapshot must not satisfy that request: public
+  // subscriptions reach this refresh without a member proof.
+  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
+    && hasAuthoritativePublicDefinition;
   const hasAuthoritativePrivateDefinition = hasAuthoritativePrivateMetaDefinition(
     contextGraphId,
     controlMetaQuads,
     options.memberProof,
   );
-  if (!hasAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
+  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
