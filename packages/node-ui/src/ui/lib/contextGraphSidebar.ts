@@ -104,3 +104,10 @@ export function belongsInContextOracleSidebar(cg: ContextGraph, identity: AgentS
   if (normalizeAccessPolicy(cg.accessPolicy) !== 'public') return false;
   return true;
 }
+
+export type ContextOracleEntryKind = 'catalogue' | 'project';
+
+/** Passive discoveries need explicit Browse/Subscribe actions, not project-row semantics. */
+export function classifyContextOracleEntry(cg: ContextGraph): ContextOracleEntryKind {
+  return cg.subscribed === true || cg.synced === true ? 'project' : 'catalogue';
+}

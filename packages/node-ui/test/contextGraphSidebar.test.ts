@@ -3,6 +3,7 @@ import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
   canonicalAgentDid,
+  classifyContextOracleEntry,
   computeSelectableProjects,
 } from '../src/ui/lib/contextGraphSidebar.js';
 import type { ContextGraph } from '../src/ui/stores/projects.js';
@@ -102,6 +103,20 @@ describe('contextGraphSidebar', () => {
       creator: 'did:dkg:agent:0x1000000000000000000000000000000000000000',
     } as ContextGraph;
     expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
+    expect(classifyContextOracleEntry(cg)).toBe('catalogue');
+  });
+
+  it('classifies an explicitly subscribed or synced Oracle entry as a project', () => {
+    expect(classifyContextOracleEntry({
+      id: 'subscribed',
+      name: 'Subscribed',
+      subscribed: true,
+    })).toBe('project');
+    expect(classifyContextOracleEntry({
+      id: 'synced',
+      name: 'Synced',
+      synced: true,
+    })).toBe('project');
   });
 
   it('neither oracle: private unsolicited', () => {

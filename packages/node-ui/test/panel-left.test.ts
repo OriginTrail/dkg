@@ -278,6 +278,54 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('Public Ready Graph');
   });
 
+  it('keeps a passive public catalogue result separate from project activation', async () => {
+    const { container } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{
+          id: 'public-passive',
+          name: 'Passive Public Graph',
+          accessPolicy: 'public',
+          callerInvolved: false,
+          subscribed: false,
+          synced: false,
+        } as any],
+        activeProjectId: null,
+      });
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
+        activeTabId: 'dashboard',
+      });
+    });
+
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    const browseButton = container.querySelector(
+      'button[aria-label="Browse Passive Public Graph"]',
+    ) as HTMLButtonElement | null;
+    const subscribeButton = container.querySelector(
+      'button[aria-label="Subscribe to Passive Public Graph"]',
+    ) as HTMLButtonElement | null;
+    expect(browseButton).toBeTruthy();
+    expect(subscribeButton).toBeTruthy();
+
+    await act(async () => { browseButton!.click(); });
+    expect(useTabsStore.getState().activeTabId).toBe('project:public-passive');
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+
+    await act(async () => { subscribeButton!.click(); });
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    expect(
+      (container.querySelector('#dkg-cg-invite') as HTMLTextAreaElement).value,
+    ).toBe('public-passive');
+    expect(container.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
+  });
+
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');

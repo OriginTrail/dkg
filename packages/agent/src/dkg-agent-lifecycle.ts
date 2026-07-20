@@ -143,6 +143,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
+import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -6909,13 +6910,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // definition above so private bootstrap still requires the current local
     // member delegation.
     const authoritativePublicDefinitionResult = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${metaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
-            <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?accessPolicy .
-          FILTER(isLiteral(?accessPolicy) && LCASE(REPLACE(STR(?accessPolicy), "^\\\\s+|\\\\s+$", "")) = "public")
-        }
-      }`,
+      buildAuthoritativePublicMetaAskQuery(contextGraphId),
     );
     if (
       authoritativePublicDefinitionResult.type === 'boolean' &&

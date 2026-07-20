@@ -4,7 +4,7 @@ import {
   validateInvite,
   formatJoinRequestError,
   joinRequestWasApproved,
-  shouldSubscribePublicGraph,
+  resolveJoinIntent,
 } from '../src/ui/components/Modals/JoinProjectModal.js';
 import { HttpError } from '../src/ui/api.js';
 
@@ -47,27 +47,32 @@ describe('JoinProjectModal invite parsing', () => {
         subscribed: false,
         synced: false,
       }];
-      expect(shouldSubscribePublicGraph(parsed, publicGraphs)).toBe(true);
+      expect(resolveJoinIntent('open-project', publicGraphs)).toMatchObject({
+        kind: 'publicSubscribe',
+        validationError: null,
+        idleLabel: 'Subscribe',
+      });
       expect(validateInvite(parsed, { allowBareContextGraphId: true })).toBeNull();
     });
 
     it('keeps an explicitly public graph on the subscribe path when an old curator invite is pasted', () => {
-      const parsed = parseInviteCode('open-project\n12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6');
-
-      expect(shouldSubscribePublicGraph(parsed, [{
+      expect(resolveJoinIntent('open-project\n12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6', [{
         id: 'open-project',
         accessPolicy: 'public',
-      }])).toBe(true);
+      }]).kind).toBe('publicSubscribe');
     });
 
     it('still requires a curator invite for a private or unknown bare context graph id', () => {
       const parsed = parseInviteCode('private-project');
-      expect(shouldSubscribePublicGraph(parsed, [{
+      expect(resolveJoinIntent('private-project', [{
         id: 'private-project',
         name: 'Private Project',
         accessPolicy: 'private',
-      }])).toBe(false);
-      expect(shouldSubscribePublicGraph(parsed, [])).toBe(false);
+      }])).toMatchObject({
+        kind: 'privateJoin',
+        validationError: expect.stringContaining('curator peer id'),
+      });
+      expect(resolveJoinIntent('private-project', []).kind).toBe('privateJoin');
       expect(validateInvite(parsed)).toContain('curator peer id');
     });
 

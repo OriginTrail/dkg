@@ -122,13 +122,61 @@ export function parseInviteCode(raw: string): ParsedInvite {
   return { cgId, curatorPeerId, legacyMultiaddr, hasUnparsedExtra };
 }
 
-export function shouldSubscribePublicGraph(
+function shouldSubscribePublicGraph(
   invite: ParsedInvite,
   contextGraphs: readonly Pick<ContextGraph, 'id' | 'accessPolicy'>[],
 ): boolean {
   return !invite.hasUnparsedExtra && contextGraphs.some((graph) => (
     graph.id === invite.cgId && normalizeAccessPolicy(graph.accessPolicy) === 'public'
   ));
+}
+
+interface JoinIntentBase {
+  invite: ParsedInvite;
+  validationError: string | null;
+  idleLabel: string;
+  sendingLabel: string;
+}
+
+export type JoinIntent =
+  | (JoinIntentBase & { kind: 'publicSubscribe' })
+  | (JoinIntentBase & { kind: 'privateJoin' });
+
+/** Resolve the modal's two user intents once, including validation and copy. */
+export function resolveJoinIntent(
+  rawInvite: string,
+  contextGraphs: readonly Pick<ContextGraph, 'id' | 'accessPolicy'>[],
+): JoinIntent {
+  const invite = parseInviteCode(rawInvite);
+  if (shouldSubscribePublicGraph(invite, contextGraphs)) {
+    return {
+      kind: 'publicSubscribe',
+      invite,
+      validationError: validateInvite(invite, { allowBareContextGraphId: true }),
+      idleLabel: 'Subscribe',
+      sendingLabel: 'Subscribing…',
+    };
+  }
+  return {
+    kind: 'privateJoin',
+    invite,
+    validationError: validateInvite(invite),
+    idleLabel: 'Request to Join',
+    sendingLabel: 'Sending request…',
+  };
+}
+
+async function warmInviteCuratorConnection(invite: ParsedInvite): Promise<void> {
+  if (invite.curatorPeerId) {
+    await connectToPeerIdWithTimeout(invite.curatorPeerId).catch(() => {});
+    return;
+  }
+  if (invite.legacyMultiaddr) {
+    console.warn(
+      '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+    );
+    await connectToPeerWithTimeout(invite.legacyMultiaddr).catch(() => {});
+  }
 }
 
 export function validateInvite(
@@ -300,6 +348,23 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     }
   }, [open, initialContextGraphId]);
 
+  const activateContextGraph = useCallback((graph: ContextGraph) => {
+    setActiveProject(graph.id);
+    openTab({ id: `project:${graph.id}`, label: graph.name || graph.id, closable: true });
+  }, [setActiveProject, openTab]);
+
+  const refreshAndOpenContextGraph = useCallback(async (
+    cgId: string,
+    fallback?: ContextGraph,
+  ): Promise<ContextGraph | undefined> => {
+    const { contextGraphs: freshList } = await fetchContextGraphs();
+    const freshContextGraphs: ContextGraph[] = freshList ?? [];
+    setContextGraphs(freshContextGraphs);
+    const graph = freshContextGraphs.find((candidate) => candidate.id === cgId) ?? fallback;
+    if (graph) activateContextGraph(graph);
+    return graph;
+  }, [setContextGraphs, activateContextGraph]);
+
   // Drive the post-approval flow: refresh the sidebar, focus the new
   // CG's tab, and hand off to the wire-workspace step. Idempotent —
   // safe to call from both the SSE join_approved handler and the
@@ -310,12 +375,8 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const transitionToApproved = useCallback(async (cgId: string) => {
     setPhase('approved');
     try {
-      const { contextGraphs: freshList } = await fetchContextGraphs();
-      setContextGraphs(freshList ?? []);
-      const joined = freshList?.find((cg: any) => cg.id === cgId);
+      const joined = await refreshAndOpenContextGraph(cgId);
       if (joined) {
-        setActiveProject(joined.id);
-        openTab({ id: `project:${joined.id}`, label: joined.name || joined.id, closable: true });
         setWiredProjectName(joined.name ?? cgId);
         setWiredCgId(cgId);
       }
@@ -324,7 +385,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       // modal and re-open the project from the (eventually-refreshed)
       // sidebar.
     }
-  }, [setContextGraphs, setActiveProject, openTab]);
+  }, [refreshAndOpenContextGraph]);
 
   // Auto-transition to wire-workspace when the curator approves a
   // pending request. The SSE event arrives when the daemon's
@@ -354,40 +415,29 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   if (!open) return null;
 
   const handleRequestJoin = async () => {
-    const invite = parseInviteCode(inviteCode);
-    const publicSubscription = shouldSubscribePublicGraph(invite, contextGraphs);
-    const inviteError = validateInvite(invite, {
-      allowBareContextGraphId: publicSubscription,
-    });
-    if (inviteError) {
-      setError(inviteError);
+    const intent = resolveJoinIntent(inviteCode, contextGraphs);
+    if (intent.validationError) {
+      setError(intent.validationError);
       return;
     }
-    const { cgId, curatorPeerId, legacyMultiaddr } = invite;
+    const { cgId, curatorPeerId } = intent.invite;
 
     setError(null);
 
-    if (publicSubscription) {
+    if (intent.kind === 'publicSubscribe') {
       setPhase('sending');
       try {
-        const existing = contextGraphs.find((cg: any) => cg.id === cgId);
-        if (!existing?.subscribed) {
-          // Public read/subscription is an explicit local opt-in. The daemon
-          // queues the same tracked durable+SWM catch-up job used by the CLI;
-          // no curator approval or member delegation participates.
-          await subscribeToContextGraph(cgId);
-        }
-        const { contextGraphs: freshList } = await fetchContextGraphs();
-        setContextGraphs(freshList ?? []);
-        const subscribed = freshList?.find((cg: any) => cg.id === cgId) ?? existing;
-        if (subscribed) {
-          setActiveProject(subscribed.id);
-          openTab({
-            id: `project:${subscribed.id}`,
-            label: subscribed.name || subscribed.id,
-            closable: true,
-          });
-        }
+        const existing = contextGraphs.find((graph) => graph.id === cgId);
+        // Public read/subscription is an explicit local opt-in. Always hand the
+        // intent to the daemon: `subscribed=true` is not readiness proof, and
+        // the idempotent route either reuses an active/done job or queues the
+        // durable+SWM catch-up needed by a subscribed-but-unsynced graph.
+        // A pasted invite may be the only fresh source hint, so warm that
+        // connection before the daemon snapshots its preferred/fallback peer
+        // cohort for the catch-up job. Dial failure remains best-effort.
+        await warmInviteCuratorConnection(intent.invite);
+        await subscribeToContextGraph(cgId);
+        await refreshAndOpenContextGraph(cgId, existing);
         onClose();
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Could not subscribe to this public context graph.');
@@ -399,10 +449,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     // Pre-check: if we already have this CG locally (previous join, or
     // curator added us via add-agent), just open it. No need to re-sign
     // a delegation we don't need.
-    const existing = contextGraphs.find((cg: any) => cg.id === cgId);
+    const existing = contextGraphs.find((graph) => graph.id === cgId);
     if (existing) {
-      setActiveProject(existing.id);
-      openTab({ id: `project:${existing.id}`, label: existing.name || existing.id, closable: true });
+      activateContextGraph(existing);
       onClose();
       return;
     }
@@ -413,14 +462,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       // Warm the curator path so the daemon's targeted `forwardJoinRequest`
       // dial doesn't pay the full DHT-walk + relay-handshake cost. Best-
       // effort — the daemon will retry via DHT internally.
-      if (curatorPeerId) {
-        await connectToPeerIdWithTimeout(curatorPeerId).catch(() => {});
-      } else if (legacyMultiaddr) {
-        console.warn(
-          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
-        );
-        await connectToPeerWithTimeout(legacyMultiaddr).catch(() => {});
-      }
+      await warmInviteCuratorConnection(intent.invite);
 
       const signed = await signJoinRequest(cgId);
       const agentName = await fetchCurrentAgent().then((i) => i.name).catch(() => undefined);
@@ -510,10 +552,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const pending = phase === 'pending';
   const approved = phase === 'approved';
   const rejected = phase === 'rejected';
-  const publicSubscription = shouldSubscribePublicGraph(
-    parseInviteCode(inviteCode),
-    contextGraphs,
-  );
+  const intent = resolveJoinIntent(inviteCode, contextGraphs);
 
   return (
     <div
@@ -607,14 +646,12 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             disabled={!inviteCode.trim() || sending || pending || approved}
           >
             {sending
-              ? (publicSubscription ? 'Subscribing…' : 'Sending request…')
+              ? intent.sendingLabel
               : pending
                 ? 'Awaiting approval…'
                 : approved
                   ? 'Approved'
-                  : publicSubscription
-                    ? 'Subscribe'
-                    : 'Request to Join'}
+                  : intent.idleLabel}
           </button>
         </div>
       </div>
