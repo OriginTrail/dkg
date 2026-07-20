@@ -14,6 +14,7 @@ import {
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
+  type LiftJobBroadcastMetadata,
   type LiftJobHex,
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
@@ -899,18 +900,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private async writeJob(job: LiftJob): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(serializeJob(job, this.graphUri));
-    // Durability before the on-chain send. The 'broadcast' record is written
-    // inside the write-ahead hook (EVMChainAdapterBase.dispatchSerializedV10Write
-    // awaits onBroadcast strictly before the tx is sent). Without an fsync here,
-    // a daemon crash in the flush->send window loses the record: on restart the
-    // job reads back as 'validated', recover() resets it, and it re-broadcasts
-    // with a fresh hash -> a double on-chain submission. Flushing on this
-    // execute-capable transition closes that window. Scoped to 'broadcast' so a
-    // whole-store snapshot is not taken on every state change (matches the
-    // promote queue's per-write flush intent, bounded to where it is load-bearing).
-    if (job.status === 'broadcast') {
-      await this.store.flush?.();
-    }
   }
 
   private async deleteJob(jobId: string): Promise<void> {
@@ -1131,24 +1120,39 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
+    await this.recordDurableBroadcastBeforeSend(current, {
+      txHash: params.txHash,
+      walletId: params.walletId,
+      merkleRoot: params.merkleRoot,
+      publicByteSize: params.publicByteSize,
+    });
+  }
+
+  /**
+   * The single pre-send write-ahead boundary for the KA VM publish path: record
+   * the 'broadcast' transition and make it fsync-durable BEFORE the caller sends
+   * the tx. Runs inside the adapter's `onBroadcast` hook, which is awaited
+   * strictly before `sendSignedTransactionAndWait` (fail-closed).
+   *
+   * Durability is scoped here — not in the generic `writeJob`/`update` — so the
+   * whole-store fsync only happens at this before-send boundary (raw-lift's
+   * post-send 'broadcast' write, and every other state change, stay flush-free).
+   *
+   * On a write-ahead failure (the fsync, or the transition itself) the tx was
+   * never sent, so restore the durable prior job: the store must never report a
+   * 'broadcast' that was not fsync-durable, or recovery would chase a tx that
+   * never landed. The prior job is 'validated' (asserted by the sole caller), so
+   * restoring it takes no fsync and cannot re-fail here. The caller then fails
+   * the job from its pre-broadcast state, off the chain-recovery track.
+   */
+  private async recordDurableBroadcastBeforeSend(
+    current: LiftJob,
+    broadcast: LiftJobBroadcastMetadata,
+  ): Promise<void> {
     try {
-      await this.update(params.jobId, 'broadcast', {
-        broadcast: {
-          txHash: params.txHash,
-          walletId: params.walletId,
-          merkleRoot: params.merkleRoot,
-          publicByteSize: params.publicByteSize,
-        },
-      });
+      await this.update(current.jobId, 'broadcast', { broadcast });
+      await this.store.flush?.();
     } catch (error) {
-      // Write-ahead durability failure BEFORE the on-chain send. `update` mutates
-      // the in-memory row to 'broadcast' and only then fsyncs (writeJob); if that
-      // fsync throws, the store is left showing an un-fsync'd 'broadcast' even
-      // though the adapter fails closed and never sends the tx. Restore the durable
-      // prior 'validated' job so recovery never treats a never-sent tx as on-chain
-      // state — the caller then fails the job from its pre-broadcast state, off the
-      // chain-recovery track. writeJob does not fsync a 'validated' row, so the
-      // rollback itself cannot re-fail here.
       await this.writeJob(current);
       throw error;
     }

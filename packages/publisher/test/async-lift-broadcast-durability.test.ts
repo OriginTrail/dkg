@@ -11,14 +11,15 @@ import { storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolu
 
 // Regression: the mutable 'broadcast' record must be fsync-durable BEFORE the
 // on-chain send. It is written inside the write-ahead hook (onBroadcast, awaited
-// strictly before the tx sends). Without a flush there, a daemon crash in the
+// strictly before the tx sends) via recordDurableBroadcastBeforeSend — the sole
+// pre-send durability boundary. Without the flush there, a daemon crash in the
 // flush->send window loses the record; on restart the job reads back as
 // 'validated', recover() resets it, and it re-broadcasts with a fresh hash — a
-// double on-chain submission. writeJob must flush on the execute-capable
-// 'broadcast' transition, and only there (to avoid a whole-store snapshot on
-// every state change). A flush FAILURE must not leave a phantom 'broadcast'
-// record: the tx was never sent (the adapter fails closed), so the job must
-// stay retryable from its pre-broadcast state, never enter chain recovery.
+// double on-chain submission. Durability is scoped to that helper (not the
+// generic update/writeJob), so no other transition takes a whole-store fsync. A
+// flush FAILURE must not leave a phantom 'broadcast': the tx was never sent (the
+// adapter fails closed), so the job rolls back to its pre-broadcast state, off
+// the chain-recovery track.
 describe('async lift publisher broadcast durability', () => {
   let now = 1_000;
   let ids = 0;
@@ -82,26 +83,7 @@ describe('async lift publisher broadcast durability', () => {
     };
   }
 
-  const VALIDATION_DATA = {
-    validation: {
-      canonicalRoots: [] as string[],
-      canonicalRootMap: {},
-      swmQuadCount: 2,
-      authorityProofRef: 'knowledge-asset-lifecycle',
-      transitionType: 'CREATE' as const,
-    },
-  };
-
   const TX_HASH = `0x${'cd'.repeat(32)}` as `0x${string}`;
-
-  async function driveToValidated(
-    publisher: TripleStoreAsyncLiftPublisher,
-  ): Promise<string> {
-    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    await publisher.claimNext('wallet-1');
-    await publisher.update(jobId, 'validated', VALIDATION_DATA);
-    return jobId;
-  }
 
   async function stageShareSnapshot(targetStore: OxigraphStore): Promise<void> {
     const request = kaVmPublishRequest();
@@ -120,37 +102,54 @@ describe('async lift publisher broadcast durability', () => {
     });
   }
 
-  it('fsyncs the store on the broadcast transition, and not on earlier transitions', async () => {
-    const publisher = createPublisher();
+  // A VM-publish executor that fires the pre-send write-ahead (onPhase → records
+  // 'broadcast'), then stops before the real send. Drives the exact pre-send
+  // durability boundary through the public processNext() path.
+  function firesBroadcastThenStops(): NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> {
+    return {
+      execute: async (input) => {
+        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+        throw new Error('stop after the durable write-ahead');
+      },
+    };
+  }
 
+  it('fsyncs once on the pre-send broadcast write-ahead, not on the earlier transitions', async () => {
     let flushCount = 0;
+    let flushCountBeforeBroadcast = -1;
     const orig = store.flush?.bind(store);
     (store as unknown as { flush?: () => Promise<void> }).flush = async () => {
       flushCount += 1;
       await orig?.();
     };
 
-    const jobId = await driveToValidated(publisher);
-    // accepted / claimed / validated are not execute-capable — no fsync.
-    expect(flushCount).toBe(0);
-
-    await publisher.update(jobId, 'broadcast', {
-      broadcast: { txHash: TX_HASH, walletId: 'wallet-1' },
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          // accepted (enqueue) / claimed (claimNext) / validated (update) have all
+          // run by now and must not have fsync'd.
+          flushCountBeforeBroadcast = flushCount;
+          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          throw new Error('stop after the durable write-ahead');
+        },
+      },
     });
-    // broadcast is written inside the pre-send write-ahead hook — must fsync.
-    expect(flushCount).toBe(1);
 
-    const persisted = await publisher.getStatus(jobId);
-    expect(persisted?.status).toBe('broadcast');
-    expect(persisted?.broadcast?.txHash).toBe(TX_HASH);
+    await stageShareSnapshot(store);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(flushCountBeforeBroadcast).toBe(0);
+    // Exactly one fsync — the pre-send write-ahead; the post-throw catch path adds none.
+    expect(flushCount).toBe(1);
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
   });
 
-  it('awaits the broadcast fsync before the transition resolves', async () => {
+  it('awaits the broadcast fsync before the pre-send write-ahead resolves', async () => {
     // Proves the fsync is AWAITED, not fire-and-forget: a regression that dropped
-    // `await` (calling flush without waiting) would let update() resolve before
-    // the record is durable, reopening the flush->send crash window.
-    const publisher = createPublisher();
-
+    // `await` on store.flush?.() would let the write-ahead resolve before the
+    // record is durable, reopening the flush->send crash window.
     const gate: { release: () => void } = { release: () => {} };
     let flushStarted = false;
     (store as unknown as { flush?: () => Promise<void> }).flush = async () => {
@@ -160,49 +159,51 @@ describe('async lift publisher broadcast durability', () => {
       });
     };
 
-    const jobId = await driveToValidated(publisher);
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenStops(),
+    });
+
+    await stageShareSnapshot(store);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
 
     let settled = false;
-    const transition = publisher
-      .update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } })
-      .then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
+    const proc = publisher.processNext('wallet-1').then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
 
-    // Let microtasks + a macrotask drain: the transition must still be pending,
-    // blocked on the in-flight fsync.
+    // Let microtasks + a macrotask drain: processNext must still be pending,
+    // blocked on the in-flight pre-send fsync.
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(flushStarted).toBe(true);
     expect(settled).toBe(false);
 
     gate.release();
-    await transition;
+    await proc;
     expect(settled).toBe(true);
-
-    const persisted = await publisher.getStatus(jobId);
-    expect(persisted?.status).toBe('broadcast');
   });
 
   it('persists the broadcast record across a restart (fresh store from disk)', async () => {
-    // Proves durability, not just that flush() was called: drive to broadcast on
-    // a persistent store, then reopen a FRESH store+publisher from the same path
-    // and confirm the record survived. A crash-recovery reads 'broadcast' (the
-    // chain-recovery path) instead of 'validated' (reset-and-resend).
+    // Proves durability, not just that flush() was called: drive the pre-send
+    // write-ahead on a persistent store, then reopen a FRESH store+publisher from
+    // the same path and confirm the record survived. A crash-recovery reads
+    // 'broadcast' (chain-recovery path) instead of 'validated' (reset-and-resend).
     const dir = mkdtempSync(join(tmpdir(), 'lift-broadcast-durability-'));
     tempDirs.push(dir);
     const persistPath = join(dir, 'store.nq');
 
     const store1 = new OxigraphStore(persistPath);
-    const publisher1 = createPublisher(store1);
-    const jobId = await driveToValidated(publisher1);
-    await publisher1.update(jobId, 'broadcast', {
-      broadcast: { txHash: TX_HASH, walletId: 'wallet-1', merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}` },
+    const publisher1 = createPublisher(store1, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenStops(),
     });
+    await stageShareSnapshot(store1);
+    const jobId = await publisher1.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher1.processNext('wallet-1');
+    expect(processed?.status).toBe('broadcast');
 
     const store2 = new OxigraphStore(persistPath);
     const publisher2 = createPublisher(store2);
@@ -217,14 +218,14 @@ describe('async lift publisher broadcast durability', () => {
     // Regression (#1851 review): the write-ahead fsync runs AFTER the in-memory
     // 'broadcast' transition. If it throws, the store would show 'broadcast'
     // although the adapter fails closed and never sends the tx. The job must roll
-    // back to a retryable pre-broadcast state, never be reported/left as
-    // 'broadcast' (which recovery would chase as an on-chain tx that never landed).
+    // back to a pre-broadcast state, never be reported/left as 'broadcast' (which
+    // recovery would chase as an on-chain tx that never landed).
     let sent = false;
     const publisher = createPublisher(store, {
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
           try {
-            // Records 'broadcast' (write-ahead) -> writeJob -> flush (rejects).
+            // Records 'broadcast' (write-ahead) -> flush (rejects) -> rollback.
             await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
           } catch (hookErr) {
             // Mirror the adapter's fail-closed rewrap (evm-adapter-base.ts:1609):
@@ -239,7 +240,7 @@ describe('async lift publisher broadcast durability', () => {
       },
     });
 
-    // fsync is only invoked on the 'broadcast' transition; fault-inject it.
+    // fsync is only invoked on the pre-send broadcast write-ahead; fault-inject it.
     (store as unknown as { flush?: () => Promise<void> }).flush = async () => {
       throw new Error('ENOSPC: no space left on device');
     };
