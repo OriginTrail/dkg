@@ -14,6 +14,7 @@ import {
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
+  type LiftJobBroadcastMetadata,
   type LiftJobHex,
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
@@ -611,6 +612,16 @@ export class TripleStoreAsyncLiftPublisher
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
       if (!executorReturned && current?.status === 'broadcast') {
+        // The tx send happens strictly AFTER the write-ahead durably records
+        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
+        // failure rolls the transition back). So a durable 'broadcast' here means
+        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend. A
+        // pre-send failure (fsync failed → rolled back to 'validated', or an error
+        // before the write-ahead) does NOT reach here and is recorded as 'failed'
+        // below; a failed KA VM job is never chain-recovery-chased
+        // (canRetryFailedRecovery === false), and its code comes from the publish
+        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
         return current;
       }
       const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
@@ -1188,14 +1199,42 @@ export class TripleStoreAsyncLiftPublisher
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    await this.update(params.jobId, 'broadcast', {
-      broadcast: {
-        txHash: params.txHash,
-        walletId: params.walletId,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      },
+    await this.recordDurableBroadcastBeforeSend(current, {
+      txHash: params.txHash,
+      walletId: params.walletId,
+      merkleRoot: params.merkleRoot,
+      publicByteSize: params.publicByteSize,
     });
+  }
+
+  /**
+   * The single pre-send write-ahead boundary for the KA VM publish path: record
+   * the 'broadcast' transition and make it fsync-durable BEFORE the caller sends
+   * the tx. Runs inside the adapter's `onBroadcast` hook, which is awaited
+   * strictly before `sendSignedTransactionAndWait` (fail-closed).
+   *
+   * Durability is scoped here — not in the generic `writeJob`/`update` — so the
+   * whole-store fsync only happens at this before-send boundary (raw-lift's
+   * post-send 'broadcast' write, and every other state change, stay flush-free).
+   *
+   * On a write-ahead failure (the fsync, or the transition itself) the tx was
+   * never sent, so restore the durable prior job: the store must never report a
+   * 'broadcast' that was not fsync-durable, or recovery would chase a tx that
+   * never landed. The prior job is 'validated' (asserted by the sole caller), so
+   * restoring it takes no fsync and cannot re-fail here. The caller then fails
+   * the job from its pre-broadcast state, off the chain-recovery track.
+   */
+  private async recordDurableBroadcastBeforeSend(
+    current: LiftJob,
+    broadcast: LiftJobBroadcastMetadata,
+  ): Promise<void> {
+    try {
+      await this.update(current.jobId, 'broadcast', { broadcast });
+      await this.store.flush?.();
+    } catch (error) {
+      await this.writeJob(current);
+      throw error;
+    }
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {
