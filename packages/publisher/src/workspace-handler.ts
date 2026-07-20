@@ -286,6 +286,27 @@ export class SharedMemoryHandler {
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
+  /**
+   * LIVE on-chain proof that a CG's access policy is public (`0`).
+   *
+   * The SWM encryption requirement must be decided from the SAME authority on
+   * both sides of the wire. The SENDER decides with this predicate
+   * (`resolveWorkspaceRecipientsGated` -> `isContextGraphPublicOnChain`) and
+   * sends PLAINTEXT for a public CG regardless of any agent gate, because on a
+   * public CG the allowlist governs PUBLISH AUTHORITY, not READ ACCESS — there
+   * is nothing to keep confidential. Without the same predicate here, the
+   * receiver decided from local `allowedAgent`/`participantAgent` triples alone
+   * and permanently dropped those plaintext writes, which silently broke every
+   * member->curator SWM share on a public/curated CG.
+   *
+   * Returns true ONLY on a live public proof. Absent oracle, `false`, or a
+   * throw all mean "not proven public" and keep the encryption requirement —
+   * the same fail-closed discipline the sender uses, so a stale mapping or an
+   * RPC flake can never become a plaintext-acceptance hole.
+   */
+  private readonly publicAccessPolicyOnChainOracle?: (
+    contextGraphId: string,
+  ) => Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -406,6 +427,16 @@ export class SharedMemoryHandler {
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
+      /**
+       * Live on-chain public-access proof, mirroring the sender's
+       * `isContextGraphPublicOnChain`. Optional; when omitted the receiver
+       * keeps the pre-existing (fail-closed) behaviour and requires
+       * encryption for every agent-gated CG.
+       * See {@link SharedMemoryHandler#publicAccessPolicyOnChainOracle}.
+       */
+      publicAccessPolicyOnChainOracle?: (
+        contextGraphId: string,
+      ) => Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -464,6 +495,7 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
@@ -1018,7 +1050,17 @@ export class SharedMemoryHandler {
         }
       }
 
-      const requiresEncryptedPayload = hasPrivateAccessPolicy || agentGateAddresses !== null;
+      // A PRIVATE CG always requires encryption. An agent gate requires it too,
+      // EXCEPT on a CG proven public on-chain: there the allowlist governs
+      // publish authority, not read access, so the sender deliberately gossips
+      // plaintext (`resolveWorkspaceRecipientsGated`). Deciding here from local
+      // gate triples alone disagreed with that and permanently dropped every
+      // member->curator SWM share on a public/curated CG. Both sides now read
+      // the same live on-chain predicate, and both fail closed when it cannot
+      // prove public.
+      const gateRequiresEncryption = agentGateAddresses !== null
+        && !(await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx));
+      const requiresEncryptedPayload = hasPrivateAccessPolicy || gateRequiresEncryption;
       if (requiresEncryptedPayload && !decoded.encryptedPayload && !decoded.senderKeyMessage) {
         const reason = `Sender Key encrypted workspace payload required for private or agent-gated context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
@@ -2066,6 +2108,35 @@ export class SharedMemoryHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * True only on a LIVE on-chain proof that this CG's access policy is public.
+   *
+   * Fail-closed by construction: no oracle, a `false` answer, or a throw all
+   * yield `false` ("not proven public"), which keeps the encryption
+   * requirement. This mirrors the sender's `isContextGraphPublicOnChain` so the
+   * two sides of the wire cannot disagree about whether plaintext SWM is
+   * acceptable. A throw is logged rather than swallowed silently — a
+   * persistently failing probe means agent-gated public CGs keep rejecting
+   * plaintext, which is safe but worth diagnosing.
+   */
+  private async isContextGraphProvenPublicOnChain(
+    contextGraphId: string,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    if (!this.publicAccessPolicyOnChainOracle) return false;
+    try {
+      return await this.publicAccessPolicyOnChainOracle(contextGraphId);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `public-access on-chain probe failed for "${contextGraphId}" — treating as NOT public `
+        + `(fail-closed: agent-gated SWM keeps requiring encryption): `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
