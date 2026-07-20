@@ -3,6 +3,7 @@ import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
   canonicalAgentDid,
+  classifyContextOracleEntry,
   computeSelectableProjects,
 } from '../src/ui/lib/contextGraphSidebar.js';
 import type { ContextGraph } from '../src/ui/stores/projects.js';
@@ -93,12 +94,7 @@ describe('contextGraphSidebar', () => {
     expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
   });
 
-  it('oracle: public, not mine, NEITHER subscribed nor synced — excluded as stale', () => {
-    // The Oracle should NOT show graphs the daemon has only ever heard about
-    // via gossip without any actual interaction. On a long-running testnet
-    // node those stale entries dominate the list (hundreds of one-off
-    // smoke/test CGs whose curators are long gone). A user who wants to join
-    // such a CG can still paste its ID into "Join Project" directly.
+  it('oracle: discovered public graph is browseable before subscription or sync', () => {
     const cg = {
       id: 'x',
       name: 'n',
@@ -106,7 +102,21 @@ describe('contextGraphSidebar', () => {
       accessPolicy: 'public',
       creator: 'did:dkg:agent:0x1000000000000000000000000000000000000000',
     } as ContextGraph;
-    expect(belongsInContextOracleSidebar(cg, id)).toBe(false);
+    expect(belongsInContextOracleSidebar(cg, id)).toBe(true);
+    expect(classifyContextOracleEntry(cg)).toBe('catalogue');
+  });
+
+  it('classifies an explicitly subscribed or synced Oracle entry as a project', () => {
+    expect(classifyContextOracleEntry({
+      id: 'subscribed',
+      name: 'Subscribed',
+      subscribed: true,
+    })).toBe('project');
+    expect(classifyContextOracleEntry({
+      id: 'synced',
+      name: 'Synced',
+      synced: true,
+    })).toBe('project');
   });
 
   it('neither oracle: private unsolicited', () => {
