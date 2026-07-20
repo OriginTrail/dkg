@@ -3,10 +3,11 @@ import { dhtProtocolForNetwork } from '../src/constants.js';
 
 const mocks = vi.hoisted(() => ({
   kadOptions: [] as any[],
+  identifyPush: vi.fn(async () => undefined),
   createLibp2p: vi.fn(async (options: any) => ({
     peerId: { toString: () => 'mock-peer' },
     peerStore: { merge: vi.fn() },
-    services: options.services,
+    services: { ...options.services, identifyPush: { push: mocks.identifyPush } },
     getConnections: vi.fn(() => []),
     getMultiaddrs: vi.fn(() => []),
     getPeers: vi.fn(() => []),
@@ -34,7 +35,23 @@ const REMOTE_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 describe('DKGNode DHT network identity wiring', () => {
   afterEach(() => {
     mocks.kadOptions.length = 0;
+    mocks.identifyPush.mockClear();
     mocks.createLibp2p.mockClear();
+  });
+
+  it('wires identify push and exposes an explicit protocol-advertisement refresh', async () => {
+    const { DKGNode } = await import('../src/node.js');
+    const node = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+
+    await expect(node.pushProtocolAdvertisement()).rejects.toThrow('DKGNode not started');
+    await node.start();
+    expect(mocks.createLibp2p.mock.calls[0][0].services.identifyPush).toEqual(expect.any(Function));
+    await node.pushProtocolAdvertisement();
+    expect(mocks.identifyPush).toHaveBeenCalledOnce();
+    await node.stop();
   });
 
   it('passes the network-scoped DHT protocol into kadDHT during start', async () => {

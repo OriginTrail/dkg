@@ -194,6 +194,34 @@ describe('WAL runtime lifecycle', () => {
     expect(existsSync(resolved.paths.root)).toBe(false);
   });
 
+  it('tracks daemon-owned protocol registration and unregisters it before stop', async () => {
+    const resolved = await configuration('parallel');
+    const runtime = createWalRuntime(resolved)!;
+    expect(() => runtime.registerProtocols(() => {})).toThrowError(expect.objectContaining({
+      code: 'WAL_RUNTIME_NOT_READY',
+    }));
+    await runtime.start();
+    expect(() => runtime.registerProtocols(undefined as never)).toThrowError(expect.objectContaining({
+      code: 'WAL_INVALID_RUNTIME_CONFIGURATION',
+    }));
+    const unregister = vi.fn();
+    const release = runtime.registerProtocols(unregister);
+    expect(runtime.status().protocolsRegistered).toBe(true);
+    expect(() => runtime.registerProtocols(() => {})).toThrowError(expect.objectContaining({
+      code: 'WAL_RUNTIME_BLOCKED',
+    }));
+    release();
+    release();
+    expect(unregister).toHaveBeenCalledTimes(1);
+    expect(runtime.status().protocolsRegistered).toBe(false);
+
+    const unregisterAtStop = vi.fn();
+    runtime.registerProtocols(unregisterAtStop);
+    await runtime.stop();
+    expect(unregisterAtStop).toHaveBeenCalledTimes(1);
+    expect(runtime.status().protocolsRegistered).toBe(false);
+  });
+
   it('rejects a symlinked WAL root before writing through it', async () => {
     const resolved = await configuration('parallel');
     const outside = await mkdtemp(join(tmpdir(), 'dkg-wal-runtime-outside-'));

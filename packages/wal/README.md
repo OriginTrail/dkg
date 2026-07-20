@@ -68,6 +68,14 @@ or transfer worker and registers no network protocol; those are subsequent
 tasks. The scaffold only makes lifecycle, isolation, authority, and operator
 visibility enforceable before that work begins.
 
+The current daemon integration registers all three `/dkg/10.1.0/wal-*`
+families after libp2p startup in `parallel` mode and refreshes the standard
+identify advertisement. Only authenticated `GET_CAPABILITIES` is active at
+this milestone; reconciliation and object methods fail closed as unavailable
+until their daemon services are connected. `legacy` mode still creates no WAL
+runtime or WAL protocol registration, and `parallel` still reports legacy as
+production authority with zero WAL workers.
+
 ## Canonical protocol identities
 
 WAL-003 implements the production byte and identity layer exported as

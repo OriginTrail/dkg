@@ -772,18 +772,18 @@ and VM prerequisite is satisfied.
 
 ### Acceptance area
 
-- [ ] No incomplete WAL object, policy, or causal set changes canonical or
+- [x] No incomplete WAL object, policy, or causal set changes canonical or
       shadow RDF.
-- [ ] Every validation step has focused valid/invalid tests and the documented
+- [x] Every validation step has focused valid/invalid tests and the documented
       fail-closed order, including private authorization before disclosure.
-- [ ] Parent cycles, excessive closure depth, cross-view references, policy
+- [x] Parent cycles, excessive closure depth, cross-view references, policy
       substitution, author equivocation, and VM evidence substitution are
       rejected or blocked exactly as specified.
-- [ ] Atomic batch crash tests leave all WAL objects staged or the entire closed batch
+- [x] Atomic batch crash tests leave all WAL objects staged or the entire closed batch
       admitted and queued; no half-admitted causal state is visible.
-- [ ] Quarantine byte/time/count limits work across restart and cannot evict or
+- [x] Quarantine byte/time/count limits work across restart and cannot evict or
       overwrite valid canonical objects.
-- [ ] Replaying the same bytes through every ingress path yields the same
+- [x] Replaying the same bytes through every ingress path yields the same
       admission result and stable reason code.
 
 ---

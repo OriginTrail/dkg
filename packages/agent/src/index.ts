@@ -47,7 +47,12 @@ export {
   type DkgWalSenderKeyEpoch,
   type DkgWalSenderKeyState,
 } from './wal/private-payload-adapter.js';
-export { registerWalWireProtocols } from './wal/wire-protocol.js';
+export { asWalRawProtocolRouter, registerWalWireProtocols } from './wal/wire-protocol.js';
+export {
+  DkgWalWireRuntime,
+  createDkgWalWireRuntime,
+  type DkgWalWireRuntimeOptions,
+} from './wal/wire-runtime.js';
 export {
   createDkgWalProviderResolutionAdapter,
   type DkgWalProviderResolutionAdapterOptions,

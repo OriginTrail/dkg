@@ -15,6 +15,7 @@ export default defineConfig({
       : [
           'test/api-client.test.ts',
           'test/agent-connect-routes.test.ts',
+          'test/wal-capabilities-route.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',

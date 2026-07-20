@@ -36,6 +36,10 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_SYNC_MODE=parallel
+#                 Start every node with the WAL shadow runtime and raw WAL
+#                 protocols enabled. Omit (or set legacy) for the unchanged
+#                 production-authoritative legacy sync path.
 #
 set -euo pipefail
 
@@ -617,6 +621,19 @@ create_node_config() {
       ;;
   esac
 
+  local wal_sync_block=""
+  case "${DEVNET_SYNC_MODE:-legacy}" in
+    legacy)
+      ;;
+    parallel)
+      wal_sync_block='"sync": { "mode": "parallel" },'
+      ;;
+    *)
+      log "ERROR: DEVNET_SYNC_MODE must be legacy or parallel"
+      return 1
+      ;;
+  esac
+
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
   # trail) and a fast tick (5s) so the e2e test sees a submitted
@@ -639,6 +656,7 @@ create_node_config() {
   "contextGraphs": ["devnet-test", "devnet-isolation"],
   "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
+  ${wal_sync_block}
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,

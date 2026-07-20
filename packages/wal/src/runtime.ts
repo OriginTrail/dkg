@@ -229,6 +229,7 @@ export class WalRuntime {
   private lifecycle: WalRuntimeLifecycle = 'created';
   private blockedReason: WalRuntimeStatus['blockedReason'] = null;
   private cutoverVerified = false;
+  private unregisterProtocols: (() => void) | null = null;
 
   constructor(
     readonly configuration: ResolvedWalRuntimeConfiguration,
@@ -250,7 +251,7 @@ export class WalRuntime {
         this.configuration.mode === 'wal' && this.cutoverVerified && runtimeWasReady ? 'wal' : 'legacy',
       shadowEnabled: this.configuration.mode === 'parallel',
       runtimeRegistered: true,
-      protocolsRegistered: false,
+      protocolsRegistered: this.unregisterProtocols !== null,
       workersActive: 0,
       protocolVersion: this.configuration.protocolVersion,
       adapterVersion: this.configuration.adapterVersion,
@@ -312,6 +313,24 @@ export class WalRuntime {
     return { pending: 0 };
   }
 
+  registerProtocols(unregister: () => void): () => void {
+    if (this.lifecycle !== 'ready') {
+      throw new WalRuntimeError('WAL_RUNTIME_NOT_READY', 'WAL protocol registration requires a ready runtime');
+    }
+    if (typeof unregister !== 'function') {
+      throw new WalRuntimeError('WAL_INVALID_RUNTIME_CONFIGURATION', 'WAL protocol unregister callback is required');
+    }
+    if (this.unregisterProtocols !== null) {
+      throw new WalRuntimeError('WAL_RUNTIME_BLOCKED', 'WAL protocols are already registered');
+    }
+    this.unregisterProtocols = unregister;
+    return () => {
+      if (this.unregisterProtocols !== unregister) return;
+      unregister();
+      this.unregisterProtocols = null;
+    };
+  }
+
   async drain(): Promise<WalRuntimeStatus> {
     if (this.lifecycle === 'ready') {
       this.lifecycle = 'draining';
@@ -323,6 +342,11 @@ export class WalRuntime {
   async stop(): Promise<WalRuntimeStatus> {
     if (this.lifecycle === 'stopped') return this.status();
     const hadDurableState = this.lifecycle === 'ready' || this.lifecycle === 'draining';
+    const unregister = this.unregisterProtocols;
+    if (unregister !== null) {
+      unregister();
+      this.unregisterProtocols = null;
+    }
     this.lifecycle = 'stopped';
     if (hadDurableState) await this.persistLifecycle();
     return this.status();

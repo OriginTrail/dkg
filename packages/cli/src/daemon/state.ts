@@ -13,6 +13,7 @@
 // object reference, e.g. `daemonState.isUpdating = true`.
 
 import type { WalRuntime } from '@origintrail-official/dkg-wal';
+import type { DkgWalWireRuntime } from '@origintrail-official/dkg-agent';
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { DkgConfig } from '../config.js';
 import { isStandaloneInstall } from '../config.js';
@@ -44,6 +45,8 @@ export const DEBUG_SYNC_TRACE =
 export const daemonState: {
   /** Registered only in explicit parallel/wal mode; null in legacy mode. */
   walRuntime: WalRuntime | null;
+  /** Real raw-protocol capability runtime; present only after parallel/wal agent startup. */
+  walWireRuntime: DkgWalWireRuntime | null;
   /** Populated in `runDaemonInner` once the DKGAgent is ready. */
   catchupRunner: CatchupRunner | null;
   /** Set to `true` while a package or git slot update is in flight. */
@@ -85,6 +88,7 @@ export const daemonState: {
   openClawBridgeHealth: { ok: boolean; ts: number } | null;
 } = {
   walRuntime: null,
+  walWireRuntime: null,
   catchupRunner: null,
   isUpdating: false,
   lastUpdateCheck: {
