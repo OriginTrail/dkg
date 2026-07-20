@@ -2717,7 +2717,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           );
         },
         {
-          concurrency: 1,
+          concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
         },
@@ -2823,6 +2823,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           isTargetCurrent,
         }),
       maxOrdinalsPerPass: DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
+      maxOrdinalConcurrency: DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
       isTargetCurrent: () => isTargetCurrent(),
       persistWatermark: (lcg, watermark) => {
         const sub = this.subscribedContextGraphs.get(lcg);
@@ -3733,10 +3734,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
-    if (outcome === 'no-swm') {
-      swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+    if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
+      if (outcome === 'no-swm') {
+        swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+      }
       // Active fetch: pull the missing snapshot core-first (selectCatchupPeers
       // already prioritises known cores + the preferred sync peer), then retry.
+      // Metadata-pending exact VM content needs the same recovery: a durable
+      // sync can supply the missing provenance-bearing assertion metadata even
+      // when no content triples need to move.
       const batchAllowsFetch = options.acquireActiveFetchPermit?.() ?? true;
       const cooldownAllowsFetch = batchAllowsFetch
         && this.shouldRunVmReconcileActiveFetch(localCgId);
@@ -3751,7 +3757,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ? undefined
           : Math.max(1, Math.floor(options.maxPeerAttempts));
         if (fixedMaxAttempts !== undefined) maxAttempts = fixedMaxAttempts;
-        for (let attempt = 0; attempt < maxAttempts && outcome === 'no-swm'; attempt += 1) {
+        for (
+          let attempt = 0;
+          attempt < maxAttempts
+            && (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending');
+          attempt += 1
+        ) {
           if (options.isTargetCurrent && !options.isTargetCurrent()) {
             break;
           }

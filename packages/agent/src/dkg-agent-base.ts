@@ -879,6 +879,15 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /**
+   * Parallel ordinal work per CG. Combined with the default two-CG dispatcher
+   * concurrency this caps chain/store pressure at ten in-flight ordinals.
+   */
+  static readonly VM_RECONCILE_ORDINAL_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_ORDINAL_CONCURRENCY']) || 5);
+  /** Keep a slow peer recovery for one CG from blocking every other CG. */
+  static readonly VM_RECONCILE_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CONCURRENCY']) || 2);
   /** At most one authenticated peer pull per batch; later batches rotate peers. */
   static readonly VM_RECONCILE_FETCHES_PER_BATCH =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_FETCHES_PER_BATCH']) || 1);

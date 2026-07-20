@@ -1178,6 +1178,33 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
+  it('actively fetches provenance metadata when exact VM content is metadata-pending', async () => {
+    const internals = await boot();
+    const onChainCgId = 62n;
+    const root = new Uint8Array(32);
+    root[31] = 62;
+    registerUnmatchedKC(internals.chain, 9062n, onChainCgId, bytesToHex(root));
+
+    let finalizationAttempt = 0;
+    const handleChainReconciledKC = recorder(async () => {
+      finalizationAttempt += 1;
+      return finalizationAttempt === 1
+        ? 'verified-vm-metadata-pending'
+        : 'already-confirmed';
+    });
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC,
+    }));
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await expect(internals.reconcileChainOrdinal('62', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(handleChainReconciledKC.calls).toHaveLength(2);
+  });
+
   it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
     const internals = await boot();
     const onChainCgId = 52n;

@@ -203,6 +203,29 @@ describe('reconcileContextGraph — sweep', () => {
     expect(state.scanOrdinal).toBe(0);
   });
 
+  it('runs each bounded slice with capped ordinal concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 10,
+      maxOrdinalsPerPass: 10,
+      maxOrdinalConcurrency: 3,
+      reconcileOrdinal: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(maxActive).toBe(3);
+    expect(result).toMatchObject({ processed: 10, reconciled: 10, watermark: 10 });
+  });
+
   it('keeps scanning later slices when an early ordinal remains pending', async () => {
     const attempts: number[][] = [[], [], []];
     let pass = 0;

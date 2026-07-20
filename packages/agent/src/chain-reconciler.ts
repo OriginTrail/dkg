@@ -76,6 +76,8 @@ export interface ChainReconcilerDeps {
   ) => Promise<OrdinalOutcome>;
   /** Maximum ordinals attempted before yielding the global VM worker. */
   maxOrdinalsPerPass?: number;
+  /** Maximum ordinal reconciliations allowed to run concurrently in one pass. */
+  maxOrdinalConcurrency?: number;
   /**
    * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
    * pass must stop when discovery repairs a stale/reused chain id.
@@ -172,17 +174,44 @@ export async function reconcileContextGraph(
   if (headUnavailable) {
     state.scanOrdinal = state.watermark;
   } else {
-    for (const ordinal of ordinals) {
-      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
-        staleTarget = true;
-        break;
+    const configuredConcurrency = deps.maxOrdinalConcurrency;
+    const ordinalConcurrency = configuredConcurrency === undefined
+      ? 1
+      : Math.max(1, Math.floor(configuredConcurrency));
+    const outcomes = new Map<number, OrdinalOutcome>();
+    let nextOrdinalIndex = 0;
+
+    const runOrdinalWorker = async (): Promise<void> => {
+      while (!staleTarget) {
+        const index = nextOrdinalIndex;
+        nextOrdinalIndex += 1;
+        if (index >= ordinals.length) return;
+
+        if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+          staleTarget = true;
+          return;
+        }
+        const ordinal = ordinals[index]!;
+        const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+        processed += 1;
+        if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+          staleTarget = true;
+          return;
+        }
+        outcomes.set(ordinal, outcome);
       }
-      const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
-      processed += 1;
-      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
-        staleTarget = true;
-        break;
-      }
+    };
+
+    const workerCount = Math.min(ordinalConcurrency, ordinals.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
+
+    // Cursor state is deliberately updated in ordinal order even though chain
+    // reads, store verification, and independent per-KA materializations ran in
+    // parallel. This preserves the contiguous-watermark contract and makes the
+    // observable result deterministic.
+    if (!staleTarget) for (const ordinal of ordinals) {
+      const outcome = outcomes.get(ordinal);
+      if (!outcome) continue;
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
