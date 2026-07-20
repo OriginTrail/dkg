@@ -648,7 +648,7 @@ describe('WalAdmissionPipeline closure and atomic admission', () => {
       target.control.completeRetry(entry.key);
     }
     expect(leased).toHaveLength(4);
-    expect(leased.every(entry => entry.kind === 'WAL_REDUCE_LOGICAL_KEY')).toBe(true);
+    expect(leased.every(entry => entry.kind === 'WAL_REPLAY_LOGICAL_KEY')).toBe(true);
     expect((await target.pipeline.admit(candidate(root))).status).toBe('already-admitted');
   });
 

@@ -379,6 +379,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+import { dkgWalSenderKeyEpoch } from './wal/private-payload-adapter.js';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
@@ -419,6 +420,37 @@ function collectProjectedDelegatees(
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
+  /**
+   * Read the existing Sender Key epoch selected by normal DKG membership and
+   * encryption handling. WAL may consume this key material but cannot create,
+   * rotate, or choose an epoch independently.
+   */
+  async resolveDkgWalPrivatePayload(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string | undefined,
+    writerId: Uint8Array,
+    expectedKeyEpoch: bigint,
+  ): Promise<{ epochKey: Uint8Array; keyEpoch: bigint }> {
+    await this.loadSwmSenderKeyState();
+    const senderAddress = ethers.getAddress(ethers.hexlify(writerId));
+    const state = this.swmSenderKeySendStates.get(
+      swmSenderStateKey(contextGraphId, subGraphName, senderAddress),
+    );
+    if (!state) {
+      throw new Error(
+        `No existing Sender Key state for private WAL view ${contextGraphId}/${subGraphName ?? ''}`,
+      );
+    }
+    const epoch = dkgWalSenderKeyEpoch(state);
+    if (epoch.keyEpoch !== expectedKeyEpoch) {
+      throw new Error(
+        `Sender Key epoch ${epoch.keyEpoch} does not match signed private WAL view ${expectedKeyEpoch}`,
+      );
+    }
+    return { epochKey: epoch.epochKey, keyEpoch: epoch.keyEpoch };
+  }
+
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
     let fallback: (AgentKeyRecord & { privateKey: string }) | null = null;

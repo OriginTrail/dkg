@@ -68,8 +68,8 @@ assert_parallel_runtime() {
     || fail "node $node is not in WAL parallel mode"
   [ "$(printf '%s' "$status" | json_field wal.protocolsRegistered)" = "true" ] \
     || fail "node $node has not registered WAL protocols"
-  [ "$(printf '%s' "$status" | json_field wal.productionAuthority)" = "legacy" ] \
-    || fail "node $node unexpectedly changed production authority"
+  [ "$(printf '%s' "$status" | json_field wal.synchronizationAuthority)" = "legacy" ] \
+    || fail "node $node unexpectedly changed synchronization authority"
   [ "$(printf '%s' "$status" | json_field wal.workersActive)" = "0" ] \
     || fail "node $node unexpectedly started a WAL worker"
 }

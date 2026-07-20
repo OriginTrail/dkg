@@ -289,7 +289,9 @@ program
       console.log(`  Peers:     ${s.connectedPeers}`);
       console.log(`  Relay:     ${s.relayConnected ? 'connected' : 'not connected'}`);
       if (s.wal) {
-        const authority = s.wal.productionAuthority === 'legacy' ? 'legacy authoritative' : 'WAL authoritative';
+        const authority = s.wal.synchronizationAuthority === 'legacy'
+          ? 'legacy sync authoritative'
+          : 'WAL sync authoritative';
         console.log(`  WAL:       ${s.wal.mode} (${s.wal.lifecycle}; ${authority})`);
       }
       // Backend visibility: local backends print just the name (file

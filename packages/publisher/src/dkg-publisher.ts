@@ -88,6 +88,13 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import type {
+  PublisherWalShadowBatchReceiptV1,
+  PublisherWalShadowFailureV1,
+  PublisherWalShadowMutationV1,
+  PublisherWalShadowObjectReceiptV1,
+  PublisherWalShadowWriter,
+} from './wal-shadow.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -111,6 +118,7 @@ export {
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
 const PROMOTE_OPERATION_INTENT_PRED = 'http://dkg.io/ontology/promoteOperationIntent';
+const DKG_ONTOLOGY_IRI = 'http://dkg.io/ontology/';
 
 type PromoteOperationIntent = {
   version: 1;
@@ -148,6 +156,7 @@ type AssertionPromoteResult = {
   gossipMessage?: Uint8Array;
   promotedAllRoots: boolean;
   shareOperationId?: string;
+  wal?: PublisherWalShadowBatchReceiptV1;
 };
 
 /**
@@ -456,6 +465,11 @@ export interface DKGPublisherConfig {
    * the lifecycle subject; the history API returns `events: []` gracefully.
    */
   provenanceEvents?: boolean;
+  /**
+   * Explicit parallel-protocol hook. Omit in legacy mode: omission guarantees
+   * that the publisher performs no WAL reads, writes, signing, or queue work.
+   */
+  walShadowWriter?: PublisherWalShadowWriter;
 }
 
 /**
@@ -590,6 +604,16 @@ function formatGossipLimit(bytes: number): string {
   return formatBytesAsKb(bytes);
 }
 
+function boundedWalShadowError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length <= 1_024 ? message : message.slice(0, 1_024);
+}
+
+function belongsToWalResource(quad: Quad, rootEntity: string): boolean {
+  return quad.subject === rootEntity
+    || quad.subject.startsWith(`${rootEntity}/.well-known/genid/`);
+}
+
 function recoverCompactMessageSigner(
   message: Uint8Array,
   signature: { r: Uint8Array; vs: Uint8Array },
@@ -628,6 +652,8 @@ export type WriteToWorkspaceOptions = ShareOptions;
 export interface ShareResult {
   shareOperationId: string;
   message: Uint8Array;
+  /** Present only when the explicitly configured parallel WAL lane ran. */
+  wal?: PublisherWalShadowBatchReceiptV1;
 }
 
 /** @deprecated Use ShareResult */
@@ -1080,12 +1106,14 @@ export class DKGPublisher implements Publisher {
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
   private readonly provenanceEvents: boolean;
+  private readonly walShadowWriter?: PublisherWalShadowWriter;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
     this.chain = config.chain;
     this.kaAllocator = config.kaAllocator;
     this.provenanceEvents = config.provenanceEvents !== false;
+    this.walShadowWriter = config.walShadowWriter;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
@@ -1627,6 +1655,265 @@ export class DKGPublisher implements Publisher {
     return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
+  private walShadowBlocked(
+    logicalResources: readonly string[],
+    error: unknown,
+  ): PublisherWalShadowBatchReceiptV1 {
+    const shadowError = boundedWalShadowError(error);
+    return {
+      mode: 'parallel',
+      status: 'blocked',
+      objects: [],
+      failures: logicalResources.map((logicalResource): PublisherWalShadowFailureV1 => ({
+        logicalResource,
+        status: 'blocked',
+        shadowError,
+      })),
+      propagationStatus: 'not-claimed',
+    };
+  }
+
+  private async commitWalShadowBatch(
+    mutations: readonly PublisherWalShadowMutationV1[],
+  ): Promise<PublisherWalShadowBatchReceiptV1> {
+    const objects: PublisherWalShadowObjectReceiptV1[] = [];
+    const failures: PublisherWalShadowFailureV1[] = [];
+    for (const mutation of mutations) {
+      try {
+        objects.push(await this.walShadowWriter!.write(mutation));
+      } catch (error) {
+        failures.push({
+          logicalResource: mutation.logicalResource,
+          status: 'blocked',
+          shadowError: boundedWalShadowError(error),
+        });
+      }
+    }
+    return {
+      mode: 'parallel',
+      status: failures.length === 0 ? 'committed' : objects.length === 0 ? 'blocked' : 'partial',
+      objects,
+      failures,
+      propagationStatus: 'not-claimed',
+    };
+  }
+
+  private async loadWalShadowQuads(
+    graphs: readonly string[],
+    rootEntities: readonly string[],
+  ): Promise<Quad[]> {
+    if (rootEntities.length === 0) return [];
+    const roots = [...new Set(rootEntities.map(root => assertSafeIri(root)))];
+    const subjectFilter = roots.map(root =>
+      `?s = <${root}> || STRSTARTS(STR(?s), "${root}/.well-known/genid/")`,
+    ).join(' || ');
+    const quads: Quad[] = [];
+    for (const graph of graphs) {
+      const safeGraph = assertSafeIri(graph);
+      const result = await this.store.query(`SELECT ?s ?p ?o WHERE {
+        GRAPH <${safeGraph}> {
+          ?s ?p ?o .
+          FILTER(${subjectFilter})
+        }
+      }`, { source: 'wal-shadow-capture' });
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          if (row.s && row.p && row.o) {
+            quads.push({ subject: row.s, predicate: row.p, object: row.o, graph: safeGraph });
+          }
+        }
+      }
+    }
+    return quads;
+  }
+
+  private async loadWalShadowGraph(graph: string): Promise<Quad[]> {
+    const safeGraph = assertSafeIri(graph);
+    const result = await this.store.query(`SELECT ?s ?p ?o WHERE {
+      GRAPH <${safeGraph}> { ?s ?p ?o }
+    }`, { source: 'wal-shadow-capture' });
+    if (result.type !== 'bindings') return [];
+    return result.bindings.flatMap((row) => row.s && row.p && row.o
+      ? [{ subject: row.s, predicate: row.p, object: row.o, graph: safeGraph }]
+      : []);
+  }
+
+  private async loadWalShadowUalMetadata(
+    graphs: readonly string[],
+    ual: string,
+  ): Promise<Quad[]> {
+    const safeUal = assertSafeIri(ual);
+    const quads: Quad[] = [];
+    for (const graph of graphs) {
+      const safeGraph = assertSafeIri(graph);
+      const result = await this.store.query(`SELECT ?s ?p ?o WHERE {
+        GRAPH <${safeGraph}> {
+          ?s ?p ?o .
+          FILTER(?s = <${safeUal}> || STRSTARTS(STR(?s), "${safeUal}/"))
+        }
+      }`, { source: 'wal-shadow-capture' });
+      if (result.type !== 'bindings') continue;
+      for (const row of result.bindings) {
+        if (row.s && row.p && row.o) {
+          quads.push({ subject: row.s, predicate: row.p, object: row.o, graph: safeGraph });
+        }
+      }
+    }
+    return quads;
+  }
+
+  private async loadWalKnowledgeAssetState(input: {
+    dataGraph: string;
+    metaGraph: string;
+    ual: string;
+    rootEntities: readonly string[];
+    exactDataGraph: boolean;
+  }): Promise<Quad[]> {
+    const data = input.exactDataGraph
+      ? await this.loadWalShadowGraph(input.dataGraph)
+      : await this.loadWalShadowQuads([input.dataGraph], input.rootEntities);
+    const metadata = await this.loadWalShadowUalMetadata([input.metaGraph], input.ual);
+    return [...data, ...metadata];
+  }
+
+  private walPrivateGraphUri(contextGraphId: string, subGraphName?: string): string {
+    return subGraphName
+      ? this.graphManager.subGraphPrivateUri(contextGraphId, subGraphName)
+      : this.graphManager.privateGraphUri(contextGraphId);
+  }
+
+  private walPrivateQuads(quads: readonly Quad[], graph: string): Quad[] {
+    const safeGraph = assertSafeIri(graph);
+    return quads.map(quad => ({ ...quad, graph: safeGraph }));
+  }
+
+  private async loadWalPrivateRootState(input: {
+    contextGraphId: string;
+    subGraphName?: string;
+    publicBaseQuads: readonly Quad[];
+  }): Promise<Quad[]> {
+    const roots = [...new Set(input.publicBaseQuads
+      .filter(quad => quad.predicate === `${DKG_ONTOLOGY_IRI}rootEntity` && isSafeIri(quad.object))
+      .map(quad => quad.object))];
+    const privateQuads: Quad[] = [];
+    for (const root of roots) {
+      privateQuads.push(...await this.privateStore.getPrivateTriples(
+        input.contextGraphId,
+        root,
+        input.subGraphName,
+      ));
+    }
+    return privateQuads;
+  }
+
+  private async loadWalGraphKnowledgeAssetPrivateState(input: {
+    contextGraphId: string;
+    subGraphName?: string;
+    metaGraph: string;
+    ual: string;
+  }): Promise<Quad[]> {
+    const result = await this.store.query(`SELECT ?version WHERE {
+      GRAPH <${assertSafeIri(input.metaGraph)}> {
+        <${assertSafeIri(input.ual)}> <${DKG_ONTOLOGY_IRI}assertionVersion> ?version
+      }
+    } LIMIT 2`, { source: 'wal-shadow-capture' });
+    if (result.type !== 'bindings' || result.bindings.length !== 1) {
+      throw new Error(`WAL private base requires one active assertion version for ${input.ual}`);
+    }
+    const versionText = rdfLexicalValue(result.bindings[0]?.version);
+    const version = versionText === undefined ? Number.NaN : Number(versionText);
+    if (!Number.isSafeInteger(version) || version < 1) {
+      throw new Error(`WAL private base has an invalid assertion version for ${input.ual}`);
+    }
+    const scope = createGraphKnowledgeAssetScope(input.ual, version);
+    const graph = this.privateStore.knowledgeAssetPrivateGraphUri(
+      input.contextGraphId,
+      scope,
+      input.subGraphName,
+    );
+    return this.walPrivateQuads(
+      await this.privateStore.getKnowledgeAssetPrivateTriples(
+        input.contextGraphId,
+        scope,
+        input.subGraphName,
+      ),
+      graph,
+    );
+  }
+
+  private async attachKnowledgeAssetWalShadow(input: {
+    result: PublishResult;
+    kind: 'publish' | 'update';
+    contextGraphId: string;
+    subGraphName?: string;
+    operationId: string;
+    dataGraph: string;
+    metaGraph: string;
+    exactDataGraph: boolean;
+    rootEntities: readonly string[];
+    baseQuads: readonly Quad[];
+    privateBaseQuads?: readonly Quad[];
+    privateResultQuads?: readonly Quad[];
+    logicalAuthorAddress?: string;
+    signerAddress?: string;
+    timestampMs: number;
+  }): Promise<void> {
+    if (!this.walShadowWriter || input.result.status === 'failed') return;
+    try {
+      const signer = await this.getPublisherSigner(input.signerAddress)
+        ?? await this.getPublisherSigner();
+      if (!signer) {
+        input.result.wal = this.walShadowBlocked(
+          [input.result.ual],
+          'WAL shadow author signer is unavailable',
+        );
+        return;
+      }
+      const resultQuads = await this.loadWalKnowledgeAssetState({
+        dataGraph: input.dataGraph,
+        metaGraph: input.metaGraph,
+        ual: input.result.ual,
+        rootEntities: input.rootEntities,
+        exactDataGraph: input.exactDataGraph,
+      });
+      const mutations: PublisherWalShadowMutationV1[] = [{
+        kind: input.kind,
+        operation: 'PUT',
+        visibility: 'public',
+        contextGraphId: input.contextGraphId,
+        ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+        logicalAuthorAddress: input.logicalAuthorAddress ?? signer.address,
+        logicalResource: input.result.ual,
+        idempotencyKey: `${input.kind}:${input.operationId}:${input.result.ual}`,
+        baseQuads: input.baseQuads,
+        resultQuads,
+        signer,
+        timestampMs: input.timestampMs,
+      }];
+      const privateBaseQuads = input.privateBaseQuads ?? [];
+      const privateResultQuads = input.privateResultQuads ?? [];
+      if (privateBaseQuads.length > 0 || privateResultQuads.length > 0) {
+        mutations.push({
+          kind: input.kind,
+          operation: privateResultQuads.length === 0 ? 'DELETE' : 'PUT',
+          visibility: 'private',
+          contextGraphId: input.contextGraphId,
+          ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
+          logicalAuthorAddress: input.logicalAuthorAddress ?? signer.address,
+          logicalResource: input.result.ual,
+          idempotencyKey: `${input.kind}:${input.operationId}:${input.result.ual}:private`,
+          baseQuads: privateBaseQuads,
+          resultQuads: privateResultQuads,
+          signer,
+          timestampMs: input.timestampMs,
+        });
+      }
+      input.result.wal = await this.commitWalShadowBatch(mutations);
+    } catch (error) {
+      input.result.wal = this.walShadowBlocked([input.result.ual], error);
+    }
+  }
+
   private assertionLifecycleWriteLockKey(
     contextGraphId: string,
     name: string,
@@ -1834,6 +2121,27 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    const rootEntities = manifestEntries.map((m) => m.rootEntity);
+    let walBaseQuads: Quad[] | undefined;
+    let walCaptureError: unknown;
+    if (this.walShadowWriter) {
+      try {
+        const existingWalRoots = rootEntities.filter(root => swmOwned.has(root));
+        // New roots have an exact empty base by the already-completed DKG
+        // validation above. Only an accepted upsert needs a graph read.
+        walBaseQuads = existingWalRoots.length === 0
+          ? []
+          : await this.loadWalShadowQuads(
+              [swmGraph, swmMetaGraph],
+              existingWalRoots,
+            );
+      } catch (error) {
+        // The production write remains authoritative. A capture failure is returned
+        // as bounded shadow state after the shared semantic transition succeeds.
+        walCaptureError = error;
+      }
+    }
+
     // Delete-then-insert for upserted entities (replace old triples).
     for (const m of manifestEntries) {
       if (swmOwned.has(m.rootEntity)) {
@@ -1846,7 +2154,6 @@ export class DKGPublisher implements Publisher {
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: swmGraph }));
     await this.store.insert(normalized);
 
-    const rootEntities = manifestEntries.map((m) => m.rootEntity);
     const operationTimestamp = new Date();
     await storeWorkspaceOperationPublicQuads({
       store: this.store,
@@ -1887,7 +2194,65 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, message };
+    if (!this.walShadowWriter) return { shareOperationId, message };
+    if (walCaptureError !== undefined || walBaseQuads === undefined) {
+      return {
+        shareOperationId,
+        message,
+        wal: this.walShadowBlocked(rootEntities, walCaptureError ?? 'WAL base capture unavailable'),
+      };
+    }
+
+    try {
+      // These are the exact values just accepted and stored by the existing
+      // share path. Reuse that outcome instead of asking a WAL-specific graph
+      // reader to reconstruct DKG behavior after the fact.
+      const walResultQuads = [
+        ...normalized,
+        ...generateOwnershipQuads(
+          rootEntities.map(rootEntity => ({
+            rootEntity,
+            creatorPeerId: liveOwned.get(rootEntity)!,
+          })),
+          swmMetaGraph,
+        ),
+      ];
+      const signer = await this.getPublisherSigner(options.senderAgentAddress)
+        ?? await this.getPublisherSigner();
+      if (!signer) {
+        return {
+          shareOperationId,
+          message,
+          wal: this.walShadowBlocked(rootEntities, 'WAL shadow author signer is unavailable'),
+        };
+      }
+      const logicalAuthorAddress = options.senderAgentAddress ?? signer.address;
+      const mutations = rootEntities.map((logicalResource): PublisherWalShadowMutationV1 => ({
+        kind: 'share',
+        operation: 'PUT',
+        visibility: 'public',
+        contextGraphId,
+        ...(options.subGraphName === undefined ? {} : { subGraphName: options.subGraphName }),
+        logicalAuthorAddress,
+        logicalResource,
+        idempotencyKey: `share:${ctx.operationId}:${logicalResource}`,
+        baseQuads: walBaseQuads.filter(quad => belongsToWalResource(quad, logicalResource)),
+        resultQuads: walResultQuads.filter(quad => belongsToWalResource(quad, logicalResource)),
+        signer,
+        timestampMs,
+      }));
+      return {
+        shareOperationId,
+        message,
+        wal: await this.commitWalShadowBatch(mutations),
+      };
+    } catch (error) {
+      return {
+        shareOperationId,
+        message,
+        wal: this.walShadowBlocked(rootEntities, error),
+      };
+    }
   }
 
   private async encodeWorkspaceGossipPayload(
@@ -4236,6 +4601,61 @@ export class DKGPublisher implements Publisher {
           }
         : {}),
     };
+
+    if (this.walShadowWriter) {
+      let walDataGraph = dataGraph;
+      let walExactDataGraph = graphPublish !== undefined;
+      if (status === 'confirmed') {
+        const confirmedKaId = result.kaId;
+        const vmNumber = confirmedKaId & ((1n << 96n) - 1n);
+        const vmAuthor = '0x' + (confirmedKaId >> 96n).toString(16).padStart(40, '0');
+        walDataGraph = graphPublish
+          ? knowledgeAssetLayerGraphUri(
+              contextGraphId,
+              MemoryLayer.VerifiableMemory,
+              graphPublish.scope,
+              options.subGraphName,
+            )
+          : contextGraphLayerUri(
+              contextGraphId,
+              MemoryLayer.VerifiableMemory,
+              vmAuthor,
+              vmNumber,
+              options.subGraphName,
+            );
+        walExactDataGraph = true;
+      }
+      const walPrivateGraph = graphPublish
+        ? this.privateStore.knowledgeAssetPrivateGraphUri(
+            contextGraphId,
+            graphPublish.scope,
+            options.subGraphName,
+          )
+        : this.walPrivateGraphUri(contextGraphId, options.subGraphName);
+      const walPrivateResultQuads = this.walPrivateQuads(
+        graphPublish ? canonicalPrivateQuads : privateQuads,
+        walPrivateGraph,
+      );
+      await this.attachKnowledgeAssetWalShadow({
+        result,
+        kind: 'publish',
+        contextGraphId,
+        ...(options.subGraphName === undefined ? {} : { subGraphName: options.subGraphName }),
+        operationId: ctx.operationId,
+        dataGraph: walDataGraph,
+        metaGraph: options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
+        exactDataGraph: walExactDataGraph,
+        rootEntities: manifestEntries.map(entry => entry.rootEntity),
+        baseQuads: [],
+        privateBaseQuads: [],
+        privateResultQuads: walPrivateResultQuads,
+        logicalAuthorAddress: onChainResult?.authorAddress
+          ?? options.precomputedAttestation?.authorAddress
+          ?? graphPublish?.scope.agentAddress,
+        signerAddress: publisherSigner?.address,
+        timestampMs: Date.now(),
+      });
+    }
     lifecycle.emit('finalization', 'complete', {
       metadata: {
         kaId: result.kaId.toString(),
@@ -4735,6 +5155,98 @@ export class DKGPublisher implements Publisher {
       if (m.privateMerkleRoot) updatePrivateRootByRoot.set(m.rootEntity, m.privateMerkleRoot);
     }
 
+    const walUpdateMetaGraph = options.targetMetaGraphUri
+      ?? this.graphManager.metaGraphUri(contextGraphId);
+    let walUpdateBaseQuads: Quad[] | undefined;
+    let walUpdatePrivateBaseQuads: Quad[] | undefined;
+    let walUpdateLogicalResource: string | undefined;
+    let walUpdateCaptureError: unknown;
+    if (this.walShadowWriter) {
+      try {
+        walUpdateLogicalResource = graphUpdate?.scope.ual
+          ?? await resolveUalByBatchId(this.store, walUpdateMetaGraph, kaId)
+          ?? (localOnlyUpdate && publisherAddress
+            ? `did:dkg:${this.chain.chainId}/${publisherAddress}/${kaId}`
+            : await this.resolveKaUal(kaId));
+        walUpdateBaseQuads = await this.loadWalKnowledgeAssetState({
+          dataGraph,
+          metaGraph: walUpdateMetaGraph,
+          ual: walUpdateLogicalResource,
+          rootEntities: manifestEntries.map(entry => entry.rootEntity),
+          exactDataGraph: true,
+        });
+        walUpdatePrivateBaseQuads = graphUpdate
+          ? await this.loadWalGraphKnowledgeAssetPrivateState({
+              contextGraphId,
+              ...(options.subGraphName === undefined ? {} : { subGraphName: options.subGraphName }),
+              metaGraph: walUpdateMetaGraph,
+              ual: walUpdateLogicalResource,
+            })
+          : await this.loadWalPrivateRootState({
+              contextGraphId,
+              ...(options.subGraphName === undefined ? {} : { subGraphName: options.subGraphName }),
+              publicBaseQuads: walUpdateBaseQuads,
+            });
+      } catch (error) {
+        // Existing DKG update semantics remain authoritative. The failure is
+        // surfaced in the eventual result only after the DKG update succeeds.
+        walUpdateCaptureError = error;
+      }
+    }
+
+    const attachUpdateWalShadow = async (result: PublishResult): Promise<void> => {
+      if (!this.walShadowWriter || result.status === 'failed') return;
+      if (
+        walUpdateCaptureError !== undefined
+        || walUpdateBaseQuads === undefined
+        || walUpdatePrivateBaseQuads === undefined
+      ) {
+        result.wal = this.walShadowBlocked(
+          [result.ual],
+          walUpdateCaptureError ?? 'WAL update base capture unavailable',
+        );
+        return;
+      }
+      if (walUpdateLogicalResource !== undefined && walUpdateLogicalResource !== result.ual) {
+        result.wal = this.walShadowBlocked(
+          [result.ual],
+          `WAL update logical resource changed from ${walUpdateLogicalResource} to ${result.ual}`,
+        );
+        return;
+      }
+      const logicalAuthorAddress = options.precomputedUpdateAttestation?.authorAddress
+        ?? graphUpdate?.scope.agentAddress
+        ?? ('0x' + (kaId >> 96n).toString(16).padStart(40, '0'));
+      const walPrivateGraph = graphUpdate
+        ? this.privateStore.knowledgeAssetPrivateGraphUri(
+            contextGraphId,
+            graphUpdate.scope,
+            options.subGraphName,
+          )
+        : this.walPrivateGraphUri(contextGraphId, options.subGraphName);
+      const walPrivateResultQuads = this.walPrivateQuads(
+        graphUpdate ? canonicalPrivateQuads : privateQuads,
+        walPrivateGraph,
+      );
+      await this.attachKnowledgeAssetWalShadow({
+        result,
+        kind: 'update',
+        contextGraphId,
+        ...(options.subGraphName === undefined ? {} : { subGraphName: options.subGraphName }),
+        operationId: ctx.operationId,
+        dataGraph,
+        metaGraph: walUpdateMetaGraph,
+        exactDataGraph: true,
+        rootEntities: manifestEntries.map(entry => entry.rootEntity),
+        baseQuads: walUpdateBaseQuads ?? [],
+        privateBaseQuads: walUpdatePrivateBaseQuads,
+        privateResultQuads: walPrivateResultQuads,
+        logicalAuthorAddress,
+        signerAddress: publisherAddress,
+        timestampMs: Date.now(),
+      });
+    };
+
     const storeUpdatedQuads = async (
       version?: MaterializedVersion,
       provenance?: OnChainProvenance,
@@ -4968,6 +5480,7 @@ export class DKGPublisher implements Publisher {
         status: 'tentative',
         publicQuads: allSkolemizedQuads,
       };
+      await attachUpdateWalShadow(result);
       this.eventBus.emit(DKGEvent.KA_UPDATED, result);
       return result;
     }
@@ -5410,6 +5923,7 @@ export class DKGPublisher implements Publisher {
         status: 'tentative',
         publicQuads: allSkolemizedQuads,
       };
+      await attachUpdateWalShadow(result);
       this.eventBus.emit(DKGEvent.KA_UPDATED, result);
       return result;
     }
@@ -5490,6 +6004,7 @@ export class DKGPublisher implements Publisher {
       },
     };
 
+    await attachUpdateWalShadow(result);
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);
     return result;
   }
@@ -8050,6 +8565,23 @@ export class DKGPublisher implements Publisher {
       contentScope,
       opts?.subGraphName,
     );
+    let walBaseQuads: Quad[] | undefined;
+    let walCaptureError: unknown;
+    if (this.walShadowWriter) {
+      try {
+        walBaseQuads = await this.loadWalKnowledgeAssetState({
+          dataGraph: swmGraphUri,
+          metaGraph: promoteMetaGraph,
+          ual: contentScope.ual,
+          rootEntities: [],
+          exactDataGraph: true,
+        });
+      } catch (error) {
+        // The existing share remains authoritative. Report the capture failure
+        // only after its complete durable production tail succeeds.
+        walCaptureError = error;
+      }
+    }
 
     // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
     // return path of assertionPromote, not just the success tail. A non-full share
@@ -8742,6 +9274,73 @@ export class DKGPublisher implements Publisher {
     // Reopened drafts explicitly wipe both rows in assertionCreateUnlocked.
     await this.dropAssertionScopedGraphs(graphUri);
 
+    let wal: PublisherWalShadowBatchReceiptV1 | undefined;
+    if (this.walShadowWriter) {
+      if (walCaptureError !== undefined || walBaseQuads === undefined) {
+        wal = this.walShadowBlocked(
+          [contentScope.ual],
+          walCaptureError ?? 'WAL graph-scoped share base capture unavailable',
+        );
+      } else {
+        try {
+          const signer = await this.getPublisherSigner(opts?.senderAgentAddress)
+            ?? await this.getPublisherSigner();
+          if (!signer) {
+            wal = this.walShadowBlocked(
+              [contentScope.ual],
+              'WAL shadow author signer is unavailable',
+            );
+          } else {
+            const resultQuads = await this.loadWalKnowledgeAssetState({
+              dataGraph: swmGraphUri,
+              metaGraph: promoteMetaGraph,
+              ual: contentScope.ual,
+              rootEntities: [],
+              exactDataGraph: true,
+            });
+            const mutations: PublisherWalShadowMutationV1[] = [{
+              kind: 'share',
+              operation: 'PUT',
+              visibility: 'public',
+              contextGraphId,
+              ...(opts?.subGraphName === undefined ? {} : { subGraphName: opts.subGraphName }),
+              logicalAuthorAddress: contentScope.agentAddress,
+              logicalResource: contentScope.ual,
+              idempotencyKey: `share:${operationId}:${contentScope.ual}`,
+              baseQuads: walBaseQuads,
+              resultQuads,
+              signer,
+              timestampMs: operationIntent.timestampMs,
+            }];
+            if (normalizedPrivateQuads.length > 0) {
+              const privateGraph = this.privateStore.knowledgeAssetPrivateGraphUri(
+                contextGraphId,
+                contentScope,
+                opts?.subGraphName,
+              );
+              mutations.push({
+                kind: 'share',
+                operation: 'PUT',
+                visibility: 'private',
+                contextGraphId,
+                ...(opts?.subGraphName === undefined ? {} : { subGraphName: opts.subGraphName }),
+                logicalAuthorAddress: contentScope.agentAddress,
+                logicalResource: contentScope.ual,
+                idempotencyKey: `share:${operationId}:${contentScope.ual}:private`,
+                baseQuads: [],
+                resultQuads: this.walPrivateQuads(normalizedPrivateQuads, privateGraph),
+                signer,
+                timestampMs: operationIntent.timestampMs,
+              });
+            }
+            wal = await this.commitWalShadowBatch(mutations);
+          }
+        } catch (error) {
+          wal = this.walShadowBlocked([contentScope.ual], error);
+        }
+      }
+    }
+
     return {
       promotedCount: resumingCommittedSwm
         ? 0
@@ -8749,6 +9348,7 @@ export class DKGPublisher implements Publisher {
       gossipMessage,
       promotedAllRoots,
       shareOperationId: operationId,
+      ...(wal === undefined ? {} : { wal }),
     };
   }
 

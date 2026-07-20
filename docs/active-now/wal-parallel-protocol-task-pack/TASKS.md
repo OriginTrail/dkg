@@ -42,9 +42,9 @@ only atomically store the resulting outcome.
 | `WAL-010` | Implement provider discovery, selection, failover, and cold start | `WAL-004`, `WAL-005`, `WAL-007`, `WAL-009` | Correct multi-provider retrieval and authorized bootstrap. |
 | `WAL-011` | Implement remote admission, causal closure, and quarantine | `WAL-006`–`WAL-010` | One fail-closed admission path for fetched WAL objects. |
 | `WAL-012` | Implement RDF canonicalization, mutation encoding, and signed replay policy | `WAL-001`, `WAL-003` | Deterministic encoding of shared-core outcomes without remote SPARQL execution. |
-| `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside legacy writes. |
+| `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside production writes while legacy sync remains authoritative. |
 | `WAL-014` | Implement deterministic replay/conflict adapter over the existing semantic core | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent scheduling and conflicts with no second DKG implementation. |
-| `WAL-015` | Implement atomic projection persistence and rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions. |
+| `WAL-015` | Persist shared-core results atomically and support rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions. |
 | `WAL-016` | Feed VM/finality/reorg events into the existing semantic core | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by WAL events without a second VM model. |
 | `WAL-017` | Implement deletion, expiry, snapshots, custody, and compaction | `WAL-004`–`WAL-007`, `WAL-011`, `WAL-014`, `WAL-015` | Bounded history with no resurrection. |
 | `WAL-018` | Implement genesis migration, backfill, and rebuild tooling | `WAL-016`, `WAL-017` | Authenticated bootstrap from existing SWM/VM state. |
@@ -296,7 +296,8 @@ package export maps.
 **Implementation evidence:** `WAL-002-EVIDENCE.md` records the exact authority
 boundary, isolated layout, CLI/API behavior, acceptance mapping, and validation
 receipts. Protocol registration, mutation capture, object storage, transfer,
-reconciliation workers, and RDF reduction remain owned by their later tasks.
+reconciliation workers, and WAL-015 storage integration remain owned by their
+later tasks.
 
 ---
 
@@ -872,8 +873,17 @@ synchronization authority.
 - Wire publisher/share/update/delete/expiry paths to the shared semantic-core
   result encoder behind
   explicit `parallel` mode.
-- Encode the complete inline adapter payload before acquiring the author-lane
-  mutex and beginning the immediate SQLite transaction.
+- Partition an accepted operation by eligible replication view. A public and
+  private outcome produces one complete `WalObjectV1` in each exact namespace;
+  neither a view mutation nor their batch is another synchronization atom.
+  Key local heads and replay work by `(namespaceId, logicalKey)` so views,
+  policy/key epochs, and tiers never collide.
+- Encode the complete canonical adapter plaintext before acquiring the
+  author-lane mutex. Complete public envelopes before the lane. Private
+  envelopes are the sole exception: resolve the existing Sender Key epoch
+  before the lane, then finalize only sequence-bound encryption and durably
+  claim nonce uniqueness after sequence allocation inside the transaction.
+  Perform no key selection, network, graph, membership, or semantic work there.
 - Resolve idempotency, allocate sequence, bind the previous object, sign the
   complete `WalObjectV1`, update the set commitment, create the checkpoint, and
   commit atomically; do no network or graph work inside the transaction.
@@ -889,9 +899,11 @@ workspace handlers, `packages/agent/src/`, and `packages/wal/`.
 
 - [ ] In `legacy`, public API responses and storage/network behavior remain the
       current baseline with zero WAL side effects.
-- [ ] In `parallel`, each eligible mutation successfully accepted by the shared
-      semantic core produces exactly
-      one matching durable WAL object/checkpoint and isolated shadow result.
+- [ ] In `parallel`, each eligible per-view mutation successfully accepted by
+      the shared semantic core produces exactly one matching durable WAL
+      object/checkpoint and isolated shadow result. Public objects contain zero
+      private RDF bytes, and dual-view objects retain independent namespace-
+      scoped heads and replay work.
 - [ ] Same idempotency key/digest returns the same `WalObjectId` across restart;
       same key/different digest fails deterministically.
 - [ ] Crashes after every object-file/WAL/checkpoint/nudge/materialization
@@ -913,6 +925,11 @@ Schedule identical admitted WAL-object sets deterministically, invoke the
 existing DKG semantic core for every candidate transition, and retain explicit
 conflict branches regardless of arrival, provider, retry, or replay order. This
 task must not create a second implementation of DKG behavior.
+
+The word `deterministic` qualifies replay scheduling, causal/conflict
+bookkeeping, and repeatable invocation of the shared core. It does **not**
+define a reducer, state machine, or semantic evaluator. WAL-014 consumes and
+orders inputs to the one existing DKG/SWM/VM implementation.
 
 ### Scope and deliverables
 
@@ -956,10 +973,12 @@ task must not create a second implementation of DKG behavior.
       defined behavior. There is no permitted RFC divergence from established
       DKG semantics in this task; a desired semantic change belongs in the
       semantic core and applies to both synchronization mechanisms.
+- [ ] Naming, APIs, package boundaries, and operator output call this a
+      replay/conflict adapter, never a DKG reducer or WAL semantic engine.
 
 ---
 
-## WAL-015 — Implement atomic projection persistence and rebuild
+## WAL-015 — Persist shared-core results atomically and support rebuild
 
 **Focused RFC context:** Sections 2, 3, 14, 17, 19, and rebuild goals.
 
@@ -984,6 +1003,9 @@ rebuildable rather than a second replication or semantic truth.
   persistence integrity, but it must not choose heads, interpret DKG operations,
   resolve conflicts, or implement SWM/VM, verified-memory, authorization,
   finality, or cryptographic behavior.
+- Do not import the replay scheduler into the persistence implementation. Its
+  only semantic input is the complete projection outcome already returned by
+  the shared core.
 - Keep Blazegraph/non-atomic backends parallel-only until they pass the same
   fault-injection capability suite.
 
@@ -996,8 +1018,9 @@ rebuildable rather than a second replication or semantic truth.
 - [ ] Opposite replay scheduling and process restart reach identical markers and
       RDF state.
 - [ ] Tests pass deliberately different complete semantic outcomes through the
-      same persistence method and prove the materializer stores or rejects them
-      only by atomic guard/integrity rules, never by a second semantic decision.
+      same persistence method and prove the persistence boundary stores or
+      rejects them only by atomic guard/integrity rules, never by a second
+      semantic decision.
 - [ ] A locally complete WAL rebuilds an empty/corrupt shadow projection with
       zero network payload transfer and exact semantic digests.
 - [ ] Production reads never include shadow graphs in `parallel` mode.
@@ -1258,6 +1281,10 @@ repeatable release-blocking tests.
 - Add architectural tests that fail if WAL reconciliation gains semantic
   dependencies or if WAL replay bypasses/reimplements the shared DKG semantic
   core, SWM/VM model, verified-memory logic, or cryptographic logic.
+- Make the reconciliation dependency test structural: files below the
+  reconciliation boundary may import only byte/ID/protocol primitives and
+  generic hashing. They may not import RDF, SPARQL, publisher, agent semantic,
+  SWM/VM, chain, membership, or DKG cryptographic modules.
 - Integrate sanitizer/fuzz/property tests and bounded resource assertions into CI.
 
 ### Acceptance area

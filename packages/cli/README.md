@@ -53,8 +53,9 @@ WAL synchronization is opt-in. An omitted `sync` block, or an explicit
 `"mode": "legacy"`, preserves the existing daemon exactly: no WAL runtime,
 directory, worker, timer, port, or protocol is created.
 
-To prepare the isolated shadow runtime while keeping all production reads,
-writes, graph synchronization, and DKG semantics on the legacy path, add this
+To prepare the isolated shadow runtime while keeping the current synchronization
+mechanism authoritative and using the same existing DKG/SWM/VM semantic core
+for both mechanisms, add this
 to `<DKG_HOME>/config.json`:
 
 ```json

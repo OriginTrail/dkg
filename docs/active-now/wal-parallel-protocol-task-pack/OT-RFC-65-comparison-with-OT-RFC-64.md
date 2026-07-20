@@ -41,9 +41,9 @@ IBLT difference discovery, transfers each complete canonical `WalObjectV1` by
 resumable byte ranges, and knows nothing about RDF or SPARQL. A deterministic
 replay/conflict adapter then schedules the inline opaque payload bytes and
 invokes the same existing DKG semantic core used by the current synchronization
-mechanism. A separate materializer only persists that core's resulting SWM/VM
-projection atomically. The WAL, not a graph catalog or triplestore, is the
-replicated source of truth.
+mechanism. WAL-015 only persists that core's resulting SWM/VM projection
+atomically through the existing storage adapter. The WAL, not a graph catalog
+or triplestore, is the replicated source of truth.
 
 This is explicitly two synchronization mechanisms and one semantic system. The
 `legacy` label refers only to current synchronization. It does not refer to the
@@ -55,9 +55,9 @@ The recommendation is therefore not to discard PR #144. Preserve its authority,
 freshness, fail-closed routing, pull, VM, fault-injection, and A/B acceptance
 contracts, but replace its semantic inventory/event wire with the generic WAL
 object-set and range protocol. Keep the proposed Revision-4 single-store
-activation insight only inside the semantically passive materializer, where a
-guarded SPARQL update atomically advances projection content and its
-materialization marker.
+activation insight only in WAL-015's storage operation, where a guarded SPARQL
+update atomically advances projection content and its marker without making a
+semantic decision.
 
 This comparison is pinned to PR head
 [`cf8ddb4`](https://github.com/OriginTrail/dkgv10-spec/blob/cf8ddb462afe98b9a4327a821dbcaa81edaae462/rfcs/OT-RFC-64-durable-inventory-sync.md).
@@ -478,7 +478,7 @@ The WAL RFC should normatively import these PR #144 decisions:
 | Oxigraph active descriptor as network progress     | In-store RDF projection marker only                                      |
 | Non-canonical local extras and quarantine          | Pre-admission staging plus explicit adapter conflict/quarantine output   |
 | Ordered event-range replay                         | Unordered set difference plus a causal replay/conflict adapter that delegates to the shared semantic core |
-| KA/RDF-aware reconciliation plus SPARQL activation | Byte/ID-only protocol plus shared DKG semantic core and atomic projection persistence |
+| KA/RDF-aware reconciliation plus SPARQL activation | Byte/ID-only protocol plus shared DKG semantic core and WAL-015 storage transaction |
 
 ## 12. Rollout relationship
 
@@ -507,11 +507,11 @@ projection export from WAL.
 If PR #144 section 12 Track 1 lands first, it becomes a useful tactical
 comparator. If the proposed Revision-4 Track-2 implementation lands first, it may
 serve as the authoritative legacy-sync arm and its guarded SPARQL activation can
-become the first RDF adapter materializer. Its semantic catalog must not become
-a second permanent replication truth after the WAL cutover. The WAL A/B run
-must record which arm was authoritative and preserve comparable v10.0.8 and
-Track-1 receipts where available, while judging correctness only against the
-independent semantic oracle and frozen WAL vectors.
+become the first WAL-015 storage implementation. Its semantic catalog must not
+become a second permanent replication truth after the WAL cutover. The
+WAL A/B run must record which arm was authoritative and preserve comparable
+v10.0.8 and Track-1 receipts where available, while judging correctness only
+against the independent semantic oracle and frozen WAL vectors.
 
 ## 13. Decision matrix
 
@@ -537,8 +537,8 @@ but adopt the WAL proposal as the target protocol boundary. Specifically:
    signed set-commitment verification, deterministic fallback, and whole-object
    range transfer instead of semantic inventory events or catalogs.
 3. Implement a deterministic replay/conflict adapter that invokes the existing
-   DKG semantic core, plus a guarded materializer that only persists the
-   resulting projection. Do not create WAL-specific SWM/VM, verified-memory,
+   DKG semantic core. WAL-015 then only persists that resulting projection
+   through the existing storage adapter. Do not create WAL-specific SWM/VM, verified-memory,
    finality, membership, or cryptographic behavior.
 4. Run byte reconciliation and shadow projection beside the current path.
 5. Consume OT-RFC-65's frozen protocol-v1 schema and vectors, then require

@@ -13,6 +13,9 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/wal-runtime.test.ts',
+          'test/wal-local-authoring.test.ts',
+          'test/wal-devnet-authoring-script.test.ts',
           'test/api-client.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/wal-capabilities-route.test.ts',

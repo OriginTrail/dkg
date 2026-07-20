@@ -65,7 +65,7 @@ describe('dkg status external-store rendering', () => {
         mode: 'parallel',
         lifecycle: 'ready',
         ready: true,
-        productionAuthority: 'legacy',
+        synchronizationAuthority: 'legacy',
         shadowEnabled: true,
         runtimeRegistered: true,
         protocolsRegistered: false,
@@ -77,6 +77,6 @@ describe('dkg status external-store rendering', () => {
       },
     });
 
-    expect(output).toContain('WAL:       parallel (ready; legacy authoritative)');
+    expect(output).toContain('WAL:       parallel (ready; legacy sync authoritative)');
   });
 });

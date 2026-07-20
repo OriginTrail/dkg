@@ -1,4 +1,4 @@
-export const WAL_CONTROL_SCHEMA_VERSION = 3;
+export const WAL_CONTROL_SCHEMA_VERSION = 5;
 export const WAL_ROLLBACK_SCHEMA_VERSION = 1;
 
 /**
@@ -16,6 +16,28 @@ export const WAL_PRIVATE_PAYLOAD_SCHEMA_SQL = `
     nonce BLOB NOT NULL CHECK (length(nonce) = 12),
     claimed_at_ms INTEGER NOT NULL CHECK (claimed_at_ms >= 0),
     PRIMARY KEY (namespace_id, writer_id, writer_epoch, sequence, nonce)
+  ) WITHOUT ROWID;
+`;
+
+/** Durable post-commit outbox for shared-core replay/projection work. */
+export const WAL_LOCAL_COMMIT_WORK_SCHEMA_SQL = `
+  CREATE TABLE local_commit_work (
+    object_id BLOB PRIMARY KEY CHECK (length(object_id) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'QUEUED', 'MATERIALIZED', 'BLOCKED')),
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE INDEX local_commit_work_state ON local_commit_work(state, updated_at_ms, object_id);
+
+  CREATE TABLE local_logical_heads (
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    object_id BLOB NOT NULL UNIQUE CHECK (length(object_id) = 32),
+    PRIMARY KEY (namespace_id, logical_key, object_id),
+    FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
   ) WITHOUT ROWID;
 `;
 
@@ -356,6 +378,7 @@ export const WAL_CONTROL_SCHEMA_SQL = `
 
   ${WAL_AUTHORITY_SCHEMA_SQL}
   ${WAL_PRIVATE_PAYLOAD_SCHEMA_SQL}
+  ${WAL_LOCAL_COMMIT_WORK_SCHEMA_SQL}
 `;
 
 export const WAL_CONTROL_MIGRATION_1_TO_2_SQL = `
@@ -366,6 +389,44 @@ export const WAL_CONTROL_MIGRATION_1_TO_2_SQL = `
 export const WAL_CONTROL_MIGRATION_2_TO_3_SQL = `
   ${WAL_PRIVATE_PAYLOAD_SCHEMA_SQL}
   UPDATE wal_control_schema SET version = 3 WHERE singleton = 1 AND version = 2;
+`;
+
+export const WAL_CONTROL_MIGRATION_3_TO_4_SQL = `
+  ${WAL_LOCAL_COMMIT_WORK_SCHEMA_SQL}
+  UPDATE wal_control_schema SET version = 4 WHERE singleton = 1 AND version = 3;
+`;
+
+export const WAL_CONTROL_MIGRATION_4_TO_5_SQL = `
+  CREATE TABLE local_commit_work_v5 (
+    object_id BLOB PRIMARY KEY CHECK (length(object_id) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'QUEUED', 'MATERIALIZED', 'BLOCKED')),
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  INSERT INTO local_commit_work_v5(object_id, namespace_id, logical_key, state, last_error, updated_at_ms)
+    SELECT c.object_id, w.namespace_id, c.logical_key, c.state, c.last_error, c.updated_at_ms
+    FROM local_commit_work c JOIN wal_objects w ON w.object_id = c.object_id;
+
+  CREATE TABLE local_logical_heads_v5 (
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    object_id BLOB NOT NULL UNIQUE CHECK (length(object_id) = 32),
+    PRIMARY KEY (namespace_id, logical_key, object_id),
+    FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  INSERT INTO local_logical_heads_v5(namespace_id, logical_key, object_id)
+    SELECT w.namespace_id, h.logical_key, h.object_id
+    FROM local_logical_heads h JOIN wal_objects w ON w.object_id = h.object_id;
+
+  DROP TABLE local_logical_heads;
+  DROP TABLE local_commit_work;
+  ALTER TABLE local_commit_work_v5 RENAME TO local_commit_work;
+  ALTER TABLE local_logical_heads_v5 RENAME TO local_logical_heads;
+  CREATE INDEX local_commit_work_state ON local_commit_work(state, updated_at_ms, object_id);
+  UPDATE wal_control_schema SET version = 5 WHERE singleton = 1 AND version = 4;
 `;
 
 export const WAL_ROLLBACK_SCHEMA_SQL = `

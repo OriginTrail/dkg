@@ -81,7 +81,7 @@ describe('daemon WAL runtime wiring', () => {
     expect(daemonWalRuntimeStatus(runtime)).toMatchObject({
       mode: 'parallel',
       lifecycle: 'ready',
-      productionAuthority: 'legacy',
+      synchronizationAuthority: 'legacy',
       shadowEnabled: true,
       protocolsRegistered: false,
       workersActive: 0,

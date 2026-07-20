@@ -1,5 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { PublisherWalShadowBatchReceiptV1 } from './wal-shadow.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
 
@@ -477,6 +478,8 @@ export interface PublishResult {
   /** Effective access envelope persisted for graph-scoped KAs. */
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
+  /** Present only when the explicitly configured parallel WAL shadow lane ran. */
+  wal?: PublisherWalShadowBatchReceiptV1;
 }
 
 export interface Publisher {

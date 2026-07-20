@@ -1,6 +1,6 @@
 # WAL parallel-protocol implementation task pack
 
-This directory turns OT-RFC-65 v0.9 into an implementation backlog for
+This directory turns OT-RFC-65 v0.11 into an implementation backlog for
 OriginTrail DKG. It is intentionally created in an isolated worktree based on
 the current remote `main`; it does not reuse or modify the dirty primary
 checkout.
@@ -15,9 +15,9 @@ checkout.
 | Authoritative branch | `codex/wal-005-iblt-lab` |
 | Worktree | `/private/tmp/dkg-v9-wal-005-iblt-lab` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `6359a659da8688016b9e75a443f9bd46b89f221d` |
-| RFC version | `0.9` |
-| RFC SHA-256 | `259d544cfb09f210b83e7e91bf892ae8d59061a83a50a20bc0c140ad1f8f84f2` |
+| RFC source commit | `3fae6958fd7875b2f435344f59bbbdd588430125` |
+| RFC version | `0.11` |
+| RFC SHA-256 | `8add36bf5f84c27a181ad5695610dc8e386615d10f537257c0defe4c132c5b1c` |
 | Schema SHA-256 | `98e1dbf857a9287dac8af780a0715d01b9b1af6b00ae708ac868f18305a159cd` |
 | Vectors SHA-256 | `c5221143d889461f13811e89c8f17f3405be14b6247dc94915d4bea5015bcde6` |
 
@@ -69,9 +69,9 @@ cryptographic implementation. The `legacy` label applies only to the current
 synchronization mechanism, never to those shared semantics. WAL reconciliation
 handles authenticated control bytes, `WalObjectId` sets, and complete
 `WalObjectV1` byte ranges only. The deterministic replay/conflict adapter
-invokes the existing semantic core; it does not reproduce DKG behavior. The
-materializer only persists the resulting projection atomically, and VM,
-finality, and reorg events enter that same core.
+invokes the existing semantic core; it does not reproduce DKG behavior. WAL-015
+only persists the resulting projection atomically through the existing storage
+adapter, and VM, finality, and reorg events enter that same core.
 
 ## Execution waves
 

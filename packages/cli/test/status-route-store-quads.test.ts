@@ -126,7 +126,7 @@ describe('/api/status external-store quad count', () => {
           wal: {
             mode: 'legacy',
             lifecycle: 'disabled',
-            productionAuthority: 'legacy',
+            synchronizationAuthority: 'legacy',
             runtimeRegistered: false,
             protocolsRegistered: false,
             workersActive: 0,

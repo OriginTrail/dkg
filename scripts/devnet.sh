@@ -38,8 +38,9 @@
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
 #   DEVNET_SYNC_MODE=parallel
 #                 Start every node with the WAL shadow runtime and raw WAL
-#                 protocols enabled. Omit (or set legacy) for the unchanged
-#                 production-authoritative legacy sync path.
+#                 protocols enabled, and provision an explicit signed local-
+#                 authoring bundle for the two built-in devnet graphs. Omit
+#                 (or set legacy) for the unchanged authoritative legacy path.
 #
 set -euo pipefail
 
@@ -648,6 +649,7 @@ create_node_config() {
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
+  "networkConfig": "testnet",
   "apiPort": ${api_port},
   "listenPort": ${libp2p_port},
   "nodeRole": "${node_role}",
@@ -727,6 +729,15 @@ EOCONF
       " 2>/dev/null
     fi
   done <<< "$extra_addrs"
+
+  if [ "${DEVNET_SYNC_MODE:-legacy}" = "parallel" ]; then
+    node --import tsx \
+      "$REPO_ROOT/scripts/wal-devnet-authoring-bundle.ts" \
+      --node-dir "$node_dir" \
+      --genesis-id base-testnet \
+      --context-graphs devnet-test,devnet-isolation \
+      >/dev/null
+  fi
 
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }

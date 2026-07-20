@@ -145,6 +145,7 @@ import {
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { startDaemonWalRuntime } from '../wal-runtime.js';
+import { createDaemonWalPublisherShadowWriter } from '../wal-local-authoring.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
@@ -1162,7 +1163,7 @@ export async function runDaemonInner(
       const walStatus = walRuntime.status();
       log(
         `[WAL] mode=${walStatus.mode} lifecycle=${walStatus.lifecycle} ` +
-        `productionAuthority=${walStatus.productionAuthority} protocols=pending workers=0`,
+        `synchronizationAuthority=${walStatus.synchronizationAuthority} protocols=pending workers=0`,
       );
     }
   } catch (error) {
@@ -1692,8 +1693,27 @@ export async function runDaemonInner(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  let walPrivatePayloadAgent: DKGAgent | undefined;
+  const walShadowWriter = await createDaemonWalPublisherShadowWriter({
+    runtime: walRuntime ?? null,
+    networkId,
+    resolvePrivatePayload: async ({ mutation, writerId, expectedKeyEpoch }) => {
+      if (!walPrivatePayloadAgent) {
+        throw new Error('DKG agent is not ready to resolve the existing Sender Key epoch');
+      }
+      return walPrivatePayloadAgent.resolveDkgWalPrivatePayload(
+        mutation.contextGraphId,
+        mutation.subGraphName,
+        writerId,
+        expectedKeyEpoch,
+      );
+    },
+    log,
+  });
+
   const agent = await DKGAgent.create({
     kaNumberAllocator,
+    walShadowWriter,
     name: config.name,
     genesisId: network?.genesisId,
     networkIdentity: {
@@ -1965,6 +1985,10 @@ export async function runDaemonInner(
       });
     },
   });
+  // Bind private WAL authoring only after the production DKG agent, and thus
+  // its existing Sender Key state, exists. WAL must reuse that cryptographic
+  // implementation rather than create a parallel key-selection model.
+  walPrivatePayloadAgent = agent;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
@@ -2103,7 +2127,7 @@ export async function runDaemonInner(
     daemonState.walWireRuntime = walWireRuntime;
     log(
       `[WAL] raw protocols registered; capability negotiation active; ` +
-      `productionAuthority=${walRuntime.status().productionAuthority}`,
+      `synchronizationAuthority=${walRuntime.status().synchronizationAuthority}`,
     );
   }
 

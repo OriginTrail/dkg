@@ -926,6 +926,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
           if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
+          if (share.wal) result.wal = share.wal;
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.
@@ -1296,6 +1297,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.sealed !== undefined ? { sealed: swmShared && share.sealed } : {}),
           ...(share.publishReady !== undefined ? { publishReady: swmShared && share.publishReady } : {}),
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+          ...(share.wal ? { wal: share.wal } : {}),
         });
       } catch (e: any) {
         // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
@@ -1506,6 +1508,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
           ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
+          ...(pub?.wal ? { wal: pub.wal } : {}),
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {

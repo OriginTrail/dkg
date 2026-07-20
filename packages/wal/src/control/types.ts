@@ -1,9 +1,11 @@
 import type { WalObjectV1 } from '../protocol/wal-object.js';
+import type { WalEip191Signer } from '../protocol/signatures.js';
 
 export type WalObjectOrigin = 'LOCAL' | 'REMOTE' | 'GENESIS' | 'SNAPSHOT';
 export type IdempotencyStatus = 'COMMITTED' | 'MATERIALIZATION_PENDING' | 'MATERIALIZED';
 export type AdmissionState = 'STAGED' | 'ADMITTED' | 'BLOCKED' | 'QUARANTINED';
 export type RetryState = 'READY' | 'LEASED' | 'BLOCKED';
+export type LocalCommitWorkState = 'PENDING' | 'QUEUED' | 'MATERIALIZED' | 'BLOCKED';
 
 export interface AdmissionRecord {
   objectId: Uint8Array;
@@ -58,6 +60,57 @@ export interface FinalizeLocalWalResult {
   objectSetRoot: Uint8Array;
   objectCount: bigint;
   sequence: bigint;
+}
+
+/**
+ * Complete local authoring input. Canonical adapter plaintext must already be
+ * compiled before this call. Public payload bytes are fully encoded up front;
+ * only a private sequence-bound envelope may be finalized in the locked lane.
+ * Sequence allocation and both signatures happen while that lane is locked.
+ */
+export interface CommitLocalWalInput {
+  namespaceId: Uint8Array;
+  writerId: Uint8Array;
+  writerEpoch: bigint;
+  /** Complete public payload bytes, frozen before the author lane is acquired. */
+  payloadBytes?: Uint8Array;
+  /**
+   * Sequence-bound envelope finalizer for private payloads. The canonical
+   * plaintext adapter content must already exist before commitLocal is called.
+   * This synchronous callback may only finalize local bytes (including a
+   * nonce claim); it must perform no network, RDF-store, or semantic work.
+   */
+  buildPayloadBytes?: (coordinates: LocalWalPayloadCoordinates) => Uint8Array;
+  signer: WalEip191Signer;
+  idempotencyKey: string;
+  requestDigest: Uint8Array;
+  status?: IdempotencyStatus;
+  policyObjectId?: Uint8Array | null;
+  baselineSnapshotObjectId?: Uint8Array | null;
+  compactionFloor?: bigint;
+  maximumObjectBytes?: bigint;
+  /** Present for DkgMutationV1; persisted as the post-commit recovery outbox. */
+  logicalKey?: Uint8Array;
+  /** Exact local logical-key heads used to compile this mutation. */
+  baseHeads?: readonly Uint8Array[];
+  createdAtMs?: number;
+}
+
+export interface LocalWalPayloadCoordinates {
+  readonly namespaceId: Uint8Array;
+  readonly writerId: Uint8Array;
+  readonly writerEpoch: bigint;
+  readonly sequence: bigint;
+  readonly previousObjectId: Uint8Array | null;
+}
+
+export interface LocalCommitWorkRecord {
+  objectId: Uint8Array;
+  namespaceId: Uint8Array;
+  logicalKey: Uint8Array;
+  state: LocalCommitWorkState;
+  lastError: string | null;
+  updatedAtMs: number;
 }
 
 export interface RollbackHighWater {

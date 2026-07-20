@@ -1,6 +1,9 @@
 import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { WalControlStore } from './control/store.js';
+import { WalLocalCommitter } from './local-commit.js';
+import { PackedWalObjectStore } from './store/packed-store.js';
 
 export const WAL_PROTOCOL_VERSION = 1;
 export const WAL_ADAPTER_VERSION = 1;
@@ -20,6 +23,14 @@ export interface WalRuntimeOperatorConfig {
   adapterVersion?: number;
   cutoverId?: string;
   paths?: WalRuntimePathConfig;
+  localAuthoring?: WalLocalAuthoringOperatorConfig;
+}
+
+export interface WalLocalAuthoringOperatorConfig {
+  /** JSON evidence bundle below the fixed WAL runtime root. */
+  bundlePath: string;
+  /** Explicit configured trust anchor; lowercase bytes32 hex without 0x. */
+  curatorAuthoritySetId: string;
 }
 
 export interface WalSyncConfiguration {
@@ -41,6 +52,10 @@ export interface ResolvedWalRuntimeConfiguration {
   protocolVersion: 1;
   adapterVersion: 1;
   cutoverId?: string;
+  localAuthoring?: {
+    bundlePath: string;
+    curatorAuthoritySetId: string;
+  };
   paths: ResolvedWalRuntimePaths;
 }
 
@@ -51,6 +66,7 @@ export type WalRuntimeErrorCode =
   | 'WAL_UNSUPPORTED_PROTOCOL_VERSION'
   | 'WAL_UNSUPPORTED_ADAPTER_VERSION'
   | 'WAL_INVALID_CUTOVER_ID'
+  | 'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION'
   | 'WAL_INVALID_PATH'
   | 'WAL_PATH_OUTSIDE_ROOT'
   | 'WAL_PATH_OVERLAP'
@@ -155,6 +171,45 @@ export function resolveWalRuntimeConfiguration(input: {
     shadowRdf: configuredPath(root, 'shadowRdf', rawPaths.shadowRdf, 'shadow-rdf'),
     control: resolve(root, 'control'),
   };
+  if (wal.localAuthoring !== undefined && !isRecord(wal.localAuthoring)) {
+    throw new WalRuntimeError(
+      'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION',
+      'sync.wal.localAuthoring must be an object',
+    );
+  }
+  const rawLocalAuthoring = wal.localAuthoring as Record<string, unknown> | undefined;
+  let localAuthoring: ResolvedWalRuntimeConfiguration['localAuthoring'];
+  if (rawLocalAuthoring !== undefined) {
+    if (
+      typeof rawLocalAuthoring.bundlePath !== 'string'
+      || rawLocalAuthoring.bundlePath.trim().length === 0
+    ) {
+      throw new WalRuntimeError(
+        'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION',
+        'sync.wal.localAuthoring.bundlePath must be a non-empty path',
+      );
+    }
+    if (
+      typeof rawLocalAuthoring.curatorAuthoritySetId !== 'string'
+      || !/^[0-9a-f]{64}$/.test(rawLocalAuthoring.curatorAuthoritySetId)
+    ) {
+      throw new WalRuntimeError(
+        'WAL_INVALID_LOCAL_AUTHORING_CONFIGURATION',
+        'sync.wal.localAuthoring.curatorAuthoritySetId must be lowercase bytes32 hex',
+      );
+    }
+    const bundlePath = resolve(root, rawLocalAuthoring.bundlePath.trim());
+    if (!strictDescendant(root, bundlePath)) {
+      throw new WalRuntimeError(
+        'WAL_PATH_OUTSIDE_ROOT',
+        `sync.wal.localAuthoring.bundlePath must stay below ${root}`,
+      );
+    }
+    localAuthoring = {
+      bundlePath,
+      curatorAuthoritySetId: rawLocalAuthoring.curatorAuthoritySetId,
+    };
+  }
   const components = Object.entries(paths).filter(([name]) => name !== 'root');
   for (let left = 0; left < components.length; left += 1) {
     for (let right = left + 1; right < components.length; right += 1) {
@@ -166,11 +221,18 @@ export function resolveWalRuntimeConfiguration(input: {
       }
     }
   }
+  if (localAuthoring && components.some(([, component]) => pathsOverlap(component, localAuthoring.bundlePath))) {
+    throw new WalRuntimeError(
+      'WAL_PATH_OVERLAP',
+      'WAL local-authoring bundle path overlaps a runtime component path',
+    );
+  }
   return {
     mode,
     protocolVersion: WAL_PROTOCOL_VERSION,
     adapterVersion: WAL_ADAPTER_VERSION,
     cutoverId: wal.cutoverId as string | undefined,
+    localAuthoring,
     paths,
   };
 }
@@ -181,7 +243,7 @@ export interface WalRuntimeStatus {
   mode: WalSyncMode;
   lifecycle: WalRuntimeLifecycle;
   ready: boolean;
-  productionAuthority: 'legacy' | 'wal';
+  synchronizationAuthority: 'legacy' | 'wal';
   shadowEnabled: boolean;
   runtimeRegistered: boolean;
   protocolsRegistered: boolean;
@@ -202,7 +264,7 @@ export function disabledWalRuntimeStatus(): WalRuntimeStatus {
     mode: 'legacy',
     lifecycle: 'disabled',
     ready: true,
-    productionAuthority: 'legacy',
+    synchronizationAuthority: 'legacy',
     shadowEnabled: false,
     runtimeRegistered: false,
     protocolsRegistered: false,
@@ -230,6 +292,9 @@ export class WalRuntime {
   private blockedReason: WalRuntimeStatus['blockedReason'] = null;
   private cutoverVerified = false;
   private unregisterProtocols: (() => void) | null = null;
+  private objectStore: PackedWalObjectStore | null = null;
+  private controlStore: WalControlStore | null = null;
+  private localCommitter: WalLocalCommitter | null = null;
 
   constructor(
     readonly configuration: ResolvedWalRuntimeConfiguration,
@@ -247,7 +312,7 @@ export class WalRuntime {
       mode: this.configuration.mode,
       lifecycle: this.lifecycle,
       ready: this.lifecycle === 'ready',
-      productionAuthority:
+      synchronizationAuthority:
         this.configuration.mode === 'wal' && this.cutoverVerified && runtimeWasReady ? 'wal' : 'legacy',
       shadowEnabled: this.configuration.mode === 'parallel',
       runtimeRegistered: true,
@@ -290,10 +355,15 @@ export class WalRuntime {
         assertNoSymlinks(this.configuration.paths.root, path);
         await mkdir(path, { recursive: true });
       }
+      this.objectStore = new PackedWalObjectStore({ root: this.configuration.paths.objectStore });
+      this.controlStore = new WalControlStore({ root: this.configuration.paths.objectStore });
+      this.localCommitter = new WalLocalCommitter({ control: this.controlStore });
+      this.localCommitter.recoverPostCommitWork();
       this.lifecycle = 'ready';
       await this.persistLifecycle();
       return this.status();
     } catch (error) {
+      this.closeLocalState();
       this.lifecycle = 'blocked';
       const runtimeError = error instanceof WalRuntimeError
         ? error
@@ -306,11 +376,36 @@ export class WalRuntime {
     }
   }
 
-  async replay(): Promise<{ pending: 0 }> {
+  async replay(): Promise<{ pending: number }> {
     if (this.lifecycle !== 'ready' && this.lifecycle !== 'draining') {
       throw new WalRuntimeError('WAL_RUNTIME_NOT_READY', 'WAL replay requires a ready or draining runtime');
     }
-    return { pending: 0 };
+    this.localCommitter!.recoverPostCommitWork();
+    return {
+      pending: this.controlStore!.listLocalCommitWork(['PENDING', 'BLOCKED']).length,
+    };
+  }
+
+  localWriter(): WalLocalCommitter {
+    if (this.lifecycle !== 'ready' || this.localCommitter === null) {
+      throw new WalRuntimeError('WAL_RUNTIME_NOT_READY', 'local WAL authoring requires a ready runtime');
+    }
+    return this.localCommitter;
+  }
+
+  localControlStore(): WalControlStore {
+    if (this.lifecycle !== 'ready' || this.controlStore === null) {
+      throw new WalRuntimeError('WAL_RUNTIME_NOT_READY', 'local WAL control state requires a ready runtime');
+    }
+    return this.controlStore;
+  }
+
+  /** Internal bootstrap/import boundary; never exposes partial range staging. */
+  localObjectStore(): PackedWalObjectStore {
+    if (this.lifecycle !== 'ready' || this.objectStore === null) {
+      throw new WalRuntimeError('WAL_RUNTIME_NOT_READY', 'local WAL object storage requires a ready runtime');
+    }
+    return this.objectStore;
   }
 
   registerProtocols(unregister: () => void): () => void {
@@ -349,7 +444,16 @@ export class WalRuntime {
     }
     this.lifecycle = 'stopped';
     if (hadDurableState) await this.persistLifecycle();
+    this.closeLocalState();
     return this.status();
+  }
+
+  private closeLocalState(): void {
+    this.localCommitter = null;
+    this.controlStore?.close();
+    this.controlStore = null;
+    this.objectStore?.close();
+    this.objectStore = null;
   }
 
   private async persistLifecycle(): Promise<void> {

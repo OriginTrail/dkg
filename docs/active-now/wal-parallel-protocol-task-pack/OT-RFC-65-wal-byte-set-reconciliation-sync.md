@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.9
+version: 0.11
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -26,9 +26,9 @@ semantic evaluator. On replay, a
 deterministic causal/conflict adapter schedules those bytes and invokes the
 same existing DKG semantic core used by the current synchronization path. It
 does not reimplement publish, share, update, deletion, expiry, SWM/VM,
-verified-memory, membership, finality, or cryptographic behavior. A separate
-materializer only persists the semantic core's resulting projection and WAL
-marker atomically.
+verified-memory, membership, finality, or cryptographic behavior. WAL-015 only
+persists the semantic core's resulting projection and WAL marker atomically
+through the existing storage adapter.
 
 Each author signs its own WAL records and checkpoints. A curator signs
 membership and bounded-freshness vectors naming the exact author checkpoints a
@@ -42,7 +42,7 @@ Protocol version 1 fixes exact-arity deterministic CBOR tuples, BLAKE3 object
 identities, a signed deterministic set commitment, rateless IBLT reconciliation
 over 32-byte `WalObjectId` values, bounded deterministic full-ID fallback,
 whole-object range transfer, three raw libp2p protocol families, durable SQLite
-WAL control state, and an atomic RDF materializer contract. The transport
+WAL control state, and one atomic graph-storage operation. The transport
 design takes inspiration from Iroh's separation of content identity, provider
 choice, resumable byte transfer, and transport path selection, but does not
 require an Iroh runtime. IBLT decoding discovers differences efficiently; it is
@@ -70,8 +70,11 @@ implementation, one SWM/VM model, and the same verified-memory and cryptographic
 logic. After fleet-wide parity, failure, security, rebuild, and throughput gates
 pass, one signed network cutover disables legacy synchronization and makes WAL
 the only synchronization authority. It does not replace the shared semantic
-core. There is no per-collection mixed synchronization authority or live legacy
-sync fallback after writes resume. A separate companion document compares this
+core. `Legacy` names only the superseded synchronization mechanism; the DKG
+semantics, SWM/VM model, verified-memory logic, and cryptographic logic are
+shared current behavior, not legacy behavior. There is no per-collection mixed
+synchronization authority or live legacy sync fallback after writes resume. A
+separate companion document compares this
 design with OT-RFC-64 / OriginTrail dkgv10-spec PR #144.
 
 ## 0. Decision
@@ -92,10 +95,10 @@ The permanent boundary is:
 > rebuildable query projection.
 
 The WAL proves what was committed. The existing semantic core validates DKG and
-RDF semantics; the WAL replay/conflict adapter invokes that core, and the graph
-materializer persists its output. A graph database is still central to the
-product, but it is no longer required to prove replication history or
-completeness.
+RDF semantics; the WAL replay/conflict adapter invokes that core, and WAL-015
+persists its output atomically through the existing storage adapter. A graph database is still
+central to the product, but it is no longer required to prove replication
+history or completeness.
 
 The files `vectors/OT-RFC-65-protocol-v1.schema.json` and
 `vectors/OT-RFC-65-protocol-v1.json` are normative. Prose names are descriptive;
@@ -183,7 +186,7 @@ flowchart LR
   X["VM/finality/reorg events"] --> S
   P["Existing membership and crypto logic"] --> S
   S --> O["Existing SWM/VM semantic outcome"]
-  O --> M["Atomic projection persistence"]
+  O --> M["WAL-015: store result in one transaction"]
   M --> G["Production or isolated shadow projection"]
 ```
 
@@ -203,7 +206,7 @@ deprecate the SWM/VM model, verified-memory rules, or cryptographic logic.
 | `ReconciliationDriver` | Compare signed heads, stream IBLT symbols, fetch complete objects by ranges, and admit closed batches. |
 | `WalReplayConflictAdapter` | Build the causal schedule, classify protocol-level compatibility from explicit mutation footprints and signed replay policy, retain incompatible branches, and invoke `DkgSemanticCore` for every branch transition. It owns no duplicate DKG behavior. |
 | `DkgSemanticCore` | The existing implementation of publish/share/update/delete/expiry, SWM/VM, verified-memory, authorization, and cryptographic behavior, reused by both synchronization mechanisms. |
-| `RdfMaterializer` | Persist the semantic core's resulting projection and WAL marker atomically; it does not decide semantic outcomes. |
+| Existing graph storage adapter | WAL-015 persists the semantic core's resulting projection and WAL marker atomically; it does not decide semantic outcomes. |
 | `VmChainValidator` | The existing chain-validation implementation for KA identity, root, version, receipt, finality, and reorg status, invoked by the shared semantic core. |
 
 ### Authority
@@ -221,7 +224,11 @@ deprecate the SWM/VM model, verified-memory rules, or cryptographic logic.
 
 1. **Immutable identity:** one `WalObjectId` names exactly one complete
    canonical signed `WalObjectV1`. No payload, range, or chunk has a separate
-   synchronization identity.
+   synchronization identity. One accepted DKG operation that changes multiple
+   disclosure views produces one complete `WalObjectV1` per eligible view and
+   namespace. Those objects are peers, not parts of a larger synchronization
+   object: each remains the sole atom, and the public object contains no private
+   RDF bytes.
 2. **Authorization before disclosure:** private roots, IDs, sizes, proofs, and
    bytes are returned only after current membership authorization.
 3. **Explicit completeness:** synchronization targets the exact author
@@ -765,6 +772,21 @@ restore or lower this guard.
 `WalObjectV1` is the only durable transferred content object. Its canonical
 CBOR byte string may be streamed in ranges, but a range is only ephemeral wire
 framing and local staging progress.
+
+This RFC uses `atom` only for synchronization identity. The observable
+admission of a complete `WalObjectV1` is all-or-nothing: partial range bytes
+remain staging data, and its `WalObjectId` MUST NOT enter an admitted set,
+checkpoint, vector, or replay queue until the complete canonical object has
+passed length, ID, signature, and policy verification and is durably
+recoverable. WAL-006 defines the crash-safe store/control transaction and
+recovery protocol that provides this property.
+
+WAL-015's all-or-nothing graph-database write is a different storage guarantee,
+not another synchronization atom. It receives the existing semantic core's
+already-decided result and stores that result plus its replay marker in one
+transaction. No RDF graph, quad, conflict record, marker, transaction, payload,
+page, or byte range gains a `WalObjectId` or independent synchronization
+lifecycle.
 
 ```text
 GetWalObjectRangeV1 = [
@@ -1536,6 +1558,8 @@ Minimum tables:
 | `checkpoints` | Canonical signed author checkpoints. |
 | `vectors` | Verified curator vectors and current expected heads. |
 | `idempotency` | `(namespace, writer, key) -> requestDigest, WalObjectId, status`. |
+| `local_logical_heads` | Exact `(namespaceId, logicalKey)` causal frontier used by local authoring compare-and-swap. |
+| `local_commit_work` | Durable `(namespaceId, logicalKey, WalObjectId)` replay/materialization outbox. |
 | `admission` | Proof, closure, validation, quarantine, and reason state. |
 | `materialization` | Per-logical-key desired and applied head/state digests. |
 | `peer_state` | Provider success, failures, backoff, and availability hints. |
@@ -1545,23 +1569,37 @@ file excluded from WAL, graph, and snapshot restores.
 
 ### 10.2 Local write transaction
 
-1. Compile the request to canonical mutation and policy-bound metadata.
-2. Encode the complete adapter envelope as inline `payloadBytes`.
+1. Compile the shared semantic core's accepted result to canonical mutation
+   plaintext and policy-bound metadata.
+2. For a public view, encode the complete adapter envelope as inline
+   `payloadBytes`. For a private view, resolve the existing Sender Key epoch
+   and complete the canonical plaintext before entering the writer lane; the
+   sequence-bound encrypted envelope cannot yet be finalized.
 3. Acquire the per-writer lane mutex.
 4. Begin `IMMEDIATE` SQLite transaction.
 5. Resolve the idempotency key. A repeated key with another request digest is an
    error; the same digest returns the existing WAL object.
 6. Allocate `sequence` and bind `previousObjectIdOrNull`.
-7. Build and sign the complete canonical `WalObjectV1`.
-8. Insert the object and update the persistent set commitment.
-9. Build and sign the new writer checkpoint.
-10. Update the writer lane and idempotency mapping.
-11. Commit.
-12. Fsync and atomically promote the canonical object file before reporting it
+7. For a private view only, derive the object key from the allocated sequence,
+   finalize the encrypted inline envelope, and durably claim nonce uniqueness
+   in this same transaction. This callback may do byte/crypto work only; no
+   network, graph, membership, key-selection, or semantic work is allowed.
+8. Build and sign the complete canonical `WalObjectV1`.
+9. Insert the object and update the persistent set commitment.
+10. Build and sign the new writer checkpoint.
+11. Update the writer lane and idempotency mapping.
+12. Commit.
+13. Fsync and atomically promote the canonical object file before reporting it
     advertisable.
-13. Materialize the logical key synchronously or return
+14. Materialize the logical key synchronously or return
     `materialization-pending` with the durable `WalObjectId`.
-14. Send a best-effort checkpoint nudge.
+15. Send a best-effort checkpoint nudge.
+
+Local causal heads and replay work are keyed by `(namespaceId, logicalKey)`,
+not by `logicalKey` alone. Public/private views, Sender Key epochs, policy
+epochs, and SWM/VM tiers therefore cannot overwrite or deduplicate one
+another's frontier or retry work. Cross-namespace relationships are expressed
+only by signed adapter payloads such as `MOVE_TIER`.
 
 The SQLite transaction remains open while signing. No network or graph call may
 occur inside it.
@@ -1573,7 +1611,7 @@ sequenceDiagram
     participant E as WAL mutation encoder
     participant W as WalObjectStore + signer
     participant A as Replay/conflict adapter
-    participant M as Atomic projection persistence
+    participant M as WAL-015 storage transaction
     participant G as Graph store
     participant H as Curator/head service
 
@@ -1806,13 +1844,14 @@ sequenceDiagram
     end
 ```
 
-## 14. Atomic projection persistence
+## 14. Persisting the resulting projection atomically
 
 WAL and graph do not share a distributed transaction. Only the graph projection
 operation itself must be atomic.
 
-The materializer receives a complete projection outcome from the shared DKG
-semantic core. It may guard, persist, read back, retry, or rebuild that outcome;
+WAL-015 receives a complete projection outcome from the shared DKG semantic
+core and passes it to the existing storage adapter. The storage operation may
+guard, persist, read back, retry, or rebuild that outcome;
 it MUST NOT choose active heads, reinterpret mutations, resolve conflicts, or
 apply separate SWM/VM, verified-memory, authorization, or cryptographic rules.
 
@@ -1918,12 +1957,12 @@ is reached; lowering it does not bypass the author's stricter value. A record
 above the signed network maximum is rejected as a resource/policy error rather
 than wrapping or truncating the u32 field.
 
-The semantic core returns the VM/SWM projection outcome, and the materializer
-stores it with the verified chain frontier and projection marker. The existing
-chain watcher periodically rechecks stored block hashes and sends changes back
-through the same core. On reorg or loss of finality, that core returns the VM
-branch to `pending` and restores the last valid SWM head when one exists. WAL
-history is never deleted by a reorg.
+The semantic core returns the VM/SWM projection outcome, and WAL-015 persists
+it with the verified chain frontier and projection marker.
+The existing chain watcher periodically rechecks stored block hashes and sends
+changes back through the same core. On reorg or loss of finality, that core
+returns the VM branch to `pending` and restores the last valid SWM head when one
+exists. WAL history is never deleted by a reorg.
 
 ```mermaid
 sequenceDiagram
@@ -1932,7 +1971,7 @@ sequenceDiagram
     participant W as WAL
     participant V as Existing VM chain validator
     participant S as Existing DKG semantic core
-    participant M as Atomic projection persistence
+    participant M as WAL-015 storage transaction
     participant G as SWM/VM projection
 
     P->>C: Publish or update KA commitment
@@ -2118,7 +2157,7 @@ sequenceDiagram
     participant W as WAL verifier/store
     participant A as Replay/conflict adapter
     participant S as Existing DKG semantic core
-    participant M as Atomic projection persistence
+    participant M as WAL-015 storage transaction
     participant G as SWM/VM projection
 
     R->>P: GET_VECTOR with authorization evidence
@@ -2235,7 +2274,7 @@ Cutover is allowed only when all conditions hold for every collection:
 7. Restart all nodes with `sync.mode = wal` and the exact `CutoverId`.
 8. Promote the verified shadow projection or rebuild production from WAL.
 9. Do not register legacy sync protocols or allow graph-persistence paths that
-   bypass the shared semantic core and atomic projection boundary.
+   bypass the shared semantic core and WAL-015 storage transaction.
 10. Resume writes.
 
 The signed cutover object and exact `CutoverId` are distributed through the
@@ -2316,8 +2355,8 @@ packages/agent/src/wal/
   status.ts
 
 packages/storage/src/wal/
-  materializer.ts
-  oxigraph-materializer.ts
+  apply-wal-projection.ts
+  oxigraph-apply-wal-projection.ts
   conflict-projection.ts
 
 packages/publisher/src/
