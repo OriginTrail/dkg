@@ -144,7 +144,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
 import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
-import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import { repairLocallyCreatedPublicMetaProjections } from './context-graph-public-meta-repair.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -951,21 +951,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
-    // Public definitions were historically written only to ONTOLOGY while
-    // late-subscriber admission requires the canonical proof in root `_meta`.
-    // Repair only graphs whose ontology creator is this exact peer. This runs
-    // after libp2p has exposed the stable peer ID but before protocol handlers
-    // and sync serving are registered. Foreign/discovered graphs remain
-    // ineligible; conflicting local policy remains fail-closed.
+    // Legacy public definitions may predate the root `_meta` proof required by
+    // late-subscriber admission. Repair only ids backed by the daemon's
+    // durable, local-only `local-create` membership record. ONTOLOGY is
+    // network-supplied discovery data and is never accepted as provenance.
     try {
-      const repaired = await repairCreatorPublicMetaProjections(
+      const memberships = await this.config.contextGraphMembershipStore?.loadAll?.() ?? [];
+      const locallyCreatedIds = memberships
+        .filter((membership) => (
+          membership.source === 'local-create'
+          && membership.role === 'curator'
+          && membership.status === 'active'
+        ))
+        .map((membership) => membership.contextGraphId);
+      const repaired = await repairLocallyCreatedPublicMetaProjections(
         this.store,
-        this.node.peerId.toString(),
+        locallyCreatedIds,
       );
       if (repaired.repairedGraphs > 0) {
         this.log.info(
           ctx,
-          `Repaired authoritative public metadata for ${repaired.repairedGraphs} creator-owned context graph(s) (${repaired.insertedTriples} triples)`,
+          `Repaired authoritative public metadata for ${repaired.repairedGraphs} durably local-created context graph(s) (${repaired.insertedTriples} triples)`,
         );
       }
       if (repaired.conflictingGraphs.length > 0) {
@@ -977,7 +983,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(
         ctx,
-        `Failed to repair creator-owned public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to repair durably local-created public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 

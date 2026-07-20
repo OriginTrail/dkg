@@ -131,6 +131,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
+import { resolveContextGraphAccessPolicyDeclarations } from './context-graph-access-policy.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -899,6 +900,25 @@ export class ContextGraphMethods extends DKGAgentBase {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
 
+    const cgMetaGraph = contextGraphMetaUri(id);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = `did:dkg:context-graph:${id}`;
+    const accessPolicyResult = await this.store.query(
+      `SELECT ?ap WHERE {
+        { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+        UNION
+        { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+      }`,
+    );
+    const storedAccessPolicy = resolveContextGraphAccessPolicyDeclarations(
+      id,
+      accessPolicyResult.type === 'bindings'
+        ? accessPolicyResult.bindings
+            .map((row) => row['ap'])
+            .filter((value): value is string => value !== undefined)
+        : [],
+    );
+
     // Only the address-scoped curator can register a CG on-chain.
     // Peer IDs are transport contact handles for sync/meta refresh, not EVM
     // authority identifiers. For legacy local CGs that only have a creator
@@ -919,20 +939,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         );
       }
 
-      const cgMetaGraph = contextGraphMetaUri(id);
-      const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      const contextGraphUri = `did:dkg:context-graph:${id}`;
-      const accessPolicyResult = await this.store.query(
-        `SELECT ?ap WHERE {
-          { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-          UNION
-          { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-        } LIMIT 1`,
-      );
-      const apValue = accessPolicyResult.type === 'bindings'
-        ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
-        : undefined;
-      const isCurated = apValue === 'private';
+      const isCurated = storedAccessPolicy === 'private';
       const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
       const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
       const curatorDid = `did:dkg:agent:${curatorAddress}`;
@@ -987,8 +994,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     let ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
     // Check if already registered
-    const cgMetaGraph = contextGraphMetaUri(id);
-    const contextGraphUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
@@ -999,7 +1004,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
-    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE {
         { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
