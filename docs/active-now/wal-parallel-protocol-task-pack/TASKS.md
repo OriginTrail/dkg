@@ -731,18 +731,18 @@ correctness dependency.
 
 ### Acceptance area
 
-- [ ] A node with no local WAL state obtains current authority evidence and at
+- [x] A node with no local WAL state obtains current authority evidence and at
       least one valid provider through the frozen bootstrap path.
-- [ ] Lost gossip, unavailable curator cache, stale hint, one malicious provider,
+- [x] Lost gossip, unavailable curator cache, stale hint, one malicious provider,
       and direct-to-relay path changes do not change the expected signed set.
-- [ ] Provider switching during symbol acquisition, fallback enumeration, and
+- [x] Provider switching during symbol acquisition, fallback enumeration, and
       WAL-object range fetch converges to exact sets and bytes without duplicate
       durably recorded ranges.
-- [ ] Private discovery returns no collection/view/root/provider metadata to an
+- [x] Private discovery returns no collection/view/root/provider metadata to an
       unauthorized requester.
-- [ ] Retry state survives restart, respects concurrency/fan-out bounds, and
+- [x] Retry state survives restart, respects concurrency/fan-out bounds, and
       avoids tight loops against malformed or unavailable peers.
-- [ ] All-provider-unavailable state reports `known-incomplete` or
+- [x] All-provider-unavailable state reports `known-incomplete` or
       `unknown-freshness` accurately, never `complete`.
 
 ---

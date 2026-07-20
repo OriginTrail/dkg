@@ -990,6 +990,57 @@ export class WalControlStore {
     );
   }
 
+  getPeerState(peerId: Uint8Array): PeerStateRecord | null {
+    this.assertUsable();
+    if (!(peerId instanceof Uint8Array) || peerId.length === 0) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'peerId cannot be empty');
+    }
+    const row = this.database.prepare(`
+      SELECT peer_id, success_count, failure_count, backoff_until_ms,
+             availability_hint, updated_at_ms
+      FROM peer_state WHERE peer_id = ?
+    `).get(Buffer.from(peerId)) as {
+      peer_id: Buffer;
+      success_count: number;
+      failure_count: number;
+      backoff_until_ms: number;
+      availability_hint: Buffer | null;
+      updated_at_ms: number;
+    } | undefined;
+    return row === undefined ? null : {
+      peerId: copy(row.peer_id),
+      successCount: row.success_count,
+      failureCount: row.failure_count,
+      backoffUntilMs: row.backoff_until_ms,
+      availabilityHint: row.availability_hint === null ? null : copy(row.availability_hint),
+      updatedAtMs: row.updated_at_ms,
+    };
+  }
+
+  listPeerStates(): readonly PeerStateRecord[] {
+    this.assertUsable();
+    const rows = this.database.prepare(`
+      SELECT peer_id, success_count, failure_count, backoff_until_ms,
+             availability_hint, updated_at_ms
+      FROM peer_state ORDER BY peer_id
+    `).all() as Array<{
+      peer_id: Buffer;
+      success_count: number;
+      failure_count: number;
+      backoff_until_ms: number;
+      availability_hint: Buffer | null;
+      updated_at_ms: number;
+    }>;
+    return rows.map(row => ({
+      peerId: copy(row.peer_id),
+      successCount: row.success_count,
+      failureCount: row.failure_count,
+      backoffUntilMs: row.backoff_until_ms,
+      availabilityHint: row.availability_hint === null ? null : copy(row.availability_hint),
+      updatedAtMs: row.updated_at_ms,
+    }));
+  }
+
   enqueueGc(input: GcQueueRecord, maximumEntries: number, maximumBytes: number): void {
     this.assertUsable();
     const entryLimit = safeInteger(maximumEntries, 'maximum GC entries', 1);

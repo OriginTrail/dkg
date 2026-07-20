@@ -48,6 +48,10 @@ export {
   type DkgWalSenderKeyState,
 } from './wal/private-payload-adapter.js';
 export { registerWalWireProtocols } from './wal/wire-protocol.js';
+export {
+  createDkgWalProviderResolutionAdapter,
+  type DkgWalProviderResolutionAdapterOptions,
+} from './wal/provider-resolution-adapter.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {

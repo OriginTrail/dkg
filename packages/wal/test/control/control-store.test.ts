@@ -981,6 +981,22 @@ describe('WalControlStore bounded durable work', () => {
       peerId: Uint8Array.of(1), successCount: 1, failureCount: 1,
       backoffUntilMs: 50, availabilityHint: null, updatedAtMs: 11,
     });
+    expect(value.getPeerState(Uint8Array.of(1))).toEqual({
+      peerId: Uint8Array.of(1), successCount: 1, failureCount: 1,
+      backoffUntilMs: 50, availabilityHint: null, updatedAtMs: 11,
+    });
+    expect(value.getPeerState(Uint8Array.of(2))).toBeNull();
+    expect(value.listPeerStates()).toEqual([{
+      peerId: Uint8Array.of(1), successCount: 1, failureCount: 1,
+      backoffUntilMs: 50, availabilityHint: null, updatedAtMs: 11,
+    }]);
+    value.putPeerState({
+      peerId: Uint8Array.of(2), successCount: 2, failureCount: 0,
+      backoffUntilMs: 0, availabilityHint: Uint8Array.of(8), updatedAtMs: 12,
+    });
+    expect(value.getPeerState(Uint8Array.of(2))?.availabilityHint).toEqual(Uint8Array.of(8));
+    expect(value.listPeerStates().map(entry => entry.availabilityHint)).toEqual([null, Uint8Array.of(8)]);
+    await expectCode(() => value.getPeerState(new Uint8Array()), 'WAL_CONTROL_INVALID_CONFIGURATION');
     await expectCode(() => value.putPeerState({
       peerId: new Uint8Array(), successCount: 0, failureCount: 0, backoffUntilMs: 0, updatedAtMs: 1,
     }), 'WAL_CONTROL_INVALID_CONFIGURATION');

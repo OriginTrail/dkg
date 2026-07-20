@@ -667,6 +667,11 @@ describe('WAL authority fail-closed validation', () => {
       }),
     });
     lifecycles.push(lifecycleWithoutClock);
+    expect(lifecycleWithoutClock.currentNetworkAuthority(100)).toBeNull();
+    expect(lifecycleWithoutClock.acceptAuthorityEvidence(network.bytes, 100)).toBeUndefined();
+    expect(lifecycleWithoutClock.currentNetworkAuthority(100)).toEqual(network.tuple);
+    expect(lifecycleWithoutClock.acceptAuthorityEvidence(network.bytes, 100)).toBeUndefined();
+    await expectCode(() => lifecycleWithoutClock.currentNetworkAuthority(-1), 'WAL_AUTHORITY_INVALID');
     const noAuthorityMembership = await membership(view(), curator.id, [curatorA]);
     await expectCode(
       lifecycleWithoutClock.acceptMembershipCheckpoint(noAuthorityMembership.bytes, 100),

@@ -5,3 +5,4 @@ export * from './store/index.js';
 export * from './control/index.js';
 export * from './authority/index.js';
 export * from './privacy/index.js';
+export * from './discovery/index.js';

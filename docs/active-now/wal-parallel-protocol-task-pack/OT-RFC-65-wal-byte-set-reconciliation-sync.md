@@ -1385,6 +1385,61 @@ authentication, capability negotiation, context binding, replay/freshness
 checks, and authorization does that candidate become an authorized protocol
 provider. Discovery success is never head, set, object, or completeness proof.
 
+An empty public node queries at least two configured bootstrap sources. Each
+source may return an oldest-to-newest authority-rotation chain and a canonical
+threshold-signed `ProviderBootstrapManifestV1`. The node installs authority
+evidence through the existing DKG authority lifecycle, verifies the manifest
+against the resulting current network authority, and then passes signed
+endpoints only as untrusted inputs to the existing peer resolver. A signed
+endpoint is not treated as dialable until it parses, targets the expected peer,
+and is accepted by the transport address book. Live connections, DHT, network
+registry, agent directory, direct paths, relays, and persisted availability
+hints may add or replace paths without changing the signed provider identity or
+content target.
+
+For private cold start, bootstrap infrastructure receives only the member agent
+address. It does not receive `collectionId`, `namespaceId`, view, root, object
+count, or provider metadata. The returned member-targeted ticket is opened by
+the existing current DKG membership and private-crypto path. Its authenticated
+plaintext is the complete canonical signed `ProviderBootstrapManifestV1` byte
+string, not a second provider-entry format. The outer ticket binds the exact
+`collectionId`, member agent, membership checkpoint, validity window, nonce,
+and `BootstrapManifestId`; the opened manifest must hash to that ID and verify
+under the current network authority.
+
+```mermaid
+sequenceDiagram
+    participant N as Empty WAL node
+    participant B1 as Bootstrap source A
+    participant B2 as Bootstrap source B
+    participant A as Existing DKG authority lifecycle
+    participant K as Existing private membership and crypto
+    participant R as Existing PeerResolver
+    participant P as Candidate provider
+    alt Public collection
+        N->>B1: networkId plus collectionId
+        N->>B2: networkId plus collectionId
+        B1-->>N: authority evidence plus signed manifest
+        B2-->>N: authority evidence plus signed manifest
+    else Private collection
+        N->>B1: memberAgentAddress only
+        N->>B2: memberAgentAddress only
+        Note over B1,B2: No collection, view, root, count, or provider metadata
+        B1-->>N: authority evidence plus encrypted member ticket
+        B2-->>N: authority evidence plus encrypted member ticket
+        N->>K: Open exact ticket using current membership and key epoch
+        K-->>N: Canonical signed manifest bytes or uniform denial
+    end
+    N->>A: Install oldest-to-newest authority evidence
+    A-->>N: Current verified network authority
+    N->>N: Verify manifest signature, epoch, scope, ID, and time window
+    N->>R: Resolve signed peer ID using endpoint hints
+    R-->>N: Bounded live, direct, DHT, directory, relay paths
+    N->>P: Authenticated GET_CAPABILITIES with fresh request ID
+    P-->>N: Bound response or uniform denial
+    Note over N,P: A path or session is never completeness or content proof
+```
+
 ```text
 ProviderBootstrapManifestV1 = [
   version, networkId, collectionId, authorityEpoch, providers,
@@ -1400,10 +1455,11 @@ PrivateBootstrapTicketV1 = [
 ]
 ```
 
-The private ticket ciphertext contains the authorized provider entries and is
-encrypted to the current member agent/key epoch. A provider still performs
-normal transport identity binding and current membership authorization; a
-ticket or manifest discovers candidates and does not prove content correctness.
+The private ticket ciphertext contains exactly the canonical signed
+`ProviderBootstrapManifestV1` bytes and is encrypted to the current member
+agent/key epoch. A provider still performs normal transport identity binding
+and current membership authorization; a ticket or manifest discovers
+candidates and does not prove content correctness.
 
 ### Message families
 

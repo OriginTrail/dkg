@@ -255,6 +255,33 @@ export class WalAuthorityLifecycle {
     return { status, authoritySetId: copy(id) };
   }
 
+  /**
+   * Discovery-facing alias that deliberately reuses the full authority
+   * lifecycle. Bootstrap evidence therefore cannot bypass genesis anchors,
+   * threshold signatures, rotations, revocations, fork detection, or durable
+   * rollback protection.
+   */
+  acceptAuthorityEvidence(
+    canonicalBytes: Uint8Array,
+    acceptedAtMs = safeInteger(this.now(), 'current time'),
+  ): void {
+    this.acceptAuthoritySet(canonicalBytes, acceptedAtMs);
+  }
+
+  /**
+   * Returns the current verified network authority for provider-manifest
+   * verification. Absence is not an error during cold start; every other
+   * lifecycle failure remains fail-closed.
+   */
+  currentNetworkAuthority(
+    atMs = safeInteger(this.now(), 'current time'),
+  ): ProtocolTuple<'AuthoritySetV1'> | null {
+    this.assertOpen();
+    safeInteger(atMs, 'atMs');
+    if (this.persistence.getCurrentAuthority(this.networkId, NETWORK_SCOPE) === null) return null;
+    return this.currentAuthority(NETWORK_SCOPE, atMs).tuple;
+  }
+
   async acceptMembershipCheckpoint(
     canonicalBytes: Uint8Array,
     acceptedAtMs = safeInteger(this.now(), 'current time'),

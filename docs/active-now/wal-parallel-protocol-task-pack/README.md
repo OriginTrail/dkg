@@ -15,11 +15,11 @@ checkout.
 | Authoritative branch | `codex/wal-005-iblt-lab` |
 | Worktree | `/private/tmp/dkg-v9-wal-005-iblt-lab` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `202375026fc1ace667d90feeb203346667c35020` |
+| RFC source commit | `897ddeb06f2cff76c0fa622aa6a213b271170106` |
 | RFC version | `0.7` |
-| RFC SHA-256 | `6fa0040c63e6b10ce2074717af4b1285bcce47063d3dadac9af070a4f9c0618e` |
-| Schema SHA-256 | `e2760054e5f996fc04a8cb8d72f6f2673de1a4972a1572b7ac3f47657ded8182` |
-| Vectors SHA-256 | `ecd25554f3403413fd31f584ca9322c4df7621cfed560d5e75d5b8100d3af38c` |
+| RFC SHA-256 | `63c90587cc67ce8bd1b34a34843bab08de283020712bc35653bef39da9582229` |
+| Schema SHA-256 | `ea5b7479fb04df7f3633cd0c9763ac4d2204a0c8df13aac32693f8ea486964fa` |
+| Vectors SHA-256 | `71b650aaca282359464684e9a2d4070fc4e4e82a9f63efcbc8eb9a9ccb023543` |
 
 ## Mandatory system-context contract
 
