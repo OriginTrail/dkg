@@ -327,6 +327,15 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const key = knowledgeAssetVmPublishLifecycleKey(facts);
     // Object-bound triple pattern (not a FILTER) so the store resolves it via the
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
+    //
+    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
+    // subject as delete-then-insert, so a lookup that races a state transition can
+    // transiently miss the index and return `none`. This window is pre-existing
+    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
+    // claim-locked findActive remains the authoritative dedup guard, so a transient
+    // false `none` cannot by itself create a duplicate active job. Making writeJob
+    // atomic (single transactional store.update) is a dedicated follow-up so this PR
+    // does not put raw-SPARQL payload-literal escaping on the hot write path.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
     );
@@ -352,19 +361,34 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   /**
-   * #1828 — idempotently backfill the ephemeral intent index for VM-publish jobs
-   * admitted before the index existed. Additive insert only (RDF set-semantics
-   * make re-runs no-ops); never deletes/rewrites, so it cannot race the runner.
-   * Returns the number of jobs (re)indexed. Run once at boot.
+   * #1828 — idempotently backfill the ephemeral lifecycle index for VM-publish
+   * jobs admitted before the index existed. Reads the subjects already carrying
+   * the index and inserts ONLY the missing ones (additive insert; never
+   * deletes/rewrites, so it cannot race the runner), returning the real number
+   * of jobs repaired rather than a full-reindex count. Run once at boot.
    */
   async ensureVmPublishIntentIndex(): Promise<number> {
     await this.ensureGraph();
-    const jobs = await this.list();
-    const quads = jobs.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
-    if (quads.length > 0) {
-      await this.store.insert(quads);
-    }
-    return quads.length / 2;
+    const vmPublishJobs = (await this.list()).filter((job) =>
+      isKnowledgeAssetVmPublishJobRequest(job.request),
+    );
+    if (vmPublishJobs.length === 0) return 0;
+    // Subjects that already carry the lifecycle index. Object-unbound read of the
+    // one predicate — no job-payload scan — so we diff in JS and insert only the
+    // jobs missing it (VM-publish filtered above, never via a SPARQL MINUS, which
+    // would over-select raw-lift jobs).
+    const indexed = await this.store.query(
+      `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
+    );
+    const alreadyIndexed = new Set(
+      expectBindings(indexed)
+        .map((row) => row['job'])
+        .filter((subject): subject is string => typeof subject === 'string'),
+    );
+    const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
+    const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
+    if (quads.length > 0) await this.store.insert(quads);
+    return missing.length;
   }
 
   async list(filter: { status?: LiftJobState } = {}): Promise<LiftJob[]> {

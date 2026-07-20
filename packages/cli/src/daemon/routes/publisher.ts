@@ -417,12 +417,25 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     //    identical chain (resolveAgentAddress) admission used — instead of the empty
     //    lane, which would never match. An explicit query param still wins.
     const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+    const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
     const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+    const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+    // The lifecycle key joins these facts with a U+001F control char (matching the
+    // promote-queue uniquenessKey), whose safety depends on no component carrying
+    // that delimiter. Reject C0 control chars on this public route so a crafted
+    // param cannot forge a colliding key. #1828.
+    const hasControlChar = (value: string | undefined): boolean =>
+      value !== undefined && /[\u0000-\u001F\u007F]/.test(value);
+    if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+      return jsonResponse(res, 400, {
+        error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+      });
+    }
     const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent({
       contextGraphId,
       name,
-      subGraphName: url.searchParams.get("subGraphName") ?? undefined,
-      agentAddress: explicitAgentAddress ?? requestAgentAddress,
+      subGraphName,
+      agentAddress,
       intentKey,
     });
     const { kind, ...rest } = lookup;

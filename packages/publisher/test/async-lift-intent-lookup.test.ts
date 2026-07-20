@@ -6,7 +6,6 @@ import {
 } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
 import {
-  CONTROL_INTENT_KEY,
   CONTROL_LIFECYCLE_KEY,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
@@ -97,17 +96,24 @@ describe('#1828 async lift intent lookup', () => {
     return jobId;
   }
 
-  it('materializes the lifecycleKey + intentKey index triples on admission (Chunk 1)', async () => {
+  it('materializes only the lifecycleKey index triple on admission (Chunk 1)', async () => {
     const publisher = createPublisher();
     const request = kaVmPublishRequest();
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
-    const result = await store.query(
-      `SELECT ?lk ?ik WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_LIFECYCLE_KEY}> ?lk ; <${CONTROL_INTENT_KEY}> ?ik } }`,
+    const lifecycle = await store.query(
+      `SELECT ?lk WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${CONTROL_LIFECYCLE_KEY}> ?lk } }`,
     );
-    expect(result.type).toBe('bindings');
-    if (result.type !== 'bindings') return;
-    expect(result.bindings).toHaveLength(1);
-    expect(result.bindings[0]?.['ik']).toContain(request.intentKey);
+    expect(lifecycle.type).toBe('bindings');
+    if (lifecycle.type !== 'bindings') return;
+    expect(lifecycle.bindings).toHaveLength(1);
+    // No separate intentKey triple is materialized — exactness is payload-derived,
+    // so the index carries only the lookup key (guards against re-adding the triple).
+    const intent = await store.query(
+      `SELECT ?ik WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <urn:dkg:publisher:intentKey> ?ik } }`,
+    );
+    expect(intent.type).toBe('bindings');
+    if (intent.type !== 'bindings') return;
+    expect(intent.bindings).toHaveLength(0);
   });
 
   it('recovers the live in-flight job from facts alone (AC1)', async () => {
@@ -198,19 +204,20 @@ describe('#1828 async lift intent lookup', () => {
     expect(after).toEqual(before);
   });
 
-  it('boot backfill is additive and idempotent (Chunk 3)', async () => {
+  it('boot backfill inserts only missing index rows and reports the real count (Chunk 3)', async () => {
     const publisher = createPublisher();
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    // Simulate a pre-index job by stripping the index triples.
+    // Simulate a pre-index job by stripping the lifecycle index triple.
     await store.deleteByPattern({ predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI });
-    await store.deleteByPattern({ predicate: CONTROL_INTENT_KEY, graph: DEFAULT_CONTROL_GRAPH_URI });
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('none');
 
+    // First run repairs the one missing job and reports exactly it.
     expect(await publisher.ensureVmPublishIntentIndex()).toBe(1);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
 
-    // Second run must not duplicate the index (idempotent → still 'active', not 'conflict').
-    await publisher.ensureVmPublishIntentIndex();
+    // Second run finds nothing missing → repairs 0 (not a full reindex) and does
+    // not duplicate the index (still 'active', never 'conflict').
+    expect(await publisher.ensureVmPublishIntentIndex()).toBe(0);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
   });
 

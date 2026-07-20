@@ -42,14 +42,13 @@ export const CONTROL_RETRY_COUNT = 'urn:dkg:publisher:retryCount';
 export const CONTROL_MAX_RETRIES = 'urn:dkg:publisher:maxRetries';
 export const CONTROL_LAST_RETRY_REASON = 'urn:dkg:publisher:lastRetryReason';
 // #1828 — ephemeral secondary index on the (mutable) job subject enabling O(1)
-// intent recovery. These triples live on jobRef, so clear/cancel/deleteJob
-// remove them with the job. PR3 (#1829) append-only journal MUST key intent on
-// its OWN journal subjects and may reuse only these predicate-URI strings —
-// never rely on the job-subject index for durability. `lifecycleKey` mirrors the
-// promote queue's uniquenessKey (the dedup subject); `intentKey` is the
-// exactness qualifier.
+// intent recovery. This triple lives on jobRef, so clear/cancel/deleteJob remove
+// it with the job. PR3 (#1829) append-only journal MUST key intent on its OWN
+// journal subjects — never rely on the job-subject index for durability.
+// `lifecycleKey` mirrors the promote queue's uniquenessKey (the dedup subject).
+// Intent exactness is derived from the parsed payload at lookup time, so no
+// separate intentKey triple is materialized.
 export const CONTROL_LIFECYCLE_KEY = 'urn:dkg:publisher:lifecycleKey';
-export const CONTROL_INTENT_KEY = 'urn:dkg:publisher:intentKey';
 export const CONTROL_WALLET_ID = 'urn:dkg:publisher:walletId';
 export const CONTROL_CLAIMED_BY = 'urn:dkg:publisher:claimedBy';
 export const CONTROL_CLAIM_TOKEN = 'urn:dkg:publisher:claimToken';
@@ -246,9 +245,10 @@ export function knowledgeAssetVmPublishLifecycleKey(publish: {
 }
 
 /**
- * #1828 — the two ephemeral index triples on the job subject (lifecycle key +
- * intent key), for VM-publish jobs only. Single source used by both serializeJob
- * and the boot backfill so the index is built identically everywhere.
+ * #1828 — the ephemeral lifecycle-key index triple on the job subject, for
+ * VM-publish jobs only. Single source used by both serializeJob and the boot
+ * backfill so the index is built identically everywhere. Intent exactness is
+ * derived from the parsed payload at lookup time (no separate intentKey triple).
  */
 export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Quad[] {
   if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
@@ -256,7 +256,6 @@ export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Q
   const publish = job.request.knowledgeAssetVmPublish;
   return [
     quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(knowledgeAssetVmPublishLifecycleKey(publish)), graphUri),
-    quad(jobRef, CONTROL_INTENT_KEY, literal(publish.intentKey), graphUri),
   ];
 }
 

@@ -95,6 +95,18 @@ describe('#1828 GET /api/publisher/job-by-intent', () => {
     expect(responseStatus(ctx)).toBe(400);
   });
 
+  // #1828 (otReviewAgent): the lifecycle key joins facts with U+001F, so a fact
+  // carrying that delimiter could forge a colliding key on this public route.
+  it('400s when a fact carries a control character (U+001F key-delimiter)', async () => {
+    const { control } = await newControlWithJob();
+    const ctx = createContext(
+      '/api/publisher/job-by-intent?contextGraphId=music-social&name=al%1Fbums',
+      control,
+    );
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(400);
+  });
+
   // #1828 (otReviewAgent): admission indexes under a non-empty agent lane, and a
   // recovering client rarely retains agentAddress. The route must default the
   // omitted lane to the caller's authenticated agent (the same resolver admission
