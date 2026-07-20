@@ -2,7 +2,7 @@
 
 | Task | Status | Evidence |
 |---|---|---|
-| `WAL-000` | Complete | `codex/wal-000-legacy-baseline` at `b3498244c954103a034abf0f55b636195bb35af0`; independent semantic oracle, with current sync output explicitly non-normative. |
+| `WAL-000` | Consolidated and verified | The accepted independent semantic oracle and report were preserved from `4fe41ec2c`/`b3498244c` and now live on `codex/wal-005-iblt-lab` as `2fa1540df`/`9f2f87c97`; current-sync output remains explicitly non-normative. |
 | `WAL-001` | Consolidated | Its schema, vectors, large-object contract, and two TypeScript conformance consumers now live on `codex/wal-005-iblt-lab` and freeze the RFC v0.7 measured binary64 mapping. |
 | `WAL-002` | Implemented and verified | The same branch contains the legacy-default runtime scaffold, isolated parallel state, fail-closed signed-cutover gate, CLI/API status, lifecycle tests, and stable configuration errors. See `WAL-002-EVIDENCE.md`. |
 | `WAL-003` | Implemented and verified | The same branch contains the exact RFC 8949 tuple codec, all frozen typed protocol schemas, domain-separated identities, EIP-191 signing/recovery, existing signer-shape adapters, golden-vector conformance, canonicality negatives/property tests, and 100% package coverage. See `WAL-003-EVIDENCE.md`. |
@@ -16,7 +16,7 @@
 | `WAL-011` | Implemented and verified | The same branch contains one opaque fail-closed admission pipeline for local validation, network, backfill, and replay; bounded causal closure; atomic closed-batch admission; durable blocking/retry/quarantine; stable reason codes; and the first real three-node daemon WAL capability/restart smoke. All 462 WAL tests pass at 100% coverage. See `WAL-011-EVIDENCE.md`. |
 | `WAL-012` | Implemented and verified | The same branch contains canonical blank-node-free N-Quads, deterministic state/logical/touched keys, signed RDF-policy admission, a bounded local SPARQL compiler, explicit mutation bytes for remote application, independent TypeScript vectors, Oxigraph/Blazegraph parity tests, unchanged DKG semantic-oracle results, and the cumulative real-daemon restart smoke. All 552 WAL tests pass at 100% coverage. See `WAL-012-EVIDENCE.md`. |
 
-WAL-001 through WAL-012 now share one linear implementation history, one worktree,
+WAL-000 through WAL-012 now share one linear implementation history, one worktree,
 and one authoritative branch. No Go/Rust/Python conformance implementation is
 required. The exact-integer mapping is retained only as named A/B experiment
 evidence; protocol version 1 uses the benchmarked exact binary64 evaluation

@@ -24,6 +24,23 @@ creates a fresh external receipt with `pnpm wal:baseline`; the fixed schema,
 matrix, semantic oracle, source digests, and command inventory make the result
 comparable without checking generated logs into Git.
 
+### Consolidation validation
+
+After the harness commits were cherry-picked into the single authoritative
+`codex/wal-005-iblt-lab` branch, the complete semantic profile was rerun at
+`9f2f87c977be68c7fad3fb5d0cb61259801b97ac` with Node 24.11.1. Every normative
+oracle below matched again; the two legacy-sync scenario groups were again
+classified only as non-normative characterization. The external receipt is
+`/private/tmp/dkg-wal-000-consolidated-2/evidence.json` with summary digest
+`cc2a4fd891a12943772d1c11b6663860f2aa6726ca081b86b49ae4c07415da93`.
+
+That consolidation rerun used `--allow-dirty` solely because task-status text
+and task-owned dependency symlinks were present while the history was being
+joined. The harness nevertheless verified unchanged source state at every
+scenario boundary and restored its protected generated deployment file. It is
+additional validation, not a replacement for the accepted clean reference
+above.
+
 ## Normative DKG oracle
 
 | Scenario | Passed | Skipped | Oracle |
