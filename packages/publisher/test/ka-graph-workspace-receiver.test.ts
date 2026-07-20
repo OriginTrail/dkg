@@ -92,6 +92,41 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(meta.quads.filter((quad) => quad.predicate.endsWith('publicQuadsDigest'))).toHaveLength(1);
   });
 
+  it('stores canonical Markdown section entities received over SWM', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const document = 'urn:document:construction-notes';
+    const section = 'urn:dkg:ka-skolem:c14n0';
+    const lines = [
+      `<${document}> <http://dkg.io/ontology/hasSection> <${section}> <${DATA_GRAPH}> .`,
+      `<${section}> <http://schema.org/name> "Safety" <${DATA_GRAPH}> .`,
+    ].join('\n');
+
+    const outcome = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(lines),
+      publicTripleCount: 2,
+      shareOperationId: 'rootless-markdown-op',
+    }), PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    if (!outcome.applied) throw new Error(outcome.reason);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const rows = await store.query(
+      `SELECT ?section ?name WHERE { GRAPH <${swmGraph}> {
+        <${document}> <http://dkg.io/ontology/hasSection> ?section .
+        ?section <http://schema.org/name> ?name .
+      } }`,
+    );
+    expect(rows).toMatchObject({
+      type: 'bindings',
+      bindings: [{ section, name: '"Safety"' }],
+    });
+  });
+
   it('replaces the whole KA graph without leaving prior subjects behind', async () => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
@@ -335,6 +370,15 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
           ),
         },
         'blank-node subject',
+      ],
+      [
+        'forged-skolem',
+        {
+          nquads: new TextEncoder().encode(
+            `<urn:dkg:ka-skolem:attacker> <urn:predicate:value> "forged" <${DATA_GRAPH}> .`,
+          ),
+        },
+        'reserved KA skolem namespace',
       ],
       [
         'private',

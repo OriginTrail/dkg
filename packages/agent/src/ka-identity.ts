@@ -27,6 +27,28 @@ export function unpackKnowledgeAssetId(packed: bigint): UnpackedKnowledgeAssetId
   };
 }
 
+/**
+ * Resolve the local KA UAL represented by an on-chain registration id.
+ *
+ * Rootless V10 KAs pack the author address into the high 160 bits and the
+ * per-author KA number into the low 96 bits. Their canonical local identity is
+ * therefore author/number, not the legacy storage-contract/packed-id receipt
+ * identity. Legacy sequential ids have no author bits and deliberately keep
+ * the old contract/id form so existing read-only KAs remain addressable.
+ */
+export function buildReconciledKnowledgeAssetUal(
+  chainId: string,
+  legacyStorageAddress: string,
+  kaId: bigint,
+): string {
+  if ((kaId >> 96n) === 0n) {
+    return buildKnowledgeAssetUal(chainId, legacyStorageAddress, kaId);
+  }
+
+  const identity = unpackKnowledgeAssetId(kaId);
+  return buildKnowledgeAssetUal(chainId, identity.agentAddress, identity.kaNumber);
+}
+
 export async function resolveAssetUalFromKaIdentity(
   chain: AssetUalChain,
   identity: KnowledgeAssetIdentity,

@@ -886,6 +886,12 @@ export const knowledgeAssetPullFrom = (
 
 export interface AtomicShareOptions {
   subGraphName?: string;
+  /**
+   * Require a private context graph's curator to apply the complete KA before
+   * the UI reports that it reached Shared Working Memory. Defaults to true for
+   * interactive UI shares; public context graphs ignore the gate.
+   */
+  awaitCuratorAck?: boolean;
 }
 
 type LegacyAtomicShareOptions = AtomicShareOptions & {
@@ -920,7 +926,16 @@ function normalizeAtomicShareOptions(raw: AtomicShareOptions): AtomicShareOption
   if (opts.skipSeal !== undefined && opts.skipSeal !== false) {
     throw new TypeError('skipSeal must be false or omitted');
   }
-  return opts.subGraphName ? { subGraphName: opts.subGraphName } : {};
+  if (opts.awaitCuratorAck !== undefined && typeof opts.awaitCuratorAck !== 'boolean') {
+    throw new TypeError('awaitCuratorAck must be a boolean when supplied');
+  }
+  return {
+    ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    // The synchronous UI flow must not turn a local-only SWM commit into a
+    // success toast. For private CGs this waits for the curator's applied ACK;
+    // for public CGs the daemon treats the flag as a no-op.
+    awaitCuratorAck: opts.awaitCuratorAck ?? true,
+  };
 }
 
 /** Atomically seal and share the complete WM Knowledge Asset to SWM. */
@@ -935,6 +950,7 @@ export const knowledgeAssetShare = (
     {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      awaitCuratorAck: opts.awaitCuratorAck,
     },
   );
 };
@@ -1103,9 +1119,11 @@ export interface AssertionInfo {
  * the single `/_shared_memory` graph, so the assertion graph itself becomes
  * empty and the WM-style listing returns nothing. The authoring node's
  * `_meta` graph also records full lifecycle entities (`dkg:state`,
- * `dkg:memoryLayer`, `prov:Activity` events), but `_meta` is NOT replicated
- * between peers — only the context graph's data graphs and the
- * `_shared_memory_meta` partitions propagate over sync.
+ * `dkg:memoryLayer`, `prov:Activity` events). NOTE: `_meta` rows for a shared
+ * (non-WM) assertion DO replicate to peers over the durable `_meta` sync lane —
+ * that is how a curator learns a member-shared KA's name and seal (see GH#1778).
+ * The context graph's data graphs and `_shared_memory_meta` partitions also
+ * propagate over sync.
  *
  * What DOES land on every replica is one `dkg:ShareTransition` entity per
  * promote, authored by `generateShareTransitionMetadata()` in
@@ -1435,11 +1453,14 @@ export const promoteAssertion = (
       code: 'KA_ATOMIC_SHARE_REQUIRED',
     });
   }
-  const subGraphName =
+  const options: AtomicShareOptions =
     optionsOrLegacyEntities === undefined || typeof optionsOrLegacyEntities === 'string'
-      ? legacySubGraphName
-      : optionsOrLegacyEntities.subGraphName ?? legacySubGraphName;
-  return knowledgeAssetShare(contextGraphId, assertionName, { subGraphName });
+      ? { subGraphName: legacySubGraphName }
+      : {
+          ...optionsOrLegacyEntities,
+          subGraphName: optionsOrLegacyEntities.subGraphName ?? legacySubGraphName,
+        };
+  return knowledgeAssetShare(contextGraphId, assertionName, options);
 };
 
 // Issue #864 — central UI translator for `promoteAssertion` outcomes so

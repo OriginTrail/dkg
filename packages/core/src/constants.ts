@@ -331,6 +331,66 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
+/**
+ * Inverse of {@link contextGraphAssertionUri}: split an assertion-coordinate
+ * subject `did:dkg:context-graph:<scope>/assertion/<addr>/<name>` into its
+ * cryptographic coordinate, or `undefined` when the shape does not match.
+ * Centralises the URI layout so consumers (VM-publish author resolution,
+ * durable-sync seal identity) do not re-derive it with bespoke slicing/regex.
+ *
+ * Anchored on the `/assertion/<addr>/<name>` suffix from the RIGHT so it is
+ * robust to slash-containing context-graph IDs (which {@link validateContextGraphId}
+ * permits, e.g. wallet-scoped `0xabc…/project`). `scope` is the raw
+ * `contextGraphId` OR `contextGraphId/<subGraphName>` and is deliberately NOT
+ * split: a context-graph ID may itself contain `/`, so it cannot be separated
+ * from an optional sub-graph name by the URI alone. Callers that know the
+ * expected context graph compare `scope` to
+ * `subGraphName ? contextGraphId + "/" + subGraphName : contextGraphId`.
+ * `subGraphName` and `name` cannot contain `/`, so the suffix is unambiguous;
+ * `agentAddress` is validated as a 0x EVM address.
+ */
+export function parseContextGraphAssertionUri(subject: string): {
+  scope: string;
+  agentAddress: string;
+  name: string;
+} | undefined {
+  const PREFIX = 'did:dkg:context-graph:';
+  if (!subject.startsWith(PREFIX)) return undefined;
+  const parts = subject.slice(PREFIX.length).split('/');
+  // Minimum shape: <scope(>=1)>/assertion/<addr>/<name> → at least 4 segments.
+  if (parts.length < 4) return undefined;
+  const name = parts[parts.length - 1]!;
+  const agentAddress = parts[parts.length - 2]!;
+  const sentinel = parts[parts.length - 3]!;
+  if (sentinel !== 'assertion' || name.length === 0) return undefined;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
+  const scope = parts.slice(0, parts.length - 3).join('/');
+  if (scope.length === 0) return undefined;
+  return { scope, agentAddress, name };
+}
+
+/**
+ * Query bounds for locating the assertion-coordinate subjects of one
+ * `(contextGraphId, name[, subGraphName])` in `_meta`, derived from the same
+ * grammar as {@link contextGraphAssertionUri} so callers do not re-encode the
+ * URI layout. `prefix`/`suffix` bound a `STRSTARTS`/`STRENDS` filter (the prefix
+ * carries the full context-graph id verbatim, so a slash-containing id matches
+ * correctly); `scope` is what a matched subject's {@link parseContextGraphAssertionUri}
+ * `scope` must equal (see that function for why cg and subGraph are not split).
+ */
+export function contextGraphAssertionQueryBounds(
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): { scope: string; prefix: string; suffix: string } {
+  const scope = subGraphName ? `${contextGraphId}/${subGraphName}` : contextGraphId;
+  return {
+    scope,
+    prefix: `did:dkg:context-graph:${scope}/assertion/`,
+    suffix: `/${name}`,
+  };
+}
+
 /** Canonical identity segment used by all new per-KA memory-layer writes. */
 export function canonicalKnowledgeAssetAgentAddress(agentAddress: string): string {
   // Non-EVM legacy identities (notably peer IDs) remain byte-for-byte stable.

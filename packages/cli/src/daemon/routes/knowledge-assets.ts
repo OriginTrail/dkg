@@ -80,8 +80,16 @@ import {
   parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
+import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
+type FinalizedPublishResult = Awaited<
+  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
+> & {
+  /** Backward-compatible response aliases still accepted by the HTTP route. */
+  authorAddress?: string;
+  kas?: unknown[];
+};
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
@@ -148,6 +156,22 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "preSignedAuthorAttestation",
   "schemeVersion",
 ] as const;
+
+/**
+ * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
+ * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
+ * response shape cannot drift between the two routes. Returns `true` (and writes
+ * the response) when it handled the error, `false` otherwise.
+ */
+function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== "AMBIGUOUS_ASSERTION_AUTHOR") return false;
+  jsonResponse(res, 409, {
+    code: "AMBIGUOUS_ASSERTION_AUTHOR",
+    error: e.message ?? String(e),
+    candidates: e.candidates ?? [],
+  });
+  return true;
+}
 
 /**
  * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
@@ -425,6 +449,16 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
   return agentAddress ? { agentAddress } : {};
+}
+
+/**
+ * GH#1778 — the VM-publish caller hint. The token holder is the CALLER, not
+ * necessarily the KA author, so it is passed as `callerAgentAddress` (a
+ * resolution hint), never as `agentAddress` (an authoritative author selector).
+ * Centralised so both publish routes construct the same option.
+ */
+function publishCallerHintLane(agentAddress?: string): { callerAgentAddress?: string } {
+  return agentAddress ? { callerAgentAddress: agentAddress } : {};
 }
 
 function resolveBatchRejectionReporterIdentity(
@@ -932,7 +966,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
         try {
-          const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
+          const pub: FinalizedPublishResult = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
             ...alsoPublishVmOptions,
             ...atomicAuthorLane,
@@ -940,6 +974,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
+          if (storageAckPeerIds.length > 0) {
+            result.storageAckPeerIds = storageAckPeerIds;
+          }
           if (pub?.onChainResult?.convictionCostCovered) {
             result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
           }
@@ -1383,7 +1421,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
-          ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+          ...publishCallerHintLane(writePreflightCallerAgentAddress),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
@@ -1419,6 +1457,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
         }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (respondAmbiguousAssertionAuthor(res, err)) return;
         if (
           err.message?.includes("required") ||
           err.message?.includes("Invalid") ||
@@ -1450,8 +1491,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // first; ONLY if the sole remaining blocker is an unregistered CG do we
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
-        let pub: any;
-        const publishStorageLane = scopedTokenStorageLane(writePreflightCallerAgentAddress);
+        let pub: FinalizedPublishResult;
+        const publishStorageLane = publishCallerHintLane(writePreflightCallerAgentAddress);
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {
@@ -1477,6 +1518,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
         recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
+        const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
@@ -1492,6 +1534,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
           ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
+          ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
@@ -1513,6 +1556,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (respondAmbiguousAssertionAuthor(res, e)) return;
         // Funded-wallet selection found no operational wallet holding the
         // gas + TRAC a publish needs. This is a user-actionable funding
         // condition (4xx), not a server/on-chain bug. Classification + body are

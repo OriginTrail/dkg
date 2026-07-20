@@ -89,6 +89,8 @@ export interface KnowledgeAssetCreateResponse {
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
+  /** Core peers whose StorageACKs backed a confirmed VM publish. */
+  storageAckPeerIds?: string[];
   errors?: KnowledgeAssetLifecycleError[];
   [key: string]: unknown;
 }
@@ -125,6 +127,8 @@ export interface KnowledgeAssetPublishResponse {
   ual?: string;
   txHash?: string;
   status?: string;
+  /** Core peers whose StorageACKs backed a confirmed VM publish. */
+  storageAckPeerIds?: string[];
   error?: string;
   errors?: KnowledgeAssetLifecycleError[];
   contextGraphError?: unknown;
@@ -938,6 +942,7 @@ export class ApiClient {
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
+    storageAckPeerIds?: string[];
     contextGraphError?: string;
   }> {
     return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
@@ -949,6 +954,7 @@ export class ApiClient {
       kas: Array<{ tokenId: string; rootEntity: string }>;
       txHash?: string;
       blockNumber?: number;
+      storageAckPeerIds?: string[];
       contextGraphError?: string;
     }>;
   }

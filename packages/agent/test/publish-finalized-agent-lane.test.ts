@@ -175,7 +175,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       };
     };
 
-    await expect(agent.publishFromFinalizedAssertion(CG, NAME)).rejects.toThrow(/is not finalized/);
+    // GH#1778 — a genuinely absent name still yields "is not finalized":
+    // resolveAssertionAuthor finds no seal, returns undefined, and the caller
+    // falls back to its own address. (Before #1778, publishing NAME itself
+    // without an explicit agentAddress failed here; it now auto-resolves the
+    // sole author AGENT_B — covered by publish-foreign-author-resolution.test.ts.)
+    await expect(agent.publishFromFinalizedAssertion(CG, 'no-such-name')).rejects.toThrow(/is not finalized/);
 
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
       agentAddress: AGENT_B,

@@ -359,7 +359,22 @@ export function createResponderSyncRowListMemo(
           (requestedGeneration !== undefined &&
             priorRejection.refreshGeneration !== requestedGeneration)
         ) deleteRejected(key);
-        else throw priorRejection.error;
+        else {
+          // An intrinsically oversized snapshot deliberately uses the
+          // store-bounded exact-graph path for every later page.  The typed
+          // rejection is therefore active session state, not a one-shot
+          // negative cache entry.  Slide its lifetime whenever the same
+          // session requests another page, just like retained row snapshots
+          // and exact-graph plans.  Without this touch, a healthy long-running
+          // stream loses the fallback marker at the original TTL boundary and
+          // is misreported as an expired immutable snapshot.
+          rememberRejected(
+            key,
+            priorRejection.error,
+            priorRejection.refreshGeneration,
+          );
+          throw priorRejection.error;
+        }
       }
 
       let existing = cached.get(key);

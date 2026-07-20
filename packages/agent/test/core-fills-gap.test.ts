@@ -51,6 +51,7 @@ import type {
 } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -741,6 +742,51 @@ describe('Phase D - VM reconcile damping', () => {
       chunks: [],
     });
   }
+
+  it('reconciles packed rootless ids through their canonical author/number UAL', async () => {
+    const internals = await boot();
+    const onChainCgId = 66n;
+    const authorAddress = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+    const kaNumber = 408n;
+    const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: authorAddress, kaNumber });
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal('66', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      kaId,
+      ual: buildKnowledgeAssetUal(internals.chain.chainId, authorAddress, kaNumber),
+    });
+  });
+
+  it('keeps legacy sequential ids on the read-only contract/id UAL', async () => {
+    const internals = await boot();
+    const onChainCgId = 67n;
+    const kaId = 9067n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal('67', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      kaId,
+      ual: buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId),
+    });
+  });
 
   it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
     const internals = await boot();

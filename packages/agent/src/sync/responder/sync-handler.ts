@@ -524,7 +524,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
-    const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+    // A durable rootless snapshot can legitimately contain millions of rows.
+    // Never clamp a valid cursor: doing so silently replays the row slice at
+    // the clamp boundary forever while the requester keeps advancing its local
+    // offset. That produces duplicates and makes an otherwise valid manifest
+    // fail integrity verification once the snapshot crosses the old 1M cap.
+    // Exact-graph paging already rejects offsets beyond the plan with an empty
+    // page, so accepting every non-negative safe integer remains bounded.
+    const requestedOffset = Number(request.offset);
+    const offset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+      ? requestedOffset
+      : 0;
     const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : syncPageSize, syncPageSize));
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
