@@ -40,7 +40,7 @@ import {
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
-import { resolveWorkspaceEncryptionRequirement } from '../src/workspace-handler.js';
+import { resolveWorkspaceEncryptionRequirement } from '../src/workspace-encryption-policy.js';
 import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 const GATE = ['0x1111111111111111111111111111111111111111'];
