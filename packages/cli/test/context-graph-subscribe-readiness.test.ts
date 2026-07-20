@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import type { CatchupJobResult } from '../src/catchup-runner.js';
+import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
@@ -155,6 +155,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     response: any;
     job: any;
     runCalls: number;
+    runRequests: CatchupRunRequest[];
     state: Record<string, any>;
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
@@ -169,13 +170,15 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    const runRequests: CatchupRunRequest[] = [];
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
 
     daemonState.catchupRunner = {
-      run: async () => {
+      run: async (request) => {
         runCalls += 1;
+        runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
       },
       close: async () => {},
@@ -279,6 +282,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       response,
       job: catchupTracker.jobs.get(jobId),
       runCalls,
+      runRequests,
       state: state.get(contextGraphId) ?? {},
       patches,
       readiness,
@@ -498,6 +502,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       status: 'queued',
       jobId: expect.any(String),
     });
+    expect(result.runRequests).toEqual([{
+      contextGraphId: result.response.subscribed,
+      includeSharedMemory: true,
+    }]);
     expect(result.statusResponse).toMatchObject({
       jobId: result.response.catchup.jobId,
       status: 'done',
