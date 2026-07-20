@@ -26,9 +26,8 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
-import { withKeyedLocks } from './keyed-lock.js';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+import { validateKnowledgeAssetPublishRequest } from './validation.js';
 import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
