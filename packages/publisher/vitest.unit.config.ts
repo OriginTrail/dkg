@@ -16,6 +16,7 @@ export default defineConfig({
       'test/async-lift-validation.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-broadcast-durability.test.ts',
+      'test/async-lift-intent-lookup.test.ts',
       'test/async-lift-publish-options.test.ts',
       'test/async-promote-queue.test.ts',
       'test/lift-job-types.test.ts',

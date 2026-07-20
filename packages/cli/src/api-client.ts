@@ -1219,6 +1219,28 @@ export class ApiClient {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
+  // #1828 — durable-admission recovery: look a VM-publish job up by the lifecycle
+  // facts the client retains (contextGraphId + name required). Read-only.
+  async publisherJobByIntent(facts: {
+    contextGraphId: string;
+    name: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<{
+    result: 'none' | 'active' | 'superseded' | 'conflict';
+    job?: any;
+    superseded?: any[];
+    jobs?: any[];
+    exactIntentMatch?: boolean;
+  }> {
+    const qs = new URLSearchParams({ contextGraphId: facts.contextGraphId, name: facts.name });
+    if (facts.subGraphName !== undefined) qs.set('subGraphName', facts.subGraphName);
+    if (facts.agentAddress !== undefined) qs.set('agentAddress', facts.agentAddress);
+    if (facts.intentKey !== undefined) qs.set('intentKey', facts.intentKey);
+    return this.get(`/api/publisher/job-by-intent?${qs.toString()}`);
+  }
+
   async publisherStats(): Promise<Record<string, number>> {
     return this.get('/api/publisher/stats');
   }
