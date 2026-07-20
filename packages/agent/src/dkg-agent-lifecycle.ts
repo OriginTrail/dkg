@@ -4774,6 +4774,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // union insert with an oversize guard, whereas a KA graph is
               // all-or-nothing and digest-verified. Insert would risk partial or
               // duplicated graph state across retries.
+              // Skip-if-present guard for the destructive replace above.
+              isGraphAssetMaterialized: async (asset) => {
+                const result = await this.store.query(
+                  `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
+                  + `<${assertSafeIri(asset.headSubject)}> `
+                  + `<http://dkg.io/ontology/assertionGraph> `
+                  + `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+                  { priority: 'background', source: 'agent.sharedMemorySync.isGraphAssetMaterialized' },
+                );
+                return result.type === 'boolean' && result.value;
+              },
               storeReplaceGraph: async (graphUri, quads) => {
                 if (typeof this.store.replaceGraph !== 'function') {
                   throw new Error('triple store does not support atomic graph replace');

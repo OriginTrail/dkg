@@ -86,6 +86,20 @@ interface SharedMemorySyncContext {
    * rather than silently half-applied.
    */
   storeReplaceGraph?: (graphUri: string, quads: Quad[]) => Promise<void>;
+  /**
+   * True when this KA's assertion graph is ALREADY materialized locally.
+   *
+   * Load-bearing safety guard, not an optimization. `storeReplaceGraph` is
+   * destructive: live gossip may already have populated a richer version of the
+   * same graph, and replacing it with snapshot content silently DESTROYS
+   * content the node already had. Omitting this check regressed a peer from 76
+   * quads to 27 on a KA that gossip had delivered correctly.
+   *
+   * Mirrors the private recovery lane's `isGraphAssetMaterialized`
+   * (`dkg-agent-lifecycle.ts`, an ASK for the head's dkg:assertionGraph marker).
+   * When absent, materialization is skipped entirely — never performed blind.
+   */
+  isGraphAssetMaterialized?: (descriptor: GraphScopedSwmRecoveryDescriptor) => Promise<boolean>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -109,6 +123,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     storeReplaceGraph,
+    isGraphAssetMaterialized,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -257,7 +272,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // otherwise abort the whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
-      if (storeReplaceGraph && publicSnapshotStore && wsMetaResult.completed) {
+      if (storeReplaceGraph && isGraphAssetMaterialized && publicSnapshotStore && wsMetaResult.completed) {
         try {
           for (const descriptor of parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
@@ -280,11 +295,20 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const materializedKeys = new Set<string>();
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
-        if (!descriptors?.length || !storeReplaceGraph || !publicSnapshotStore) return;
+        if (!descriptors?.length || !storeReplaceGraph || !isGraphAssetMaterialized || !publicSnapshotStore) return;
         for (const descriptor of descriptors) {
           const graphKey = `${descriptor.metaGraph} ${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
           try {
+            // NEVER replace a graph that is already materialized. Live gossip may
+            // hold a richer version of this KA, and storeReplaceGraph is
+            // destructive — blind replacement silently DROPS content the node
+            // already had. Omitting this regressed a peer from 76 quads to 27 on
+            // a KA that gossip had delivered correctly.
+            if (await isGraphAssetMaterialized(descriptor)) {
+              materializedKeys.add(graphKey);
+              continue;
+            }
             const asset = await materializeGraphScopedSwmRecoveryAsset({
               descriptor,
               fetchedDataQuads: [],
