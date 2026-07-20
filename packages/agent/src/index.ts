@@ -67,6 +67,31 @@ export {
   type DkgWalPublisherShadowWriterOptions,
 } from './wal/local-commit.js';
 export {
+  DkgWalReplayCoreAdapterV1,
+  replayAdmittedWalSetWithDkgCoreV1,
+  type DkgWalReplayCoreAdapterOptionsV1,
+  type ReplayAdmittedWalSetWithDkgCoreOptionsV1,
+} from './wal/replay-conflict-adapter.js';
+export {
+  DkgWalRetentionSemanticAdapterV1,
+  createDkgWalRetentionSemanticAdapterV1,
+  createDkgWalEpochSnapshotValidatorV1,
+  type DkgWalRetentionSemanticAdapterOptionsV1,
+  type DkgWalEpochSnapshotValidatorOptionsV1,
+} from './wal/retention-semantic-adapter.js';
+export {
+  DkgWalProjectionMaterializerError,
+  DkgWalProjectionMaterializerV1,
+  type DkgWalProjectionApplyResultV1,
+  type DkgWalProjectionMaterializerErrorCode,
+  type DkgWalProjectionMaterializerOptionsV1,
+  type DkgWalProjectionRecoveryAuditV1,
+  type DkgWalProjectionRecalculateV1,
+  type DkgWalSemanticProjectionOutcomeV1,
+  type LocalWalProjectionRebuildSourceV1,
+  type WalProjectionScopeV1,
+} from './wal/projection-materializer.js';
+export {
   DkgWalLocalAuthoringBundleError,
   SignedDkgWalLocalAuthoringResolverV1,
   loadSignedDkgWalLocalAuthoringResolverV1,

@@ -55,6 +55,21 @@
       "import": "./dist/rdf/index.js",
       "default": "./dist/rdf/index.js"
     },
+    "./replay": {
+      "types": "./dist/replay/index.d.ts",
+      "import": "./dist/replay/index.js",
+      "default": "./dist/replay/index.js"
+    },
+    "./vm": {
+      "types": "./dist/vm/index.d.ts",
+      "import": "./dist/vm/index.js",
+      "default": "./dist/vm/index.js"
+    },
+    "./retention": {
+      "types": "./dist/retention/index.d.ts",
+      "import": "./dist/retention/index.js",
+      "default": "./dist/retention/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

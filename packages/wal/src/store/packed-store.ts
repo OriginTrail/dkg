@@ -25,6 +25,7 @@ import {
   PACKED_RECORD_HEADER_BYTES,
   PACKED_SEGMENT_HEADER_BYTES,
   PACKED_STORE_SCHEMA_VERSION,
+  PACKED_GC_SCHEMA_SQL,
   PackedObjectTransactionAppend,
   createPackedSegmentFile,
   packedRecordMagicMatches,
@@ -42,6 +43,18 @@ interface ObjectRow {
   segment_id: number;
   object_offset: number;
   object_length: number;
+}
+
+export type PackedWalObjectStoreGcPoint =
+  | 'tombstones-written'
+  | 'gc-index-committed'
+  | 'gc-segment-files-removed';
+
+export interface PackedWalObjectStoreGcResult {
+  readonly newlyRetiredObjects: number;
+  readonly alreadyRetiredObjects: number;
+  readonly physicallyRemovedSegmentIds: readonly number[];
+  readonly deferredSegmentIds: readonly number[];
 }
 
 export type PackedWalObjectStoreDurabilityPoint =
@@ -197,7 +210,11 @@ export class PackedWalObjectStore extends WalObjectStore {
     assertId(id);
     this.assertOpen();
     try {
-      return this.database.prepare('SELECT 1 FROM objects WHERE object_id = ?').get(idBuffer(id)) !== undefined;
+      return this.database.prepare(`
+        SELECT 1 FROM objects o
+        LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+        WHERE o.object_id = ? AND g.object_id IS NULL
+      `).get(idBuffer(id)) !== undefined;
     } catch (error) {
       return storeError('WAL_STORE_IO', 'failed to query packed WalObjectStore', error);
     }
@@ -215,7 +232,9 @@ export class PackedWalObjectStore extends WalObjectStore {
     let row: ObjectRow | undefined;
     try {
       row = this.database.prepare(
-        'SELECT object_id, segment_id, object_offset, object_length FROM objects WHERE object_id = ?',
+        `SELECT o.object_id, o.segment_id, o.object_offset, o.object_length
+         FROM objects o LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+         WHERE o.object_id = ? AND g.object_id IS NULL`,
       ).get(idBuffer(id)) as ObjectRow | undefined;
     } catch (error) {
       return storeError('WAL_STORE_IO', 'failed to query packed WalObjectStore', error);
@@ -265,6 +284,9 @@ export class PackedWalObjectStore extends WalObjectStore {
     assertId(expectedId);
     this.assertOpen();
     if (await this.has(expectedId)) return;
+    if (this.database.prepare('SELECT 1 FROM objects WHERE object_id = ?').get(idBuffer(expectedId)) !== undefined) {
+      storeError('WAL_STORE_INVALID_OBJECT', 'WalObject was retired below an authenticated compaction floor');
+    }
     const temporary = join(this.stagingRoot, `.${idBuffer(expectedId).toString('hex')}.${randomUUID()}.tmp`);
     let candidate;
     try {
@@ -309,7 +331,11 @@ export class PackedWalObjectStore extends WalObjectStore {
   async *ids(): AsyncIterable<WalObjectId> {
     this.assertOpen();
     try {
-      const rows = this.database.prepare('SELECT object_id FROM objects ORDER BY object_id').iterate() as Iterable<{
+      const rows = this.database.prepare(`
+        SELECT o.object_id FROM objects o
+        LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+        WHERE g.object_id IS NULL ORDER BY o.object_id
+      `).iterate() as Iterable<{
         object_id: Buffer;
       }>;
       for (const row of rows) {
@@ -324,6 +350,104 @@ export class PackedWalObjectStore extends WalObjectStore {
     }
   }
 
+  /**
+   * Stop serving exact complete WalObject IDs and physically remove only
+   * fully-retired sealed segments. The retention/custody coordinator must
+   * prove eligibility before calling this storage-only operation.
+   */
+  async collectGarbage(
+    objectIds: readonly WalObjectId[],
+    retiredAtMs: number,
+    hook?: (point: PackedWalObjectStoreGcPoint) => void | Promise<void>,
+  ): Promise<PackedWalObjectStoreGcResult> {
+    this.assertOpen();
+    if (!Number.isSafeInteger(retiredAtMs) || retiredAtMs < 0) {
+      storeError('WAL_STORE_INVALID_CONFIGURATION', 'retiredAtMs must be a non-negative safe integer');
+    }
+    const ids = objectIds.map(value => {
+      assertId(value);
+      return Buffer.from(value);
+    });
+    const unique = new Map(ids.map(value => [value.toString('hex'), value]));
+    if (unique.size !== ids.length) {
+      storeError('WAL_STORE_INVALID_CONFIGURATION', 'physical GC object IDs must be unique');
+    }
+    return this.mutex.run(async () => {
+      let committed = false;
+      let newlyRetiredObjects = 0;
+      let alreadyRetiredObjects = 0;
+      const removable: number[] = [];
+      const deferred: number[] = [];
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const segments = new Set<number>();
+        for (const id of unique.values()) {
+          const row = this.database.prepare(`
+            SELECT o.segment_id,
+                   CASE WHEN g.object_id IS NULL THEN 0 ELSE 1 END AS retired
+            FROM objects o LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+            WHERE o.object_id = ?
+          `).get(id) as { segment_id: number; retired: number } | undefined;
+          if (row === undefined) {
+            storeError('WAL_STORE_OBJECT_NOT_FOUND', 'physical GC target is not stored');
+          }
+          segments.add(row.segment_id);
+          if (row.retired === 1) {
+            alreadyRetiredObjects += 1;
+          } else {
+            this.database.prepare(
+              'INSERT INTO packed_gc_tombstones(object_id, retired_at_ms) VALUES (?, ?)',
+            ).run(id, retiredAtMs);
+            newlyRetiredObjects += 1;
+          }
+        }
+        await hook?.('tombstones-written');
+        for (const segmentId of [...segments].sort((left, right) => left - right)) {
+          const segment = this.database.prepare(
+            'SELECT sealed FROM segments WHERE segment_id = ?',
+          ).get(segmentId) as { sealed: number } | undefined;
+          /* v8 ignore start -- objects.segment_id has a foreign key. */
+          if (segment === undefined) storeError('WAL_STORE_CORRUPT', 'GC target references a missing segment');
+          /* v8 ignore stop */
+          const live = this.database.prepare(`
+            SELECT 1 FROM objects o
+            LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+            WHERE o.segment_id = ? AND g.object_id IS NULL LIMIT 1
+          `).get(segmentId);
+          if (segment.sealed === 1 && live === undefined) {
+            this.database.prepare(`
+              INSERT INTO packed_gc_segments(segment_id, retired_at_ms) VALUES (?, ?)
+              ON CONFLICT(segment_id) DO NOTHING
+            `).run(segmentId, retiredAtMs);
+            removable.push(segmentId);
+          } else deferred.push(segmentId);
+        }
+        this.database.exec('COMMIT');
+        committed = true;
+        await hook?.('gc-index-committed');
+      } catch (error) {
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        throw error;
+      }
+      /* v8 ignore start -- the branch documents the post-COMMIT boundary. */
+      if (!committed) storeError('WAL_STORE_IO', 'physical GC transaction did not commit');
+      /* v8 ignore stop */
+      let removed = false;
+      for (const segmentId of removable) {
+        rmSync(this.segmentPath(segmentId), { force: true });
+        removed = true;
+      }
+      if (removed) fsyncDirectory(this.segmentsRoot);
+      await hook?.('gc-segment-files-removed');
+      return {
+        newlyRetiredObjects,
+        alreadyRetiredObjects,
+        physicallyRemovedSegmentIds: removable,
+        deferredSegmentIds: deferred,
+      };
+    });
+  }
+
   private assertOpen(): void {
     if (this.closed) storeError('WAL_STORE_IO', 'packed WalObjectStore is closed');
   }
@@ -333,7 +457,10 @@ export class PackedWalObjectStore extends WalObjectStore {
     if (version !== 0 && version !== PACKED_STORE_SCHEMA_VERSION) {
       storeError('WAL_STORE_INVALID_CONFIGURATION', `unsupported packed store schema version ${version}`);
     }
-    if (version === PACKED_STORE_SCHEMA_VERSION) return;
+    if (version === PACKED_STORE_SCHEMA_VERSION) {
+      this.database.exec(PACKED_GC_SCHEMA_SQL);
+      return;
+    }
     this.database.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE segments (
@@ -353,6 +480,7 @@ export class PackedWalObjectStore extends WalObjectStore {
       PRAGMA user_version = ${PACKED_STORE_SCHEMA_VERSION};
       COMMIT;
     `);
+    this.database.exec(PACKED_GC_SCHEMA_SQL);
   }
 
   private recover(): void {
@@ -365,11 +493,35 @@ export class PackedWalObjectStore extends WalObjectStore {
     `).get();
     if (invalid !== undefined) storeError('WAL_STORE_CORRUPT', 'packed index points outside committed segments');
 
+    const retiredSegments = new Set((this.database.prepare(
+      'SELECT segment_id FROM packed_gc_segments ORDER BY segment_id',
+    ).all() as Array<{ segment_id: number }>).map(row => row.segment_id));
+    const invalidRetired = this.database.prepare(`
+      SELECT 1 FROM objects o
+      JOIN packed_gc_segments s ON s.segment_id = o.segment_id
+      LEFT JOIN packed_gc_tombstones g ON g.object_id = o.object_id
+      WHERE g.object_id IS NULL LIMIT 1
+    `).get();
+    if (invalidRetired !== undefined) {
+      storeError('WAL_STORE_CORRUPT', 'physically retired segment still contains a served WalObject');
+    }
     const rows = this.database.prepare(
       'SELECT segment_id, committed_end, record_count, sealed FROM segments ORDER BY segment_id',
     ).all() as PackedSegmentRow[];
     const referenced = new Set(rows.map(row => packedSegmentName(row.segment_id)));
-    for (const row of rows) this.recoverSegment(row);
+    let retiredRemoved = false;
+    for (const row of rows) {
+      if (retiredSegments.has(row.segment_id)) {
+        if (row.sealed !== 1) storeError('WAL_STORE_CORRUPT', 'active packed segment cannot be physically retired');
+        if (kind(this.segmentPath(row.segment_id)) === 'file') {
+          rmSync(this.segmentPath(row.segment_id), { force: true });
+          retiredRemoved = true;
+        }
+        continue;
+      }
+      this.recoverSegment(row);
+    }
+    if (retiredRemoved) fsyncDirectory(this.segmentsRoot);
     let removed = false;
     for (const entry of readdirSync(this.segmentsRoot, { withFileTypes: true })) {
       if (!/^[0-9a-f]{16}\.pack$/.test(entry.name) || referenced.has(entry.name)) continue;

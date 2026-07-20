@@ -86,7 +86,8 @@ export interface CommitLocalWalInput {
   requestDigest: Uint8Array;
   status?: IdempotencyStatus;
   policyObjectId?: Uint8Array | null;
-  baselineSnapshotObjectId?: Uint8Array | null;
+  /** `self` binds an epoch-zero snapshot checkpoint to the object being authored. */
+  baselineSnapshotObjectId?: Uint8Array | null | 'self';
   compactionFloor?: bigint;
   maximumObjectBytes?: bigint;
   /** Present for DkgMutationV1; persisted as the post-commit recovery outbox. */
@@ -191,14 +192,19 @@ export interface VectorRecord {
 }
 
 export interface MaterializationRecord {
+  namespaceId: Uint8Array;
   logicalKey: Uint8Array;
   desiredHeadsDigest: Uint8Array;
+  desiredConflictHeadsDigest: Uint8Array;
   desiredStateDigest: Uint8Array;
+  sourceVectorId: Uint8Array;
   appliedHeadsDigest?: Uint8Array | null;
+  appliedConflictHeadsDigest?: Uint8Array | null;
   appliedStateDigest?: Uint8Array | null;
   status: 'PENDING' | 'APPLIED' | 'BLOCKED';
   attempts: number;
   retryAtMs: number;
+  lastError?: string | null;
   updatedAtMs: number;
 }
 
@@ -218,4 +224,56 @@ export interface GcQueueRecord {
   eligibleAtMs: number;
   state?: 'PENDING' | 'BLOCKED';
   createdAtMs: number;
+}
+
+export type RetentionEpochState =
+  | 'INSTALLED'
+  | 'VECTOR_BOUND'
+  | 'GC_ELIGIBLE'
+  | 'GC_COMPLETE';
+
+export interface RetentionEpochRecord {
+  snapshotObjectId: Uint8Array;
+  namespaceId: Uint8Array;
+  writerId: Uint8Array;
+  coveredWriterEpoch: bigint;
+  newWriterEpoch: bigint;
+  coveredCheckpointId: Uint8Array;
+  compactionFloor: bigint;
+  graceStartedAtMs: number;
+  graceEndsAtMs: number;
+  vectorId: Uint8Array | null;
+  state: RetentionEpochState;
+  updatedAtMs: number;
+}
+
+export interface InstallRetentionEpochInput {
+  snapshotObjectId: Uint8Array;
+  namespaceId: Uint8Array;
+  writerId: Uint8Array;
+  coveredWriterEpoch: bigint;
+  newWriterEpoch: bigint;
+  coveredCheckpointId: Uint8Array;
+  compactionFloor: bigint;
+  graceStartedAtMs: number;
+  graceEndsAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface RetentionCustodyReceiptRecord {
+  receiptId: Uint8Array;
+  snapshotObjectId: Uint8Array;
+  custodianAgentAddress: Uint8Array;
+  custodianPeerId: Uint8Array;
+  membershipCheckpointId: Uint8Array;
+  canonicalBytes: Uint8Array;
+  expiresAtMs: number;
+  recordedAtMs: number;
+}
+
+export interface RetentionGcObjectRecord {
+  snapshotObjectId: Uint8Array;
+  objectId: Uint8Array;
+  state: 'ELIGIBLE' | 'RETIRED';
+  updatedAtMs: number;
 }

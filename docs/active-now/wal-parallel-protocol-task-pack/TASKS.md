@@ -44,7 +44,7 @@ only atomically store the resulting outcome.
 | `WAL-012` | Implement RDF canonicalization, mutation encoding, and signed replay policy | `WAL-001`, `WAL-003` | Deterministic encoding of shared-core outcomes without remote SPARQL execution. |
 | `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside production writes while legacy sync remains authoritative. |
 | `WAL-014` | Implement deterministic replay/conflict adapter over the existing semantic core | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent scheduling and conflicts with no second DKG implementation. |
-| `WAL-015` | Persist shared-core results atomically and support rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions. |
+| `WAL-015` | Commit shared-core projections transactionally and support rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions or another synchronization atom. |
 | `WAL-016` | Feed VM/finality/reorg events into the existing semantic core | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by WAL events without a second VM model. |
 | `WAL-017` | Implement deletion, expiry, snapshots, custody, and compaction | `WAL-004`–`WAL-007`, `WAL-011`, `WAL-014`, `WAL-015` | Bounded history with no resurrection. |
 | `WAL-018` | Implement genesis migration, backfill, and rebuild tooling | `WAL-016`, `WAL-017` | Authenticated bootstrap from existing SWM/VM state. |
@@ -953,52 +953,61 @@ orders inputs to the one existing DKG/SWM/VM implementation.
 
 ### Acceptance area
 
-- [ ] Every replay/conflict scenario obtains its decision from the shared
+- [x] Every replay/conflict scenario obtains its decision from the shared
       semantic core and then produces identical active-head, state, and
       conflict digests under all WAL-object-arrival and provider permutations.
 - [ ] Instrumented current-sync and WAL-replay scenarios invoke the same semantic
       entry points and return the same outcomes; static/code review finds no
       duplicated DKG/SWM/VM/verified-memory/finality/crypto implementation.
-- [ ] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
+- [x] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
       delete/update, tier movement, multi-base, resolution, and equivocation
       vectors match the normative fixtures. Those fixtures consume
       semantic-core outcomes as inputs; they do not contain a DKG decision table.
-- [ ] No incompatible branch is dropped or made active by wall clock, arrival
+- [x] No incompatible branch is dropped or made active by wall clock, arrival
       order, provider identity, or lexical `WalObjectId` winner selection.
-- [ ] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
+- [x] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
       without changing active/conflict state.
-- [ ] Resource limits bound causal depth, conflict heads, touched keys, and
+- [x] Resource limits bound causal depth, conflict heads, touched keys, and
       recomputation work with stable blocked/quarantine outcomes.
 - [ ] Replay output matches the shared semantic oracle for all previously
       defined behavior. There is no permitted RFC divergence from established
       DKG semantics in this task; a desired semantic change belongs in the
       semantic core and applies to both synchronization mechanisms.
-- [ ] Naming, APIs, package boundaries, and operator output call this a
+- [x] Naming, APIs, package boundaries, and operator output call this a
       replay/conflict adapter, never a DKG reducer or WAL semantic engine.
 
 ---
 
-## WAL-015 — Persist shared-core results atomically and support rebuild
+## WAL-015 — Commit shared-core projections transactionally and support rebuild
 
 **Focused RFC context:** Sections 2, 3, 14, 17, 19, and rebuild goals.
 
 ### Objective
 
 Persist the shared semantic core's complete projection outcome into isolated
-RDF graphs with an atomic content/conflict/marker commit, making the graph store
-rebuildable rather than a second replication or semantic truth.
+RDF graphs with one all-or-nothing content/conflict/marker database transaction,
+making the graph store rebuildable rather than a second replication or semantic
+truth. This database transaction is not a synchronization atom: complete
+`WalObjectV1` remains the sole durable content-addressed synchronization atom.
 
 ### Scope and deliverables
 
-- Add `applyWalProjectionAtomic` to the storage capability contract with guarded
-  expected/new head digests, content mutations, conflict graphs, state digest,
-  vector ID, and `APPLIED | GUARD_FAILED` outcome.
+- Add `commitWalProjectionV1` to the storage capability contract. Its complete
+  persistence plan contains `CAS | REBUILD` mode, `(namespaceId, logicalKey)`,
+  expected/new active-head digests, new conflict-head/state digests, content
+  mutations, conflict graphs, source vector ID, materialization status, and a
+  `COMMITTED | GUARD_FAILED` outcome with an exact marker.
 - Implement the Oxigraph reference path as one all-or-none transaction and exact
   marker post-read after lost responses.
-- Persist adapter version, active-head-set digest, state digest, source vector,
-  and materialization status in `urn:dkg:wal:projection`.
+- Persist exactly adapter version, namespace, logical key, active-head-set
+  digest, conflict-head-set digest, state digest, source vector, and
+  materialization status in `urn:dkg:wal:projection`.
+- Keep materialization status out of the shared semantic-core outcome. WAL-015
+  alone stamps `APPLIED` when it constructs the storage commit, so graph and
+  control markers cannot disagree about a successfully committed projection.
 - Implement per-key locking, persistent retry, guard-failure recalculation,
-  corruption detection, and full/selective projection rebuild from WAL.
+  corruption detection, and full/selective graph-only projection rebuild from
+  locally complete WAL state with no peer/network source.
 - Keep the storage boundary semantically passive: it may validate guards and
   persistence integrity, but it must not choose heads, interpret DKG operations,
   resolve conflicts, or implement SWM/VM, verified-memory, authorization,
@@ -1011,20 +1020,20 @@ rebuildable rather than a second replication or semantic truth.
 
 ### Acceptance area
 
-- [ ] Fault injection proves content, conflict graphs, and marker are always all
+- [x] Fault injection proves content, conflict graphs, and marker are always all
       old or all new; no partial canonical projection is observable.
-- [ ] Lost response is resolved by exact marker/state post-read; a different
+- [x] Lost response is resolved by exact marker/state post-read; a different
       value blocks/recalculates instead of being treated as success.
-- [ ] Opposite replay scheduling and process restart reach identical markers and
+- [x] Opposite replay scheduling and process restart reach identical markers and
       RDF state.
-- [ ] Tests pass deliberately different complete semantic outcomes through the
+- [x] Tests pass deliberately different complete semantic outcomes through the
       same persistence method and prove the persistence boundary stores or
       rejects them only by atomic guard/integrity rules, never by a second
       semantic decision.
-- [ ] A locally complete WAL rebuilds an empty/corrupt shadow projection with
+- [x] A locally complete WAL rebuilds an empty/corrupt shadow projection with
       zero network payload transfer and exact semantic digests.
-- [ ] Production reads never include shadow graphs in `parallel` mode.
-- [ ] Backend capability tests explicitly mark Oxigraph eligible and keep every
+- [x] Production reads never include shadow graphs in `parallel` mode.
+- [x] Backend capability tests explicitly mark Oxigraph eligible and keep every
       failing backend ineligible for authoritative `wal` mode.
 
 ---
@@ -1066,9 +1075,9 @@ machine.
       CG, insufficient finality, and reorg cases never produce active VM state.
 - [ ] Valid finalized transition atomically activates VM and supersedes the
       corresponding SWM view; reorg deterministically restores prior valid SWM.
-- [ ] Public target objects/responses disclose none of the private source IDs,
+- [x] Public target objects/responses disclose none of the private source IDs,
       graph names, epochs, counts, or causal shape.
-- [ ] Chain policy reconfiguration and stored-frontier revalidation follow the
+- [x] Chain policy reconfiguration and stored-frontier revalidation follow the
       frozen rule across restart.
 - [ ] WAL sync and legacy sync produce identical VM API state and canonical RDF
       for the golden corpus because both invoke the same semantic code paths.
@@ -1102,16 +1111,16 @@ conflicts, forging authorship, or resurrecting stale state.
 
 ### Acceptance area
 
-- [ ] Offline/restart/compaction tests never resurrect deleted or expired state.
-- [ ] Local-clock-only expiry, unauthorized expiry, missing base heads, and stale
+- [x] Offline/restart/compaction tests never resurrect deleted or expired state.
+- [x] Local-clock-only expiry, unauthorized expiry, missing base heads, and stale
       frontier fail without hiding state.
-- [ ] Snapshot bytes, authorship, covered checkpoint/root, policy, adapter, VM
+- [x] Snapshot bytes, authorship, covered checkpoint/root, policy, adapter, VM
       frontier, tombstones, and conflicts verify against normative vectors.
-- [ ] A peer below the floor installs the author baseline before delta
+- [x] A peer below the floor installs the author baseline before delta
       reconciliation and validates closure without fetching removed history.
-- [ ] GC is impossible before required durable replicas/receipts and grace; stale,
+- [x] GC is impossible before required durable replicas/receipts and grace; stale,
       expired, removed, or forged custody evidence cannot authorize deletion.
-- [ ] Crash tests at snapshot install, epoch rotation, receipt persistence, floor
+- [x] Crash tests at snapshot install, epoch rotation, receipt persistence, floor
       advance, and physical GC retain one safe authoritative WAL state.
 
 ---

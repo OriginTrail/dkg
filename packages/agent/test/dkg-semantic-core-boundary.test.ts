@@ -4,11 +4,20 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type {
+  WalReplayMergeInputV1,
+  WalReplaySemanticCoreV1,
+  WalReplayTransitionInputV1,
+} from '@origintrail-official/dkg-wal/replay';
 import {
   DkgSemanticCore,
   type DkgSemanticCoreDelegates,
   type DkgSemanticCoreTraceEvent,
 } from '../src/semantic/dkg-semantic-core.js';
+import {
+  DkgWalReplayCoreAdapterV1,
+  replayAdmittedWalSetWithDkgCoreV1,
+} from '../src/wal/replay-conflict-adapter.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const asset: VerifiedGraphScopedAsset = {
@@ -108,6 +117,79 @@ describe('one shared DKG semantic-core boundary', () => {
     expect(chainResult).toEqual(walResult);
     expect(reconcile).toHaveBeenCalledTimes(2);
     expect(reconcile.mock.calls[0]).toEqual(reconcile.mock.calls[1]);
+  });
+
+  it('routes legacy and WAL replay orchestration through identical shared-core entry points', async () => {
+    const trace: DkgSemanticCoreTraceEvent[] = [];
+    const core = new DkgSemanticCore({ observer: event => trace.push(event) });
+    const replayState = { stateDigest: new Uint8Array(32), projection: 'opaque-state' };
+    const initialState = vi.fn(async () => replayState);
+    const evaluateTransition = vi.fn(async () => ({ status: 'accepted' as const, state: replayState }));
+    const mergeCompatibleBranches = vi.fn(async () => ({ status: 'accepted' as const, state: replayState }));
+    const implementation: WalReplaySemanticCoreV1<string> = {
+      initialState,
+      evaluateTransition,
+      mergeCompatibleBranches,
+    };
+    const legacy = new DkgWalReplayCoreAdapterV1({
+      implementation,
+      driver: 'legacy-sync',
+      semanticCore: core,
+    });
+    const wal = new DkgWalReplayCoreAdapterV1({
+      implementation,
+      driver: 'wal-sync',
+      semanticCore: core,
+    });
+    const scope = { namespaceId: new Uint8Array(32), logicalKey: new Uint8Array(32) };
+    const transition = { marker: 'same-transition-input' } as unknown as WalReplayTransitionInputV1<string>;
+    const merge = { marker: 'same-merge-input' } as unknown as WalReplayMergeInputV1<string>;
+
+    await expect(legacy.initialState(scope)).resolves.toBe(replayState);
+    await expect(wal.initialState(scope)).resolves.toBe(replayState);
+    await expect(legacy.evaluateTransition(transition)).resolves.toEqual({ status: 'accepted', state: replayState });
+    await expect(wal.evaluateTransition(transition)).resolves.toEqual({ status: 'accepted', state: replayState });
+    await expect(legacy.mergeCompatibleBranches(merge)).resolves.toEqual({ status: 'accepted', state: replayState });
+    await expect(wal.mergeCompatibleBranches(merge)).resolves.toEqual({ status: 'accepted', state: replayState });
+
+    expect(initialState.mock.calls).toEqual([[scope], [scope]]);
+    expect(evaluateTransition.mock.calls).toEqual([[transition], [transition]]);
+    expect(mergeCompatibleBranches.mock.calls).toEqual([[merge], [merge]]);
+    expect(trace).toEqual([
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-initial-state', phase: 'enter' },
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-initial-state', phase: 'return' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-initial-state', phase: 'enter' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-initial-state', phase: 'return' },
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-transition', phase: 'enter' },
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-transition', phase: 'return' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-transition', phase: 'enter' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-transition', phase: 'return' },
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-compatible-merge', phase: 'enter' },
+      { driver: 'legacy-sync', entryPoint: 'wal-replay-compatible-merge', phase: 'return' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-compatible-merge', phase: 'enter' },
+      { driver: 'wal-sync', entryPoint: 'wal-replay-compatible-merge', phase: 'return' },
+    ]);
+  });
+
+  it('runs an admitted set through the production WAL replay bridge without inventing semantics', async () => {
+    const initial = { stateDigest: new Uint8Array(32), projection: 'empty-shared-state' };
+    const implementation: WalReplaySemanticCoreV1<string> = {
+      initialState: vi.fn(async () => initial),
+      evaluateTransition: vi.fn(async () => ({ status: 'rejected', reasonCode: 'unused' })),
+      mergeCompatibleBranches: vi.fn(async () => ({ status: 'rejected', reasonCode: 'unused' })),
+    };
+    const result = await replayAdmittedWalSetWithDkgCoreV1({
+      implementation,
+      input: {
+        namespaceId: new Uint8Array(32),
+        logicalKey: new Uint8Array(32),
+        objects: [],
+      },
+    });
+    expect(result).toMatchObject({ status: 'empty', state: initial });
+    expect(implementation.initialState).toHaveBeenCalledOnce();
+    expect(implementation.evaluateTransition).not.toHaveBeenCalled();
+    expect(implementation.mergeCompatibleBranches).not.toHaveBeenCalled();
   });
 
   it('keeps failures identical and records no driver-specific fallback', async () => {

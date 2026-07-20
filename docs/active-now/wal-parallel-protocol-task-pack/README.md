@@ -1,6 +1,6 @@
 # WAL parallel-protocol implementation task pack
 
-This directory turns OT-RFC-65 v0.11 into an implementation backlog for
+This directory turns OT-RFC-65 v0.14 into an implementation backlog for
 OriginTrail DKG. It is intentionally created in an isolated worktree based on
 the current remote `main`; it does not reuse or modify the dirty primary
 checkout.
@@ -15,11 +15,11 @@ checkout.
 | Authoritative branch | `codex/wal-005-iblt-lab` |
 | Worktree | `/private/tmp/dkg-v9-wal-005-iblt-lab` |
 | RFC source repository | `OriginTrail/dkgv10-spec` |
-| RFC source commit | `3fae6958fd7875b2f435344f59bbbdd588430125` |
-| RFC version | `0.11` |
-| RFC SHA-256 | `8add36bf5f84c27a181ad5695610dc8e386615d10f537257c0defe4c132c5b1c` |
-| Schema SHA-256 | `98e1dbf857a9287dac8af780a0715d01b9b1af6b00ae708ac868f18305a159cd` |
-| Vectors SHA-256 | `c5221143d889461f13811e89c8f17f3405be14b6247dc94915d4bea5015bcde6` |
+| RFC source commit | `2323c5b326b52360bbba63c8f9fbbddb3bf569b0` |
+| RFC version | `0.14` |
+| RFC SHA-256 | `cb876f94089ec83a565c9cb2d450e336b946ded4a5b41b1c6d450a602cb9b00c` |
+| Schema SHA-256 | `a47d7d3301531889ebaba1968eef92f00cf2f0c31d25873232463191d282eac0` |
+| Vectors SHA-256 | `a3869c3ecdad213ad365b2277cffe2f4e7d507e39ae00f956538f4ac505a6ce4` |
 
 ## Mandatory system-context contract
 
@@ -70,8 +70,9 @@ synchronization mechanism, never to those shared semantics. WAL reconciliation
 handles authenticated control bytes, `WalObjectId` sets, and complete
 `WalObjectV1` byte ranges only. The deterministic replay/conflict adapter
 invokes the existing semantic core; it does not reproduce DKG behavior. WAL-015
-only persists the resulting projection atomically through the existing storage
-adapter, and VM, finality, and reorg events enter that same core.
+only commits the resulting projection through one graph-database transaction in
+the existing storage adapter; that transaction is not a synchronization atom.
+VM, finality, and reorg events enter the same semantic core.
 
 ## Execution waves
 

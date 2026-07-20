@@ -315,6 +315,10 @@ export function moveTierCommitment(input: {
   );
 }
 
+export function moveTierTargetMutationDigest(targetMutation: readonly unknown[]): Uint8Array {
+  return hash(DOMAINS.moveTierTargetMutation, encodeCanonical(targetMutation as never));
+}
+
 export function assertPublicMoveTierSafe(publicPayloadBytes: Uint8Array, privateValues: readonly Uint8Array[]): void {
   for (const privateValue of privateValues) {
     if (privateValue.length === 0) continue;

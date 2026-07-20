@@ -98,8 +98,10 @@ function chainBinding(
   if (!input) return null;
   return [
     input.chainId,
+    input.knowledgeAssetsContract,
     input.contextGraphOnChainId,
     input.kaId,
+    input.authorAddress,
     input.assertionVersion,
     input.merkleRoot,
     input.transactionHash,
@@ -110,6 +112,24 @@ function chainBinding(
     input.eventType,
     input.requiredFinalityBlocks,
   ];
+}
+
+function deleteBasis(
+  input: PublisherWalShadowMutationV1['deleteBasis'],
+): ProtocolTuple<'DeleteBasisV1'> | null {
+  if (!input) return null;
+  const vector = input.curatorVectorId ?? null;
+  const frontier = input.finalizedChainFrontier === undefined
+    ? null
+    : [
+        input.finalizedChainFrontier.chainId,
+        input.finalizedChainFrontier.blockNumber,
+        input.finalizedChainFrontier.blockHash,
+      ] as ProtocolTuple<'ChainFrontierV1'>;
+  if ((vector === null) === (frontier === null)) {
+    throw new Error('WAL expiry must bind exactly one signed vector or finalized chain frontier');
+  }
+  return [input.expiresAtMs, vector, frontier];
 }
 
 function hex(value: Uint8Array): string {
@@ -135,6 +155,7 @@ function requestDigest(
     writerId,
     resultNQuads,
     chainBinding(mutation.chainBinding),
+    deleteBasis(mutation.deleteBasis),
     visibility,
     keyEpoch,
   ]);
@@ -199,6 +220,14 @@ export class DkgWalPublisherShadowWriter implements PublisherWalShadowWriter {
     if (mutation.operation === 'DELETE' && mutation.resultQuads.length !== 0) {
       throw new Error('WAL DELETE shadow mutation must have an empty result');
     }
+    const expiryBasis = deleteBasis(mutation.deleteBasis);
+    if (mutation.kind === 'expiry') {
+      if (mutation.operation !== 'DELETE' || expiryBasis === null) {
+        throw new Error('WAL expiry shadow mutation requires DELETE and a signed frontier basis');
+      }
+    } else if (expiryBasis !== null) {
+      throw new Error('WAL delete basis is available only for an expiry mutation');
+    }
 
     const committed = await this.options.committer.commitRdf({
       policyAdmission: context.policyAdmission,
@@ -230,6 +259,7 @@ export class DkgWalPublisherShadowWriter implements PublisherWalShadowWriter {
           ? { kind: 'delete-logical-key' }
           : { kind: 'replace', subjects: replacements(mutation) },
         chainBinding: chainBinding(mutation.chainBinding),
+        deleteBasis: expiryBasis,
         nonConsensusTimestampMs: mutation.timestampMs === undefined
           ? null
           : BigInt(mutation.timestampMs),

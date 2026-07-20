@@ -194,6 +194,9 @@ describe('WalControlStore schema and rollback guard', () => {
       'peer_state',
       'private_payload_nonces',
       'quarantine',
+      'retention_custody_receipts',
+      'retention_epochs',
+      'retention_gc_objects',
       'retry_queue',
       'rollback_guard',
       'set_commitment_nodes',
@@ -227,7 +230,7 @@ describe('WalControlStore schema and rollback guard', () => {
     let value = control(root);
     closeControl(value);
     database = new Database(join(root, 'objects.sqlite'));
-    database.prepare('UPDATE wal_control_schema SET version = 6').run();
+    database.prepare('UPDATE wal_control_schema SET version = 8').run();
     database.close();
     await expectCode(() => control(root), 'WAL_CONTROL_UNSUPPORTED_SCHEMA');
 
@@ -250,7 +253,7 @@ describe('WalControlStore schema and rollback guard', () => {
     await expectCode(() => control(missingObjects), 'WAL_CONTROL_INVALID_CONFIGURATION');
   });
 
-  it('migrates schema version 1 through namespace-scoped local-work version 5 transactionally', async () => {
+  it('migrates schema version 1 through retention-journal version 7 transactionally', async () => {
     const root = await temporary('migration-v1-v2');
     await prepare(root);
     let value = control(root);
@@ -284,9 +287,9 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(4);
+    expect(hookCalls).toBe(6);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'authority_sets'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
@@ -294,7 +297,7 @@ describe('WalControlStore schema and rollback guard', () => {
     database.close();
   });
 
-  it('migrates schema version 2 through namespace-scoped local-work version 5 transactionally', async () => {
+  it('migrates schema version 2 through retention-journal version 7 transactionally', async () => {
     const root = await temporary('migration-v2-v3');
     await prepare(root);
     let value = control(root);
@@ -317,9 +320,9 @@ describe('WalControlStore schema and rollback guard', () => {
 
     let hookCalls = 0;
     value = control(root, { migrationHook: () => { hookCalls += 1; } });
-    expect(hookCalls).toBe(3);
+    expect(hookCalls).toBe(5);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'private_payload_nonces'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
@@ -349,7 +352,7 @@ describe('WalControlStore schema and rollback guard', () => {
 
     value = control(root);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
-    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_commit_work'").get()).toBeDefined();
     expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'local_logical_heads'").get()).toBeDefined();
     database.close();
@@ -421,7 +424,61 @@ describe('WalControlStore schema and rollback guard', () => {
     }));
     expect(value.getLocalLogicalHeads(input.namespaceId, input.logicalKey)).toEqual([committed.objectId]);
     database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
+    database.close();
+  });
+
+  it('migrates version 5 by resetting provisional materialization into namespace-scoped version 6', async () => {
+    const root = await temporary('migration-v5-v6');
+    await prepare(root);
+    let value = control(root);
+    closeControl(value);
+
+    let database = new Database(join(root, 'objects.sqlite'));
+    database.exec(`
+      DROP INDEX materialization_status_v6;
+      DROP TABLE materialization;
+      CREATE TABLE materialization (
+        logical_key BLOB PRIMARY KEY CHECK (length(logical_key) = 32),
+        desired_heads_digest BLOB NOT NULL CHECK (length(desired_heads_digest) = 32),
+        desired_state_digest BLOB NOT NULL CHECK (length(desired_state_digest) = 32),
+        applied_heads_digest BLOB CHECK (applied_heads_digest IS NULL OR length(applied_heads_digest) = 32),
+        applied_state_digest BLOB CHECK (applied_state_digest IS NULL OR length(applied_state_digest) = 32),
+        status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'BLOCKED')),
+        attempts INTEGER NOT NULL CHECK (attempts >= 0),
+        retry_at_ms INTEGER NOT NULL CHECK (retry_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+      ) WITHOUT ROWID;
+      INSERT INTO materialization(
+        logical_key, desired_heads_digest, desired_state_digest,
+        status, attempts, retry_at_ms, updated_at_ms
+      ) VALUES (
+        zeroblob(32), zeroblob(32), zeroblob(32),
+        'PENDING', 1, 2, 3
+      );
+      UPDATE wal_control_schema SET version = 5 WHERE singleton = 1;
+    `);
+    database.close();
+
+    await expectCode(
+      () => control(root, { migrationHook: () => { throw new Error('v5 to v6 migration crash'); } }),
+      'WAL_CONTROL_IO',
+    );
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
     expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(5);
+    expect((database.prepare('SELECT count(*) AS count FROM materialization').get() as { count: number }).count).toBe(1);
+    expect((database.pragma('table_info(materialization)') as Array<{ name: string }>)
+      .map(column => column.name)).not.toContain('namespace_id');
+    database.close();
+
+    value = control(root);
+    database = new Database(join(root, 'objects.sqlite'), { readonly: true });
+    expect((database.prepare('SELECT version FROM wal_control_schema').get() as { version: number }).version).toBe(7);
+    expect((database.prepare('SELECT count(*) AS count FROM materialization').get() as { count: number }).count).toBe(0);
+    expect((database.pragma('table_info(materialization)') as Array<{ name: string }>)
+      .map(column => column.name)).toContain('namespace_id');
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'materialization_status_v6'").get())
+      .toBeDefined();
     database.close();
   });
 
@@ -814,13 +871,22 @@ describe('WalControlStore atomic finalization and admission', () => {
       expect.objectContaining({ objectId: first.objectId, state: 'QUEUED' }),
       expect.objectContaining({ objectId: second.objectId, state: 'PENDING' }),
     ]));
-    value.setLocalCommitWorkState({
-      objectId: second.objectId,
-      expected: ['PENDING'],
-      state: 'MATERIALIZED',
-      updatedAtMs: 7_002,
-    });
+    expect(value.completeLocalCommitWorkForScope(
+      firstInput.namespaceId,
+      firstInput.logicalKey,
+      7_002,
+    )).toBe(2);
+    expect(value.getLocalCommitWork(first.objectId)?.state).toBe('MATERIALIZED');
     expect(value.getLocalCommitWork(second.objectId)?.state).toBe('MATERIALIZED');
+    expect(value.completeLocalCommitWorkForScope(
+      firstInput.namespaceId,
+      firstInput.logicalKey,
+      7_003,
+    )).toBe(0);
+    const database = (value as unknown as { database: Database.Database }).database;
+    expect(database.prepare(
+      "SELECT count(*) AS count FROM idempotency WHERE status = 'MATERIALIZED'",
+    ).get()).toEqual({ count: 2 });
     expect(value.getLocalLogicalHeads(firstInput.namespaceId, firstInput.logicalKey))
       .toEqual([second.objectId]);
     expect(value.integrityScan()).toEqual(expect.objectContaining({
@@ -1014,6 +1080,24 @@ describe('WalControlStore atomic finalization and admission', () => {
       expected: ['MATERIALIZED'],
       state: 'QUEUED',
     })).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_LANE_CONFLICT' }));
+    const database = (value as unknown as { database: Database.Database }).database;
+    database.exec(`
+      CREATE TRIGGER reject_scope_materialization BEFORE UPDATE ON local_commit_work
+      BEGIN SELECT RAISE(ABORT, 'scope materialization'); END
+    `);
+    expect(() => value.completeLocalCommitWorkForScope(
+      bytes('outbox-namespace'),
+      bytes('outbox-key'),
+    )).toThrowError(expect.objectContaining({ code: 'WAL_CONTROL_IO' }));
+    expect(database.inTransaction).toBe(false);
+    expect(value.getLocalCommitWork(committed.objectId)?.state).toBe('PENDING');
+    database.exec('DROP TRIGGER reject_scope_materialization');
+    value.setLocalCommitWorkState({
+      objectId: committed.objectId,
+      expected: ['PENDING'],
+      state: 'MATERIALIZED',
+    });
+    expect(value.getLocalCommitWork(committed.objectId)?.state).toBe('MATERIALIZED');
   });
 
   it.each([
@@ -1593,8 +1677,12 @@ describe('WalControlStore bounded durable work', () => {
     const high = value.leaseRetry(50);
     expect(high).toEqual(expect.objectContaining({ key: 'high', state: 'LEASED', leaseUntilMs: 150 }));
     expect(value.failRetry('high', 'permanent', 200)).toBe('BLOCKED');
+    expect(value.cancelRetry('high')).toBe(true);
+    expect(value.cancelRetry('high')).toBe(false);
     const low = value.leaseRetry(50);
     expect(low?.key).toBe('low');
+    expect(value.cancelRetry('low')).toBe(false);
+    await expectCode(() => value.cancelRetry(''), 'WAL_CONTROL_INVALID_CONFIGURATION');
     await expectCode(() => value.completeRetry('missing'), 'WAL_CONTROL_LEASE_CONFLICT');
     await expectCode(() => value.failRetry('missing', 'no lease', 1), 'WAL_CONTROL_LEASE_CONFLICT');
     await expectCode(() => value.leaseRetry(1, Number.MAX_SAFE_INTEGER), 'WAL_CONTROL_INVALID_CONFIGURATION');
@@ -1880,26 +1968,95 @@ describe('WalControlStore bounded durable work', () => {
       canonicalBytes: Uint8Array.of(2), status: 'CURRENT', expiresAtMs: 100, createdAtMs: 11,
     }), 'WAL_CONTROL_IDEMPOTENCY_CONFLICT');
 
+    const materializationNamespace = bytes('materialization-namespace');
+    const materializationLogicalKey = bytes('logical-key');
     value.putMaterialization({
-      logicalKey: bytes('logical-key'),
+      namespaceId: materializationNamespace,
+      logicalKey: materializationLogicalKey,
       desiredHeadsDigest: bytes('desired-heads'),
+      desiredConflictHeadsDigest: bytes('desired-conflicts'),
       desiredStateDigest: bytes('desired-state'),
+      sourceVectorId: bytes('materialization-vector'),
       status: 'PENDING',
       attempts: 0,
       retryAtMs: 12,
+      lastError: 'waiting',
+      updatedAtMs: 12,
+    });
+    expect(value.getMaterialization(materializationNamespace, materializationLogicalKey)).toEqual({
+      namespaceId: materializationNamespace,
+      logicalKey: materializationLogicalKey,
+      desiredHeadsDigest: bytes('desired-heads'),
+      desiredConflictHeadsDigest: bytes('desired-conflicts'),
+      desiredStateDigest: bytes('desired-state'),
+      sourceVectorId: bytes('materialization-vector'),
+      appliedHeadsDigest: null,
+      appliedConflictHeadsDigest: null,
+      appliedStateDigest: null,
+      status: 'PENDING',
+      attempts: 0,
+      retryAtMs: 12,
+      lastError: 'waiting',
       updatedAtMs: 12,
     });
     value.putMaterialization({
-      logicalKey: bytes('logical-key'),
+      namespaceId: materializationNamespace,
+      logicalKey: materializationLogicalKey,
       desiredHeadsDigest: bytes('desired-heads-2'),
+      desiredConflictHeadsDigest: bytes('desired-conflicts-2'),
       desiredStateDigest: bytes('desired-state-2'),
+      sourceVectorId: bytes('materialization-vector-2'),
       appliedHeadsDigest: bytes('applied-heads'),
+      appliedConflictHeadsDigest: bytes('applied-conflicts'),
       appliedStateDigest: bytes('applied-state'),
       status: 'APPLIED',
       attempts: 1,
       retryAtMs: 13,
       updatedAtMs: 13,
     });
+    const otherMaterializationNamespace = bytes('other-materialization-namespace');
+    value.putMaterialization({
+      namespaceId: otherMaterializationNamespace,
+      logicalKey: materializationLogicalKey,
+      desiredHeadsDigest: bytes('other-desired-heads'),
+      desiredConflictHeadsDigest: bytes('other-desired-conflicts'),
+      desiredStateDigest: bytes('other-desired-state'),
+      sourceVectorId: bytes('other-materialization-vector'),
+      status: 'BLOCKED',
+      attempts: 2,
+      retryAtMs: 14,
+      lastError: 'selective rebuild required',
+      updatedAtMs: 14,
+    });
+    expect(value.getMaterialization(materializationNamespace, materializationLogicalKey)).toEqual(
+      expect.objectContaining({
+        namespaceId: materializationNamespace,
+        status: 'APPLIED',
+        desiredConflictHeadsDigest: bytes('desired-conflicts-2'),
+        appliedConflictHeadsDigest: bytes('applied-conflicts'),
+        lastError: null,
+      }),
+    );
+    expect(value.getMaterialization(otherMaterializationNamespace, materializationLogicalKey)).toEqual(
+      expect.objectContaining({ namespaceId: otherMaterializationNamespace, status: 'BLOCKED' }),
+    );
+    expect(value.getMaterialization(bytes('missing-materialization-namespace'), materializationLogicalKey)).toBeNull();
+    expect(value.listMaterializations()).toEqual([
+      expect.objectContaining({ namespaceId: otherMaterializationNamespace, status: 'BLOCKED' }),
+    ]);
+    expect(value.listMaterializations(['APPLIED'], 1)).toEqual([
+      expect.objectContaining({ namespaceId: materializationNamespace, status: 'APPLIED' }),
+    ]);
+    await expectCode(() => value.listMaterializations([], 1), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(
+      () => value.listMaterializations(['INVALID' as never], 1),
+      'WAL_CONTROL_INVALID_CONFIGURATION',
+    );
+    await expectCode(() => value.listMaterializations(['APPLIED'], 0), 'WAL_CONTROL_INVALID_CONFIGURATION');
+    await expectCode(
+      () => value.listMaterializations(['APPLIED'], 100_001),
+      'WAL_CONTROL_INVALID_CONFIGURATION',
+    );
 
     value.putPeerState({
       peerId: Uint8Array.of(1), successCount: 1, failureCount: 0,
@@ -1944,7 +2101,9 @@ describe('WalControlStore bounded durable work', () => {
 
     const database = new Database(join(root, 'objects.sqlite'), { readonly: true });
     expect(database.prepare("SELECT count(*) AS count FROM vectors WHERE status = 'CURRENT'").get()).toEqual({ count: 1 });
-    expect(database.prepare("SELECT status FROM materialization").get()).toEqual({ status: 'APPLIED' });
+    expect(database.prepare("SELECT count(*) AS count FROM materialization").get()).toEqual({ count: 2 });
+    expect(database.prepare("SELECT count(*) AS count FROM materialization WHERE status = 'APPLIED'").get())
+      .toEqual({ count: 1 });
     expect(database.prepare('SELECT failure_count FROM peer_state').get()).toEqual({ failure_count: 1 });
     expect(database.prepare('SELECT state, byte_length FROM gc_queue').get()).toEqual({ state: 'BLOCKED', byte_length: 5 });
     database.close();

@@ -658,6 +658,31 @@ export class WalAuthorityLifecycle {
     return copy(id);
   }
 
+  /**
+   * Verify a private-safe tier receipt against the current curator authority.
+   * Target/source binding and current-vector selection remain the caller's
+   * view-specific checks; this method reuses the one authority lifecycle.
+   */
+  verifyTierTransitionReceiptAuthority(
+    receipt: ProtocolTuple<'TierTransitionReceiptV1'>,
+    atMs = safeInteger(this.now(), 'current time'),
+  ): Uint8Array {
+    this.assertOpen();
+    safeInteger(atMs, 'atMs');
+    const authority = this.currentAuthority(CURATOR_SCOPE, atMs);
+    if (!bytesEqual(receipt[7], authority.id)) {
+      authorityError(
+        'WAL_AUTHORITY_UNAUTHORIZED',
+        'tier-transition receipt does not reference the current curator authority',
+      );
+    }
+    if (atMs > safeTime(receipt[6], 'tier-transition receipt expiry') + this.clockSkewMs) {
+      authorityError('WAL_AUTHORITY_EXPIRED', 'tier-transition receipt expired');
+    }
+    verifyThreshold('TierTransitionReceiptV1', receipt, authority.tuple);
+    return protocolTupleId('TierTransitionReceiptV1', receipt);
+  }
+
   private currentAuthority(scope: bigint, atMs: number): {
     id: Uint8Array;
     tuple: ProtocolTuple<'AuthoritySetV1'>;

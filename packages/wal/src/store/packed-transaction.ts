@@ -23,6 +23,20 @@ export const PACKED_DEFAULT_MAXIMUM_OBJECT_BYTES = 1_073_741_824n;
 export const PACKED_HARD_MAXIMUM_OBJECT_BYTES = 8_589_934_592n;
 export const PACKED_DEFAULT_BUFFER_BYTES = 65_536;
 
+/** Optional serving-GC overlay; it never creates another content atom. */
+export const PACKED_GC_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS packed_gc_tombstones (
+    object_id BLOB PRIMARY KEY CHECK (length(object_id) = 32),
+    retired_at_ms INTEGER NOT NULL CHECK (retired_at_ms >= 0),
+    FOREIGN KEY (object_id) REFERENCES objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS packed_gc_segments (
+    segment_id INTEGER PRIMARY KEY,
+    retired_at_ms INTEGER NOT NULL CHECK (retired_at_ms >= 0),
+    FOREIGN KEY (segment_id) REFERENCES segments(segment_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+`;
+
 const SEGMENT_MAGIC = Buffer.from('DKGWSEG1');
 const RECORD_MAGIC = Buffer.from('DKGWREC1');
 
@@ -164,6 +178,8 @@ export interface PackedObjectTransactionAppendOptions {
   source: PackedAppendSource;
   segmentTargetBytes: number;
   bufferBytes?: number;
+  /** Seal the current non-empty segment before an epoch-zero snapshot. */
+  forceNewSegment?: boolean;
   hook?: (point: PackedTransactionAppendPoint) => void | Promise<void>;
 }
 
@@ -200,7 +216,10 @@ export class PackedObjectTransactionAppend {
     if (this.segment === undefined) storeError('WAL_STORE_CORRUPT', 'packed index has no active segment');
 
     const recordBytes = PACKED_RECORD_HEADER_BYTES + objectLength;
-    if (this.segment.record_count > 0 && this.segment.committed_end + recordBytes > segmentTargetBytes) {
+    if (
+      this.segment.record_count > 0
+      && (this.options.forceNewSegment === true || this.segment.committed_end + recordBytes > segmentTargetBytes)
+    ) {
       const nextId = this.segment.segment_id + 1;
       createPackedSegmentFile(segmentsRoot, nextId);
       this.createdSegmentId = nextId;

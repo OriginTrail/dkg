@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.11
+version: 0.14
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -27,8 +27,10 @@ deterministic causal/conflict adapter schedules those bytes and invokes the
 same existing DKG semantic core used by the current synchronization path. It
 does not reimplement publish, share, update, deletion, expiry, SWM/VM,
 verified-memory, membership, finality, or cryptographic behavior. WAL-015 only
-persists the semantic core's resulting projection and WAL marker atomically
-through the existing storage adapter.
+commits the semantic core's resulting projection and exact WAL marker through
+one graph-database transaction in the existing storage adapter. That
+transaction is a projection persistence guarantee, not another synchronization
+atom.
 
 Each author signs its own WAL records and checkpoints. A curator signs
 membership and bounded-freshness vectors naming the exact author checkpoints a
@@ -42,7 +44,7 @@ Protocol version 1 fixes exact-arity deterministic CBOR tuples, BLAKE3 object
 identities, a signed deterministic set commitment, rateless IBLT reconciliation
 over 32-byte `WalObjectId` values, bounded deterministic full-ID fallback,
 whole-object range transfer, three raw libp2p protocol families, durable SQLite
-WAL control state, and one atomic graph-storage operation. The transport
+WAL control state, and one transactional graph-storage capability. The transport
 design takes inspiration from Iroh's separation of content identity, provider
 choice, resumable byte transfer, and transport path selection, but does not
 require an Iroh runtime. IBLT decoding discovers differences efficiently; it is
@@ -459,6 +461,7 @@ DkgMutationV1 = [
   policyObjectId,
   rdfMutationOrNull,
   chainBindingOrNull,
+  deleteBasisOrNull,
   nonConsensusTimestampMsOrNull
 ]
 ```
@@ -471,6 +474,26 @@ These positions are application semantics, not generic replication metadata.
 `DELETE` contains a deterministic deletion mutation, `RESOLVE` references every
 conflicting active head, and VM activation requires `chainBindingOrNull` to be
 non-null.
+
+`deleteBasisOrNull` is null for every non-`DELETE` operation and for an ordinary
+owner-initiated delete. A policy-authorized expiry delete carries:
+
+```text
+DeleteBasisV1 = [
+  expiresAtMs,
+  curatorVectorIdOrNull,
+  finalizedChainFrontierOrNull
+]
+```
+
+Exactly one of `curatorVectorIdOrNull` and `finalizedChainFrontierOrNull` is
+non-null. The current semantic core verifies that the enclosing `WalObjectV1`
+writer is the owner or an expiry authority named by `policyObjectId`. For a
+vector basis, the referenced current signed vector must have
+`issuedAtMs >= expiresAtMs`; for a chain basis, the existing chain adapter must
+verify the exact finalized block and that block's timestamp is at or after
+`expiresAtMs`. Local wall time may enqueue the request but is never sufficient
+to apply or hide the delete.
 
 ### 6.4 RDF logical key
 
@@ -574,7 +597,19 @@ BLAKE3(
 ```
 
 `transitionNonce` is a random bytes32 value. The public target contains only the
-randomized commitment and target mutation. It contains no source namespace,
+randomized commitment and a complete `DkgMutationV1` target mutation. The target
+mutation uses operation `MOVE_TIER_TARGET` and carries both its public RDF
+outcome and `ChainBindingV1`; it is not a partial RDF-only tuple. Its committed
+digest is:
+
+```text
+BLAKE3(
+  "dkg-wal-move-tier-target-mutation-v1\0" ||
+  canonicalCbor(targetDkgMutationV1)
+)
+```
+
+The public target contains no source namespace,
 source WAL-object ID, graph name, key epoch, activity count, or causal shape.
 The private source opening binds the public target ID and is served only under
 the source-view authorization policy. The target remains pending until a
@@ -587,8 +622,10 @@ state is marked superseded only after that receipt and VM finality both pass.
 ```text
 ChainBindingV1 = [
   chainId,
+  knowledgeAssetsContract,
   contextGraphOnChainId,
   kaId,
+  authorAddress,
   assertionVersion,
   merkleRoot,
   transactionHash,
@@ -600,6 +637,13 @@ ChainBindingV1 = [
   requiredFinalityBlocks
 ]
 ```
+
+`eventType` is the frozen enum `PUBLISH=0`, `UPDATE=1`. Together,
+`chainId`, `knowledgeAssetsContract`, and `kaId` bind the exact UAL/KA identity.
+`assertionVersion` is the current on-chain Merkle-root count for that KA, while
+`authorAddress`, the Merkle root, transaction/log coordinates, and block hash
+bind the exact publish/update evidence. All fourteen values are inside the
+signed `WalObjectV1` payload; none is unsigned transfer side information.
 
 ### 6.8 `AuthorCheckpointV1`
 
@@ -781,7 +825,7 @@ passed length, ID, signature, and policy verification and is durably
 recoverable. WAL-006 defines the crash-safe store/control transaction and
 recovery protocol that provides this property.
 
-WAL-015's all-or-nothing graph-database write is a different storage guarantee,
+WAL-015's all-or-nothing graph-database transaction is a different storage guarantee,
 not another synchronization atom. It receives the existing semantic core's
 already-decided result and stores that result plus its replay marker in one
 transaction. No RDF graph, quad, conflict record, marker, transaction, payload,
@@ -1561,7 +1605,7 @@ Minimum tables:
 | `local_logical_heads` | Exact `(namespaceId, logicalKey)` causal frontier used by local authoring compare-and-swap. |
 | `local_commit_work` | Durable `(namespaceId, logicalKey, WalObjectId)` replay/materialization outbox. |
 | `admission` | Proof, closure, validation, quarantine, and reason state. |
-| `materialization` | Per-logical-key desired and applied head/state digests. |
+| `materialization` | Per-`(namespaceId, logicalKey)` desired/applied active-head, conflict-head, and state digests plus source vector, retry, and error state. |
 | `peer_state` | Provider success, failures, backoff, and availability hints. |
 
 The rollback-resistant vector high-water is stored in a separate small SQLite
@@ -1629,8 +1673,8 @@ sequenceDiagram
     W->>A: Queue affected logical key
     A->>S: Replay explicit transition against shadow state
     S-->>M: Semantic projection outcome
-    M->>G: applyWalProjectionAtomic(...)
-    G-->>M: APPLIED or GUARD_FAILED
+    M->>G: commitWalProjectionV1(...)
+    G-->>M: COMMITTED or GUARD_FAILED
     M-->>W: Materialization status
     W-->>C: WalObjectId and materialization status
     W-->>H: Best-effort checkpoint nudge
@@ -1831,7 +1875,7 @@ sequenceDiagram
     R->>S: Validate/apply candidate branch transitions
     S-->>R: Existing semantic outcomes
     alt Mutations are compatible under signed policy
-        R->>G: Persist semantic outcome atomically
+        R->>G: Commit semantic projection transactionally
     else Mutations are incompatible
         R->>G: Keep maximal common base active
         R->>G: Materialize both reserved conflict branches
@@ -1840,14 +1884,16 @@ sequenceDiagram
         W->>R: Admit resolution and re-evaluate DAG
         R->>S: Validate/apply resolution
         S-->>R: Existing semantic outcome
-        R->>G: Persist resolved projection atomically
+        R->>G: Commit resolved projection transactionally
     end
 ```
 
-## 14. Persisting the resulting projection atomically
+## 14. Transactional commit of the resulting projection
 
-WAL and graph do not share a distributed transaction. Only the graph projection
-operation itself must be atomic.
+WAL and graph do not share a distributed transaction. The complete
+`WalObjectV1` remains the sole durable content-addressed synchronization atom.
+Separately, one graph projection commit must be an all-or-nothing database
+transaction so content, conflicts, and its exact marker cannot tear.
 
 WAL-015 receives a complete projection outcome from the shared DKG semantic
 core and passes it to the existing storage adapter. The storage operation may
@@ -1858,7 +1904,10 @@ apply separate SWM/VM, verified-memory, authorization, or cryptographic rules.
 Each logical key has a marker in `urn:dkg:wal:projection` containing:
 
 - adapter version;
+- namespace ID;
+- logical key;
 - active-head-set digest;
+- conflict-head-set digest;
 - projected state digest;
 - source vector ID;
 - materialization status.
@@ -1866,25 +1915,46 @@ Each logical key has a marker in `urn:dkg:wal:projection` containing:
 The storage package exposes one required capability:
 
 ```text
-applyWalProjectionAtomic({
+commitWalProjectionV1({
+  adapterVersion: 1,
+  mode: CAS | REBUILD,
+  namespaceId,
   logicalKey,
-  expectedHeadDigest,
+  expectedActiveHeadsDigest,
   replaceGraphs,
   replaceSubjects,
   deleteQuads,
   insertQuads,
   conflictGraphs,
-  newHeadDigest,
+  newActiveHeadsDigest,
+  newConflictHeadsDigest,
   newStateDigest,
-  vectorId
-}) -> APPLIED | GUARD_FAILED
+  sourceVectorId,
+  materializationStatus
+}) -> COMMITTED(exactMarker) | GUARD_FAILED(currentExactMarker)
 ```
+
+`materializationStatus` is WAL-015 persistence bookkeeping, not a DKG semantic
+output. The shared semantic core returns the complete projection data and
+digests without this field; the materializer stamps `APPLIED` when constructing
+the successful storage commit. `PENDING` and `BLOCKED` remain durable control
+states and API/readiness results, but cannot be supplied as semantic decisions
+by the core or written as the marker of a successfully applied projection.
 
 The backend must commit content, conflict graphs, and marker all-or-none. A lost
 response is resolved by reading the marker. `GUARD_FAILED` causes the
 replay/conflict adapter to invoke the semantic core again from the current
 guarded base and retry. Content/marker disagreement blocks readiness and forces
-rebuild of that logical key.
+rebuild of that logical key. Normal replay uses `CAS`. Explicit `REBUILD` is a
+complete graph-only replacement derived from locally admitted WAL state; it has
+no network input and repairs a missing or corrupt marker while removing stale
+shadow graphs for that exact `(namespaceId, logicalKey)` scope.
+
+Projection graphs use the isolated
+`urn:dkg:wal:shadow:v1:<namespaceId>:<logicalKey>:` prefix. The marker graph and
+all shadow graphs are hidden from production graph enumeration. Neither a
+graph, quad, marker, transaction, nor materialization row receives a
+`WalObjectId` or an independent synchronization lifecycle.
 
 Initial authoritative support is limited to backends that pass fault-injection
 atomicity tests. Oxigraph is the reference implementation. Blazegraph becomes
@@ -2042,7 +2112,7 @@ SnapshotManifestV1 = [
 ]
 
 SnapshotEntryV1 = [
-  logicalKey, activeHeadIds, stateDigest, canonicalGraphBytes
+  logicalKey, stateKind, activeHeadIds, stateDigest, canonicalGraphBytes
 ]
 
 SnapshotConflictV1 = [
@@ -2062,14 +2132,33 @@ SnapshotCustodyReceiptV1 = [
 ]
 ```
 
-A snapshot is sequence zero of `newWriterEpoch`, has
-`previousObjectIdOrNull=null`, and its enclosing `DkgMutationV1` has empty
-`parents` and `baseHeads`. The same-author snapshot signature plus the covered
-signed checkpoint, exact covered root/count, and complete inline manifest form
-the new baseline; a post-floor receiver does not fetch an artificial parent
-below the floor. External conflict heads are not re-authored: every referenced
-external head must remain reachable through that author's current retained set
-or authenticated baseline before this snapshot is eligible for compaction.
+`stateKind` is the frozen enum `LIVE=0`, `TOMBSTONE=1`. A tombstone has empty
+`canonicalGraphBytes` and retains the delete head IDs and deleted-state digest;
+a live entry may also have an empty canonical dataset, so the explicit enum is
+required to prevent resurrection. Every manifest entry is validated through
+the existing semantic core's baseline-validation entry point; snapshot install
+does not add a WAL-specific state reducer.
+
+A snapshot is encoded directly as canonical `SnapshotManifestV1` bytes in a
+`DkgPayloadEnvelopeV1` whose kind is `SNAPSHOT_MANIFEST`, codec is
+`DETERMINISTIC_CBOR`, and media type is
+`application/vnd.origintrail.wal-snapshot-manifest+cbor`. There is no enclosing
+`DkgMutationV1` and no JSON representation. The enclosing complete
+`WalObjectV1` is sequence zero of `newWriterEpoch`, has
+`previousObjectIdOrNull=null`, and its namespace/writer/epoch coordinates equal
+the manifest. The same-author WAL-object signature plus the covered signed
+checkpoint, exact covered root/count, and complete inline manifest form the new
+baseline; a post-floor receiver does not fetch an artificial parent below the
+floor. External conflict heads are not re-authored: every referenced external
+head must remain reachable through that author's current retained set or
+authenticated baseline before this snapshot is eligible for compaction.
+
+Protocol version 1 defines `compactionFloor == coveredObjectCount`: it is the
+exclusive count of the covered old-epoch object prefix that may eventually stop
+being served. A receiver whose retained lane is absent, has an earlier epoch,
+or has fewer than `compactionFloor` objects in `coveredWriterEpoch` installs the
+baseline before post-snapshot delta reconciliation. The first checkpoint of
+`newWriterEpoch` carries the same baseline snapshot ID and compaction floor.
 
 Default snapshot trigger is 100,000 authored records or 30 days, whichever
 comes first. The thresholds are configurable but are signed into network policy.

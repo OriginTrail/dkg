@@ -1,4 +1,4 @@
-export const WAL_CONTROL_SCHEMA_VERSION = 5;
+export const WAL_CONTROL_SCHEMA_VERSION = 7;
 export const WAL_ROLLBACK_SCHEMA_VERSION = 1;
 
 /**
@@ -37,6 +37,53 @@ export const WAL_LOCAL_COMMIT_WORK_SCHEMA_SQL = `
     logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
     object_id BLOB NOT NULL UNIQUE CHECK (length(object_id) = 32),
     PRIMARY KEY (namespace_id, logical_key, object_id),
+    FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+`;
+
+/** Durable, monotonic snapshot/custody/floor/physical-GC journal. */
+export const WAL_RETENTION_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS retention_epochs (
+    snapshot_object_id BLOB PRIMARY KEY CHECK (length(snapshot_object_id) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    writer_id BLOB NOT NULL CHECK (length(writer_id) = 20),
+    covered_writer_epoch BLOB NOT NULL CHECK (length(covered_writer_epoch) = 8),
+    new_writer_epoch BLOB NOT NULL CHECK (length(new_writer_epoch) = 8),
+    covered_checkpoint_id BLOB NOT NULL CHECK (length(covered_checkpoint_id) = 32),
+    compaction_floor BLOB NOT NULL CHECK (length(compaction_floor) = 8),
+    grace_started_at_ms INTEGER NOT NULL CHECK (grace_started_at_ms >= 0),
+    grace_ends_at_ms INTEGER NOT NULL CHECK (grace_ends_at_ms >= grace_started_at_ms),
+    vector_id BLOB CHECK (vector_id IS NULL OR length(vector_id) = 32),
+    state TEXT NOT NULL CHECK (state IN ('INSTALLED', 'VECTOR_BOUND', 'GC_ELIGIBLE', 'GC_COMPLETE')),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    UNIQUE (namespace_id, writer_id, covered_writer_epoch),
+    UNIQUE (namespace_id, writer_id, new_writer_epoch),
+    FOREIGN KEY (snapshot_object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS retention_epochs_state
+    ON retention_epochs(state, grace_ends_at_ms, namespace_id, writer_id);
+
+  CREATE TABLE IF NOT EXISTS retention_custody_receipts (
+    receipt_id BLOB PRIMARY KEY CHECK (length(receipt_id) = 32),
+    snapshot_object_id BLOB NOT NULL CHECK (length(snapshot_object_id) = 32),
+    custodian_agent_address BLOB NOT NULL CHECK (length(custodian_agent_address) = 20),
+    custodian_peer_id BLOB NOT NULL,
+    membership_checkpoint_id BLOB NOT NULL CHECK (length(membership_checkpoint_id) = 32),
+    canonical_bytes BLOB NOT NULL,
+    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+    recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
+    UNIQUE (snapshot_object_id, custodian_agent_address),
+    UNIQUE (snapshot_object_id, custodian_peer_id),
+    FOREIGN KEY (snapshot_object_id) REFERENCES retention_epochs(snapshot_object_id) ON DELETE RESTRICT
+  ) WITHOUT ROWID;
+
+  CREATE TABLE IF NOT EXISTS retention_gc_objects (
+    snapshot_object_id BLOB NOT NULL CHECK (length(snapshot_object_id) = 32),
+    object_id BLOB NOT NULL CHECK (length(object_id) = 32),
+    state TEXT NOT NULL CHECK (state IN ('ELIGIBLE', 'RETIRED')),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (snapshot_object_id, object_id),
+    FOREIGN KEY (snapshot_object_id) REFERENCES retention_epochs(snapshot_object_id) ON DELETE RESTRICT,
     FOREIGN KEY (object_id) REFERENCES wal_objects(object_id) ON DELETE RESTRICT
   ) WITHOUT ROWID;
 `;
@@ -319,16 +366,26 @@ export const WAL_CONTROL_SCHEMA_SQL = `
   CREATE INDEX admission_state ON admission(state, updated_at_ms);
 
   CREATE TABLE materialization (
-    logical_key BLOB PRIMARY KEY CHECK (length(logical_key) = 32),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
     desired_heads_digest BLOB NOT NULL CHECK (length(desired_heads_digest) = 32),
+    desired_conflict_heads_digest BLOB NOT NULL CHECK (length(desired_conflict_heads_digest) = 32),
     desired_state_digest BLOB NOT NULL CHECK (length(desired_state_digest) = 32),
+    source_vector_id BLOB NOT NULL CHECK (length(source_vector_id) = 32),
     applied_heads_digest BLOB CHECK (applied_heads_digest IS NULL OR length(applied_heads_digest) = 32),
+    applied_conflict_heads_digest BLOB CHECK (
+      applied_conflict_heads_digest IS NULL OR length(applied_conflict_heads_digest) = 32
+    ),
     applied_state_digest BLOB CHECK (applied_state_digest IS NULL OR length(applied_state_digest) = 32),
     status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'BLOCKED')),
     attempts INTEGER NOT NULL CHECK (attempts >= 0),
     retry_at_ms INTEGER NOT NULL CHECK (retry_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (namespace_id, logical_key)
   ) WITHOUT ROWID;
+  CREATE INDEX materialization_status_v6
+    ON materialization(status, retry_at_ms, updated_at_ms, namespace_id, logical_key);
 
   CREATE TABLE peer_state (
     peer_id BLOB PRIMARY KEY,
@@ -379,6 +436,7 @@ export const WAL_CONTROL_SCHEMA_SQL = `
   ${WAL_AUTHORITY_SCHEMA_SQL}
   ${WAL_PRIVATE_PAYLOAD_SCHEMA_SQL}
   ${WAL_LOCAL_COMMIT_WORK_SCHEMA_SQL}
+  ${WAL_RETENTION_SCHEMA_SQL}
 `;
 
 export const WAL_CONTROL_MIGRATION_1_TO_2_SQL = `
@@ -427,6 +485,43 @@ export const WAL_CONTROL_MIGRATION_4_TO_5_SQL = `
   ALTER TABLE local_logical_heads_v5 RENAME TO local_logical_heads;
   CREATE INDEX local_commit_work_state ON local_commit_work(state, updated_at_ms, object_id);
   UPDATE wal_control_schema SET version = 5 WHERE singleton = 1 AND version = 4;
+`;
+
+/**
+ * The pre-WAL-015 materialization table was an unused provisional shape keyed
+ * only by logical_key, so it could not preserve namespace isolation. It is
+ * derived/rebuildable state and is deliberately replaced rather than copied
+ * ambiguously into one or more namespaces.
+ */
+export const WAL_CONTROL_MIGRATION_5_TO_6_SQL = `
+  DROP TABLE materialization;
+  CREATE TABLE materialization (
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 32),
+    logical_key BLOB NOT NULL CHECK (length(logical_key) = 32),
+    desired_heads_digest BLOB NOT NULL CHECK (length(desired_heads_digest) = 32),
+    desired_conflict_heads_digest BLOB NOT NULL CHECK (length(desired_conflict_heads_digest) = 32),
+    desired_state_digest BLOB NOT NULL CHECK (length(desired_state_digest) = 32),
+    source_vector_id BLOB NOT NULL CHECK (length(source_vector_id) = 32),
+    applied_heads_digest BLOB CHECK (applied_heads_digest IS NULL OR length(applied_heads_digest) = 32),
+    applied_conflict_heads_digest BLOB CHECK (
+      applied_conflict_heads_digest IS NULL OR length(applied_conflict_heads_digest) = 32
+    ),
+    applied_state_digest BLOB CHECK (applied_state_digest IS NULL OR length(applied_state_digest) = 32),
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'APPLIED', 'BLOCKED')),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    retry_at_ms INTEGER NOT NULL CHECK (retry_at_ms >= 0),
+    last_error TEXT,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (namespace_id, logical_key)
+  ) WITHOUT ROWID;
+  CREATE INDEX materialization_status_v6
+    ON materialization(status, retry_at_ms, updated_at_ms, namespace_id, logical_key);
+  UPDATE wal_control_schema SET version = 6 WHERE singleton = 1 AND version = 5;
+`;
+
+export const WAL_CONTROL_MIGRATION_6_TO_7_SQL = `
+  ${WAL_RETENTION_SCHEMA_SQL}
+  UPDATE wal_control_schema SET version = 7 WHERE singleton = 1 AND version = 6;
 `;
 
 export const WAL_ROLLBACK_SCHEMA_SQL = `

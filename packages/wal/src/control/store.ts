@@ -22,6 +22,7 @@ import {
   PACKED_DEFAULT_SEGMENT_TARGET_BYTES,
   PACKED_HARD_MAXIMUM_OBJECT_BYTES,
   PackedObjectTransactionAppend,
+  PACKED_GC_SCHEMA_SQL,
   packedWriteMutexFor,
 } from '../store/packed-transaction.js';
 import { controlError, WalControlStoreError } from './errors.js';
@@ -33,6 +34,8 @@ import {
   WAL_CONTROL_MIGRATION_2_TO_3_SQL,
   WAL_CONTROL_MIGRATION_3_TO_4_SQL,
   WAL_CONTROL_MIGRATION_4_TO_5_SQL,
+  WAL_CONTROL_MIGRATION_5_TO_6_SQL,
+  WAL_CONTROL_MIGRATION_6_TO_7_SQL,
   WAL_ROLLBACK_SCHEMA_SQL,
   WAL_ROLLBACK_SCHEMA_VERSION,
 } from './schema.js';
@@ -55,6 +58,11 @@ import type {
   RetryQueueEntry,
   RollbackHighWater,
   RollbackProtectionStatus,
+  InstallRetentionEpochInput,
+  RetentionCustodyReceiptRecord,
+  RetentionEpochRecord,
+  RetentionEpochState,
+  RetentionGcObjectRecord,
   VectorRecord,
   WalControlIntegrity,
   WalObjectMetadataRecord,
@@ -91,6 +99,48 @@ interface CountRow { count: number; bytes?: number | null }
 interface GuardRow { guard_id: Buffer }
 interface VersionRow { version: number }
 interface IntegrityRow { quick_check: string }
+interface MaterializationRow {
+  namespace_id: Buffer;
+  logical_key: Buffer;
+  desired_heads_digest: Buffer;
+  desired_conflict_heads_digest: Buffer;
+  desired_state_digest: Buffer;
+  source_vector_id: Buffer;
+  applied_heads_digest: Buffer | null;
+  applied_conflict_heads_digest: Buffer | null;
+  applied_state_digest: Buffer | null;
+  status: MaterializationRecord['status'];
+  attempts: number;
+  retry_at_ms: number;
+  last_error: string | null;
+  updated_at_ms: number;
+}
+
+interface RetentionEpochRow {
+  snapshot_object_id: Buffer;
+  namespace_id: Buffer;
+  writer_id: Buffer;
+  covered_writer_epoch: Buffer;
+  new_writer_epoch: Buffer;
+  covered_checkpoint_id: Buffer;
+  compaction_floor: Buffer;
+  grace_started_at_ms: number;
+  grace_ends_at_ms: number;
+  vector_id: Buffer | null;
+  state: RetentionEpochState;
+  updated_at_ms: number;
+}
+
+interface RetentionReceiptRow {
+  receipt_id: Buffer;
+  snapshot_object_id: Buffer;
+  custodian_agent_address: Buffer;
+  custodian_peer_id: Buffer;
+  membership_checkpoint_id: Buffer;
+  canonical_bytes: Buffer;
+  expires_at_ms: number;
+  recorded_at_ms: number;
+}
 
 export type WalControlTransactionPoint =
   | 'after-object-file-sync'
@@ -104,6 +154,11 @@ export type WalControlTransactionPoint =
   | 'after-replay-enqueue'
   | 'after-quarantine-insert'
   | 'after-quarantine-state'
+  | 'after-retention-snapshot-install'
+  | 'after-retention-receipt-persist'
+  | 'after-retention-vector-bind'
+  | 'after-retention-floor-advance'
+  | 'after-retention-gc-complete'
   | 'before-commit'
   | 'after-commit'
   | 'after-rollback';
@@ -211,6 +266,27 @@ function assertRelativePath(value: string | null | undefined): string | null {
 
 function copy(value: Uint8Array): Uint8Array {
   return new Uint8Array(value);
+}
+
+function materializationRecord(row: MaterializationRow): MaterializationRecord {
+  return {
+    namespaceId: copy(row.namespace_id),
+    logicalKey: copy(row.logical_key),
+    desiredHeadsDigest: copy(row.desired_heads_digest),
+    desiredConflictHeadsDigest: copy(row.desired_conflict_heads_digest),
+    desiredStateDigest: copy(row.desired_state_digest),
+    sourceVectorId: copy(row.source_vector_id),
+    appliedHeadsDigest: row.applied_heads_digest === null ? null : copy(row.applied_heads_digest),
+    appliedConflictHeadsDigest: row.applied_conflict_heads_digest === null
+      ? null
+      : copy(row.applied_conflict_heads_digest),
+    appliedStateDigest: row.applied_state_digest === null ? null : copy(row.applied_state_digest),
+    status: row.status,
+    attempts: row.attempts,
+    retryAtMs: row.retry_at_ms,
+    lastError: row.last_error,
+    updatedAtMs: row.updated_at_ms,
+  };
 }
 
 function decodeCheckpoint(bytes: Uint8Array): ProtocolTuple<'AuthorCheckpointV1'> {
@@ -367,9 +443,11 @@ export class WalControlStore {
     const policyObjectId = input.policyObjectId === undefined || input.policyObjectId === null
       ? null
       : fixedBytes(input.policyObjectId, 32, 'policyObjectId');
-    const baseline = input.baselineSnapshotObjectId === undefined || input.baselineSnapshotObjectId === null
+    const baselineInput = input.baselineSnapshotObjectId;
+    const baselineIsSelf = baselineInput === 'self';
+    const baseline = typeof baselineInput === 'string' || baselineInput === undefined || baselineInput === null
       ? null
-      : fixedBytes(input.baselineSnapshotObjectId, 32, 'baselineSnapshotObjectId');
+      : fixedBytes(baselineInput, 32, 'baselineSnapshotObjectId');
     const compactionFloor = input.compactionFloor ?? 0n;
     u64Blob(compactionFloor, 'compactionFloor');
     const createdAtMs = input.createdAtMs === undefined
@@ -505,6 +583,13 @@ export class WalControlStore {
           authored.tuple,
           authored.canonicalBytes.length,
         );
+        if (baselineIsSelf && sequence !== 0n) {
+          controlError(
+            'WAL_CONTROL_INVALID_CONFIGURATION',
+            'self snapshot baseline is valid only for sequence zero of a new author epoch',
+          );
+        }
+        const checkpointBaseline = baselineIsSelf ? metadata.id : baseline;
         const commitment = lane === undefined
           ? new MutableSetCommitment()
           : this.restoreCommitment(namespace, writer, epoch, lane.current_set_root);
@@ -523,7 +608,7 @@ export class WalControlStore {
           count,
           sequence,
           lane?.current_checkpoint_id ?? null,
-          baseline,
+          checkpointBaseline,
           compactionFloor,
         ], input.signer);
         const checkpointBytes = encodeProtocolTuple('AuthorCheckpointV1', checkpoint);
@@ -535,6 +620,7 @@ export class WalControlStore {
           id: walObjectId(authored.walObjectId),
           source: { kind: 'bytes', bytes: authored.canonicalBytes },
           segmentTargetBytes: this.segmentTargetBytes,
+          forceNewSegment: baselineIsSelf,
           hook: async point => {
             await this.transactionHook?.(
               point === 'segment-file-synced' ? 'after-object-file-sync' : 'after-packed-index-insert',
@@ -547,7 +633,7 @@ export class WalControlStore {
           INSERT INTO wal_objects(
             object_id, namespace_id, writer_id, writer_epoch, sequence,
             previous_object_id, payload_length, canonical_length, origin, admitted_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'LOCAL', ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           metadata.id,
           namespace,
@@ -557,6 +643,7 @@ export class WalControlStore {
           metadata.previous,
           payloadBytes.length,
           authored.canonicalBytes.length,
+          baselineIsSelf ? 'SNAPSHOT' : 'LOCAL',
           createdAtMs,
         );
         await this.transactionHook?.('after-object-insert');
@@ -600,7 +687,7 @@ export class WalControlStore {
           metadata.id,
           lane?.current_checkpoint_id ?? null,
           policyObjectId,
-          baseline,
+          checkpointBaseline,
           createdAtMs,
         );
         await this.transactionHook?.('after-checkpoint-insert');
@@ -1246,6 +1333,15 @@ export class WalControlStore {
     }
   }
 
+  /** Remove queued/blocked work after an exact post-read proves it completed. */
+  cancelRetry(key: string): boolean {
+    this.assertUsable();
+    const value = assertText(key, 'retry key');
+    return this.database.prepare(
+      "DELETE FROM retry_queue WHERE queue_key = ? AND state IN ('READY', 'BLOCKED')",
+    ).run(value).changes === 1;
+  }
+
   failRetry(key: string, error: string, availableAtMs: number): RetryState {
     this.assertUsable();
     assertText(error, 'retry error');
@@ -1585,36 +1681,96 @@ export class WalControlStore {
 
   putMaterialization(input: MaterializationRecord): void {
     this.assertUsable();
+    const error = input.lastError === undefined || input.lastError === null
+      ? null
+      : assertText(input.lastError, 'materialization error');
     this.database.prepare(`
       INSERT INTO materialization(
-        logical_key, desired_heads_digest, desired_state_digest,
-        applied_heads_digest, applied_state_digest, status,
-        attempts, retry_at_ms, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(logical_key) DO UPDATE SET
+        namespace_id, logical_key, desired_heads_digest,
+        desired_conflict_heads_digest, desired_state_digest, source_vector_id,
+        applied_heads_digest, applied_conflict_heads_digest,
+        applied_state_digest, status, attempts, retry_at_ms, last_error,
+        updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(namespace_id, logical_key) DO UPDATE SET
         desired_heads_digest = excluded.desired_heads_digest,
+        desired_conflict_heads_digest = excluded.desired_conflict_heads_digest,
         desired_state_digest = excluded.desired_state_digest,
+        source_vector_id = excluded.source_vector_id,
         applied_heads_digest = excluded.applied_heads_digest,
+        applied_conflict_heads_digest = excluded.applied_conflict_heads_digest,
         applied_state_digest = excluded.applied_state_digest,
         status = excluded.status,
         attempts = excluded.attempts,
         retry_at_ms = excluded.retry_at_ms,
+        last_error = excluded.last_error,
         updated_at_ms = excluded.updated_at_ms
     `).run(
+      fixedBytes(input.namespaceId, 32, 'namespaceId'),
       fixedBytes(input.logicalKey, 32, 'logicalKey'),
       fixedBytes(input.desiredHeadsDigest, 32, 'desiredHeadsDigest'),
+      fixedBytes(input.desiredConflictHeadsDigest, 32, 'desiredConflictHeadsDigest'),
       fixedBytes(input.desiredStateDigest, 32, 'desiredStateDigest'),
+      fixedBytes(input.sourceVectorId, 32, 'sourceVectorId'),
       input.appliedHeadsDigest === undefined || input.appliedHeadsDigest === null
         ? null
         : fixedBytes(input.appliedHeadsDigest, 32, 'appliedHeadsDigest'),
+      input.appliedConflictHeadsDigest === undefined || input.appliedConflictHeadsDigest === null
+        ? null
+        : fixedBytes(input.appliedConflictHeadsDigest, 32, 'appliedConflictHeadsDigest'),
       input.appliedStateDigest === undefined || input.appliedStateDigest === null
         ? null
         : fixedBytes(input.appliedStateDigest, 32, 'appliedStateDigest'),
       input.status,
       safeInteger(input.attempts, 'materialization attempts'),
       safeInteger(input.retryAtMs, 'materialization retryAtMs'),
+      error,
       safeInteger(input.updatedAtMs, 'materialization updatedAtMs'),
     );
+  }
+
+  getMaterialization(namespaceId: Uint8Array, logicalKey: Uint8Array): MaterializationRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT namespace_id, logical_key, desired_heads_digest,
+             desired_conflict_heads_digest, desired_state_digest,
+             source_vector_id, applied_heads_digest,
+             applied_conflict_heads_digest, applied_state_digest, status,
+             attempts, retry_at_ms, last_error, updated_at_ms
+      FROM materialization WHERE namespace_id = ? AND logical_key = ?
+    `).get(
+      fixedBytes(namespaceId, 32, 'namespaceId'),
+      fixedBytes(logicalKey, 32, 'logicalKey'),
+    ) as MaterializationRow | undefined;
+    return row === undefined ? null : materializationRecord(row);
+  }
+
+  listMaterializations(
+    statuses: readonly MaterializationRecord['status'][] = ['PENDING', 'BLOCKED'],
+    limit = 1_000,
+  ): readonly MaterializationRecord[] {
+    this.assertUsable();
+    safeInteger(limit, 'materialization limit', 1);
+    if (limit > this.maximumQueueEntries) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'materialization limit exceeds the queue bound');
+    }
+    if (
+      statuses.length === 0
+      || statuses.some(status => !['PENDING', 'APPLIED', 'BLOCKED'].includes(status))
+    ) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'materialization statuses are invalid');
+    }
+    const placeholders = statuses.map(() => '?').join(', ');
+    const rows = this.database.prepare(`
+      SELECT namespace_id, logical_key, desired_heads_digest,
+             desired_conflict_heads_digest, desired_state_digest,
+             source_vector_id, applied_heads_digest,
+             applied_conflict_heads_digest, applied_state_digest, status,
+             attempts, retry_at_ms, last_error, updated_at_ms
+      FROM materialization WHERE status IN (${placeholders})
+      ORDER BY retry_at_ms, updated_at_ms, namespace_id, logical_key LIMIT ?
+    `).all(...statuses, limit) as MaterializationRow[];
+    return rows.map(materializationRecord);
   }
 
   getLocalCommitWork(objectId: Uint8Array): LocalCommitWorkRecord | null {
@@ -1717,6 +1873,40 @@ export class WalControlStore {
       this.database.prepare(`
         UPDATE idempotency SET status = 'MATERIALIZED' WHERE object_id = ?
       `).run(objectId);
+    }
+  }
+
+  completeLocalCommitWorkForScope(
+    namespaceId: Uint8Array,
+    logicalKey: Uint8Array,
+    updatedAtMs = nowValue(this.now),
+  ): number {
+    this.assertUsable();
+    const namespace = fixedBytes(namespaceId, 32, 'namespaceId');
+    const logical = fixedBytes(logicalKey, 32, 'logicalKey');
+    safeInteger(updatedAtMs, 'updatedAtMs');
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const objectRows = this.database.prepare(`
+        SELECT object_id FROM local_commit_work
+        WHERE namespace_id = ? AND logical_key = ?
+          AND state IN ('PENDING', 'QUEUED')
+      `).all(namespace, logical) as Array<{ object_id: Buffer }>;
+      const result = this.database.prepare(`
+        UPDATE local_commit_work
+        SET state = 'MATERIALIZED', last_error = NULL, updated_at_ms = ?
+        WHERE namespace_id = ? AND logical_key = ?
+          AND state IN ('PENDING', 'QUEUED')
+      `).run(updatedAtMs, namespace, logical);
+      const updateIdempotency = this.database.prepare(
+        "UPDATE idempotency SET status = 'MATERIALIZED' WHERE object_id = ?",
+      );
+      for (const row of objectRows) updateIdempotency.run(row.object_id);
+      this.database.exec('COMMIT');
+      return result.changes;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      return this.wrapIo('failed to complete local materialization work', error);
     }
   }
 
@@ -1828,6 +2018,442 @@ export class WalControlStore {
       input.state ?? 'PENDING',
       safeInteger(input.createdAtMs, 'GC createdAtMs'),
     );
+  }
+
+  /** Persist one already-verified sequence-zero author baseline atomically. */
+  async installRetentionEpoch(input: InstallRetentionEpochInput): Promise<'stored' | 'replay'> {
+    this.assertUsable();
+    const snapshot = fixedBytes(input.snapshotObjectId, 32, 'snapshotObjectId');
+    const namespace = fixedBytes(input.namespaceId, 32, 'namespaceId');
+    const writer = fixedBytes(input.writerId, 20, 'writerId');
+    const coveredEpoch = u64Blob(input.coveredWriterEpoch, 'coveredWriterEpoch');
+    const newEpoch = u64Blob(input.newWriterEpoch, 'newWriterEpoch');
+    const checkpoint = fixedBytes(input.coveredCheckpointId, 32, 'coveredCheckpointId');
+    const floor = u64Blob(input.compactionFloor, 'compactionFloor');
+    const graceStartedAtMs = safeInteger(input.graceStartedAtMs, 'graceStartedAtMs');
+    const graceEndsAtMs = safeInteger(input.graceEndsAtMs, 'graceEndsAtMs');
+    const updatedAtMs = safeInteger(input.updatedAtMs, 'updatedAtMs');
+    if (input.newWriterEpoch !== input.coveredWriterEpoch + 1n || input.compactionFloor < 1n) {
+      controlError(
+        'WAL_CONTROL_INVALID_CONFIGURATION',
+        'retention epoch must increment exactly once and carry a positive v1 compaction floor',
+      );
+    }
+    if (graceEndsAtMs < graceStartedAtMs) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'retention grace cannot end before it starts');
+    }
+    return this.mutex.run(async () => {
+      const existing = this.getRetentionEpoch(snapshot);
+      if (existing !== null) {
+        if (
+          !bytesEqual(existing.namespaceId, namespace)
+          || !bytesEqual(existing.writerId, writer)
+          || existing.coveredWriterEpoch !== input.coveredWriterEpoch
+          || existing.newWriterEpoch !== input.newWriterEpoch
+          || !bytesEqual(existing.coveredCheckpointId, checkpoint)
+          || existing.compactionFloor !== input.compactionFloor
+          || existing.graceStartedAtMs !== graceStartedAtMs
+          || existing.graceEndsAtMs !== graceEndsAtMs
+        ) {
+          controlError('WAL_CONTROL_IDEMPOTENCY_CONFLICT', 'snapshot retention epoch was installed with different evidence');
+        }
+        return 'replay';
+      }
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const object = this.database.prepare(`
+          SELECT namespace_id, writer_id, writer_epoch, sequence
+          FROM wal_objects WHERE object_id = ?
+        `).get(snapshot) as {
+          namespace_id: Buffer;
+          writer_id: Buffer;
+          writer_epoch: Buffer;
+          sequence: Buffer;
+        } | undefined;
+        if (
+          object === undefined
+          || !bytesEqual(object.namespace_id, namespace)
+          || !bytesEqual(object.writer_id, writer)
+          || blobU64(object.writer_epoch, 'snapshot writer epoch') !== input.newWriterEpoch
+          || blobU64(object.sequence, 'snapshot sequence') !== 0n
+        ) {
+          controlError(
+            'WAL_CONTROL_INVALID_CONFIGURATION',
+            'retention baseline must be an admitted sequence-zero object at the exact new author epoch',
+          );
+        }
+        const localCheckpoint = this.database.prepare(`
+          SELECT baseline_snapshot_object_id, compaction_floor, object_count, max_sequence
+          FROM checkpoints
+          WHERE namespace_id = ? AND writer_id = ? AND writer_epoch = ? AND checkpoint_number = ?
+        `).get(namespace, writer, newEpoch, u64Blob(0n, 'checkpointNumber')) as {
+          baseline_snapshot_object_id: Buffer | null;
+          compaction_floor: Buffer;
+          object_count: Buffer;
+          max_sequence: Buffer;
+        } | undefined;
+        if (
+          localCheckpoint !== undefined
+          && (
+            localCheckpoint.baseline_snapshot_object_id === null
+            || !bytesEqual(localCheckpoint.baseline_snapshot_object_id, snapshot)
+            || blobU64(localCheckpoint.compaction_floor, 'checkpoint compaction floor') !== input.compactionFloor
+            || blobU64(localCheckpoint.object_count, 'checkpoint object count') !== 1n
+            || blobU64(localCheckpoint.max_sequence, 'checkpoint max sequence') !== 0n
+          )
+        ) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'new epoch checkpoint does not bind its own snapshot and floor');
+        }
+        this.database.prepare(`
+          INSERT INTO retention_epochs(
+            snapshot_object_id, namespace_id, writer_id, covered_writer_epoch,
+            new_writer_epoch, covered_checkpoint_id, compaction_floor,
+            grace_started_at_ms, grace_ends_at_ms, vector_id, state, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'INSTALLED', ?)
+        `).run(
+          snapshot,
+          namespace,
+          writer,
+          coveredEpoch,
+          newEpoch,
+          checkpoint,
+          floor,
+          graceStartedAtMs,
+          graceEndsAtMs,
+          updatedAtMs,
+        );
+        await this.transactionHook?.('after-retention-snapshot-install');
+        this.database.exec('COMMIT');
+        return 'stored';
+      } catch (error) {
+        /* v8 ignore start -- this retention transaction cannot throw after a successful COMMIT. */
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        /* v8 ignore stop */
+        throw error;
+      }
+    });
+  }
+
+  getRetentionEpoch(snapshotObjectId: Uint8Array): RetentionEpochRecord | null {
+    this.assertUsable();
+    const row = this.database.prepare(`
+      SELECT snapshot_object_id, namespace_id, writer_id, covered_writer_epoch,
+             new_writer_epoch, covered_checkpoint_id, compaction_floor,
+             grace_started_at_ms, grace_ends_at_ms, vector_id, state, updated_at_ms
+      FROM retention_epochs WHERE snapshot_object_id = ?
+    `).get(fixedBytes(snapshotObjectId, 32, 'snapshotObjectId')) as RetentionEpochRow | undefined;
+    return row === undefined ? null : {
+      snapshotObjectId: copy(row.snapshot_object_id),
+      namespaceId: copy(row.namespace_id),
+      writerId: copy(row.writer_id),
+      coveredWriterEpoch: blobU64(row.covered_writer_epoch, 'coveredWriterEpoch'),
+      newWriterEpoch: blobU64(row.new_writer_epoch, 'newWriterEpoch'),
+      coveredCheckpointId: copy(row.covered_checkpoint_id),
+      compactionFloor: blobU64(row.compaction_floor, 'compactionFloor'),
+      graceStartedAtMs: row.grace_started_at_ms,
+      graceEndsAtMs: row.grace_ends_at_ms,
+      vectorId: row.vector_id === null ? null : copy(row.vector_id),
+      state: row.state,
+      updatedAtMs: row.updated_at_ms,
+    };
+  }
+
+  /** Verify and durably retain one signed custody receipt. */
+  async recordRetentionCustodyReceipt(
+    canonicalBytes: Uint8Array,
+    recordedAtMs = nowValue(this.now),
+  ): Promise<{ status: 'stored' | 'replay'; receiptId: Uint8Array }> {
+    this.assertUsable();
+    let receipt: ProtocolTuple<'SnapshotCustodyReceiptV1'>;
+    try {
+      receipt = decodeProtocolTuple('SnapshotCustodyReceiptV1', canonicalBytes);
+      verifySingleSignedProtocolTuple('SnapshotCustodyReceiptV1', receipt);
+    } catch (error) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'retention custody receipt is invalid', error);
+    }
+    const receiptId = protocolTupleId('SnapshotCustodyReceiptV1', receipt);
+    const expiresAt = Number(receipt[6]);
+    if (!Number.isSafeInteger(expiresAt) || BigInt(expiresAt) !== receipt[6]) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'custody receipt expiry exceeds durable millisecond range');
+    }
+    const recorded = safeInteger(recordedAtMs, 'recordedAtMs');
+    return this.mutex.run(async () => {
+      const replay = this.database.prepare(
+        'SELECT canonical_bytes FROM retention_custody_receipts WHERE receipt_id = ?',
+      ).get(receiptId) as { canonical_bytes: Buffer } | undefined;
+      if (replay !== undefined) {
+        if (!bytesEqual(replay.canonical_bytes, canonicalBytes)) {
+          controlError('WAL_CONTROL_IDEMPOTENCY_CONFLICT', 'custody receipt ID has different canonical bytes');
+        }
+        return { status: 'replay', receiptId: copy(receiptId) };
+      }
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        if (this.getRetentionEpoch(receipt[1]) === null) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'custody receipt snapshot retention epoch is not installed');
+        }
+        const collision = this.database.prepare(`
+          SELECT 1 FROM retention_custody_receipts
+          WHERE snapshot_object_id = ? AND (
+            custodian_agent_address = ? OR custodian_peer_id = ?
+          )
+        `).get(receipt[1], receipt[2], receipt[3]);
+        if (collision !== undefined) {
+          controlError('WAL_CONTROL_IDEMPOTENCY_CONFLICT', 'snapshot already has a different receipt for this agent or peer');
+        }
+        this.database.prepare(`
+          INSERT INTO retention_custody_receipts(
+            receipt_id, snapshot_object_id, custodian_agent_address,
+            custodian_peer_id, membership_checkpoint_id, canonical_bytes,
+            expires_at_ms, recorded_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          receiptId,
+          receipt[1],
+          receipt[2],
+          receipt[3],
+          receipt[4],
+          canonicalBytes,
+          expiresAt,
+          recorded,
+        );
+        await this.transactionHook?.('after-retention-receipt-persist');
+        this.database.exec('COMMIT');
+        return { status: 'stored', receiptId: copy(receiptId) };
+      } catch (error) {
+        /* v8 ignore start -- this retention transaction cannot throw after a successful COMMIT. */
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        /* v8 ignore stop */
+        throw error;
+      }
+    });
+  }
+
+  listRetentionCustodyReceipts(snapshotObjectId: Uint8Array): readonly RetentionCustodyReceiptRecord[] {
+    this.assertUsable();
+    const rows = this.database.prepare(`
+      SELECT receipt_id, snapshot_object_id, custodian_agent_address,
+             custodian_peer_id, membership_checkpoint_id, canonical_bytes,
+             expires_at_ms, recorded_at_ms
+      FROM retention_custody_receipts
+      WHERE snapshot_object_id = ? ORDER BY custodian_agent_address
+    `).all(fixedBytes(snapshotObjectId, 32, 'snapshotObjectId')) as RetentionReceiptRow[];
+    return rows.map(row => ({
+      receiptId: copy(row.receipt_id),
+      snapshotObjectId: copy(row.snapshot_object_id),
+      custodianAgentAddress: copy(row.custodian_agent_address),
+      custodianPeerId: copy(row.custodian_peer_id),
+      membershipCheckpointId: copy(row.membership_checkpoint_id),
+      canonicalBytes: copy(row.canonical_bytes),
+      expiresAtMs: row.expires_at_ms,
+      recordedAtMs: row.recorded_at_ms,
+    }));
+  }
+
+  /** Bind the installed new epoch to a previously verified curator vector. */
+  async bindRetentionVector(input: {
+    snapshotObjectId: Uint8Array;
+    vectorId: Uint8Array;
+    updatedAtMs: number;
+  }): Promise<'advanced' | 'unchanged'> {
+    this.assertUsable();
+    const snapshot = fixedBytes(input.snapshotObjectId, 32, 'snapshotObjectId');
+    const vector = fixedBytes(input.vectorId, 32, 'vectorId');
+    const updated = safeInteger(input.updatedAtMs, 'updatedAtMs');
+    return this.mutex.run(async () => {
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const epoch = this.getRetentionEpoch(snapshot);
+        if (epoch === null) controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'retention epoch is not installed');
+        if (epoch.vectorId !== null) {
+          if (!bytesEqual(epoch.vectorId, vector)) {
+            controlError('WAL_CONTROL_ROLLBACK_REJECTED', 'retention epoch cannot switch curator vectors');
+          }
+          this.database.exec('COMMIT');
+          return 'unchanged';
+        }
+        const known = this.database.prepare(`
+          SELECT 1 FROM collection_vectors WHERE vector_id = ?
+          UNION ALL SELECT 1 FROM vectors WHERE vector_id = ? LIMIT 1
+        `).get(vector, vector);
+        if (known === undefined) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'retention vector must already be verified and persisted');
+        }
+        this.database.prepare(`
+          UPDATE retention_epochs
+          SET vector_id = ?, state = 'VECTOR_BOUND', updated_at_ms = ?
+          WHERE snapshot_object_id = ? AND state = 'INSTALLED'
+        `).run(vector, updated, snapshot);
+        await this.transactionHook?.('after-retention-vector-bind');
+        this.database.exec('COMMIT');
+        return 'advanced';
+      } catch (error) {
+        /* v8 ignore start -- this retention transaction cannot throw after a successful COMMIT. */
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        /* v8 ignore stop */
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Atomically advance the serving floor after fresh custody verification.
+   * The caller passes the exact receipt IDs returned by the fail-closed
+   * retention verifier and every complete old-epoch WalObject ID under floor.
+   */
+  async markRetentionGcEligible(input: {
+    snapshotObjectId: Uint8Array;
+    verifiedReceiptIds: readonly Uint8Array[];
+    coveredObjectIds: readonly Uint8Array[];
+    evaluatedAtMs: number;
+  }): Promise<'advanced' | 'unchanged'> {
+    this.assertUsable();
+    const snapshot = fixedBytes(input.snapshotObjectId, 32, 'snapshotObjectId');
+    const evaluated = safeInteger(input.evaluatedAtMs, 'evaluatedAtMs');
+    const receiptIds = input.verifiedReceiptIds.map((value, index) =>
+      Buffer.from(fixedBytes(value, 32, `verifiedReceiptIds[${index}]`)));
+    const objectIds = input.coveredObjectIds.map((value, index) =>
+      Buffer.from(fixedBytes(value, 32, `coveredObjectIds[${index}]`)));
+    if (new Set(receiptIds.map(value => value.toString('hex'))).size !== receiptIds.length || receiptIds.length < 2) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'GC floor requires at least two distinct verified receipts');
+    }
+    if (new Set(objectIds.map(value => value.toString('hex'))).size !== objectIds.length) {
+      controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'covered GC object IDs must be unique');
+    }
+    return this.mutex.run(async () => {
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const epoch = this.getRetentionEpoch(snapshot);
+        if (epoch === null || epoch.vectorId === null) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'GC floor requires an installed vector-bound retention epoch');
+        }
+        if (epoch.state === 'GC_ELIGIBLE' || epoch.state === 'GC_COMPLETE') {
+          this.database.exec('COMMIT');
+          return 'unchanged';
+        }
+        if (epoch.state !== 'VECTOR_BOUND' || evaluated < epoch.graceEndsAtMs) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'GC floor cannot advance before vector binding and grace expiry');
+        }
+        if (BigInt(objectIds.length) !== epoch.compactionFloor) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'GC object count must equal the v1 compaction floor');
+        }
+        for (const receiptId of receiptIds) {
+          const receipt = this.database.prepare(`
+            SELECT expires_at_ms FROM retention_custody_receipts
+            WHERE receipt_id = ? AND snapshot_object_id = ?
+          `).get(receiptId, snapshot) as { expires_at_ms: number } | undefined;
+          if (receipt === undefined || receipt.expires_at_ms < evaluated) {
+            controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'verified custody receipt is missing, stale, or expired');
+          }
+        }
+        for (const objectId of objectIds) {
+          const object = this.database.prepare(`
+            SELECT namespace_id, writer_id, writer_epoch, sequence
+            FROM wal_objects WHERE object_id = ?
+          `).get(objectId) as {
+            namespace_id: Buffer;
+            writer_id: Buffer;
+            writer_epoch: Buffer;
+            sequence: Buffer;
+          } | undefined;
+          if (
+            object === undefined
+            || !bytesEqual(object.namespace_id, epoch.namespaceId)
+            || !bytesEqual(object.writer_id, epoch.writerId)
+            || blobU64(object.writer_epoch, 'GC writer epoch') !== epoch.coveredWriterEpoch
+            || blobU64(object.sequence, 'GC sequence') >= epoch.compactionFloor
+          ) {
+            controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'GC target is not an exact covered old-epoch object');
+          }
+          this.database.prepare(`
+            INSERT INTO retention_gc_objects(snapshot_object_id, object_id, state, updated_at_ms)
+            VALUES (?, ?, 'ELIGIBLE', ?)
+          `).run(snapshot, objectId, evaluated);
+        }
+        this.database.prepare(`
+          UPDATE retention_epochs SET state = 'GC_ELIGIBLE', updated_at_ms = ?
+          WHERE snapshot_object_id = ? AND state = 'VECTOR_BOUND'
+        `).run(evaluated, snapshot);
+        await this.transactionHook?.('after-retention-floor-advance');
+        this.database.exec('COMMIT');
+        return 'advanced';
+      } catch (error) {
+        /* v8 ignore start -- this retention transaction cannot throw after a successful COMMIT. */
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        /* v8 ignore stop */
+        throw error;
+      }
+    });
+  }
+
+  listRetentionGcObjects(snapshotObjectId: Uint8Array): readonly RetentionGcObjectRecord[] {
+    this.assertUsable();
+    const snapshot = fixedBytes(snapshotObjectId, 32, 'snapshotObjectId');
+    const rows = this.database.prepare(`
+      SELECT snapshot_object_id, object_id, state, updated_at_ms
+      FROM retention_gc_objects WHERE snapshot_object_id = ? ORDER BY object_id
+    `).all(snapshot) as Array<{
+      snapshot_object_id: Buffer;
+      object_id: Buffer;
+      state: RetentionGcObjectRecord['state'];
+      updated_at_ms: number;
+    }>;
+    return rows.map(row => ({
+      snapshotObjectId: copy(row.snapshot_object_id),
+      objectId: copy(row.object_id),
+      state: row.state,
+      updatedAtMs: row.updated_at_ms,
+    }));
+  }
+
+  /** Mark complete only after PackedWalObjectStore made every target unavailable. */
+  async completeRetentionGc(input: {
+    snapshotObjectId: Uint8Array;
+    completedAtMs: number;
+  }): Promise<'advanced' | 'unchanged'> {
+    this.assertUsable();
+    const snapshot = fixedBytes(input.snapshotObjectId, 32, 'snapshotObjectId');
+    const completed = safeInteger(input.completedAtMs, 'completedAtMs');
+    return this.mutex.run(async () => {
+      this.database.exec('BEGIN IMMEDIATE');
+      try {
+        const epoch = this.getRetentionEpoch(snapshot);
+        if (epoch === null) controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'retention epoch is not installed');
+        if (epoch.state === 'GC_COMPLETE') {
+          this.database.exec('COMMIT');
+          return 'unchanged';
+        }
+        if (epoch.state !== 'GC_ELIGIBLE') {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'physical GC was not authorized');
+        }
+        const counts = this.database.prepare(`
+          SELECT count(*) AS total,
+                 sum(CASE WHEN t.object_id IS NULL THEN 0 ELSE 1 END) AS retired
+          FROM retention_gc_objects g
+          LEFT JOIN packed_gc_tombstones t ON t.object_id = g.object_id
+          WHERE g.snapshot_object_id = ?
+        `).get(snapshot) as { total: number; retired: number | null };
+        if (BigInt(counts.total) !== epoch.compactionFloor || counts.retired !== counts.total) {
+          controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'every eligible object must be durably unavailable before GC completion');
+        }
+        this.database.prepare(`
+          UPDATE retention_gc_objects SET state = 'RETIRED', updated_at_ms = ?
+          WHERE snapshot_object_id = ? AND state = 'ELIGIBLE'
+        `).run(completed, snapshot);
+        this.database.prepare(`
+          UPDATE retention_epochs SET state = 'GC_COMPLETE', updated_at_ms = ?
+          WHERE snapshot_object_id = ? AND state = 'GC_ELIGIBLE'
+        `).run(completed, snapshot);
+        await this.transactionHook?.('after-retention-gc-complete');
+        this.database.exec('COMMIT');
+        return 'advanced';
+      } catch (error) {
+        /* v8 ignore start -- this retention transaction cannot throw after a successful COMMIT. */
+        if (this.database.inTransaction) this.database.exec('ROLLBACK');
+        /* v8 ignore stop */
+        throw error;
+      }
+    });
   }
 
   getRollbackHighWater(collectionId: Uint8Array): RollbackHighWater | null {
@@ -1989,6 +2615,7 @@ export class WalControlStore {
     if (version !== 1 || objectTable === undefined) {
       controlError('WAL_CONTROL_INVALID_CONFIGURATION', 'WalControlStore requires a version-1 PackedWalObjectStore index');
     }
+    this.database.exec(PACKED_GC_SCHEMA_SQL);
   }
 
   private migrate(hook?: () => void): void {
@@ -2007,6 +2634,8 @@ export class WalControlStore {
         { from: 2, sql: WAL_CONTROL_MIGRATION_2_TO_3_SQL },
         { from: 3, sql: WAL_CONTROL_MIGRATION_3_TO_4_SQL },
         { from: 4, sql: WAL_CONTROL_MIGRATION_4_TO_5_SQL },
+        { from: 5, sql: WAL_CONTROL_MIGRATION_5_TO_6_SQL },
+        { from: 6, sql: WAL_CONTROL_MIGRATION_6_TO_7_SQL },
       ]) {
         if (version !== migration.from) continue;
         this.database.exec('BEGIN IMMEDIATE');

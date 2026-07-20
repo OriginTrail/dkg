@@ -19,8 +19,10 @@ export type PublisherWalShadowMutationKind =
 
 export interface PublisherWalShadowChainBindingV1 {
   readonly chainId: bigint;
+  readonly knowledgeAssetsContract: Uint8Array;
   readonly contextGraphOnChainId: Uint8Array;
   readonly kaId: Uint8Array;
+  readonly authorAddress: Uint8Array;
   readonly assertionVersion: bigint;
   readonly merkleRoot: Uint8Array;
   readonly transactionHash: Uint8Array;
@@ -30,6 +32,16 @@ export interface PublisherWalShadowChainBindingV1 {
   readonly logIndex: bigint;
   readonly eventType: bigint;
   readonly requiredFinalityBlocks: bigint;
+}
+
+export interface PublisherWalShadowDeleteBasisV1 {
+  readonly expiresAtMs: bigint;
+  readonly curatorVectorId?: Uint8Array;
+  readonly finalizedChainFrontier?: {
+    readonly chainId: bigint;
+    readonly blockNumber: bigint;
+    readonly blockHash: Uint8Array;
+  };
 }
 
 /** One exact mutation already accepted by the shared DKG semantic core. */
@@ -53,6 +65,8 @@ export interface PublisherWalShadowMutationV1 {
   /** The WAL author. It may differ from logicalAuthorAddress for shared keys. */
   readonly signer: PublisherWalShadowSigner;
   readonly chainBinding?: PublisherWalShadowChainBindingV1;
+  /** Required only for kind=expiry; owner delete keeps this absent. */
+  readonly deleteBasis?: PublisherWalShadowDeleteBasisV1;
   readonly timestampMs?: number;
 }
 

@@ -503,6 +503,43 @@ describe('WalLocalCommitter', () => {
       expectedMediaType: 'application/vnd.origintrail.dkg-mutation-v1+cbor',
     })).toEqual(committed.encoded.contentBytes);
 
+    const automaticSubject = 'https://example.com/private/entity/automatic-nonce';
+    const automatic = await committer.commitRdf({
+      ...input,
+      idempotencyKey: 'private-rdf-put-automatic-nonce',
+      privatePayload: { epochKey, keyEpoch: 9n },
+      mutation: {
+        ...input.mutation,
+        logicalKey: {
+          ...input.mutation.logicalKey,
+          knowledgeAssetUalOrRootEntity: automaticSubject,
+        },
+        source: {
+          kind: 'replace',
+          subjects: [{
+            graphIri: graph,
+            subjectIri: automaticSubject,
+            nquads: `<${automaticSubject}> <https://example.com/private/predicate> "secret" <${graph}> .`,
+          }],
+        },
+      },
+    });
+    const automaticObject = verifyWalObjectV1(
+      await collect(store.read(walObjectId(automatic.receipt.walObjectId))),
+    );
+    expect(decryptPrivateDkgPayload({
+      namespaceId,
+      writerId,
+      writerEpoch: 0n,
+      sequence: automatic.receipt.sequence,
+      epochKey,
+      envelopeBytes: automaticObject.payloadBytes,
+      expectedKeyEpoch: 9n,
+      expectedPayloadKind: 0n,
+      expectedCodec: 0n,
+      expectedMediaType: 'application/vnd.origintrail.dkg-mutation-v1+cbor',
+    })).toEqual(automatic.encoded.contentBytes);
+
     const replay = await committer.commitRdf(input);
     expect(replay.receipt).toEqual(expect.objectContaining({
       walStatus: 'already-committed',

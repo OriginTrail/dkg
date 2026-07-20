@@ -1,6 +1,7 @@
 import { encodeCanonicalCbor } from './protocol/canonical-cbor.js';
+import { encodeProtocolTuple } from './protocol/codec.js';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { WAL_V1_ENUMS } from './protocol/schema.js';
+import { WAL_V1_ENUMS, type ProtocolTuple } from './protocol/schema.js';
 import type { WalEip191Signer } from './protocol/signatures.js';
 import { encodePublicDkgPayload, encryptPrivateDkgPayload } from './privacy/crypto.js';
 import {
@@ -12,11 +13,13 @@ import {
 } from './rdf/index.js';
 import type { WalControlStore } from './control/store.js';
 import type { FinalizeLocalWalResult, LocalCommitWorkRecord } from './control/types.js';
+import { SNAPSHOT_MANIFEST_MEDIA_TYPE_V1 } from './retention/types.js';
 
 const DKG_MUTATION_KIND = BigInt(WAL_V1_ENUMS.payloadKind.DKG_MUTATION);
 const DETERMINISTIC_CBOR = BigInt(WAL_V1_ENUMS.codec.DETERMINISTIC_CBOR);
 const REPLAY_KIND = 'WAL_REPLAY_LOGICAL_KEY';
 const LOCAL_REQUEST_DIGEST_DOMAIN = new TextEncoder().encode('dkg-wal-local-request-v1\0');
+const SNAPSHOT_MANIFEST_KIND = BigInt(WAL_V1_ENUMS.payloadKind.SNAPSHOT_MANIFEST);
 
 function copy(value: Uint8Array): Uint8Array {
   return new Uint8Array(value);
@@ -119,6 +122,23 @@ export interface CommittedRdfLocalMutationV1 {
   receipt: WalLocalCommitReceiptV1;
 }
 
+export interface CommitLocalSnapshotV1Input {
+  /** Already validated by the existing DKG baseline semantic entry point. */
+  readonly manifest: ProtocolTuple<'SnapshotManifestV1'>;
+  readonly signer: WalEip191Signer;
+  readonly idempotencyKey: string;
+  readonly requestDigest?: Uint8Array;
+  readonly privatePayload?: PrivateRdfLocalPayloadV1;
+  readonly retentionGraceMs: number;
+  readonly maximumObjectBytes?: bigint;
+  readonly createdAtMs?: number;
+}
+
+export interface CommittedLocalSnapshotV1 {
+  readonly manifest: ProtocolTuple<'SnapshotManifestV1'>;
+  readonly receipt: WalLocalCommitReceiptV1;
+}
+
 /**
  * WAL-013 local authoring boundary. The semantic core's accepted outcome and
  * canonical payload plaintext are complete before WalControlStore acquires its
@@ -198,6 +218,106 @@ export class WalLocalCommitter {
       createdAtMs: input.createdAtMs,
     });
     return { encoded, receipt };
+  }
+
+  /**
+   * Author the direct SnapshotManifestV1 envelope as the sole sequence-zero
+   * WalObjectV1 of a new epoch, bind its own object ID into the checkpoint,
+   * and durably install the retention epoch. A retry completes any crash gap
+   * after the object/checkpoint commit without creating a second object.
+   */
+  async commitSnapshot(input: CommitLocalSnapshotV1Input): Promise<CommittedLocalSnapshotV1> {
+    const manifestBytes = encodeProtocolTuple('SnapshotManifestV1', input.manifest);
+    const privatePayload = input.privatePayload;
+    const publicEnvelope = privatePayload === undefined
+      ? encodePublicDkgPayload({
+          payloadKind: SNAPSHOT_MANIFEST_KIND,
+          codec: DETERMINISTIC_CBOR,
+          mediaType: SNAPSHOT_MANIFEST_MEDIA_TYPE_V1,
+          contentBytes: manifestBytes,
+        })
+      : null;
+    if (!Number.isSafeInteger(input.retentionGraceMs) || input.retentionGraceMs < 0) {
+      throw new TypeError('retentionGraceMs must be a non-negative safe integer');
+    }
+    const createdAtMs = input.createdAtMs ?? this.now();
+    const committed = await this.control.commitLocal({
+      namespaceId: input.manifest[1],
+      writerId: input.manifest[2],
+      writerEpoch: input.manifest[3],
+      ...(publicEnvelope === null
+        ? {
+            buildPayloadBytes: coordinates => encryptPrivateDkgPayload({
+              ...coordinates,
+              epochKey: privatePayload!.epochKey,
+              keyEpoch: privatePayload!.keyEpoch,
+              payloadKind: SNAPSHOT_MANIFEST_KIND,
+              codec: DETERMINISTIC_CBOR,
+              mediaType: SNAPSHOT_MANIFEST_MEDIA_TYPE_V1,
+              plaintext: manifestBytes,
+              nonceRegistry: this.control,
+              ...(privatePayload!.nonce === undefined ? {} : { nonce: privatePayload!.nonce }),
+            }).canonicalBytes,
+          }
+        : { payloadBytes: publicEnvelope.canonicalBytes }),
+      signer: input.signer,
+      idempotencyKey: input.idempotencyKey,
+      requestDigest: input.requestDigest ?? localRequestDigest(encodeCanonicalCbor([
+        manifestBytes,
+        privatePayload?.keyEpoch ?? null,
+      ])),
+      status: 'COMMITTED',
+      policyObjectId: input.manifest[11],
+      baselineSnapshotObjectId: 'self',
+      compactionFloor: input.manifest[8],
+      maximumObjectBytes: input.maximumObjectBytes,
+      createdAtMs,
+    });
+    await this.control.installRetentionEpoch({
+      snapshotObjectId: committed.objectId,
+      namespaceId: input.manifest[1],
+      writerId: input.manifest[2],
+      coveredWriterEpoch: input.manifest[4],
+      newWriterEpoch: input.manifest[3],
+      coveredCheckpointId: input.manifest[5],
+      compactionFloor: input.manifest[8],
+      graceStartedAtMs: createdAtMs,
+      graceEndsAtMs: createdAtMs + input.retentionGraceMs,
+      updatedAtMs: createdAtMs,
+    });
+    let nudgeStatus: WalLocalCommitReceiptV1['nudgeStatus'] = 'not-configured';
+    let nudgeError: string | undefined;
+    if (this.sendCheckpointNudge) {
+      try {
+        await this.sendCheckpointNudge({
+          namespaceId: copy(input.manifest[1]),
+          writerId: copy(input.manifest[2]),
+          writerEpoch: input.manifest[3],
+          checkpointId: copy(committed.checkpointId),
+          objectSetRoot: copy(committed.objectSetRoot),
+          objectCount: committed.objectCount,
+          sequence: committed.sequence,
+        });
+        nudgeStatus = 'sent';
+      } catch (error) {
+        nudgeStatus = 'failed';
+        nudgeError = errorMessage(error);
+      }
+    }
+    return {
+      manifest: input.manifest,
+      receipt: {
+        walObjectId: copy(committed.objectId),
+        checkpointId: copy(committed.checkpointId),
+        walStatus: committed.status,
+        materializationStatus: 'materialized',
+        nudgeStatus,
+        sequence: committed.sequence,
+        objectCount: committed.objectCount,
+        objectSetRoot: copy(committed.objectSetRoot),
+        ...(nudgeError === undefined ? {} : { nudgeError }),
+      },
+    };
   }
 
   async commitEncoded(input: CommitEncodedLocalMutationV1Input): Promise<WalLocalCommitReceiptV1> {

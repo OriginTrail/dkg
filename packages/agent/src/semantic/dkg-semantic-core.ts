@@ -19,6 +19,11 @@ import {
 } from '../chain-reconciler.js';
 import type { CursorState } from '../reconcile-cursor.js';
 import type { OversizeGuardHooks } from '../sync/oversize-filter.js';
+import {
+  validateCurrentDkgVmChainEvidenceV1,
+  type ValidateCurrentDkgVmChainEvidenceInputV1,
+  type DkgVmChainValidationResultV1,
+} from './vm-chain-validator.js';
 
 /**
  * The driver identifies how bytes reached the semantic boundary. It is
@@ -33,7 +38,29 @@ export type DkgSemanticDriver =
 export type DkgSemanticEntryPoint =
   | 'verified-graph-scoped-materialization'
   | 'verified-swm-recovery'
-  | 'vm-reconciliation';
+  | 'vm-reconciliation'
+  | 'vm-chain-evidence-validation'
+  | 'vm-evidence-application'
+  | 'wal-replay-initial-state'
+  | 'wal-replay-transition'
+  | 'wal-replay-compatible-merge'
+  | 'wal-delete-expiry-authorization'
+  | 'wal-snapshot-baseline-entry-validation'
+  | 'wal-snapshot-baseline-conflict-validation';
+
+export type DkgWalReplaySemanticEntryPoint = Extract<
+  DkgSemanticEntryPoint,
+  | 'wal-replay-initial-state'
+  | 'wal-replay-transition'
+  | 'wal-replay-compatible-merge'
+>;
+
+export type DkgWalRetentionSemanticEntryPoint = Extract<
+  DkgSemanticEntryPoint,
+  | 'wal-delete-expiry-authorization'
+  | 'wal-snapshot-baseline-entry-validation'
+  | 'wal-snapshot-baseline-conflict-validation'
+>;
 
 export interface DkgSemanticCoreTraceEvent {
   readonly driver: DkgSemanticDriver;
@@ -48,6 +75,7 @@ export interface DkgSemanticCoreDelegates {
   readonly materializeVerifiedGraphScopedAsset: typeof materializeVerifiedGraphScopedAsset;
   readonly applySwmRecovery: typeof applySwmRecovery;
   readonly reconcileContextGraph: typeof reconcileContextGraph;
+  readonly validateCurrentDkgVmChainEvidenceV1: typeof validateCurrentDkgVmChainEvidenceV1;
 }
 
 export interface DkgSemanticCoreOptions {
@@ -89,6 +117,7 @@ const DEFAULT_DELEGATES: DkgSemanticCoreDelegates = {
   materializeVerifiedGraphScopedAsset,
   applySwmRecovery,
   reconcileContextGraph,
+  validateCurrentDkgVmChainEvidenceV1,
 };
 
 /**
@@ -155,6 +184,55 @@ export class DkgSemanticCore {
         params.onChainContextGraphId,
       ),
     );
+  }
+
+  async validateVmChainEvidence(
+    driver: DkgSemanticDriver,
+    params: ValidateCurrentDkgVmChainEvidenceInputV1,
+  ): Promise<DkgVmChainValidationResultV1> {
+    return this.invoke(
+      driver,
+      'vm-chain-evidence-validation',
+      () => this.delegates.validateCurrentDkgVmChainEvidenceV1(params),
+    );
+  }
+
+  /**
+   * Invoke the existing VM/SWM semantic implementation after chain evidence
+   * has been normalized. The operation is supplied by the existing semantic
+   * owner; this boundary adds only driver-independent tracing.
+   */
+  async invokeVmSemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync' | 'chain-event'>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, 'vm-evidence-application', operation);
+  }
+
+  /**
+   * Trace and invoke one WAL replay call through this same shared boundary.
+   * The supplied operation is an existing semantic-core implementation; this
+   * method does not interpret the candidate or select a different function by
+   * synchronization driver.
+   */
+  async invokeWalReplaySemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
+    entryPoint: DkgWalReplaySemanticEntryPoint,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, entryPoint, operation);
+  }
+
+  /**
+   * Trace and invoke existing delete/expiry and snapshot-baseline semantics.
+   * WAL supplies authenticated protocol inputs but owns no DKG decision.
+   */
+  async invokeWalRetentionSemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync'>,
+    entryPoint: DkgWalRetentionSemanticEntryPoint,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, entryPoint, operation);
   }
 
   private async invoke<T>(

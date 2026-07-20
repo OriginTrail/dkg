@@ -26,7 +26,7 @@ not replacements for the RFC.
 | 11. RDF canonicalization/mutation encoder | `WAL-012` | Shared-core use and semantic parity in `WAL-000`, `WAL-012`, `WAL-022`. |
 | 12. Signed RDF policy | `WAL-007`, `WAL-011`, `WAL-012`, `WAL-014` | Policy negative suite in `WAL-012`/`WAL-021`. |
 | 13. Replay/conflict adapter | `WAL-014` | Shared-core delegation and all-permutation fixtures in `WAL-014`/`WAL-021`. |
-| 14. Store the semantic-core result atomically | `WAL-015` | Semantically passive backend fault capability suite in `WAL-015`/`WAL-021`. |
+| 14. Commit the semantic-core projection transactionally | `WAL-015` | Semantically passive backend fault capability suite in `WAL-015`/`WAL-021`; this is not another synchronization atom. |
 | 15. Private payloads | `WAL-001`, `WAL-008` | Non-disclosure/crypto parity in `WAL-008`, `WAL-021`, `WAL-022`. |
 | 16. VM activation and reorgs | `WAL-016` | Existing chain corpus plus reorg suite in `WAL-016`/`WAL-021`. |
 | 17. Deletion, expiry, snapshots, compaction, genesis, backfill | `WAL-017`, `WAL-018` | No-resurrection/backfill evidence in `WAL-017`, `WAL-018`, `WAL-022`. |

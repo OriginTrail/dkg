@@ -28,6 +28,7 @@ export const WAL_V1_DOMAINS = Object.freeze({
   replayConflict: 'dkg-rdf-conflict-v1\0',
   payloadAssociatedData: 'dkg-wal-payload-ad-v1\0',
   moveTierCommitment: 'dkg-wal-move-tier-v1\0',
+  moveTierTargetMutation: 'dkg-wal-move-tier-target-mutation-v1\0',
   setEmpty: 'dkg-wal-set-empty-v1\0',
   setLeaf: 'dkg-wal-set-leaf-v1\0',
   setBranch: 'dkg-wal-set-branch-v1\0',
@@ -65,6 +66,8 @@ export const WAL_V1_ENUMS = Object.freeze({
     LEGACY_GENESIS: 7,
   }),
   mutationMode: Object.freeze({ REPLACE: 0, PATCH: 1 }),
+  snapshotEntryState: Object.freeze({ LIVE: 0, TOMBSTONE: 1 }),
+  chainEventType: Object.freeze({ PUBLISH: 0, UPDATE: 1 }),
   authorityScope: Object.freeze({ CURATOR: 0, NETWORK: 1 }),
   errorCode: Object.freeze({
     UNSUPPORTED_VERSION: 0,
@@ -137,9 +140,13 @@ export const PROTOCOL_TUPLES = Object.freeze({
     { enumFields: { 0: 'encryptionAlgorithm' } },
   ),
   DkgMutationV1: tuple(
-    ['version', 'operation', 'logicalKey', 'parents', 'baseHeads', 'policyObjectId', 'rdfMutationOrNull', 'chainBindingOrNull', 'nonConsensusTimestampMsOrNull'],
-    ['literal-1', 'u16-enum', 'bytes32', 'sorted-unique<bytes32>', 'sorted-unique<bytes32>', 'bytes32', 'RdfMutationV1|null', 'ChainBindingV1|null', 'u64|null'],
+    ['version', 'operation', 'logicalKey', 'parents', 'baseHeads', 'policyObjectId', 'rdfMutationOrNull', 'chainBindingOrNull', 'deleteBasisOrNull', 'nonConsensusTimestampMsOrNull'],
+    ['literal-1', 'u16-enum', 'bytes32', 'sorted-unique<bytes32>', 'sorted-unique<bytes32>', 'bytes32', 'RdfMutationV1|null', 'ChainBindingV1|null', 'DeleteBasisV1|null', 'u64|null'],
     { enumFields: { 1: 'mutationOperation' } },
+  ),
+  DeleteBasisV1: tuple(
+    ['expiresAtMs', 'curatorVectorIdOrNull', 'finalizedChainFrontierOrNull'],
+    ['u64', 'bytes32|null', 'ChainFrontierV1|null'],
   ),
   RdfMutationV1: tuple(
     ['version', 'mode', 'baseStateDigest', 'resultStateDigest', 'replaceGraphs', 'replaceSubjects', 'deleteNQuadsBytes', 'insertNQuadsBytes', 'touchedKeys', 'sourceSemanticAuditBytesOrNull'],
@@ -159,8 +166,9 @@ export const PROTOCOL_TUPLES = Object.freeze({
     ['literal-1', 'u16', 'sorted-unique<nfc-tstr>', 'u64', 'u64', 'sorted-unique<nfc-tstr>', 'sorted-unique<nfc-tstr>', 'sorted-unique<bytes32>', 'sorted-unique<address20>', 'sorted-unique<address20>', 'sorted-unique<u16>'],
   ),
   ChainBindingV1: tuple(
-    ['chainId', 'contextGraphOnChainId', 'kaId', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
-    ['u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16', 'u32'],
+    ['chainId', 'knowledgeAssetsContract', 'contextGraphOnChainId', 'kaId', 'authorAddress', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
+    ['u64', 'address20', 'bytes32', 'bytes32', 'address20', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16-enum', 'u32'],
+    { enumFields: { 12: 'chainEventType' } },
   ),
   AuthorCheckpointV1: tuple(
     ['version', 'namespaceId', 'writerId', 'writerEpoch', 'checkpointNumber', 'setCommitmentVersion', 'objectSetRoot', 'objectCount', 'maxSequence', 'previousCheckpointIdOrNull', 'baselineSnapshotObjectIdOrNull', 'compactionFloor', 'signature'],
@@ -278,8 +286,9 @@ export const PROTOCOL_TUPLES = Object.freeze({
     ['literal-1', 'bytes32', 'address20', 'u64', 'u64', 'bytes32', 'bytes32', 'u64', 'u64', 'sorted-unique<SnapshotEntryV1>', 'sorted-unique<SnapshotConflictV1>', 'bytes32', 'u16', 'ChainFrontierV1|null'],
   ),
   SnapshotEntryV1: tuple(
-    ['logicalKey', 'activeHeadIds', 'stateDigest', 'canonicalGraphBytes'],
-    ['bytes32', 'sorted-unique<bytes32>', 'bytes32', 'bstr'],
+    ['logicalKey', 'stateKind', 'activeHeadIds', 'stateDigest', 'canonicalGraphBytes'],
+    ['bytes32', 'u8-enum', 'sorted-unique<bytes32>', 'bytes32', 'bstr'],
+    { enumFields: { 1: 'snapshotEntryState' } },
   ),
   SnapshotConflictV1: tuple(
     ['logicalKey', 'externalHeadIds', 'commonBaseHeadIds', 'conflictDigest'],
@@ -312,7 +321,7 @@ export const PROTOCOL_TUPLES = Object.freeze({
   ),
   MoveTierTargetV1: tuple(
     ['version', 'transitionCommitment', 'targetMutation'],
-    ['literal-1', 'bytes32', 'RdfMutationV1'],
+    ['literal-1', 'bytes32', 'DkgMutationV1'],
   ),
   TierTransitionReceiptV1: tuple(
     ['version', 'transitionCommitment', 'targetNamespaceId', 'targetWalObjectId', 'policyObjectId', 'curatorVectorId', 'expiresAtMs', 'authoritySetId', 'signatures'],

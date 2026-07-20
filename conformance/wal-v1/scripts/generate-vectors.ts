@@ -20,6 +20,7 @@ import {
   derivePrivateObjectKey,
   encryptAes256Gcm,
   moveTierCommitment,
+  moveTierTargetMutationDigest,
   namespaceId,
   payloadAssociatedDataDigest,
   encodeReplayConflictProjection,
@@ -162,6 +163,7 @@ async function buildVectors() {
     rdfPolicyObjectId,
     rdfReplaceMutation,
     null,
+    null,
     null
   ] as const;
   const logicalKey = fixtureId('logical-key');
@@ -190,6 +192,7 @@ async function buildVectors() {
     [],
     policyObjectId,
     rdfMutation,
+    null,
     null,
     1_750_000_000_000n
   ] as const;
@@ -328,13 +331,45 @@ async function buildVectors() {
   const sourceNamespaceId = fixtureId('private-source-namespace');
   const targetNamespaceId = fixtureId('public-target-namespace');
   const transitionNonce = fixtureId('transition-nonce');
-  const targetMutationDigest = fixtureId('target-mutation');
   const sourceState = fixtureId('source-state');
   const sourceResult = fixtureId('source-result');
   const sourceCausalOpening = fixtureId('private-source-causal-opening');
   const sourceGraphName = 'urn:dkg:private-source-graph';
   const sourceKeyEpoch = 987_654_321n;
   const sourceActivityCount = 123_456_789n;
+  const targetRdfMutation = [
+    ...rdfMutation.slice(0, 9),
+    null
+  ] as const;
+  const targetChainBinding = [
+    2043n,
+    byteRange(0x40, 20),
+    fixtureId('target-context-graph-on-chain'),
+    fixtureId('target-ka-id'),
+    byteRange(0x60, 20),
+    1n,
+    resultStateDigest,
+    fixtureId('target-transaction'),
+    21_000_000n,
+    fixtureId('target-block'),
+    2n,
+    3n,
+    BigInt(ENUMS.chainEventType.PUBLISH),
+    64n
+  ] as const;
+  const targetDkgMutation = [
+    1n,
+    BigInt(ENUMS.mutationOperation.MOVE_TIER_TARGET),
+    logicalKey,
+    [],
+    [],
+    policyObjectId,
+    targetRdfMutation,
+    targetChainBinding,
+    null,
+    null
+  ] as const;
+  const targetMutationDigest = moveTierTargetMutationDigest(targetDkgMutation);
   const transitionCommitment = moveTierCommitment({
     nonce: transitionNonce,
     sourceNamespaceId,
@@ -343,7 +378,7 @@ async function buildVectors() {
     sourceStateDigest: sourceState,
     sourceResultDigest: sourceResult
   });
-  const publicMoveTier = encodeCanonical([1n, transitionCommitment, rdfMutation]);
+  const publicMoveTier = encodeCanonical([1n, transitionCommitment, targetDkgMutation]);
   const privateMoveTier = encodeCanonical([
     1n,
     transitionNonce,
@@ -356,7 +391,22 @@ async function buildVectors() {
   ]);
   assertPublicMoveTierSafe(publicMoveTier, [sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult]);
 
-  const snapshotEntry = [logicalKey, [secondObject.id], resultStateDigest, insertNQuads] as const;
+  const snapshotEntry = [
+    logicalKey,
+    BigInt(ENUMS.snapshotEntryState.LIVE),
+    [secondObject.id],
+    resultStateDigest,
+    insertNQuads
+  ] as const;
+  const snapshotTombstone = [
+    fixtureId('deleted-logical-key'),
+    BigInt(ENUMS.snapshotEntryState.TOMBSTONE),
+    [fixtureId('delete-head')],
+    independentRdfStateDigest(new Uint8Array()),
+    new Uint8Array()
+  ] as const;
+  const snapshotEntries = [snapshotEntry, snapshotTombstone]
+    .sort((left, right) => compareBytes(encodeCanonical(left), encodeCanonical(right)));
   const snapshotManifest = [
     1n,
     namespace,
@@ -367,7 +417,7 @@ async function buildVectors() {
     setCommitmentRoot([firstObject.id, secondObject.id]),
     2n,
     2n,
-    [snapshotEntry],
+    snapshotEntries,
     [],
     policyObjectId,
     1n,
@@ -494,6 +544,46 @@ async function buildVectors() {
   const vectorSignature = signTuple(DOMAINS.vectorSignature, vectorUnsigned);
   const vectorBytes = encodeCanonical([...vectorUnsigned, [signatureEntryBytes(vectorSignature)]]);
   const vectorId = hash(DOMAINS.vectorId, vectorBytes);
+  const expiryDeleteRdfMutation = [
+    1n,
+    BigInt(ENUMS.mutationMode.PATCH),
+    rdfResultDigest,
+    independentRdfStateDigest(new Uint8Array()),
+    [],
+    [],
+    rdfCanonical,
+    new Uint8Array(),
+    rdfTouchedKeys,
+    null
+  ] as const;
+  const expiryDeleteBasis = [1_750_000_004_000n, vectorId, null] as const;
+  const expiryDeleteMutation = [
+    1n,
+    BigInt(ENUMS.mutationOperation.DELETE),
+    rdfLogicalKey,
+    [firstObject.id],
+    [firstObject.id],
+    rdfPolicyObjectId,
+    expiryDeleteRdfMutation,
+    null,
+    expiryDeleteBasis,
+    null
+  ] as const;
+  const tierReceiptUnsigned = [
+    1n,
+    transitionCommitment,
+    targetNamespaceId,
+    secondObject.id,
+    policyObjectId,
+    vectorId,
+    1_750_000_065_000n,
+    authoritySetId
+  ] as const;
+  const tierReceiptSignature = signTuple(DOMAINS.receiptSignature, tierReceiptUnsigned);
+  const tierReceiptBytes = encodeCanonical([
+    ...tierReceiptUnsigned,
+    [signatureEntryBytes(tierReceiptSignature)]
+  ]);
   const downgradedVectorUnsigned = [
     ...vectorUnsigned.slice(0, 4),
     0n,
@@ -692,6 +782,14 @@ async function buildVectors() {
         touchedKeys: rdfTouchedKeys.map(hex),
         rdfMutationBytes: hex(encodeCanonical(rdfReplaceMutation)),
         dkgMutationBytes: hex(encodeCanonical(rdfDkgMutation))
+      },
+      expiryDelete: {
+        expiresAtMs: expiryDeleteBasis[0].toString(),
+        curatorVectorId: hex(vectorId),
+        finalizedChainFrontier: null,
+        deleteBasisBytes: hex(encodeCanonical(expiryDeleteBasis)),
+        dkgMutationBytes: hex(encodeCanonical(expiryDeleteMutation)),
+        invalid: ['both-vector-and-chain', 'neither-vector-nor-chain', 'local-wall-time-only']
       }
     },
     walObjects: {
@@ -842,15 +940,19 @@ async function buildVectors() {
     snapshot: {
       manifestBytes: hex(snapshotBytes),
       custodyReceiptBytes: hex(custodyReceiptBytes),
-      parents: [],
-      baseHeads: [],
+      envelopePayloadKind: ENUMS.payloadKind.SNAPSHOT_MANIFEST,
+      envelopeCodec: ENUMS.codec.DETERMINISTIC_CBOR,
+      mediaType: 'application/vnd.origintrail.wal-snapshot-manifest+cbor',
+      entryStates: { LIVE: ENUMS.snapshotEntryState.LIVE, TOMBSTONE: ENUMS.snapshotEntryState.TOMBSTONE },
       baselineRule: 'A SNAPSHOT starts the new writer epoch at sequence zero with previousObjectId null; the signed manifest and covered checkpoint close the compacted lane.',
       externalConflictRule: 'External conflict heads must remain available through their own current checkpoint or baseline and are never re-authored by the snapshot author.'
     },
     moveTier: {
       transitionCommitment: hex(transitionCommitment),
+      targetMutationDigest: hex(targetMutationDigest),
       publicTargetPayload: hex(publicMoveTier),
       privateSourcePayload: hex(privateMoveTier),
+      tierTransitionReceipt: hex(tierReceiptBytes),
       forbiddenPublicValues: [
         sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult, sourceCausalOpening
       ].map(hex),
