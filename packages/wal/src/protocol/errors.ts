@@ -1,0 +1,45 @@
+export type WalProtocolErrorCode =
+  | 'WAL_CBOR_UNSUPPORTED_VALUE'
+  | 'WAL_CBOR_INTEGER_RANGE'
+  | 'WAL_CBOR_TRUNCATED'
+  | 'WAL_CBOR_INDEFINITE_LENGTH'
+  | 'WAL_CBOR_RESERVED_ARGUMENT'
+  | 'WAL_CBOR_NON_SHORTEST'
+  | 'WAL_CBOR_LENGTH_RANGE'
+  | 'WAL_CBOR_INVALID_UTF8'
+  | 'WAL_CBOR_NON_NFC'
+  | 'WAL_CBOR_MAP_FORBIDDEN'
+  | 'WAL_CBOR_TAG_FORBIDDEN'
+  | 'WAL_CBOR_SIMPLE_FORBIDDEN'
+  | 'WAL_CBOR_TRAILING_BYTES'
+  | 'WAL_CBOR_NON_CANONICAL'
+  | 'WAL_SCHEMA_UNKNOWN_TUPLE'
+  | 'WAL_SCHEMA_ARITY'
+  | 'WAL_SCHEMA_FIELD_TYPE'
+  | 'WAL_SCHEMA_INTEGER_RANGE'
+  | 'WAL_SCHEMA_ENUM_VALUE'
+  | 'WAL_SCHEMA_SET_ORDER'
+  | 'WAL_SCHEMA_SET_DUPLICATE'
+  | 'WAL_SCHEMA_SEMANTIC'
+  | 'WAL_SIGNATURE_DOMAIN'
+  | 'WAL_SIGNATURE_LENGTH'
+  | 'WAL_SIGNATURE_RECOVERY_BIT'
+  | 'WAL_SIGNATURE_R_RANGE'
+  | 'WAL_SIGNATURE_HIGH_S'
+  | 'WAL_SIGNATURE_RECOVERY_FAILED'
+  | 'WAL_SIGNATURE_SIGNER_MISMATCH'
+  | 'WAL_SIGNATURE_DUPLICATE_SIGNER'
+  | 'WAL_SIGNATURE_THRESHOLD'
+  | 'WAL_SIGNATURE_ADAPTER'
+  | 'WAL_ID_DOMAIN';
+
+export class WalProtocolError extends Error {
+  constructor(readonly code: WalProtocolErrorCode, message: string) {
+    super(message);
+    this.name = 'WalProtocolError';
+  }
+}
+
+export function protocolError(code: WalProtocolErrorCode, message: string): never {
+  throw new WalProtocolError(code, message);
+}

@@ -28,6 +28,7 @@
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-random-sampling": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@origintrail-official/dkg-wal": "workspace:*",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "jsonld": "^8.3.3"

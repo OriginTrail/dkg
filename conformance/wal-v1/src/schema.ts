@@ -92,6 +92,13 @@ export const LIMITS = Object.freeze({
   concurrentObjectStreamsPerNamespacePeer: 2,
   outstandingRequestsPerPeer: 128,
   outstandingRequestsGlobal: 1_024,
+  replayEntriesPerPeer: 16_384,
+  replayEntriesGlobal: 131_072,
+  queuedRequestsPerSchedulerKey: 16,
+  inboundReadTimeoutMs: 20_000,
+  requestHandlerTimeoutMs: 20_000,
+  decodedCborArrayEntries: 65_536,
+  decodedCborNestingDepth: 16,
   walObjectPolicyDefaultBytes: 1_073_741_824,
   walObjectHardBytes: 8_589_934_592,
   temporaryStagingBytesPerPeer: 17_179_869_184,
@@ -239,6 +246,8 @@ export const TUPLES = Object.freeze({
   ),
   FrameV1: tuple(['protocolVersion', 'messageType', 'requestId', 'body'], ['literal-1', 'u16', 'bytes16', 'tuple']),
   AuthenticatedRequestV1: tuple(['context', 'request'], ['RequestContextV1', 'tuple']),
+  GetCapabilitiesV1: tuple([], []),
+  AckV1: tuple([], []),
   CapabilitiesV1: tuple(
     ['protocolVersions', 'adapterVersions', 'maximumControlFrameBytes', 'maximumSymbolsPerResponse', 'maximumFallbackIdsPerPage', 'maximumObjectRangeBytes', 'maximumWalObjectBytes', 'maximumConcurrentRanges'],
     ['sorted-unique<u16>', 'sorted-unique<u16>', 'u64', 'u64', 'u64', 'u64', 'u64', 'u64']

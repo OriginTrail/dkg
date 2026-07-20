@@ -88,6 +88,8 @@ export type LocalSwmSenderKeySendState = {
   epochId: string;
   membershipHash: string;
   chainKey: Uint8Array;
+  /** Stable copy of this epoch's initial Sender Key for WAL object-key HKDF. */
+  walEpochKey?: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
   senderSigningPublicKey: Uint8Array;
@@ -101,6 +103,8 @@ export type LocalSwmSenderKeyReceiveState = {
   epochId: string;
   membershipHash: string;
   chainKey: Uint8Array;
+  /** Stable copy of the received initial Sender Key for WAL object-key HKDF. */
+  walEpochKey?: Uint8Array;
   nextMessageIndex: number;
   senderSigningPublicKey: Uint8Array;
   createdAtMs: number;

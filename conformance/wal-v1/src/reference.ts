@@ -1,6 +1,6 @@
-import { createCipheriv, createDecipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto';
 import { computeAddress, getBytes, hashMessage, recoverAddress, Signature, SigningKey } from 'ethers';
-import { assertBytes, compareBytes, concat, equalBytes, fromHex, hash, hex, sortedUniqueBytes, utf8 } from './bytes.js';
+import { assertBytes, compareBytes, concat, equalBytes, fromHex, hash, hex, sortedUniqueBytes, u64be, utf8 } from './bytes.js';
 import { assertTuple, decodeCanonical, encodeCanonical, type CborValue } from './cbor.js';
 import { DOMAINS, ENUMS, LIMITS } from './schema.js';
 
@@ -196,6 +196,18 @@ export function payloadAssociatedDataDigest(fields: {
     fields.keyEpoch,
     fields.nonce
   ]));
+}
+
+export function derivePrivateObjectKey(
+  epochKey: Uint8Array,
+  fields: Pick<WalObjectFields, 'namespaceId' | 'writerId' | 'writerEpoch' | 'sequence'>
+): Uint8Array {
+  assertBytes(epochKey, 32);
+  assertBytes(fields.namespaceId, 32);
+  assertBytes(fields.writerId, 20);
+  const salt = concat(fields.writerId, u64be(fields.writerEpoch));
+  const info = concat(utf8('dkg-wal-private-object-v1\0'), fields.namespaceId, u64be(fields.sequence));
+  return new Uint8Array(hkdfSync('sha256', epochKey, salt, info, 32));
 }
 
 export function encryptAes256Gcm(

@@ -263,17 +263,22 @@ package export maps.
 
 ### Acceptance area
 
-- [ ] A clean install builds and tests the new workspace package.
-- [ ] Omitted mode preserves byte-for-byte current startup behavior and registers
+- [x] A clean install builds and tests the new workspace package.
+- [x] Omitted mode preserves byte-for-byte current startup behavior and registers
       no WAL protocol or worker.
-- [ ] `parallel` creates isolated state, starts shadow components, and leaves all
+- [x] `parallel` creates isolated state, starts shadow components, and leaves all
       production reads/writes and legacy sync authoritative.
-- [ ] `wal` refuses to start without the future signed cutover prerequisites;
+- [x] `wal` refuses to start without the future signed cutover prerequisites;
       configuration alone cannot bypass that gate.
-- [ ] Start/stop/restart tests prove no leaked workers, open handles, ports, or
+- [x] Start/stop/restart tests prove no leaked workers, open handles, ports, or
       shared state between legacy and shadow paths.
-- [ ] Config validation rejects unknown modes, unsafe path overlap, and
+- [x] Config validation rejects unknown modes, unsafe path overlap, and
       incompatible adapter/protocol versions with stable reason codes.
+
+**Implementation evidence:** `WAL-002-EVIDENCE.md` records the exact authority
+boundary, isolated layout, CLI/API behavior, acceptance mapping, and validation
+receipts. Protocol registration, mutation capture, object storage, transfer,
+reconciliation workers, and RDF reduction remain owned by their later tasks.
 
 ---
 
@@ -300,22 +305,28 @@ which every later proof and replication decision depends.
   signatures and normalized recovery bits.
 - Implement typed codecs for all protocol objects frozen by `WAL-001`; do not
   introduce JSON as an alternate signed representation.
-- Add cross-language/golden fixtures and fuzz/property tests for canonicality.
+- Consume the language-neutral golden fixtures from the two independently
+  written TypeScript conformance implementations and add property tests for
+  canonicality; do not introduce a new implementation language.
 
 ### Acceptance area
 
-- [ ] Every valid conformance fixture encodes to the exact expected bytes, digest,
+- [x] Every valid conformance fixture encodes to the exact expected bytes, digest,
       signer, and object ID.
-- [ ] Every alternate/non-canonical encoding is rejected rather than normalized
+- [x] Every alternate/non-canonical encoding is rejected rather than normalized
       after receipt.
-- [ ] Tuple arity/position, missing/extra value, explicit-null, map rejection,
+- [x] Tuple arity/position, missing/extra value, explicit-null, map rejection,
       Unicode normalization, integer boundaries, set ordering, low-S,
       recovery-bit, and domain-confusion negatives pass.
-- [ ] Round-trip/property tests do not create two byte representations for one
+- [x] Round-trip/property tests do not create two byte representations for one
       accepted logical object.
-- [ ] Existing author/curator key adapters sign and verify without redefining
+- [x] Existing author/curator key adapters sign and verify without redefining
       their DKG authority.
-- [ ] Package build, lint, unit tests, and fixture checksum verification pass.
+- [x] Package build, lint, unit tests, and fixture checksum verification pass.
+
+**Implementation evidence:** `WAL-003-EVIDENCE.md` records the production
+codec/identity boundary, frozen-vector mapping, signer/authority integration,
+negative/property coverage, and exact validation receipts.
 
 ---
 
@@ -331,10 +342,37 @@ whole-object verification, and crash durability.
 
 ### Scope and deliverables
 
-- Implement final content paths keyed only by `WalObjectId`, quota-controlled
-  temporary files, local range-progress metadata, overlap/reorder handling,
-  restart resume, final ID/signature/canonicality verification, fsync/atomic
-  rename, parent-directory fsync, and orphan cleanup.
+- Freeze the public storage boundary to this complete-object-only shape:
+
+  ```ts
+  abstract class WalObjectStore {
+    abstract has(id: WalObjectId): Promise<boolean>;
+    abstract read(id: WalObjectId, offset?: bigint, length?: number): AsyncIterable<Uint8Array>;
+    abstract put(expectedId: WalObjectId, bytes: AsyncIterable<Uint8Array>): Promise<void>;
+    abstract ids(): AsyncIterable<WalObjectId>;
+  }
+  ```
+
+  `put` verifies and atomically admits one complete object; `read` offsets
+  address its full canonical bytes; and `ids` is strict unsigned lexical order.
+  Range progress, provider identity, temporary paths, deletion, quarantine,
+  RDF, and SPARQL do not appear in this abstract contract.
+- Implement scalable local packed segments keyed through a SQLite B-tree from
+  `WalObjectId` to local segment/offset/length. Segment IDs, record headers,
+  offsets, index rows, and pages are never synchronization atoms or wire data.
+  Admission must verify complete canonical bytes before append, fsync segment
+  bytes before index commit, truncate unindexed crash tails on restart, rotate
+  bounded segments, and retain the simple file-per-object backend only as a
+  reference implementation.
+- Freeze the local packed format as a 32-byte `DKGWSEG1` header (schema `u32`,
+  reserved bytes, segment ID `u64`, reserved bytes), followed by 48-byte
+  `DKGWREC1` record headers (`WalObjectId[32]`, canonical length `u64`) and the
+  unchanged canonical object bytes. Integers are unsigned big-endian. Keep the
+  mutable object/offset catalog in SQLite rather than rewriting a shared
+  segment header on every append.
+- Implement quota-controlled temporary files, local range-progress metadata,
+  overlap/reorder handling, restart resume, final ID/signature/canonicality
+  verification, fsync/atomic commit, and orphan cleanup.
 - Stream ranges directly to temporary storage; memory usage must remain bounded
   independently of total WAL-object size.
 - Enforce negotiated total length, offset arithmetic, maximum range, staged
@@ -345,27 +383,39 @@ whole-object verification, and crash durability.
   correctness.
 - Keep range hashes/IDs out of persistent protocol schemas. Protocol v1 accepts
   only the complete `WalObjectId` after all canonical bytes are reconstructed.
+- Implement range reconstruction as a package-internal concrete service rather
+  than a public storage abstraction. Its JSON metadata is local restart state,
+  never a signed, hashed, reconciled, or wire representation.
 
 ### Acceptance area
 
-- [ ] Zero-payload, one-range, multi-range, maximum-policy-size, out-of-order,
+- [x] Zero-payload, one-range, multi-range, maximum-policy-size, out-of-order,
       overlapping, duplicate, interrupted, restarted, and multi-provider cases
       reconstruct the exact canonical WAL-object bytes and ID.
-- [ ] Dishonest total length, overflow, gap, truncation, out-of-bounds offset,
+- [x] Dishonest total length, overflow, gap, truncation, out-of-bounds offset,
       conflicting overlap, invalid tuple, non-canonical CBOR, wrong signature,
       wrong ID, path traversal, sparse-file exhaustion, and oversized cases fail
       before an object becomes complete or visible.
-- [ ] Crashes after range write, progress update, fsync, rename, parent fsync, and
+- [x] Crashes after range write, progress update, fsync, rename, parent fsync, and
       metadata commit recover to a safe resumable state with no false completion.
-- [ ] Durably recorded complete ranges are not retransmitted and an interrupted
+- [x] Durably recorded complete ranges are not retransmitted and an interrupted
       stream retransmits at most one in-flight range.
-- [ ] A WAL object substantially larger than the configured process-memory
+- [x] A WAL object substantially larger than the configured process-memory
       budget transfers and verifies while measured memory remains within the
       frozen bound and small-object streams continue making progress.
-- [ ] Repository and wire-schema assertions prove there is no `PayloadId`,
+- [x] Repository and wire-schema assertions prove there is no `PayloadId`,
       `BlobId`, content-addressed range/chunk, or independent payload fetch path.
-- [ ] Concurrent providers cannot substitute bytes or cause two objects to
+- [x] Concurrent providers cannot substitute bytes or cause two objects to
       occupy the same final path.
+- [x] Packed-store restart tests prove an index row never points beyond durable
+      segment bytes; unindexed tails are truncated; missing/corrupt segment,
+      record-header, index, schema, and path state fails closed; and concurrent
+      duplicate admission creates one index row and one physical record.
+- [x] A fresh-process packed-store benchmark covers `N = 10^4`, `10^5`,
+      `10^6`, and `10^7`; separates synthetic index-cardinality preparation
+      from genuine verified admission; and reports ordered `ids`, hit/miss
+      `has`, verified full/ranged reads, verified/idempotent `put`, 8 MiB
+      throughput, CPU, RSS, and p50/p95/p99 latency.
 
 ---
 
@@ -499,17 +549,17 @@ projection.
 
 ### Acceptance area
 
-- [ ] Schema creation and migrations are deterministic, transactional, and
+- [x] Schema creation and migrations are deterministic, transactional, and
       backwards/forwards gated by explicit versions.
-- [ ] Fault injection at every insert, set update, checkpoint, commit, rollback,
+- [x] Fault injection at every insert, set update, checkpoint, commit, rollback,
       and process boundary yields either the old state or the complete new state.
-- [ ] No acknowledged WAL object is lost and no checkpoint references absent
+- [x] No acknowledged WAL object is lost and no checkpoint references absent
       object, set-commitment, policy, or snapshot state.
-- [ ] Idempotency returns the original result for the same request digest and
+- [x] Idempotency returns the original result for the same request digest and
       rejects key reuse with a different digest across restart.
-- [ ] Corruption/integrity failures produce `blocked` and never false `complete`
+- [x] Corruption/integrity failures produce `blocked` and never false `complete`
       or automatic graph mutation.
-- [ ] Queue, quarantine, and GC limits remain bounded under adversarial input.
+- [x] Queue, quarantine, and GC limits remain bounded under adversarial input.
 
 ---
 
@@ -539,16 +589,16 @@ membership, and chain authority rather than provider inventory.
 
 ### Acceptance area
 
-- [ ] A replica reports complete only for the exact author checkpoints named by
+- [x] A replica reports complete only for the exact author checkpoints named by
       a currently valid signed vector and membership checkpoint.
-- [ ] Stale, expired, rolled-back, forked, wrong-view, wrong-policy, and
+- [x] Stale, expired, rolled-back, forked, wrong-view, wrong-policy, and
       same-position/different-hash evidence fails closed with stable status.
-- [ ] Private roots and metadata are not served under `unknown-freshness`.
-- [ ] Curator key rotation, HA failover, rollback-file restore/loss, author epoch
+- [x] Private roots and metadata are not served under `unknown-freshness`.
+- [x] Curator key rotation, HA failover, rollback-file restore/loss, author epoch
       rotation, and open-author indexing tests match the frozen rules.
-- [ ] The curator cannot author content or replace an author's checkpoint; a
+- [x] The curator cannot author content or replace an author's checkpoint; a
       serving cache has no authority beyond availability.
-- [ ] Existing DKG membership and delegation golden tests remain unchanged and
+- [x] Existing DKG membership and delegation golden tests remain unchanged and
       pass through the adapter boundary.
 
 ---
@@ -578,17 +628,17 @@ membership/key-package distribution and preserving its authority semantics.
 
 ### Acceptance area
 
-- [ ] Existing Sender Key membership and key-package vectors still decide who
+- [x] Existing Sender Key membership and key-package vectors still decide who
       receives epoch keys; WAL code does not invent another membership source.
-- [ ] Valid encryption vectors decrypt exactly; wrong collection/view/author/
+- [x] Valid encryption vectors decrypt exactly; wrong collection/view/author/
       sequence/key/nonce/policy/length/codec/media-type data fails authentication.
-- [ ] Nonce reuse, unsigned metadata, plaintext-hash advertisement, and
+- [x] Nonce reuse, unsigned metadata, plaintext-hash advertisement, and
       deterministic-equality leakage are rejected by tests.
-- [ ] Unauthenticated, removed, stale-policy, wrong-view, downgrade, and probing
+- [x] Unauthenticated, removed, stale-policy, wrong-view, downgrade, and probing
       callers receive a uniform denial with zero private metadata disclosure.
-- [ ] Key-epoch rotation stops future serving/writes to removed members while
+- [x] Key-epoch rotation stops future serving/writes to removed members while
       documentation states the non-retroactive limit accurately.
-- [ ] Public VM reconciliation fixtures contain no private SWM IDs, graph names,
+- [x] Public VM reconciliation fixtures contain no private SWM IDs, graph names,
       epochs, counts, or causal openings.
 
 ---
@@ -636,22 +686,22 @@ hard resource bounds.
 
 ### Acceptance area
 
-- [ ] All protocol conformance frames round-trip byte-exactly and reject
+- [x] All protocol conformance frames round-trip byte-exactly and reject
       non-canonical, truncated, trailing, oversized, replayed, stale, or
       misbound requests.
-- [ ] Every catalogued method and stable error code has valid, boundary, and
+- [x] Every catalogued method and stable error code has valid, boundary, and
       invalid golden frames plus requester/provider transition tests; no
       undocumented message can affect reconciliation or object admission.
-- [ ] Authorization runs before private metadata lookup/serialization and before
+- [x] Authorization runs before private metadata lookup/serialization and before
       any private response byte is written.
-- [ ] Existing `/dkg/10.0.x/*` handlers and legacy sync behavior are unchanged in
+- [x] Existing `/dkg/10.0.x/*` handlers and legacy sync behavior are unchanged in
       `legacy` and remain authoritative in `parallel`.
-- [ ] Slowloris, count/length mismatch, symbol bomb, fallback-page abuse,
+- [x] Slowloris, count/length mismatch, symbol bomb, fallback-page abuse,
       dishonest object length, range overflow, cancellation, timeout, queue
       saturation, and concurrent-stream tests stay within configured bounds.
-- [ ] Protocol negotiation cannot downgrade a private WAL request to legacy or
+- [x] Protocol negotiation cannot downgrade a private WAL request to legacy or
       another disclosure view.
-- [ ] Provider responses remain independently verifiable; session state is never
+- [x] Provider responses remain independently verifiable; session state is never
       used as proof of correctness.
 
 ---
@@ -681,18 +731,18 @@ correctness dependency.
 
 ### Acceptance area
 
-- [ ] A node with no local WAL state obtains current authority evidence and at
+- [x] A node with no local WAL state obtains current authority evidence and at
       least one valid provider through the frozen bootstrap path.
-- [ ] Lost gossip, unavailable curator cache, stale hint, one malicious provider,
+- [x] Lost gossip, unavailable curator cache, stale hint, one malicious provider,
       and direct-to-relay path changes do not change the expected signed set.
-- [ ] Provider switching during symbol acquisition, fallback enumeration, and
+- [x] Provider switching during symbol acquisition, fallback enumeration, and
       WAL-object range fetch converges to exact sets and bytes without duplicate
       durably recorded ranges.
-- [ ] Private discovery returns no collection/view/root/provider metadata to an
+- [x] Private discovery returns no collection/view/root/provider metadata to an
       unauthorized requester.
-- [ ] Retry state survives restart, respects concurrency/fan-out bounds, and
+- [x] Retry state survives restart, respects concurrency/fan-out bounds, and
       avoids tight loops against malformed or unavailable peers.
-- [ ] All-provider-unavailable state reports `known-incomplete` or
+- [x] All-provider-unavailable state reports `known-incomplete` or
       `unknown-freshness` accurately, never `complete`.
 
 ---

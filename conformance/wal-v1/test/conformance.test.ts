@@ -9,6 +9,7 @@ import {
   independentCborDecode,
   independentCborEncode,
   independentDecryptAesGcm,
+  independentDerivePrivateObjectKey,
   independentMappingIndexForState,
   independentReduceCase,
   independentRoot,
@@ -18,6 +19,7 @@ import {
 import {
   assembleRanges,
   authorFinalityRequirement,
+  derivePrivateObjectKey,
   decryptAes256Gcm,
   parseWalObject,
   reduceCase,
@@ -28,10 +30,12 @@ import {
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot, verifyMembershipProof, type SetMembershipProof } from '../src/set-commitment.js';
 import { DOMAINS, SCHEMA, TUPLES } from '../src/schema.js';
+import { decodeUnsignedVarint, decodeWireFrame, encodeWireFrame, wireFramesEqual } from '../src/wire.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const vectors = JSON.parse(await readFile(resolve(here, '../vectors/protocol-v1.json'), 'utf8'));
 const invalidWalObjects = vectors.invalidWalObjects as Array<{ name: string; bytes: string; error: string }>;
+const invalidWireFrames = vectors.wire.invalid as Array<{ name: string; expected: string; frame: string }>;
 const reducerVectorCases = vectors.reducer as Array<{ name: string; input: any; expected: any }>;
 
 function frame(name: 'first' | 'middle' | 'final' | 'eof'): RangeFrame {
@@ -101,6 +105,52 @@ describe('WalObjectV1 sole-atom contract', () => {
       expect(() => decodeCanonical(fromHex(value))).toThrow();
       expect(() => independentCborDecode(fromHex(value))).toThrow();
     }
+  });
+});
+
+describe('ProtocolV1 wire golden frames', () => {
+  it('freezes every method request and response byte-for-byte', () => {
+    expect(vectors.wire.methods).toHaveLength(11);
+    for (const value of vectors.wire.methods) {
+      const requestBytes = fromHex(value.requestFrame);
+      const responseBytes = fromHex(value.responseFrame);
+      const request = decodeWireFrame(requestBytes);
+      const response = decodeWireFrame(responseBytes);
+      expect(request.messageType, value.name).toBe(BigInt(value.requestType));
+      expect(response.messageType, value.name).toBe(BigInt(value.responseType));
+      expect(hex(request.requestId), value.name).toBe(value.requestId);
+      expect(hex(response.requestId), value.name).toBe(value.requestId);
+      expect(hex(encodeCanonical((request.body as any[])[1])), value.name).toBe(value.requestBodyCbor);
+      expect(hex(encodeCanonical(response.body)), value.name).toBe(value.responseBodyCbor);
+      expect(wireFramesEqual(decodeWireFrame(encodeWireFrame(request)), request), value.name).toBe(true);
+      expect(wireFramesEqual(decodeWireFrame(encodeWireFrame(response)), response), value.name).toBe(true);
+      expect(hex(encodeWireFrame(request)), value.name).toBe(value.requestFrame);
+      expect(hex(encodeWireFrame(response)), value.name).toBe(value.responseFrame);
+      const invalidRequest = decodeWireFrame(fromHex(value.invalidRequestFrame));
+      expect((invalidRequest.body as any[])[1]).toHaveLength((request.body as any[])[1].length + 1);
+    }
+  });
+
+  it('freezes every protocol error and all varint-width boundaries', () => {
+    expect(vectors.wire.errors).toHaveLength(9);
+    for (const value of vectors.wire.errors) {
+      const decoded = decodeWireFrame(fromHex(value.frame));
+      expect(decoded.messageType, value.name).toBe(255n);
+      expect(hex(decoded.requestId), value.name).toBe(value.requestId);
+      expect(hex(encodeCanonical(decoded.body)), value.name).toBe(value.bodyCbor);
+      expect(hex(encodeWireFrame(decoded)), value.name).toBe(value.frame);
+      expect((decodeWireFrame(fromHex(value.invalidFrame)).body as any[])).toHaveLength(4);
+    }
+    expect(vectors.wire.boundaries.map((value: any) => value.prefixLength)).toEqual([1, 2, 3]);
+    for (const value of vectors.wire.boundaries) {
+      const bytes = fromHex(value.frame);
+      expect(decodeUnsignedVarint(bytes)).toEqual({ value: value.cborLength, byteLength: value.prefixLength });
+      expect(hex(encodeWireFrame(decodeWireFrame(bytes)))).toBe(value.frame);
+    }
+  });
+
+  it.each(invalidWireFrames)('rejects invalid wire fixture $name', (value) => {
+    expect(() => decodeWireFrame(fromHex(value.frame))).toThrow();
   });
 });
 
@@ -258,7 +308,22 @@ describe('ProtocolV1IbltReconciliationAlgorithm', () => {
 
 describe('adapter, reducer, privacy, and finality vectors', () => {
   it('decrypts the fixed AES-GCM vector in independent implementations', async () => {
-    const key = fromHex(vectors.encryption.key, 32);
+    const epochKey = fromHex(vectors.encryption.epochKey, 32);
+    const coordinates = {
+      namespaceId: fromHex(vectors.encryption.namespaceId, 32),
+      writerId: fromHex(vectors.encryption.writerId, 20),
+      writerEpoch: BigInt(vectors.encryption.writerEpoch),
+      sequence: BigInt(vectors.encryption.sequence),
+    };
+    const key = derivePrivateObjectKey(epochKey, coordinates);
+    expect(hex(key)).toBe(vectors.encryption.objectKey);
+    expect(hex(await independentDerivePrivateObjectKey(
+      epochKey,
+      coordinates.namespaceId,
+      coordinates.writerId,
+      coordinates.writerEpoch,
+      coordinates.sequence,
+    ))).toBe(vectors.encryption.objectKey);
     const nonce = fromHex(vectors.encryption.nonce, 12);
     const ciphertext = fromHex(vectors.encryption.ciphertextAndTag);
     const associatedData = fromHex(vectors.encryption.associatedDataDigest, 32);
@@ -285,6 +350,12 @@ describe('adapter, reducer, privacy, and finality vectors', () => {
   it('keeps private MOVE_TIER data out of the public target bytes', () => {
     const publicBytes = Buffer.from(vectors.moveTier.publicTargetPayload, 'hex');
     for (const forbidden of vectors.moveTier.forbiddenPublicValues) {
+      expect(publicBytes.includes(Buffer.from(forbidden, 'hex'))).toBe(false);
+    }
+    for (const forbidden of vectors.moveTier.forbiddenPublicText) {
+      expect(publicBytes.includes(Buffer.from(forbidden, 'utf8'))).toBe(false);
+    }
+    for (const forbidden of vectors.moveTier.forbiddenPublicScalarCbor) {
       expect(publicBytes.includes(Buffer.from(forbidden, 'hex'))).toBe(false);
     }
   });

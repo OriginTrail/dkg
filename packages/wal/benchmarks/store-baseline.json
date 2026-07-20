@@ -1,0 +1,704 @@
+{
+  "schema": "dkg-wal-packed-object-store-benchmark-v1",
+  "recordedAt": "2026-07-19T19:33:45.906Z",
+  "runtime": {
+    "node": "v24.11.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "host": {
+    "cpuModel": "Apple M3",
+    "logicalCpuCount": 8,
+    "totalMemoryBytes": 17179869184
+  },
+  "executionModel": "fresh-process-per-size",
+  "fixturePolicy": "sqlite-index-cardinality-fixture; canonical-verified-admission-and-transfer",
+  "sizes": [
+    10000,
+    100000,
+    1000000,
+    10000000
+  ],
+  "repetitions": 1,
+  "maximumTimeRegressionRatio": 2,
+  "results": [
+    {
+      "objectCount": 10000,
+      "fixtureMode": "sqlite-index-aliases-with-separate-verified-admission",
+      "fixtureObjectBytes": 506,
+      "inventoryPreparationMs": 16.47833300000002,
+      "inventoryPreparationObjectsPerSecond": 606857.5019087178,
+      "enumerate": {
+        "objects": 10000,
+        "totalMs": 9.541333000000009,
+        "objectsPerSecond": 1048071.5849661668
+      },
+      "hasHit": {
+        "operations": 10000,
+        "totalMs": 58.21371599999958,
+        "operationsPerSecond": 171780.8222378395,
+        "p50Ms": 0.004416999999989457,
+        "p95Ms": 0.005707999999913227,
+        "p99Ms": 0.008874999999989086,
+        "maximumMs": 5.530583000000092
+      },
+      "hasMiss": {
+        "operations": 10000,
+        "totalMs": 50.2218039999924,
+        "operationsPerSecond": 199116.7023789411,
+        "p50Ms": 0.0037920000000895016,
+        "p95Ms": 0.004750000000058208,
+        "p99Ms": 0.005374999999958163,
+        "maximumMs": 6.581957999999986
+      },
+      "fullRead": {
+        "operations": 1000,
+        "totalMs": 63.43134799999984,
+        "operationsPerSecond": 15765.075653129781,
+        "p50Ms": 0.060417000000029475,
+        "p95Ms": 0.07333300000004783,
+        "p99Ms": 0.09475000000009004,
+        "maximumMs": 1.1348330000000715,
+        "bytes": 386000,
+        "mebibytesPerSecond": 5.803412630184265
+      },
+      "rangedRead": {
+        "operations": 1000,
+        "totalMs": 61.52064999999914,
+        "operationsPerSecond": 16254.70472109794,
+        "p50Ms": 0.05704199999991033,
+        "p95Ms": 0.0680409999999938,
+        "p99Ms": 0.08962499999995543,
+        "maximumMs": 1.1777920000000677,
+        "bytes": 64000,
+        "mebibytesPerSecond": 0.9921084424498255
+      },
+      "verifiedAdmission": {
+        "operations": 16,
+        "totalMs": 168.64179000000001,
+        "operationsPerSecond": 94.87565330040673,
+        "p50Ms": 10.207832999999937,
+        "p95Ms": 14.10233299999993,
+        "p99Ms": 14.10233299999993,
+        "maximumMs": 14.10233299999993,
+        "bytes": 6176,
+        "mebibytesPerSecond": 0.034925462888676644
+      },
+      "idempotentAdmission": {
+        "operations": 16,
+        "totalMs": 0.11395800000013878,
+        "operationsPerSecond": 140402.60446814192,
+        "p50Ms": 0.005250000000046384,
+        "p95Ms": 0.024834000000055312,
+        "p99Ms": 0.024834000000055312,
+        "maximumMs": 0.024834000000055312
+      },
+      "largeObject": {
+        "payloadBytes": 8388608,
+        "canonicalBytes": 8388740,
+        "putMs": 292.10458300000005,
+        "putMebibytesPerSecond": 27.387882116898403,
+        "fullReadMs": 2.672749999999951,
+        "fullReadMebibytesPerSecond": 2993.218926203316,
+        "rangedReadMs": 4.165542000000187,
+        "rangedReadMebibytesPerSecond": 1920.5486068822272,
+        "rangedReadOperations": 9
+      },
+      "rangeReassembly": {
+        "canonicalBytes": 8388740,
+        "rangeBytes": 1048576,
+        "ranges": 9,
+        "totalMs": 494.812584,
+        "mebibytesPerSecond": 16.16799197049072
+      },
+      "totalMs": 1230.226541,
+      "cpu": {
+        "userMicros": 843511,
+        "systemMicros": 158530
+      },
+      "memory": {
+        "rssBytes": 236257280,
+        "heapUsedBytes": 10194544,
+        "externalBytes": 22019303,
+        "arrayBuffersBytes": 19492831,
+        "maxRssBytes": 236290048
+      },
+      "cleanupMs": 1.109416999999894,
+      "repetition": 0,
+      "heapLimitMiB": 1024
+    },
+    {
+      "objectCount": 100000,
+      "fixtureMode": "sqlite-index-aliases-with-separate-verified-admission",
+      "fixtureObjectBytes": 506,
+      "inventoryPreparationMs": 153.268417,
+      "inventoryPreparationObjectsPerSecond": 652450.1391568492,
+      "enumerate": {
+        "objects": 100000,
+        "totalMs": 97.60779100000002,
+        "objectsPerSecond": 1024508.3817130949
+      },
+      "hasHit": {
+        "operations": 10000,
+        "totalMs": 55.29764099999704,
+        "operationsPerSecond": 180839.54069578726,
+        "p50Ms": 0.004792000000065855,
+        "p95Ms": 0.005999999999971806,
+        "p99Ms": 0.007500000000050022,
+        "maximumMs": 5.078207999999904
+      },
+      "hasMiss": {
+        "operations": 10000,
+        "totalMs": 46.674641999997675,
+        "operationsPerSecond": 214249.09911468625,
+        "p50Ms": 0.0037500000000818545,
+        "p95Ms": 0.00483299999996234,
+        "p99Ms": 0.005708000000026914,
+        "maximumMs": 6.8244170000000395
+      },
+      "fullRead": {
+        "operations": 1000,
+        "totalMs": 61.28590299999746,
+        "operationsPerSecond": 16316.966072932652,
+        "p50Ms": 0.0570829999999205,
+        "p95Ms": 0.0710830000000442,
+        "p99Ms": 0.08941600000002836,
+        "maximumMs": 1.1307079999999132,
+        "bytes": 386000,
+        "mebibytesPerSecond": 6.006573585655215
+      },
+      "rangedRead": {
+        "operations": 1000,
+        "totalMs": 61.4851900000026,
+        "operationsPerSecond": 16264.079203462778,
+        "p50Ms": 0.056916999999884865,
+        "p95Ms": 0.06883300000004056,
+        "p99Ms": 0.08641599999987193,
+        "maximumMs": 1.1791250000001128,
+        "bytes": 64000,
+        "mebibytesPerSecond": 0.9926806154457263
+      },
+      "verifiedAdmission": {
+        "operations": 16,
+        "totalMs": 172.7639999999999,
+        "operationsPerSecond": 92.61188673566258,
+        "p50Ms": 10.477374999999938,
+        "p95Ms": 13.753917000000001,
+        "p99Ms": 13.753917000000001,
+        "maximumMs": 13.753917000000001,
+        "bytes": 6176,
+        "mebibytesPerSecond": 0.03409212902065826
+      },
+      "idempotentAdmission": {
+        "operations": 16,
+        "totalMs": 0.10395700000003671,
+        "operationsPerSecond": 153909.78962450195,
+        "p50Ms": 0.004791999999952168,
+        "p95Ms": 0.020874999999932697,
+        "p99Ms": 0.020874999999932697,
+        "maximumMs": 0.020874999999932697
+      },
+      "largeObject": {
+        "payloadBytes": 8388608,
+        "canonicalBytes": 8388740,
+        "putMs": 289.24637499999994,
+        "putMebibytesPerSecond": 27.65851736261091,
+        "fullReadMs": 2.8837919999998576,
+        "fullReadMebibytesPerSecond": 2774.1688322216582,
+        "rangedReadMs": 3.6010420000000067,
+        "rangedReadMebibytesPerSecond": 2221.614156405216,
+        "rangedReadOperations": 9
+      },
+      "rangeReassembly": {
+        "canonicalBytes": 8388740,
+        "rangeBytes": 1048576,
+        "ranges": 9,
+        "totalMs": 489.78366700000015,
+        "mebibytesPerSecond": 16.33399891427936
+      },
+      "totalMs": 1313.380916,
+      "cpu": {
+        "userMicros": 954584,
+        "systemMicros": 160633
+      },
+      "memory": {
+        "rssBytes": 244858880,
+        "heapUsedBytes": 10042432,
+        "externalBytes": 22027231,
+        "arrayBuffersBytes": 19500759,
+        "maxRssBytes": 244891648
+      },
+      "cleanupMs": 1.0849170000001322,
+      "repetition": 0,
+      "heapLimitMiB": 1024
+    },
+    {
+      "objectCount": 1000000,
+      "fixtureMode": "sqlite-index-aliases-with-separate-verified-admission",
+      "fixtureObjectBytes": 506,
+      "inventoryPreparationMs": 1535.828125,
+      "inventoryPreparationObjectsPerSecond": 651114.5249407385,
+      "enumerate": {
+        "objects": 1000000,
+        "totalMs": 936.6692910000002,
+        "objectsPerSecond": 1067612.6671478543
+      },
+      "hasHit": {
+        "operations": 10000,
+        "totalMs": 69.25373899999113,
+        "operationsPerSecond": 144396.53575962564,
+        "p50Ms": 0.005874999999832653,
+        "p95Ms": 0.007291999999779364,
+        "p99Ms": 0.009791999999833934,
+        "maximumMs": 4.722291000000041
+      },
+      "hasMiss": {
+        "operations": 10000,
+        "totalMs": 45.47063600001093,
+        "operationsPerSecond": 219922.14931846558,
+        "p50Ms": 0.003875000000334694,
+        "p95Ms": 0.0048750000000836735,
+        "p99Ms": 0.005625000000236469,
+        "maximumMs": 4.958125000000109
+      },
+      "fullRead": {
+        "operations": 1000,
+        "totalMs": 61.13544799999681,
+        "operationsPerSecond": 16357.12230325117,
+        "p50Ms": 0.057542000000012195,
+        "p95Ms": 0.07091700000000856,
+        "p99Ms": 0.08466599999974278,
+        "maximumMs": 1.2036250000001019,
+        "bytes": 386000,
+        "mebibytesPerSecond": 6.021355828337623
+      },
+      "rangedRead": {
+        "operations": 1000,
+        "totalMs": 62.29693499999894,
+        "operationsPerSecond": 16052.15409072721,
+        "p50Ms": 0.05758299999979499,
+        "p95Ms": 0.07016700000031051,
+        "p99Ms": 0.11616700000013225,
+        "maximumMs": 1.2544580000003407,
+        "bytes": 64000,
+        "mebibytesPerSecond": 0.979745733076612
+      },
+      "verifiedAdmission": {
+        "operations": 16,
+        "totalMs": 171.63829399999895,
+        "operationsPerSecond": 93.21929056228035,
+        "p50Ms": 10.262666999999965,
+        "p95Ms": 15.018916999999874,
+        "p99Ms": 15.018916999999874,
+        "maximumMs": 15.018916999999874,
+        "bytes": 6176,
+        "mebibytesPerSecond": 0.0343157254763033
+      },
+      "idempotentAdmission": {
+        "operations": 16,
+        "totalMs": 0.10695899999973335,
+        "operationsPerSecond": 149590.02982488513,
+        "p50Ms": 0.00491699999975026,
+        "p95Ms": 0.02187499999990905,
+        "p99Ms": 0.02187499999990905,
+        "maximumMs": 0.02187499999990905
+      },
+      "largeObject": {
+        "payloadBytes": 8388608,
+        "canonicalBytes": 8388740,
+        "putMs": 290.39708299999984,
+        "putMebibytesPerSecond": 27.548919577163144,
+        "fullReadMs": 2.946042000000034,
+        "fullReadMebibytesPerSecond": 2715.5505199890813,
+        "rangedReadMs": 3.5628750000000764,
+        "rangedReadMebibytesPerSecond": 2245.413011966346,
+        "rangedReadOperations": 9
+      },
+      "rangeReassembly": {
+        "canonicalBytes": 8388740,
+        "rangeBytes": 1048576,
+        "ranges": 9,
+        "totalMs": 491.3505829999999,
+        "mebibytesPerSecond": 16.2819098252902
+      },
+      "totalMs": 2165.1524580000005,
+      "cpu": {
+        "userMicros": 1965065,
+        "systemMicros": 215777
+      },
+      "memory": {
+        "rssBytes": 246251520,
+        "heapUsedBytes": 10089264,
+        "externalBytes": 22085175,
+        "arrayBuffersBytes": 19558703,
+        "maxRssBytes": 246284288
+      },
+      "cleanupMs": 1.6802079999997659,
+      "repetition": 0,
+      "heapLimitMiB": 2048
+    },
+    {
+      "objectCount": 10000000,
+      "fixtureMode": "sqlite-index-aliases-with-separate-verified-admission",
+      "fixtureObjectBytes": 506,
+      "inventoryPreparationMs": 15288.230584,
+      "inventoryPreparationObjectsPerSecond": 654097.9314156582,
+      "enumerate": {
+        "objects": 10000000,
+        "totalMs": 10235.166540999999,
+        "objectsPerSecond": 977023.6722521349
+      },
+      "hasHit": {
+        "operations": 10000,
+        "totalMs": 219.2370880001763,
+        "operationsPerSecond": 45612.72041704896,
+        "p50Ms": 0.006958000001759501,
+        "p95Ms": 0.11287499999889405,
+        "p99Ms": 0.16629199999806588,
+        "maximumMs": 4.1270000000004075
+      },
+      "hasMiss": {
+        "operations": 10000,
+        "totalMs": 49.06495699986772,
+        "operationsPerSecond": 203811.4493818258,
+        "p50Ms": 0.0038749999985157046,
+        "p95Ms": 0.004832999999052845,
+        "p99Ms": 0.005582999998296145,
+        "maximumMs": 5.8356669999993755
+      },
+      "fullRead": {
+        "operations": 1000,
+        "totalMs": 62.68466099996658,
+        "operationsPerSecond": 15952.866044861168,
+        "p50Ms": 0.05908399999680114,
+        "p95Ms": 0.07374999999956344,
+        "p99Ms": 0.09904200000164565,
+        "maximumMs": 1.1427499999990687,
+        "bytes": 386000,
+        "mebibytesPerSecond": 5.872541707340632
+      },
+      "rangedRead": {
+        "operations": 1000,
+        "totalMs": 63.107721999989735,
+        "operationsPerSecond": 15845.921359673903,
+        "p50Ms": 0.058249999998224666,
+        "p95Ms": 0.07237500000337604,
+        "p99Ms": 0.0861670000012964,
+        "maximumMs": 1.2000840000000608,
+        "bytes": 64000,
+        "mebibytesPerSecond": 0.9671582861129091
+      },
+      "verifiedAdmission": {
+        "operations": 16,
+        "totalMs": 181.37583599999925,
+        "operationsPerSecond": 88.21461751939252,
+        "p50Ms": 10.93145899999945,
+        "p95Ms": 18.825959000001603,
+        "p99Ms": 18.825959000001603,
+        "maximumMs": 18.825959000001603,
+        "bytes": 6176,
+        "mebibytesPerSecond": 0.03247341381310035
+      },
+      "idempotentAdmission": {
+        "operations": 16,
+        "totalMs": 0.10524999999324791,
+        "operationsPerSecond": 152019.00238504936,
+        "p50Ms": 0.005083000000013271,
+        "p95Ms": 0.020165999998425832,
+        "p99Ms": 0.020165999998425832,
+        "maximumMs": 0.020165999998425832
+      },
+      "largeObject": {
+        "payloadBytes": 8388608,
+        "canonicalBytes": 8388740,
+        "putMs": 291.679583000001,
+        "putMebibytesPerSecond": 27.427788406464288,
+        "fullReadMs": 3.4099999999998545,
+        "fullReadMebibytesPerSecond": 2346.077972143726,
+        "rangedReadMs": 3.390457999998034,
+        "rangedReadMebibytesPerSecond": 2359.600350458376,
+        "rangedReadOperations": 9
+      },
+      "rangeReassembly": {
+        "canonicalBytes": 8388740,
+        "rangeBytes": 1048576,
+        "ranges": 9,
+        "totalMs": 500.78004099999816,
+        "mebibytesPerSecond": 15.975328946885474
+      },
+      "totalMs": 11635.418416,
+      "cpu": {
+        "userMicros": 11222308,
+        "systemMicros": 785579
+      },
+      "memory": {
+        "rssBytes": 251117568,
+        "heapUsedBytes": 10115968,
+        "externalBytes": 21829623,
+        "arrayBuffersBytes": 19303151,
+        "maxRssBytes": 251150336
+      },
+      "cleanupMs": 9.919207999999344,
+      "repetition": 0,
+      "heapLimitMiB": 4096
+    }
+  ],
+  "summaries": [
+    {
+      "objectCount": 10000,
+      "samples": 1,
+      "inventoryPreparationMs": {
+        "minimum": 16.47833300000002,
+        "median": 16.47833300000002,
+        "p95": 16.47833300000002,
+        "maximum": 16.47833300000002
+      },
+      "enumerateMs": {
+        "minimum": 9.541333000000009,
+        "median": 9.541333000000009,
+        "p95": 9.541333000000009,
+        "maximum": 9.541333000000009
+      },
+      "hasHitP95Ms": {
+        "minimum": 0.005707999999913227,
+        "median": 0.005707999999913227,
+        "p95": 0.005707999999913227,
+        "maximum": 0.005707999999913227
+      },
+      "fullReadMebibytesPerSecond": {
+        "minimum": 5.803412630184265,
+        "median": 5.803412630184265,
+        "p95": 5.803412630184265,
+        "maximum": 5.803412630184265
+      },
+      "verifiedAdmissionP95Ms": {
+        "minimum": 14.10233299999993,
+        "median": 14.10233299999993,
+        "p95": 14.10233299999993,
+        "maximum": 14.10233299999993
+      },
+      "largePutMebibytesPerSecond": {
+        "minimum": 27.387882116898403,
+        "median": 27.387882116898403,
+        "p95": 27.387882116898403,
+        "maximum": 27.387882116898403
+      },
+      "largeReadMebibytesPerSecond": {
+        "minimum": 2993.218926203316,
+        "median": 2993.218926203316,
+        "p95": 2993.218926203316,
+        "maximum": 2993.218926203316
+      },
+      "rangeReassemblyMebibytesPerSecond": {
+        "minimum": 16.16799197049072,
+        "median": 16.16799197049072,
+        "p95": 16.16799197049072,
+        "maximum": 16.16799197049072
+      },
+      "totalMs": {
+        "minimum": 1230.226541,
+        "median": 1230.226541,
+        "p95": 1230.226541,
+        "maximum": 1230.226541
+      },
+      "maxRssBytes": {
+        "minimum": 236290048,
+        "median": 236290048,
+        "p95": 236290048,
+        "maximum": 236290048
+      }
+    },
+    {
+      "objectCount": 100000,
+      "samples": 1,
+      "inventoryPreparationMs": {
+        "minimum": 153.268417,
+        "median": 153.268417,
+        "p95": 153.268417,
+        "maximum": 153.268417
+      },
+      "enumerateMs": {
+        "minimum": 97.60779100000002,
+        "median": 97.60779100000002,
+        "p95": 97.60779100000002,
+        "maximum": 97.60779100000002
+      },
+      "hasHitP95Ms": {
+        "minimum": 0.005999999999971806,
+        "median": 0.005999999999971806,
+        "p95": 0.005999999999971806,
+        "maximum": 0.005999999999971806
+      },
+      "fullReadMebibytesPerSecond": {
+        "minimum": 6.006573585655215,
+        "median": 6.006573585655215,
+        "p95": 6.006573585655215,
+        "maximum": 6.006573585655215
+      },
+      "verifiedAdmissionP95Ms": {
+        "minimum": 13.753917000000001,
+        "median": 13.753917000000001,
+        "p95": 13.753917000000001,
+        "maximum": 13.753917000000001
+      },
+      "largePutMebibytesPerSecond": {
+        "minimum": 27.65851736261091,
+        "median": 27.65851736261091,
+        "p95": 27.65851736261091,
+        "maximum": 27.65851736261091
+      },
+      "largeReadMebibytesPerSecond": {
+        "minimum": 2774.1688322216582,
+        "median": 2774.1688322216582,
+        "p95": 2774.1688322216582,
+        "maximum": 2774.1688322216582
+      },
+      "rangeReassemblyMebibytesPerSecond": {
+        "minimum": 16.33399891427936,
+        "median": 16.33399891427936,
+        "p95": 16.33399891427936,
+        "maximum": 16.33399891427936
+      },
+      "totalMs": {
+        "minimum": 1313.380916,
+        "median": 1313.380916,
+        "p95": 1313.380916,
+        "maximum": 1313.380916
+      },
+      "maxRssBytes": {
+        "minimum": 244891648,
+        "median": 244891648,
+        "p95": 244891648,
+        "maximum": 244891648
+      }
+    },
+    {
+      "objectCount": 1000000,
+      "samples": 1,
+      "inventoryPreparationMs": {
+        "minimum": 1535.828125,
+        "median": 1535.828125,
+        "p95": 1535.828125,
+        "maximum": 1535.828125
+      },
+      "enumerateMs": {
+        "minimum": 936.6692910000002,
+        "median": 936.6692910000002,
+        "p95": 936.6692910000002,
+        "maximum": 936.6692910000002
+      },
+      "hasHitP95Ms": {
+        "minimum": 0.007291999999779364,
+        "median": 0.007291999999779364,
+        "p95": 0.007291999999779364,
+        "maximum": 0.007291999999779364
+      },
+      "fullReadMebibytesPerSecond": {
+        "minimum": 6.021355828337623,
+        "median": 6.021355828337623,
+        "p95": 6.021355828337623,
+        "maximum": 6.021355828337623
+      },
+      "verifiedAdmissionP95Ms": {
+        "minimum": 15.018916999999874,
+        "median": 15.018916999999874,
+        "p95": 15.018916999999874,
+        "maximum": 15.018916999999874
+      },
+      "largePutMebibytesPerSecond": {
+        "minimum": 27.548919577163144,
+        "median": 27.548919577163144,
+        "p95": 27.548919577163144,
+        "maximum": 27.548919577163144
+      },
+      "largeReadMebibytesPerSecond": {
+        "minimum": 2715.5505199890813,
+        "median": 2715.5505199890813,
+        "p95": 2715.5505199890813,
+        "maximum": 2715.5505199890813
+      },
+      "rangeReassemblyMebibytesPerSecond": {
+        "minimum": 16.2819098252902,
+        "median": 16.2819098252902,
+        "p95": 16.2819098252902,
+        "maximum": 16.2819098252902
+      },
+      "totalMs": {
+        "minimum": 2165.1524580000005,
+        "median": 2165.1524580000005,
+        "p95": 2165.1524580000005,
+        "maximum": 2165.1524580000005
+      },
+      "maxRssBytes": {
+        "minimum": 246284288,
+        "median": 246284288,
+        "p95": 246284288,
+        "maximum": 246284288
+      }
+    },
+    {
+      "objectCount": 10000000,
+      "samples": 1,
+      "inventoryPreparationMs": {
+        "minimum": 15288.230584,
+        "median": 15288.230584,
+        "p95": 15288.230584,
+        "maximum": 15288.230584
+      },
+      "enumerateMs": {
+        "minimum": 10235.166540999999,
+        "median": 10235.166540999999,
+        "p95": 10235.166540999999,
+        "maximum": 10235.166540999999
+      },
+      "hasHitP95Ms": {
+        "minimum": 0.11287499999889405,
+        "median": 0.11287499999889405,
+        "p95": 0.11287499999889405,
+        "maximum": 0.11287499999889405
+      },
+      "fullReadMebibytesPerSecond": {
+        "minimum": 5.872541707340632,
+        "median": 5.872541707340632,
+        "p95": 5.872541707340632,
+        "maximum": 5.872541707340632
+      },
+      "verifiedAdmissionP95Ms": {
+        "minimum": 18.825959000001603,
+        "median": 18.825959000001603,
+        "p95": 18.825959000001603,
+        "maximum": 18.825959000001603
+      },
+      "largePutMebibytesPerSecond": {
+        "minimum": 27.427788406464288,
+        "median": 27.427788406464288,
+        "p95": 27.427788406464288,
+        "maximum": 27.427788406464288
+      },
+      "largeReadMebibytesPerSecond": {
+        "minimum": 2346.077972143726,
+        "median": 2346.077972143726,
+        "p95": 2346.077972143726,
+        "maximum": 2346.077972143726
+      },
+      "rangeReassemblyMebibytesPerSecond": {
+        "minimum": 15.975328946885474,
+        "median": 15.975328946885474,
+        "p95": 15.975328946885474,
+        "maximum": 15.975328946885474
+      },
+      "totalMs": {
+        "minimum": 11635.418416,
+        "median": 11635.418416,
+        "p95": 11635.418416,
+        "maximum": 11635.418416
+      },
+      "maxRssBytes": {
+        "minimum": 251150336,
+        "median": 251150336,
+        "p95": 251150336,
+        "maximum": 251150336
+      }
+    }
+  ]
+}

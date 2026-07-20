@@ -8,6 +8,7 @@ import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
+import type { WalSyncConfiguration } from '@origintrail-official/dkg-wal';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
@@ -613,6 +614,12 @@ export interface DkgConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Disable expensive peer-connect SWM catch-up for bulk benchmark/devnet runs. */
   syncSharedMemoryOnConnect?: boolean;
+  /**
+   * OT-RFC-65 replication authority mode. Omitted means `legacy`.
+   * `parallel` starts only isolated shadow WAL state; `wal` additionally
+   * requires a successfully verified signed network cutover.
+   */
+  sync?: WalSyncConfiguration;
   /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
   syncReconcilerEnabled?: boolean;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */

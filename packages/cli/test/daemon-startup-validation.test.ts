@@ -89,6 +89,36 @@ describe('daemon startup network validation', () => {
     tempHome = undefined;
   });
 
+  it('fails wal mode closed with a stable reason before network or agent startup', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-wal-cutover-startup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    await expect(runDaemonInner(true, {
+      name: 'wal-cutover-startup-test',
+      networkConfig: 'testnet',
+      listenPort: 0,
+      nodeRole: 'edge',
+      sync: {
+        mode: 'wal',
+        wal: { cutoverId: '01'.repeat(32) },
+      },
+    } as any, Date.now())).rejects.toMatchObject({
+      code: 'WAL_CUTOVER_VERIFIER_UNAVAILABLE',
+    });
+
+    expect(mocks.loadNetworkConfig).not.toHaveBeenCalled();
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(stdoutSpy.mock.calls.map(call => String(call[0])).join('')).toContain(
+      'WAL_CUTOVER_VERIFIER_UNAVAILABLE',
+    );
+  });
+
   it('exits before agent creation when the selected network is pre-deployment', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-predeployment-startup-'));
     originalDkgHome = process.env.DKG_HOME;

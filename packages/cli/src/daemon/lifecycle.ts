@@ -144,6 +144,7 @@ import {
   validateNetworkConfigReadiness,
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
+import { startDaemonWalRuntime } from '../wal-runtime.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
@@ -1150,6 +1151,26 @@ export async function runDaemonInner(
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
+  }
+
+  daemonState.walRuntime = null;
+  let walRuntime: Awaited<ReturnType<typeof startDaemonWalRuntime>>;
+  try {
+    walRuntime = await startDaemonWalRuntime(config, dkgDir(), process.env);
+    daemonState.walRuntime = walRuntime;
+    if (walRuntime) {
+      const walStatus = walRuntime.status();
+      log(
+        `[WAL] mode=${walStatus.mode} lifecycle=${walStatus.lifecycle} ` +
+        `productionAuthority=${walStatus.productionAuthority} protocols=0 workers=0`,
+      );
+    }
+  } catch (error) {
+    const reason = error && typeof error === 'object' && 'code' in error
+      ? `${String((error as { code: unknown }).code)}: `
+      : '';
+    log(`[WAL] FATAL ${reason}${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   }
 
   if (startupLogRotation?.rotated) {
@@ -3727,6 +3748,17 @@ export async function runDaemonInner(
           .catch((err: any) =>
             log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
           );
+        await walRuntime
+          ?.drain()
+          .catch((err: any) =>
+            log(`WAL runtime drain error: ${err?.message ?? String(err)}`),
+          );
+        await walRuntime
+          ?.stop()
+          .catch((err: any) =>
+            log(`WAL runtime stop error: ${err?.message ?? String(err)}`),
+          );
+        daemonState.walRuntime = null;
         server.close();
         await agent.stop();
         // Stop the managed Oxigraph child AFTER the agent has stopped
