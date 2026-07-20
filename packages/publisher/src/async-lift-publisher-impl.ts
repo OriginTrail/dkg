@@ -529,11 +529,23 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
       if (!executorReturned && current?.status === 'broadcast') {
+        // The write-ahead hook durably recorded 'broadcast' (the fsync succeeded)
+        // before the adapter sent the tx, then confirmation was interrupted.
+        // Reconcile on chain — never resend.
         return current;
       }
-      const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
+      // The publish tx is sent strictly AFTER the write-ahead record is fsync-durable
+      // (the adapter fails closed on a hook error, evm-adapter-base.dispatchSerializedV10Write).
+      // So if the executor never returned and the durable status is not 'broadcast'
+      // (e.g. the write-ahead fsync failed and rolled the transition back), no tx
+      // reached the wire — fail from the pre-broadcast ('validated') state, off the
+      // chain-recovery track (which chases an on-chain tx that never landed).
+      // Failures after the executor returned keep the precondition heuristic.
+      const failedFromState: LiftJobState = !executorReturned
         ? 'validated'
-        : 'broadcast';
+        : this.isKnowledgeAssetPublishPreconditionFailure(error)
+          ? 'validated'
+          : 'broadcast';
       return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
     }
   }
@@ -1119,14 +1131,27 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    await this.update(params.jobId, 'broadcast', {
-      broadcast: {
-        txHash: params.txHash,
-        walletId: params.walletId,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      },
-    });
+    try {
+      await this.update(params.jobId, 'broadcast', {
+        broadcast: {
+          txHash: params.txHash,
+          walletId: params.walletId,
+          merkleRoot: params.merkleRoot,
+          publicByteSize: params.publicByteSize,
+        },
+      });
+    } catch (error) {
+      // Write-ahead durability failure BEFORE the on-chain send. `update` mutates
+      // the in-memory row to 'broadcast' and only then fsyncs (writeJob); if that
+      // fsync throws, the store is left showing an un-fsync'd 'broadcast' even
+      // though the adapter fails closed and never sends the tx. Restore the durable
+      // prior 'validated' job so recovery never treats a never-sent tx as on-chain
+      // state — the caller then fails the job from its pre-broadcast state, off the
+      // chain-recovery track. writeJob does not fsync a 'validated' row, so the
+      // rollback itself cannot re-fail here.
+      await this.writeJob(current);
+      throw error;
+    }
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {
