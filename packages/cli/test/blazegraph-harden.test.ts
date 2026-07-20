@@ -25,6 +25,7 @@ import {
   HARDEN_BACKUP_SUFFIX,
   HARDEN_DISK_PREFLIGHT_FACTOR,
   HARDEN_EXPORT_FILENAME,
+  type HardenStep,
 } from '../src/daemon/blazegraph-harden.js';
 import {
   BLAZEGRAPH_DATA_DIR,
@@ -273,8 +274,13 @@ describe('planHardenMigration', () => {
 
   it('resumes from backup-only with only the non-destructive tail', () => {
     const steps = planHardenMigration({ ...input, state: 'backup-only' });
+    // disable-backup-restart is in the resume plan too: the executor has
+    // always re-run it on resume (idempotent — the crashed run may have died
+    // between the rename and the restart-policy update), but the plan used
+    // to omit it, under-reporting the dry-run. Plan and executor now share
+    // one step model, and the conformance tests below pin them together.
     expect(steps.map((s) => s.id)).toEqual([
-      'volume-create', 'seed-volume', 'run-hardened', 'verify',
+      'volume-create', 'seed-volume', 'disable-backup-restart', 'run-hardened', 'verify',
     ]);
   });
 
@@ -768,6 +774,54 @@ describe('executeHardenMigration', () => {
     expect(calls.some((c) => c[0] === 'run' && c[1] === '--rm')).toBe(true);
     expect(calls.some((c) => c[0] === 'run' && c[1] === '-d')).toBe(true);
     assertSafetyInvariants(calls, migrationDir, true);
+  });
+
+  /**
+   * Plan/executor conformance: every docker-backed step of the dry-run plan
+   * must be executed with EXACTLY the planned argv, in plan order. The
+   * executor sources its argv from the same hardenStepDefs the plan renders,
+   * so this fails whenever someone hand-writes a docker command in the
+   * executor again (or reorders/skips a planned step) — the drift the plan
+   * would then silently misreport to the operator.
+   */
+  function assertExecutionFollowsPlan(plan: HardenStep[], calls: string[][]) {
+    const planned = plan.filter((s) => s.dockerArgs !== undefined);
+    expect(planned.length).toBeGreaterThan(0);
+    let cursor = -1;
+    for (const step of planned) {
+      const idx = calls.findIndex(
+        (c, i) => i > cursor && JSON.stringify(c) === JSON.stringify(step.dockerArgs),
+      );
+      expect(
+        idx,
+        `planned step "${step.id}" (docker ${step.dockerArgs!.join(' ')}) was not executed after its predecessor`,
+      ).toBeGreaterThan(cursor);
+      cursor = idx;
+    }
+  }
+
+  it('executes every planned docker command with the planned argv, in plan order (legacy path)', async () => {
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn } = verifierFetch();
+    await executeHardenMigration(baseOpts(runner, fn));
+    const plan = planHardenMigration({
+      containerName: NAME, namespace: NAMESPACE, hostPort: 9999,
+      heapMb: 3072, migrationDir, state: 'legacy',
+    });
+    expect(plan.filter((s) => s.dockerArgs).length).toBe(9);
+    assertExecutionFollowsPlan(plan, calls);
+  });
+
+  it('executes every planned docker command with the planned argv, in plan order (backup-only resume)', async () => {
+    writeFileSync(join(migrationDir, HARDEN_EXPORT_FILENAME), Buffer.alloc(JOURNAL_BYTES, 1));
+    const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir });
+    const { fn } = verifierFetch();
+    await executeHardenMigration(baseOpts(runner, fn));
+    const plan = planHardenMigration({
+      containerName: NAME, namespace: NAMESPACE, hostPort: 9999,
+      heapMb: 3072, migrationDir, state: 'backup-only',
+    });
+    assertExecutionFollowsPlan(plan, calls);
   });
 
   it('re-running after success is a verify-only no-op', async () => {
