@@ -4762,6 +4762,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
               },
+              // Whole-graph replace for materializing verified public SWM
+              // snapshots. Graph-scoped (contentScopeVersion 2) KAs carry no
+              // dkg:rootEntity, so the aggregate data phase returns 0 data quads
+              // for them by design and their content arrives as immutable
+              // snapshots. Without this the public catch-up lane cached every
+              // verified snapshot and never wrote one to the store, so a node
+              // that missed the live gossip stayed empty forever.
+              //
+              // Deliberately NOT routed through storeInsert below: that is a
+              // union insert with an oversize guard, whereas a KA graph is
+              // all-or-nothing and digest-verified. Insert would risk partial or
+              // duplicated graph state across retries.
+              storeReplaceGraph: async (graphUri, quads) => {
+                if (typeof this.store.replaceGraph !== 'function') {
+                  throw new Error('triple store does not support atomic graph replace');
+                }
+                await this.store.replaceGraph(graphUri, quads, {
+                  priority: 'background',
+                  source: 'agent.sharedMemorySync.materializeSnapshot',
+                });
+                this.invalidateListContextGraphsCache();
+              },
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
                 // literals BEFORE insert so the SWM page cursor advances instead

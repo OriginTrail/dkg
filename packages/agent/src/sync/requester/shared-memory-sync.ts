@@ -6,6 +6,11 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
+import {
+  materializeGraphScopedSwmRecoveryAsset,
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -62,6 +67,25 @@ interface SharedMemorySyncContext {
   }>;
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /**
+   * Atomic whole-graph replace for one graph-scoped KA.
+   *
+   * Required to MATERIALIZE verified public SWM snapshots. `contentScopeVersion 2`
+   * KAs carry no `dkg:rootEntity`, so the aggregate data phase legitimately
+   * returns 0 data quads for them — their content travels as immutable
+   * snapshots instead. The private recovery lane already materializes those
+   * (`swm-recovery.ts` `materializeReadySnapshot`); the public catch-up lane did
+   * not, so a node that missed the live gossip cached every verified snapshot
+   * and never wrote one into the store. Symptom: "0 data + N meta triples",
+   * indefinitely, with the content sitting in `swm-public-snapshots/`.
+   *
+   * Must be REPLACE, not insert: a KA graph is all-or-nothing and digest-verified,
+   * and union-insert would risk partial/duplicate graph state across retries.
+   * Optional so existing callers/tests keep compiling; when absent, snapshot
+   * materialization is skipped and the prior (broken) behaviour is preserved
+   * rather than silently half-applied.
+   */
+  storeReplaceGraph?: (graphUri: string, quads: Quad[]) => Promise<void>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -84,6 +108,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     processSharedMemoryBatch,
     ensureContextGraph,
     storeInsert,
+    storeReplaceGraph,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -223,6 +248,66 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.droppedDataTriples += dropped;
       }
 
+      // MATERIALIZE verified snapshots into the store, mirroring the private
+      // recovery lane (`swm-recovery.ts` materializeReadySnapshot).
+      //
+      // Descriptors are parsed ONLY from verified meta, and only when the meta
+      // phase completed: parseGraphScopedSwmRecoveryDescriptors throws on
+      // incomplete metadata, and this lane pages meta, so a timed-out page would
+      // otherwise abort the whole CG fanout. A parse failure here must degrade to
+      // "no materialization this round" — never take down the sync.
+      const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
+      if (storeReplaceGraph && publicSnapshotStore && wsMetaResult.completed) {
+        try {
+          for (const descriptor of parseGraphScopedSwmRecoveryDescriptors({
+            contextGraphId: pid,
+            metaQuads: processed.verifiedMeta,
+          })) {
+            const ref = descriptor.publicSnapshotRef;
+            if (!ref) continue; // no immutable snapshot for this KA
+            const list = snapshotDescriptorsByRef.get(ref) ?? [];
+            list.push(descriptor);
+            snapshotDescriptorsByRef.set(ref, list);
+          }
+        } catch (err) {
+          logWarn(ctx, `SWM sync could not parse graph-scoped snapshot descriptors for "${pid}": `
+            + `${err instanceof Error ? err.message : String(err)}`);
+          snapshotDescriptorsByRef.clear();
+        }
+      }
+      let materializedGraphs = 0;
+      let materializedQuads = 0;
+      const materializedKeys = new Set<string>();
+      const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
+        const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
+        if (!descriptors?.length || !storeReplaceGraph || !publicSnapshotStore) return;
+        for (const descriptor of descriptors) {
+          const graphKey = `${descriptor.metaGraph} ${descriptor.assertionGraph}`;
+          if (materializedKeys.has(graphKey)) continue;
+          try {
+            const asset = await materializeGraphScopedSwmRecoveryAsset({
+              descriptor,
+              fetchedDataQuads: [],
+              publicSnapshotStore,
+            });
+            await ensureContextGraph(pid);
+            // Whole-graph replace: a KA graph is all-or-nothing and its content
+            // is digest-verified. Insert would risk partial/duplicate state.
+            await storeReplaceGraph(asset.assertionGraph, [...asset.quads]);
+            materializedKeys.add(graphKey);
+            materializedGraphs += 1;
+            materializedQuads += asset.quads.length;
+            logInfo(ctx, `SWM sync for "${pid}": materialized snapshot ${snapshotRef} `
+              + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
+          } catch (err) {
+            // One bad KA must not abort the rest of the corpus; the phase stays
+            // incomplete so the scheduler retries this peer.
+            logWarn(ctx, `SWM sync failed to materialize snapshot ${snapshotRef} for "${pid}": `
+              + `${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      };
+
       const snapshotStartedAt = Date.now();
       const snapshotSync = await syncPublicSnapshotsForMeta({
         ctx,
@@ -234,7 +319,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         fetchSyncPages,
         deleteCheckpoint,
         setCheckpoint,
+        // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
+        // runs already cached the blobs materializes them on the next pass
+        // without refetching a byte.
+        ...(snapshotDescriptorsByRef.size > 0
+          ? { onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref) }
+          : {}),
       });
+      if (materializedGraphs > 0) {
+        summary.insertedTriples += materializedQuads;
+        logInfo(ctx, `SWM sync for "${pid}": materialized ${materializedGraphs} graph-scoped `
+          + `KA snapshot(s) totalling ${materializedQuads} triples`);
+      }
       summary.bytesReceived += snapshotSync.bytesReceived;
       summary.resumedPhases += snapshotSync.resumedPhases;
       summary.timedOutPhases += snapshotSync.timedOutPhases;
