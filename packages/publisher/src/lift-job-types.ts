@@ -42,7 +42,17 @@ export interface LiftRequestAuthorSeal {
 export interface KnowledgeAssetVmPublishRequest {
   readonly contextGraphId: string;
   readonly name: string;
+  /** Resolved assertion AUTHOR (may differ from the caller — GH#1778 curator publish). */
   readonly agentAddress?: string;
+  /**
+   * Enqueuing CALLER identity (token holder / operator), distinct from the
+   * resolved author (GH#1778). Used to stamp the CG curator on `CG_NOT_REGISTERED`
+   * auto-registration, matching the synchronous `vm/publish` lane — the async
+   * worker registers under the caller who requested the publish, not the KA
+   * author and not the node's default. Absent → registration falls back to the
+   * node default inside `stampAddressCurator`, exactly as the sync lane does.
+   */
+  readonly callerAgentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];

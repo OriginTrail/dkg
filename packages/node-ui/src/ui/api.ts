@@ -1119,9 +1119,11 @@ export interface AssertionInfo {
  * the single `/_shared_memory` graph, so the assertion graph itself becomes
  * empty and the WM-style listing returns nothing. The authoring node's
  * `_meta` graph also records full lifecycle entities (`dkg:state`,
- * `dkg:memoryLayer`, `prov:Activity` events), but `_meta` is NOT replicated
- * between peers — only the context graph's data graphs and the
- * `_shared_memory_meta` partitions propagate over sync.
+ * `dkg:memoryLayer`, `prov:Activity` events). NOTE: `_meta` rows for a shared
+ * (non-WM) assertion DO replicate to peers over the durable `_meta` sync lane —
+ * that is how a curator learns a member-shared KA's name and seal (see GH#1778).
+ * The context graph's data graphs and `_shared_memory_meta` partitions also
+ * propagate over sync.
  *
  * What DOES land on every replica is one `dkg:ShareTransition` entity per
  * promote, authored by `generateShareTransitionMetadata()` in

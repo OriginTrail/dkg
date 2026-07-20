@@ -886,9 +886,19 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      // GH#1778 — auto-register the CG under the ENQUEUING CALLER (the token
+      // holder / operator who requested the publish), stamped as the CG curator by
+      // `stampAddressCurator`. This matches the synchronous `vm/publish` lane
+      // (`knowledge-assets.ts` passes `callerAgentAddress: requestAgentAddress`), so
+      // the same CG gets the same curator regardless of which lane registers it.
+      // NOT `request.agentAddress` (the resolved KA author — a member the curator
+      // is publishing for). When the caller was not captured (tokenless enqueue /
+      // pre-#1778 job), `stampAddressCurator` falls back to the node's default
+      // identity — again exactly as the sync lane does when `requestAgentAddress`
+      // is undefined. Deduped jobs stamp under the first enqueuer's caller, which
+      // is the same first-writer-wins the sync lane already has.
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
-        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+        ...(request.callerAgentAddress ? { callerAgentAddress: request.callerAgentAddress } : {}),
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,
