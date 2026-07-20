@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -1315,7 +1315,7 @@ export class SharedMemoryHandler {
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
         onPhase?.('validate', 'start');
-        const validation = validateKnowledgeAssetPublishRequest(
+        const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
           quads,
           expectedWireGraph,
           publicTripleCount ?? 0,

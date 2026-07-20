@@ -11,7 +11,7 @@
  * 8. Sub-graph assertions — assertion lifecycle within a sub-graph
  * 9. Two-node promote gossip — promoted data replicates via gossip
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -200,7 +200,7 @@ describe('Assertion lifecycle with sub-graphs', () => {
 });
 
 describe('Assertion promote gossip (2 nodes)', () => {
-  it('promoted data replicates to connected peer via gossip', async () => {
+  it('a rootless Markdown-shaped KA replicates to the connected peer with its entities intact', async () => {
     const nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PromoteGossipA',
@@ -235,18 +235,40 @@ describe('Assertion promote gossip (2 nodes)', () => {
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(500);
 
+    const markdownRoot = 'did:dkg:context-graph:assertion-e2e/assertion/0xauthor/readme.md';
+    // The Markdown extractor emits section blank nodes. Finalization owns the
+    // conversion into the protocol-reserved urn:dkg:ka-skolem namespace.
+    const markdownSection = '_:section-safety';
+    const markdownFile = 'urn:dkg:file:keccak256:abc';
     await nodeA.assertion.create(CG_ID, 'gossip-draft');
     await nodeA.assertion.write(CG_ID, 'gossip-draft', [
-      { subject: 'urn:gossip:item', predicate: 'http://schema.org/name', object: '"Gossiped via promote"' },
+      { subject: markdownRoot, predicate: 'http://schema.org/name', object: '"Construction notes"' },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/sourceContentType', object: '"text/markdown"' },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/sourceFile', object: markdownFile },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/markdownForm', object: markdownFile },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/rootEntity', object: markdownRoot },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/hasSection', object: markdownSection },
+      { subject: markdownSection, predicate: 'http://schema.org/name', object: '"Safety"' },
     ]);
 
-    await nodeA.assertion.promote(CG_ID, 'gossip-draft');
+    const publishWorkspaceGossip = vi.spyOn(nodeA, 'publishWorkspaceGossip');
+    const promoted = await nodeA.assertion.promote(CG_ID, 'gossip-draft');
+    expect(promoted.shareOperationId).toBeTruthy();
+    const publishCall = publishWorkspaceGossip.mock.calls[0];
+    expect(publishCall?.[0]).toBe(CG_ID);
+    expect(publishCall?.[1]).toBeInstanceOf(Uint8Array);
+    expect(publishCall?.[4]).toBe(promoted.shareOperationId);
 
     const deadline = Date.now() + 15_000;
     let bindings: any[] = [];
     while (Date.now() < deadline) {
       const result = await nodeB.query(
-        'SELECT ?name WHERE { <urn:gossip:item> <http://schema.org/name> ?name }',
+        `SELECT ?title ?contentType ?sectionName WHERE {
+          <${markdownRoot}> <http://schema.org/name> ?title ;
+            <http://dkg.io/ontology/sourceContentType> ?contentType ;
+            <http://dkg.io/ontology/hasSection> ?section .
+          ?section <http://schema.org/name> ?sectionName .
+        }`,
         { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
       );
       bindings = result.bindings;
@@ -254,6 +276,8 @@ describe('Assertion promote gossip (2 nodes)', () => {
       await sleep(500);
     }
     expect(bindings.length).toBe(1);
-    expect(bindings[0]?.['name']).toBe('"Gossiped via promote"');
+    expect(bindings[0]?.['title']).toBe('"Construction notes"');
+    expect(bindings[0]?.['contentType']).toBe('"text/markdown"');
+    expect(bindings[0]?.['sectionName']).toBe('"Safety"');
   }, 20_000);
 });

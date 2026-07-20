@@ -53,7 +53,7 @@ import { replaceCatalogQuads } from './catalog-persistence.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
-import { validateKnowledgeAssetPublishRequest } from './validation.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -2002,7 +2002,7 @@ export class StorageACKHandler {
             `intent=${graphUpdate.publicTripleCount}, local=${publicQuads.length}`,
         );
       }
-      const validation = validateKnowledgeAssetPublishRequest(
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
         inlineByteLength === undefined
           ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
           : publicQuads,
