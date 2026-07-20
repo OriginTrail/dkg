@@ -2,13 +2,11 @@
 //
 // Extracted from `runDaemonInner` so the fail-open contract (a backfill error
 // must NEVER abort boot) and the count-logging behaviour are unit-testable
-// without driving the whole daemon-start path.
+// without driving the whole daemon-start path. Depends only on the narrow
+// VmPublishIntentIndexBackfiller maintenance interface (exported by the publisher
+// package), never on the runtime publisher contract.
 
-/** Minimal publisher-control surface the boot backfill needs. */
-export interface VmPublishIntentIndexBackfiller {
-  /** Idempotently (re)index VM-publish jobs; returns the number of jobs indexed. */
-  ensureVmPublishIntentIndex(): Promise<number>;
-}
+import type { VmPublishIntentIndexBackfiller } from '@origintrail-official/dkg-publisher';
 
 /**
  * Run the one-time, additive intent-index backfill for VM-publish jobs admitted

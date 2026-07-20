@@ -58,10 +58,6 @@ export interface AsyncLiftPublisher {
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
-  /** #1828 — read-only recovery lookup by lifecycle facts (+ optional intentKey). */
-  lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
-  /** #1828 — idempotent boot backfill of the ephemeral intent index. Returns jobs (re)indexed. */
-  ensureVmPublishIntentIndex(): Promise<number>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<LiftJob | null>;
@@ -74,6 +70,31 @@ export interface AsyncLiftPublisher {
   cancel(jobId: string): Promise<void>;
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/**
+ * #1828 — a publisher that also exposes the read-only durable-admission intent
+ * recovery lookup. Kept OFF the base {@link AsyncLiftPublisher} runtime queue
+ * contract so runner/adapter implementations that never serve recovery are not
+ * forced to implement it (the exported contract stays minimal). The daemon's
+ * `createPublisherControlFromStore` returns this; the recovery route depends on
+ * it. PR3/PR4 add their own feature reads on their own extended interfaces —
+ * the base contract does not grow.
+ */
+export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
+  /** #1828 — read-only recovery lookup by lifecycle facts (+ optional intentKey). */
+  lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
+}
+
+/**
+ * #1828 — one-shot storage maintenance: (re)build the ephemeral intent index for
+ * VM-publish jobs admitted before it existed. This is a boot-time repair, not a
+ * runtime publisher behaviour, so it lives on its OWN narrow interface — the
+ * daemon boot backfill depends only on this, never on the publisher contract.
+ */
+export interface VmPublishIntentIndexBackfiller {
+  /** Idempotent additive backfill; returns the number of jobs (re)indexed. */
+  ensureVmPublishIntentIndex(): Promise<number>;
 }
 
 export interface AsyncLiftPublisherRecoveryResult {

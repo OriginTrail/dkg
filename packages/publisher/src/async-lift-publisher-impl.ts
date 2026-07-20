@@ -28,11 +28,12 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
-  AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
   IntentLookupInput,
   IntentLookupResult,
+  VmPublishIntentRecoveryPublisher,
+  VmPublishIntentIndexBackfiller,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
@@ -155,7 +156,8 @@ function resolveKnowledgeAssetVmPublishHandler(
   };
 }
 
-export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
+export class TripleStoreAsyncLiftPublisher
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
