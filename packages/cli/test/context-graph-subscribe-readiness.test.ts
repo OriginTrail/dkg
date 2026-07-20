@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 
 function cleanEmptyResult(): CatchupJobResult {
@@ -103,6 +104,25 @@ function privateSharedMemoryOnlyResult(): CatchupJobResult {
   return result;
 }
 
+function publicDurableAndSharedMemoryResult(): CatchupJobResult {
+  const result = cleanEmptyResult();
+  if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
+    throw new Error('catch-up diagnostics missing');
+  }
+  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
+  result.dataSynced = 3;
+  result.sharedMemorySynced = 4;
+  result.diagnostics.durable.emptyResponses = 0;
+  result.diagnostics.durable.fetchedDataTriples = 3;
+  result.diagnostics.durable.insertedDataTriples = 3;
+  result.diagnostics.sharedMemory.emptyResponses = 0;
+  result.diagnostics.sharedMemory.fetchedDataTriples = 4;
+  result.diagnostics.sharedMemory.insertedDataTriples = 4;
+  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 1, emptyPeers: 0 };
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 1, emptyPeers: 0 };
+  return result;
+}
+
 describe('context graph subscribe readiness requires authoritative metadata', () => {
   const previousCatchupRunner = daemonState.catchupRunner;
   let server: Server | undefined;
@@ -121,6 +141,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     hasConfirmedMeta: boolean;
     hasConfirmedMetaAfterCatchup?: boolean;
     isPrivate?: boolean;
+    allowedAgents?: string[];
+    callerAddress?: string;
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
     readiness?: {
@@ -136,6 +158,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     state: Record<string, any>;
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
+    statusResponse: any;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -159,7 +182,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      getContextGraphAllowedAgents: async () => [],
+      getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (id: string) => {
         state.set(id, {
@@ -178,12 +201,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       resolveAgentByToken: () => undefined,
-      getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+      getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
     };
 
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      await handleContextGraphRoutes({
+      const routeContext = {
         req,
         res,
         agent,
@@ -219,7 +242,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         path: url.pathname,
         requestToken: undefined,
         requestAgentAddress: undefined,
-      } as any);
+      } as any;
+      await handleContextGraphRoutes(routeContext);
+      if (!res.writableEnded) await handleQueryRoutes(routeContext);
       if (!res.writableEnded) {
         res.statusCode = 404;
         res.end();
@@ -245,6 +270,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
+    const statusHttpResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
+    );
+    const statusResponse = await statusHttpResponse.json() as any;
+
     return {
       response,
       job: catchupTracker.jobs.get(jobId),
@@ -252,6 +282,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       state: state.get(contextGraphId) ?? {},
       patches,
       readiness,
+      statusResponse,
     };
   }
 
@@ -433,6 +464,48 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.runCalls).toBe(1);
     expect(result.job.status).toBe('done');
     expect(result.job.error).toBeUndefined();
+    expect(result.state).toMatchObject({
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      pendingMeta: false,
+    });
+    expect(result.readiness).toMatchObject({
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: true,
+    });
+  });
+
+  it('backfills both public planes and exposes the completed subscription job through catchup status', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      // Publishing is allowlisted to a different wallet. Explicit public read
+      // policy must still bypass the private membership gate.
+      allowedAgents: ['0x1111111111111111111111111111111111111111'],
+      callerAddress: '0x2222222222222222222222222222222222222222',
+      result: publicDurableAndSharedMemoryResult(),
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup).toMatchObject({
+      status: 'queued',
+      jobId: expect.any(String),
+    });
+    expect(result.statusResponse).toMatchObject({
+      jobId: result.response.catchup.jobId,
+      status: 'done',
+      result: {
+        dataSynced: 3,
+        sharedMemorySynced: 4,
+      },
+    });
     expect(result.state).toMatchObject({
       subscribed: true,
       synced: true,

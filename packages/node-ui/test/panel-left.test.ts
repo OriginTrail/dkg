@@ -240,6 +240,44 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
 
+  it('explains that discovered public graphs are browseable before subscription', async () => {
+    const { container } = await renderPanel();
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    expect(container.textContent).toContain('Public graphs appear here as soon as your node discovers them');
+    expect(container.textContent).toContain('subscribe by ID');
+  });
+
+  it('renders a successfully synchronized public graph in the Context Oracle', async () => {
+    const { container } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{
+          id: 'public-ready',
+          name: 'Public Ready Graph',
+          accessPolicy: 'public',
+          callerInvolved: false,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        } as any],
+      });
+    });
+
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    expect(container.textContent).toContain('Public Ready Graph');
+  });
+
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');

@@ -366,7 +366,7 @@ export function PanelLeft() {
           )}
           {contextOracleProjects.length === 0 && (
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
-              No public catalogue entries yet. Context graphs you sync or curate appear under <strong>Context Graphs</strong>; non-private graphs you discover but haven&apos;t joined list here — use <strong>Join Context Graph</strong> to subscribe.
+              No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>
           )}
           {hiddenCount > 0 && (

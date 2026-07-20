@@ -3,11 +3,13 @@ import {
   fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent,
   connectToPeerWithTimeout, connectToPeerIdWithTimeout,
+  subscribeToContextGraph,
   HttpError,
 } from '../../api.js';
-import { useProjectsStore } from '../../stores/projects.js';
+import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 
@@ -120,18 +122,28 @@ export function parseInviteCode(raw: string): ParsedInvite {
   return { cgId, curatorPeerId, legacyMultiaddr, hasUnparsedExtra };
 }
 
-export function validateInvite(invite: ParsedInvite): string | null {
+export function shouldSubscribePublicGraph(
+  invite: ParsedInvite,
+  contextGraphs: readonly Pick<ContextGraph, 'id' | 'accessPolicy'>[],
+): boolean {
+  return !invite.hasUnparsedExtra && contextGraphs.some((graph) => (
+    graph.id === invite.cgId && normalizeAccessPolicy(graph.accessPolicy) === 'public'
+  ));
+}
+
+export function validateInvite(
+  invite: ParsedInvite,
+  options: { allowBareContextGraphId?: boolean } = {},
+): string | null {
   if (!invite.cgId) return 'Missing context graph ID';
   if (invite.hasUnparsedExtra) {
     return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
   }
-  // V10: every join requires a curator peer id (the daemon's
+  // V10 private joins require a curator peer id (the daemon's
   // `/request-join` returns 400 when curatorPeerId is absent — see
-  // `forwardJoinRequest`). A bare cgId would silently 400 here, so
-  // reject it loudly with actionable copy. The old subscribe-to-public-CG
-  // paste flow has been removed; users who want a public CG that hasn't
-  // surfaced in the Oracle yet need to ask the creator for an invite.
-  if (!invite.curatorPeerId && !invite.legacyMultiaddr) {
+  // `forwardJoinRequest`). A discovered graph whose explicit access policy is
+  // public uses `/api/subscribe` instead and deliberately needs no invite.
+  if (!invite.curatorPeerId && !invite.legacyMultiaddr && !options.allowBareContextGraphId) {
     return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Context Graph dialog.';
   }
   if (invite.legacyMultiaddr) {
@@ -343,7 +355,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleRequestJoin = async () => {
     const invite = parseInviteCode(inviteCode);
-    const inviteError = validateInvite(invite);
+    const publicSubscription = shouldSubscribePublicGraph(invite, contextGraphs);
+    const inviteError = validateInvite(invite, {
+      allowBareContextGraphId: publicSubscription,
+    });
     if (inviteError) {
       setError(inviteError);
       return;
@@ -351,6 +366,35 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     const { cgId, curatorPeerId, legacyMultiaddr } = invite;
 
     setError(null);
+
+    if (publicSubscription) {
+      setPhase('sending');
+      try {
+        const existing = contextGraphs.find((cg: any) => cg.id === cgId);
+        if (!existing?.subscribed) {
+          // Public read/subscription is an explicit local opt-in. The daemon
+          // queues the same tracked durable+SWM catch-up job used by the CLI;
+          // no curator approval or member delegation participates.
+          await subscribeToContextGraph(cgId);
+        }
+        const { contextGraphs: freshList } = await fetchContextGraphs();
+        setContextGraphs(freshList ?? []);
+        const subscribed = freshList?.find((cg: any) => cg.id === cgId) ?? existing;
+        if (subscribed) {
+          setActiveProject(subscribed.id);
+          openTab({
+            id: `project:${subscribed.id}`,
+            label: subscribed.name || subscribed.id,
+            closable: true,
+          });
+        }
+        onClose();
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Could not subscribe to this public context graph.');
+        setPhase('idle');
+      }
+      return;
+    }
 
     // Pre-check: if we already have this CG locally (previous join, or
     // curator added us via add-agent), just open it. No need to re-sign
@@ -466,6 +510,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const pending = phase === 'pending';
   const approved = phase === 'approved';
   const rejected = phase === 'rejected';
+  const publicSubscription = shouldSubscribePublicGraph(
+    parseInviteCode(inviteCode),
+    contextGraphs,
+  );
 
   return (
     <div
@@ -494,7 +542,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         <div className="v10-modal-header">
           <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>
           <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
-            Paste the invite from the curator. Your node will send a signed join request and wait for approval.
+            Enter a discovered public Context Graph ID to subscribe, or paste a curator invite for a private graph.
           </div>
         </div>
 
@@ -532,12 +580,12 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-invite">Invite Code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite Code</label>
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
               className="v10-form-textarea"
-              placeholder={"Paste the invite code from the context graph curator.\n\ne.g.\nmy-context-graph-abc123\n12D3KooW..."}
+              placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
@@ -558,7 +606,15 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             onClick={handleRequestJoin}
             disabled={!inviteCode.trim() || sending || pending || approved}
           >
-            {sending ? 'Sending request…' : pending ? 'Awaiting approval…' : approved ? 'Approved' : 'Request to Join'}
+            {sending
+              ? (publicSubscription ? 'Subscribing…' : 'Sending request…')
+              : pending
+                ? 'Awaiting approval…'
+                : approved
+                  ? 'Approved'
+                  : publicSubscription
+                    ? 'Subscribe'
+                    : 'Request to Join'}
           </button>
         </div>
       </div>

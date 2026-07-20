@@ -6857,7 +6857,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
-    let hasActivePublicOnChainProof = false;
+    let hasActivePublicOnChainProof: boolean | undefined;
     if (hasUnregisteredPlaceholder && options?.rejectUnregisteredPlaceholder === true) {
       // Replicas do not rewrite the creator's local registrationStatus marker,
       // so a legitimately registered public CG can still say "unregistered".
@@ -6865,8 +6865,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // non-zero id, active slot, accessPolicy=public); a legacy local shadow
       // has no such proof, and a private slot cannot borrow its public ontology
       // fallback.
-      hasActivePublicOnChainProof = await this.contextGraphActivePublicOnChainFromRegistry(
+      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
         contextGraphId,
+        createOperationContext('sync'),
       ).catch(() => false);
     }
     // Curated/private CG creation in 10.0.6 emits this complete definition in
@@ -6900,6 +6901,45 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) {
       return true;
     }
+
+    // Public subscriptions have no member credential to prove. A complete
+    // root definition that explicitly says `accessPolicy="public"` is the
+    // corresponding authoritative metadata gate; publisher allowlists do not
+    // alter that read/subscription policy. Keep this separate from the private
+    // definition above so private bootstrap still requires the current local
+    // member delegation.
+    const authoritativePublicDefinitionResult = await this.store.query(
+      `ASK WHERE {
+        GRAPH <${metaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
+            <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?accessPolicy .
+          FILTER(isLiteral(?accessPolicy) && LCASE(REPLACE(STR(?accessPolicy), "^\\\\s+|\\\\s+$", "")) = "public")
+        }
+      }`,
+    );
+    if (
+      authoritativePublicDefinitionResult.type === 'boolean' &&
+      authoritativePublicDefinitionResult.value === true &&
+      // A replica may retain the creator's local-only placeholder. When the
+      // caller explicitly rejects that shape, preserve the existing fresh
+      // active-public chain requirement instead of trusting the shadow alone.
+      (!hasUnregisteredPlaceholder || options?.rejectUnregisteredPlaceholder !== true || hasActivePublicOnChainProof)
+    ) {
+      return true;
+    }
+
+    // A tracked, active registration with live accessPolicy=public is an
+    // independent authority. This covers chain-discovered subscriptions whose
+    // local ontology/control projection has not landed yet. The registry
+    // resolver is fail-closed: it requires an identity-bound on-chain id,
+    // liveness, and policy=public, so a private or stale slot cannot pass.
+    if (hasActivePublicOnChainProof === undefined) {
+      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
+        contextGraphId,
+        createOperationContext('sync'),
+      ).catch(() => false);
+    }
+    if (hasActivePublicOnChainProof) return true;
 
     // `ensureContextGraphLocal` remains authoritative for explicit public
     // network defaults, including namespaced defaults. Reject that otherwise-
