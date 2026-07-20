@@ -28,6 +28,7 @@ export const DOMAINS = Object.freeze({
   replayConflict: 'dkg-rdf-conflict-v1\0',
   payloadAssociatedData: 'dkg-wal-payload-ad-v1\0',
   moveTierCommitment: 'dkg-wal-move-tier-v1\0',
+  moveTierTargetMutation: 'dkg-wal-move-tier-target-mutation-v1\0',
   setEmpty: 'dkg-wal-set-empty-v1\0',
   setLeaf: 'dkg-wal-set-leaf-v1\0',
   setBranch: 'dkg-wal-set-branch-v1\0',
@@ -63,6 +64,7 @@ export const ENUMS = Object.freeze({
     LEGACY_GENESIS: 7
   },
   mutationMode: { REPLACE: 0, PATCH: 1 },
+  chainEventType: { PUBLISH: 0, UPDATE: 1 },
   authorityScope: { CURATOR: 0, NETWORK: 1 },
   errorCode: {
     UNSUPPORTED_VERSION: 0,
@@ -132,6 +134,7 @@ export interface TupleSchema {
   readonly signed?: boolean;
   readonly identityDomain?: keyof typeof DOMAINS;
   readonly signatureDomain?: keyof typeof DOMAINS;
+  readonly enumFields?: Readonly<Record<number, keyof typeof ENUMS>>;
   readonly notes?: readonly string[];
 }
 
@@ -196,8 +199,9 @@ export const TUPLES = Object.freeze({
     ['literal-1', 'u16', 'sorted-unique<nfc-tstr>', 'u64', 'u64', 'sorted-unique<nfc-tstr>', 'sorted-unique<nfc-tstr>', 'sorted-unique<bytes32>', 'sorted-unique<address20>', 'sorted-unique<address20>', 'sorted-unique<u16>']
   ),
   ChainBindingV1: tuple(
-    ['chainId', 'contextGraphOnChainId', 'kaId', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
-    ['u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16', 'u32']
+    ['chainId', 'knowledgeAssetsContract', 'contextGraphOnChainId', 'kaId', 'authorAddress', 'assertionVersion', 'merkleRoot', 'transactionHash', 'blockNumber', 'blockHash', 'transactionIndex', 'logIndex', 'eventType', 'requiredFinalityBlocks'],
+    ['u64', 'address20', 'bytes32', 'bytes32', 'address20', 'u64', 'bytes32', 'bytes32', 'u64', 'bytes32', 'u64', 'u64', 'u16-enum', 'u32'],
+    { enumFields: { 12: 'chainEventType' } }
   ),
   AuthorCheckpointV1: tuple(
     ['version', 'namespaceId', 'writerId', 'writerEpoch', 'checkpointNumber', 'setCommitmentVersion', 'objectSetRoot', 'objectCount', 'maxSequence', 'previousCheckpointIdOrNull', 'baselineSnapshotObjectIdOrNull', 'compactionFloor', 'signature'],
@@ -317,7 +321,7 @@ export const TUPLES = Object.freeze({
   ),
   MoveTierTargetV1: tuple(
     ['version', 'transitionCommitment', 'targetMutation'],
-    ['literal-1', 'bytes32', 'RdfMutationV1']
+    ['literal-1', 'bytes32', 'DkgMutationV1']
   ),
   TierTransitionReceiptV1: tuple(
     ['version', 'transitionCommitment', 'targetNamespaceId', 'targetWalObjectId', 'policyObjectId', 'curatorVectorId', 'expiresAtMs', 'authoritySetId', 'signatures'],

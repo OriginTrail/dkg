@@ -1240,8 +1240,10 @@ function compareBytes(left: Uint8Array, right: Uint8Array): number {
 function chainBinding(blockNumber: number): ProtocolTuple<'ChainBindingV1'> {
   return [
     2043n,
+    new Uint8Array(20).fill(0x21),
     id('chain-context'),
     id('chain-ka'),
+    new Uint8Array(20).fill(0x22),
     1n,
     id('chain-root'),
     id(`chain-tx-${blockNumber}`),

@@ -52,6 +52,7 @@
     "replayConflict": "dkg-rdf-conflict-v1\u0000",
     "payloadAssociatedData": "dkg-wal-payload-ad-v1\u0000",
     "moveTierCommitment": "dkg-wal-move-tier-v1\u0000",
+    "moveTierTargetMutation": "dkg-wal-move-tier-target-mutation-v1\u0000",
     "setEmpty": "dkg-wal-set-empty-v1\u0000",
     "setLeaf": "dkg-wal-set-leaf-v1\u0000",
     "setBranch": "dkg-wal-set-branch-v1\u0000",
@@ -103,6 +104,10 @@
     "mutationMode": {
       "REPLACE": 0,
       "PATCH": 1
+    },
+    "chainEventType": {
+      "PUBLISH": 0,
+      "UPDATE": 1
     },
     "authorityScope": {
       "CURATOR": 0,
@@ -424,8 +429,10 @@
     "ChainBindingV1": {
       "fields": [
         "chainId",
+        "knowledgeAssetsContract",
         "contextGraphOnChainId",
         "kaId",
+        "authorAddress",
         "assertionVersion",
         "merkleRoot",
         "transactionHash",
@@ -438,8 +445,10 @@
       ],
       "fieldTypes": [
         "u64",
+        "address20",
         "bytes32",
         "bytes32",
+        "address20",
         "u64",
         "bytes32",
         "bytes32",
@@ -447,9 +456,12 @@
         "bytes32",
         "u64",
         "u64",
-        "u16",
+        "u16-enum",
         "u32"
-      ]
+      ],
+      "enumFields": {
+        "12": "chainEventType"
+      }
     },
     "AuthorCheckpointV1": {
       "fields": [
@@ -1134,7 +1146,7 @@
       "fieldTypes": [
         "literal-1",
         "bytes32",
-        "RdfMutationV1"
+        "DkgMutationV1"
       ]
     },
     "TierTransitionReceiptV1": {

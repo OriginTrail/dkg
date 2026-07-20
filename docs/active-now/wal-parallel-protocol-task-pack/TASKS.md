@@ -1075,9 +1075,9 @@ machine.
       CG, insufficient finality, and reorg cases never produce active VM state.
 - [ ] Valid finalized transition atomically activates VM and supersedes the
       corresponding SWM view; reorg deterministically restores prior valid SWM.
-- [ ] Public target objects/responses disclose none of the private source IDs,
+- [x] Public target objects/responses disclose none of the private source IDs,
       graph names, epochs, counts, or causal shape.
-- [ ] Chain policy reconfiguration and stored-frontier revalidation follow the
+- [x] Chain policy reconfiguration and stored-frontier revalidation follow the
       frozen rule across restart.
 - [ ] WAL sync and legacy sync produce identical VM API state and canonical RDF
       for the golden corpus because both invoke the same semantic code paths.

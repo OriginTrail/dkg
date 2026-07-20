@@ -1,6 +1,6 @@
 ---
 status: protocol-v1-freeze
-version: 0.12
+version: 0.13
 audience: protocol, agent, storage, publisher
 protocol_version: 1
 schema: vectors/OT-RFC-65-protocol-v1.schema.json
@@ -576,7 +576,19 @@ BLAKE3(
 ```
 
 `transitionNonce` is a random bytes32 value. The public target contains only the
-randomized commitment and target mutation. It contains no source namespace,
+randomized commitment and a complete `DkgMutationV1` target mutation. The target
+mutation uses operation `MOVE_TIER_TARGET` and carries both its public RDF
+outcome and `ChainBindingV1`; it is not a partial RDF-only tuple. Its committed
+digest is:
+
+```text
+BLAKE3(
+  "dkg-wal-move-tier-target-mutation-v1\0" ||
+  canonicalCbor(targetDkgMutationV1)
+)
+```
+
+The public target contains no source namespace,
 source WAL-object ID, graph name, key epoch, activity count, or causal shape.
 The private source opening binds the public target ID and is served only under
 the source-view authorization policy. The target remains pending until a
@@ -589,8 +601,10 @@ state is marked superseded only after that receipt and VM finality both pass.
 ```text
 ChainBindingV1 = [
   chainId,
+  knowledgeAssetsContract,
   contextGraphOnChainId,
   kaId,
+  authorAddress,
   assertionVersion,
   merkleRoot,
   transactionHash,
@@ -602,6 +616,13 @@ ChainBindingV1 = [
   requiredFinalityBlocks
 ]
 ```
+
+`eventType` is the frozen enum `PUBLISH=0`, `UPDATE=1`. Together,
+`chainId`, `knowledgeAssetsContract`, and `kaId` bind the exact UAL/KA identity.
+`assertionVersion` is the current on-chain Merkle-root count for that KA, while
+`authorAddress`, the Merkle root, transaction/log coordinates, and block hash
+bind the exact publish/update evidence. All fourteen values are inside the
+signed `WalObjectV1` payload; none is unsigned transfer side information.
 
 ### 6.8 `AuthorCheckpointV1`
 

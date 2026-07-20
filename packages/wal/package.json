@@ -60,6 +60,11 @@
       "import": "./dist/replay/index.js",
       "default": "./dist/replay/index.js"
     },
+    "./vm": {
+      "types": "./dist/vm/index.d.ts",
+      "import": "./dist/vm/index.js",
+      "default": "./dist/vm/index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

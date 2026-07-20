@@ -18,10 +18,13 @@
 | `WAL-013` | Implementation increment pushed; acceptance open | Namespace-scoped authoring, packed-store/control transaction integration, replay outbox, per-view privacy isolation, existing Sender Key epoch reuse, publisher capture, CLI wiring, devnet scripts, and benchmark receipts are implemented at `418b8faf0`. The measured shadow overhead exceeds the RFC latency/CPU limits, the network workload gate is not yet valid, and signed expiry/rebuild materialization remain open; current sync is not used as a correctness baseline. |
 | `WAL-014` | Core implementation verified; integration acceptance open | Deterministic causal replay, protocol-level compatibility/conflict handling, equivocation blocking, bounded work, complete resolution checks, and the narrow shared-core bridge are implemented. All 598 WAL tests pass at 100% package coverage and all 1,215 agent unit tests pass. Full production cross-path semantic-oracle coverage remains open in acceptance items 2 and 7. See `WAL-014-EVIDENCE.md`. |
 | `WAL-015` | Implemented and verified | The same branch contains a semantically passive `commitWalProjectionV1` capability, one guarded Oxigraph content/conflict/marker transaction, exact lost-response readback, an exact APPLIED-marker restart audit, namespace-scoped durable materialization/retry state, per-scope locking, local-WAL-only full/selective rebuild, internal graph isolation, and fail-closed backend eligibility. See `WAL-015-EVIDENCE.md`. |
+| `WAL-016` | Core increment verified; production lifecycle parity open | The same branch contains the frozen two-sided MOVE_TIER protocol, complete publish/update chain binding, shared chain validation, receipt/authority/privacy/finality checks, chain-event extraction, restart/policy revalidation, and a driver-independent bridge into one injected VM semantic implementation followed by WAL-015 persistence. Public non-disclosure and restart/policy rules are verified. Actual existing lifecycle wiring, active-VM/SWM restoration, and golden legacy/WAL API/RDF parity remain open. See `WAL-016-EVIDENCE.md`. |
 
-All work through the current WAL-015 increment shares one linear implementation
+All work through the current WAL-016 increment shares one linear implementation
 history, one worktree, and one authoritative branch. WAL-013 and WAL-014 are not
-declared complete while their explicitly listed acceptance gates remain open.
+declared complete while their explicitly listed acceptance gates remain open;
+WAL-016 is likewise not declared complete while production lifecycle parity is
+open.
 No Go/Rust/Python conformance implementation is required. The exact-integer
 mapping is retained only as named A/B experiment evidence; protocol version 1
 uses the benchmarked exact binary64 evaluation profile and its regenerated

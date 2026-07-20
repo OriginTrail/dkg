@@ -81,6 +81,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                 txHash: log.transactionHash,
                 // PR #845 (review #9): chain-truth tiebreaker — see KCCreated.
                 txIndex: log.transactionIndex,
+                logIndex: log.index,
+                blockHash: log.blockHash,
               },
             };
           }
@@ -105,6 +107,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                   contextGraphId: parsed.args.contextGraphId.toString(),
                   batchId: parsed.args.batchId?.toString(),
                   txHash: log.transactionHash,
+                  logIndex: log.index,
+                  blockHash: log.blockHash,
                 },
               };
             }
@@ -136,6 +140,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                   kaId: parsed.args.kaId.toString(),
                   txHash: log.transactionHash,
                   txIndex: log.transactionIndex,
+                  logIndex: log.index,
+                  blockHash: log.blockHash,
                 },
               };
             }
@@ -248,6 +254,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                   // because the latter is trust-based and can be inflated
                   // to lock out a legitimate same-block update.
                   txIndex: log.transactionIndex,
+                  logIndex: log.index,
+                  blockHash: log.blockHash,
                   // Greenfield: no batch mint → publisher is the KA owner
                   // (Transfer recipient), falling back to the attested author.
                   publisherAddress: mint?.publisherAddress ?? ownerByTokenId.get(idStr) ?? author,
@@ -258,6 +266,46 @@ export class EventsMethods extends EVMChainAdapterBase {
                 },
               };
             }
+          }
+        }
+      }
+
+      if (eventType === 'KnowledgeAssetUpdated') {
+        const kaStorage = this.contracts.knowledgeAssetStorage;
+        if (kaStorage) {
+          const hasEvent = kaStorage.interface.fragments.some(
+            (fragment) =>
+              fragment.type === 'event'
+              && (fragment as { name?: string }).name === 'KnowledgeAssetUpdated',
+          );
+          if (!hasEvent) continue;
+          const eventFilter = kaStorage.filters.KnowledgeAssetUpdated();
+          const logs = await this.queryFilterWithFailover(
+            kaStorage,
+            'kas.queryFilter(KnowledgeAssetUpdated)',
+            eventFilter,
+            filter.fromBlock ?? 0,
+            filter.toBlock,
+          );
+          for (const log of logs) {
+            const parsed = kaStorage.interface.parseLog({
+              topics: [...log.topics],
+              data: log.data,
+            });
+            if (!parsed) continue;
+            yield {
+              type: 'KnowledgeAssetUpdated',
+              blockNumber: log.blockNumber,
+              data: {
+                kaId: parsed.args.id.toString(),
+                author: String(parsed.args.author ?? ''),
+                merkleRoot: parsed.args.merkleRoot,
+                txHash: log.transactionHash,
+                txIndex: log.transactionIndex,
+                logIndex: log.index,
+                blockHash: log.blockHash,
+              },
+            };
           }
         }
       }

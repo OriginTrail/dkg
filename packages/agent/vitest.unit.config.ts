@@ -16,6 +16,8 @@ export default defineConfig({
       "test/wal-local-authoring-bundle.test.ts",
       "test/wal-local-commit.test.ts",
       "test/wal-projection-materializer.test.ts",
+      "test/wal-vm-chain-validator.test.ts",
+      "test/wal-vm-event-adapter.test.ts",
       "test/dkg-semantic-core-boundary.test.ts",
       "test/agent-delegation.test.ts",
       "test/request-authorize.test.ts",

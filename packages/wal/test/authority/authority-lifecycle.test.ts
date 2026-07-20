@@ -312,6 +312,24 @@ async function rollbackRecovery(
   return { tuple, bytes: encodeProtocolTuple('RollbackRecoveryV1', tuple) };
 }
 
+async function tierTransitionReceipt(
+  authoritySetId: Uint8Array,
+  signingKeys: readonly WalEip191Signer[],
+  options: { readonly expiresAtMs?: bigint } = {},
+) {
+  const unsigned = [
+    1n,
+    bytes('tier-transition-commitment'),
+    bytes('tier-target-namespace'),
+    bytes('tier-target-object'),
+    bytes('tier-policy'),
+    bytes('tier-curator-vector'),
+    options.expiresAtMs ?? 1_000n,
+    authoritySetId,
+  ] satisfies readonly CborProtocolValue[];
+  return signThresholdProtocolTuple('TierTransitionReceiptV1', unsigned, signingKeys);
+}
+
 async function expectCode(action: Promise<unknown> | (() => unknown), code: string): Promise<void> {
   if (typeof action === 'function') expect(action).toThrowError(expect.objectContaining({ code }));
   else await expect(action).rejects.toMatchObject({ code });
@@ -459,6 +477,36 @@ describe('WAL authority lifecycle', () => {
       transportPeerId: Uint8Array.of(9),
       delegation: 'ok',
     }, 200)).toBe(false);
+  });
+
+  it('verifies tier-transition receipts through the current curator authority only', async () => {
+    const setup = await scenario('tier-receipt-authority');
+    const receipt = await tierTransitionReceipt(setup.curator.id, [curatorA]);
+    expect(setup.lifecycle.verifyTierTransitionReceiptAuthority(receipt, 200))
+      .toEqual(protocolTupleId('TierTransitionReceiptV1', receipt));
+
+    const wrongAuthority = await tierTransitionReceipt(setup.network.id, [networkA]);
+    await expectCode(
+      () => setup.lifecycle.verifyTierTransitionReceiptAuthority(wrongAuthority, 200),
+      'WAL_AUTHORITY_UNAUTHORIZED',
+    );
+
+    const badSignature = [
+      ...receipt.slice(0, 8),
+      [[curatorA.address, new Uint8Array(65)]],
+    ] as unknown as ProtocolTuple<'TierTransitionReceiptV1'>;
+    await expectCode(
+      () => setup.lifecycle.verifyTierTransitionReceiptAuthority(badSignature, 200),
+      'WAL_AUTHORITY_UNAUTHORIZED',
+    );
+
+    const expired = await tierTransitionReceipt(setup.curator.id, [curatorA], {
+      expiresAtMs: 100n,
+    });
+    await expectCode(
+      () => setup.lifecycle.verifyTierTransitionReceiptAuthority(expired, 6_000),
+      'WAL_AUTHORITY_EXPIRED',
+    );
   });
 
   it('validates set extension, open authors, epoch snapshots, and curator/content separation', async () => {

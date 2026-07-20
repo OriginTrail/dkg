@@ -98,8 +98,10 @@ function chainBinding(
   if (!input) return null;
   return [
     input.chainId,
+    input.knowledgeAssetsContract,
     input.contextGraphOnChainId,
     input.kaId,
+    input.authorAddress,
     input.assertionVersion,
     input.merkleRoot,
     input.transactionHash,

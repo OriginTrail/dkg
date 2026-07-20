@@ -19,6 +19,11 @@ import {
 } from '../chain-reconciler.js';
 import type { CursorState } from '../reconcile-cursor.js';
 import type { OversizeGuardHooks } from '../sync/oversize-filter.js';
+import {
+  validateCurrentDkgVmChainEvidenceV1,
+  type ValidateCurrentDkgVmChainEvidenceInputV1,
+  type DkgVmChainValidationResultV1,
+} from './vm-chain-validator.js';
 
 /**
  * The driver identifies how bytes reached the semantic boundary. It is
@@ -34,6 +39,8 @@ export type DkgSemanticEntryPoint =
   | 'verified-graph-scoped-materialization'
   | 'verified-swm-recovery'
   | 'vm-reconciliation'
+  | 'vm-chain-evidence-validation'
+  | 'vm-evidence-application'
   | 'wal-replay-initial-state'
   | 'wal-replay-transition'
   | 'wal-replay-compatible-merge';
@@ -58,6 +65,7 @@ export interface DkgSemanticCoreDelegates {
   readonly materializeVerifiedGraphScopedAsset: typeof materializeVerifiedGraphScopedAsset;
   readonly applySwmRecovery: typeof applySwmRecovery;
   readonly reconcileContextGraph: typeof reconcileContextGraph;
+  readonly validateCurrentDkgVmChainEvidenceV1: typeof validateCurrentDkgVmChainEvidenceV1;
 }
 
 export interface DkgSemanticCoreOptions {
@@ -99,6 +107,7 @@ const DEFAULT_DELEGATES: DkgSemanticCoreDelegates = {
   materializeVerifiedGraphScopedAsset,
   applySwmRecovery,
   reconcileContextGraph,
+  validateCurrentDkgVmChainEvidenceV1,
 };
 
 /**
@@ -165,6 +174,29 @@ export class DkgSemanticCore {
         params.onChainContextGraphId,
       ),
     );
+  }
+
+  async validateVmChainEvidence(
+    driver: DkgSemanticDriver,
+    params: ValidateCurrentDkgVmChainEvidenceInputV1,
+  ): Promise<DkgVmChainValidationResultV1> {
+    return this.invoke(
+      driver,
+      'vm-chain-evidence-validation',
+      () => this.delegates.validateCurrentDkgVmChainEvidenceV1(params),
+    );
+  }
+
+  /**
+   * Invoke the existing VM/SWM semantic implementation after chain evidence
+   * has been normalized. The operation is supplied by the existing semantic
+   * owner; this boundary adds only driver-independent tracing.
+   */
+  async invokeVmSemanticEntryPoint<T>(
+    driver: Extract<DkgSemanticDriver, 'legacy-sync' | 'wal-sync' | 'chain-event'>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.invoke(driver, 'vm-evidence-application', operation);
   }
 
   /**

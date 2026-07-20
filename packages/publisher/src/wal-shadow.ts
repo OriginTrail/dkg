@@ -19,8 +19,10 @@ export type PublisherWalShadowMutationKind =
 
 export interface PublisherWalShadowChainBindingV1 {
   readonly chainId: bigint;
+  readonly knowledgeAssetsContract: Uint8Array;
   readonly contextGraphOnChainId: Uint8Array;
   readonly kaId: Uint8Array;
+  readonly authorAddress: Uint8Array;
   readonly assertionVersion: bigint;
   readonly merkleRoot: Uint8Array;
   readonly transactionHash: Uint8Array;

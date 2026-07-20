@@ -20,6 +20,7 @@ import {
   derivePrivateObjectKey,
   encryptAes256Gcm,
   moveTierCommitment,
+  moveTierTargetMutationDigest,
   namespaceId,
   payloadAssociatedDataDigest,
   encodeReplayConflictProjection,
@@ -328,13 +329,44 @@ async function buildVectors() {
   const sourceNamespaceId = fixtureId('private-source-namespace');
   const targetNamespaceId = fixtureId('public-target-namespace');
   const transitionNonce = fixtureId('transition-nonce');
-  const targetMutationDigest = fixtureId('target-mutation');
   const sourceState = fixtureId('source-state');
   const sourceResult = fixtureId('source-result');
   const sourceCausalOpening = fixtureId('private-source-causal-opening');
   const sourceGraphName = 'urn:dkg:private-source-graph';
   const sourceKeyEpoch = 987_654_321n;
   const sourceActivityCount = 123_456_789n;
+  const targetRdfMutation = [
+    ...rdfMutation.slice(0, 9),
+    null
+  ] as const;
+  const targetChainBinding = [
+    2043n,
+    byteRange(0x40, 20),
+    fixtureId('target-context-graph-on-chain'),
+    fixtureId('target-ka-id'),
+    byteRange(0x60, 20),
+    1n,
+    resultStateDigest,
+    fixtureId('target-transaction'),
+    21_000_000n,
+    fixtureId('target-block'),
+    2n,
+    3n,
+    BigInt(ENUMS.chainEventType.PUBLISH),
+    64n
+  ] as const;
+  const targetDkgMutation = [
+    1n,
+    BigInt(ENUMS.mutationOperation.MOVE_TIER_TARGET),
+    logicalKey,
+    [],
+    [],
+    policyObjectId,
+    targetRdfMutation,
+    targetChainBinding,
+    null
+  ] as const;
+  const targetMutationDigest = moveTierTargetMutationDigest(targetDkgMutation);
   const transitionCommitment = moveTierCommitment({
     nonce: transitionNonce,
     sourceNamespaceId,
@@ -343,7 +375,7 @@ async function buildVectors() {
     sourceStateDigest: sourceState,
     sourceResultDigest: sourceResult
   });
-  const publicMoveTier = encodeCanonical([1n, transitionCommitment, rdfMutation]);
+  const publicMoveTier = encodeCanonical([1n, transitionCommitment, targetDkgMutation]);
   const privateMoveTier = encodeCanonical([
     1n,
     transitionNonce,
@@ -494,6 +526,21 @@ async function buildVectors() {
   const vectorSignature = signTuple(DOMAINS.vectorSignature, vectorUnsigned);
   const vectorBytes = encodeCanonical([...vectorUnsigned, [signatureEntryBytes(vectorSignature)]]);
   const vectorId = hash(DOMAINS.vectorId, vectorBytes);
+  const tierReceiptUnsigned = [
+    1n,
+    transitionCommitment,
+    targetNamespaceId,
+    secondObject.id,
+    policyObjectId,
+    vectorId,
+    1_750_000_065_000n,
+    authoritySetId
+  ] as const;
+  const tierReceiptSignature = signTuple(DOMAINS.receiptSignature, tierReceiptUnsigned);
+  const tierReceiptBytes = encodeCanonical([
+    ...tierReceiptUnsigned,
+    [signatureEntryBytes(tierReceiptSignature)]
+  ]);
   const downgradedVectorUnsigned = [
     ...vectorUnsigned.slice(0, 4),
     0n,
@@ -849,8 +896,10 @@ async function buildVectors() {
     },
     moveTier: {
       transitionCommitment: hex(transitionCommitment),
+      targetMutationDigest: hex(targetMutationDigest),
       publicTargetPayload: hex(publicMoveTier),
       privateSourcePayload: hex(privateMoveTier),
+      tierTransitionReceipt: hex(tierReceiptBytes),
       forbiddenPublicValues: [
         sourceNamespaceId, transitionNonce, firstObject.id, sourceState, sourceResult, sourceCausalOpening
       ].map(hex),
