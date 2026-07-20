@@ -26,8 +26,8 @@
  *   rename old container to `<name>-backup` (restart policy disabled,
  *   NEVER removed by any code path here) → run hardened container →
  *   verify (readiness + ASK + identity-tag probe + journal byte size) →
- *   on verify failure, automatic rollback to the untouched backup →
- *   remove harden lock (finally).
+ *   on ANY post-rename failure (setup OR verification), automatic
+ *   rollback to the untouched backup → remove harden lock (finally).
  *
  * Every step is idempotent and the whole migration is resumable: state is
  * derived from `docker inspect` (no state file), and a crashed run picks
@@ -508,8 +508,8 @@ async function inspectStoppedSnapshot(
 /**
  * Execute (or resume) the harden migration. See the module header for the
  * algorithm and the safety invariants. Throws on any predicate failure;
- * a verify failure after the swap additionally rolls back to the backup
- * container before throwing.
+ * any failure after the swap (post-swap docker setup or verification)
+ * additionally rolls back to the backup container before throwing.
  */
 export async function executeHardenMigration(
   opts: ExecuteHardenMigrationOptions,
@@ -815,22 +815,35 @@ export async function executeHardenMigration(
         hint: stoppedHint,
       });
     }
-    await mustRun(
-      docker,
-      ['update', '--restart=no', backupName],
-      'disabling the backup restart policy',
-    );
 
-    // (9) Create the hardened container on the SAME host port.
-    log(`Creating hardened container ${containerName} (heap ${heapMb} MB)…`);
-    await mustRun(
-      docker,
-      buildBlazegraphRunArgs({ containerName, hostPort, namespace, heapMb }),
-      'creating the hardened container',
-    );
-
-    // (10) Verify, (11) roll back on failure.
+    // From here the world is post-swap: the authoritative data sits under
+    // the backup name and nothing serves the daemon. ANY failure below —
+    // disabling the backup's restart policy, creating the hardened
+    // container, or the verification probes — must attempt the automatic
+    // rollback. Scoping the rollback to verification only (as an earlier
+    // revision did) strands the node with no store at all when e.g.
+    // another process grabs the host port and `docker run` exits non-zero:
+    // the untouched backup would sit one rename away while the operator
+    // reads a raw docker error. `phase` only labels the failure for the
+    // operator-facing message; the recovery path is identical.
+    let phase: 'post-swap setup' | 'verification' = 'post-swap setup';
     try {
+      await mustRun(
+        docker,
+        ['update', '--restart=no', backupName],
+        'disabling the backup restart policy',
+      );
+
+      // (9) Create the hardened container on the SAME host port.
+      log(`Creating hardened container ${containerName} (heap ${heapMb} MB)…`);
+      await mustRun(
+        docker,
+        buildBlazegraphRunArgs({ containerName, hostPort, namespace, heapMb }),
+        'creating the hardened container',
+      );
+
+      // (10) Verify, (11) roll back on failure.
+      phase = 'verification';
       await waitForBlazegraphReady({
         url: baseUrl,
         fetch: fetchImpl,
@@ -862,7 +875,10 @@ export async function executeHardenMigration(
         );
       }
     } catch (err) {
-      log(`Verification FAILED (${(err as Error).message}) — rolling back to ${backupName}.`);
+      log(
+        `${phase === 'verification' ? 'Verification' : 'Post-swap setup'} FAILED ` +
+        `(${(err as Error).message}) — rolling back to ${backupName}.`,
+      );
       let rollback: RollbackResult;
       try {
         rollback = await rollbackToBackup({ docker, containerName, backupName, log });
@@ -878,17 +894,17 @@ export async function executeHardenMigration(
       }
       if (rollback.complete) {
         throw new Error(
-          `Harden verification failed and the legacy container was restored. ` +
+          `Harden ${phase} failed and the legacy container was restored. ` +
           `Cause: ${(err as Error).message}. The journal export is retained at ${exportPath}.`,
         );
       }
       throw new Error(
-        `Harden verification failed and the automatic rollback is INCOMPLETE ` +
+        `Harden ${phase} failed and the automatic rollback is INCOMPLETE ` +
         `(stopped at step "${rollback.failedStep}": ${rollback.detail ?? 'see log'}). ` +
         `The legacy container was NOT restored to service. Your data is still safe in ` +
         `container "${backupName}" and in the export at ${exportPath} — see the log above ` +
         `for the exact docker commands to finish the restore by hand. ` +
-        `Cause of the failed verification: ${(err as Error).message}.`,
+        `Cause of the failed ${phase}: ${(err as Error).message}.`,
       );
     }
 

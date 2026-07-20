@@ -641,6 +641,49 @@ describe('executeHardenMigration', () => {
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
+  it('rolls back to the backup when `docker run` fails AFTER the rename (post-swap setup, not just verify)', async () => {
+    // The reviewer scenario: another process binds the host port between the
+    // rename and the hardened `docker run`. Before the fix only verification
+    // failures rolled back — this one stranded the daemon with no store while
+    // the intact backup sat one rename away.
+    const { runner, calls } = scriptedDocker({
+      initial: 'legacy',
+      migrationDir,
+      failOn: (args) => (args[0] === 'run' && args[1] === '-d'
+        ? { stdout: '', stderr: 'driver failed programming external connectivity: port is already allocated', exitCode: 125 }
+        : null),
+    });
+    const { fn } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn)))
+      .rejects.toThrow(/post-swap setup failed.*restored/is);
+    // The rename DID happen, and the full rollback ran after the failure.
+    expect(calls).toContainEqual(['rename', NAME, BACKUP]);
+    expect(calls).toContainEqual(['rename', BACKUP, NAME]);
+    expect(calls).toContainEqual(['update', '--restart=unless-stopped', NAME]);
+    expect(calls).toContainEqual(['start', NAME]);
+    assertSafetyInvariants(calls, migrationDir, true);
+  });
+
+  it('rolls back to the backup when disabling the backup restart policy fails after the rename', async () => {
+    const { runner, calls } = scriptedDocker({
+      initial: 'legacy',
+      migrationDir,
+      failOn: (args) => (args[0] === 'update' && args[1] === '--restart=no'
+        ? { stdout: '', stderr: 'Error response from daemon: engine unavailable', exitCode: 1 }
+        : null),
+    });
+    const { fn } = verifierFetch();
+    await expect(executeHardenMigration(baseOpts(runner, fn)))
+      .rejects.toThrow(/post-swap setup failed.*restored/is);
+    // Nothing was created yet, so the rollback must NOT rm anything — just
+    // rename the backup back, restore its policy, and start it.
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls).toContainEqual(['rename', BACKUP, NAME]);
+    expect(calls).toContainEqual(['update', '--restart=unless-stopped', NAME]);
+    expect(calls).toContainEqual(['start', NAME]);
+    assertSafetyInvariants(calls, migrationDir, true);
+  });
+
   it('rolls back when the identity tag did not follow the data', async () => {
     const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
     const { fn } = verifierFetch({ identityPresent: false });
