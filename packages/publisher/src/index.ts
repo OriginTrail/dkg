@@ -325,3 +325,4 @@ export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, 
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
+export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';

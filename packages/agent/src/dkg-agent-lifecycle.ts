@@ -131,6 +131,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  withKeyedLocks, swmKaWriteLockKey,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -4762,38 +4763,75 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
               },
-              // Whole-graph replace for materializing verified public SWM
-              // snapshots. Graph-scoped (contentScopeVersion 2) KAs carry no
-              // dkg:rootEntity, so the aggregate data phase returns 0 data quads
-              // for them by design and their content arrives as immutable
-              // snapshots. Without this the public catch-up lane cached every
-              // verified snapshot and never wrote one to the store, so a node
-              // that missed the live gossip stayed empty forever.
-              //
-              // Deliberately NOT routed through storeInsert below: that is a
-              // union insert with an oversize guard, whereas a KA graph is
-              // all-or-nothing and digest-verified. Insert would risk partial or
-              // duplicated graph state across retries.
-              // Skip-if-present guard for the destructive replace above.
-              isGraphAssetMaterialized: async (asset) => {
-                const result = await this.store.query(
-                  `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
-                  + `<${assertSafeIri(asset.headSubject)}> `
-                  + `<http://dkg.io/ontology/assertionGraph> `
-                  + `<${assertSafeIri(asset.assertionGraph)}> . } }`,
-                  { priority: 'background', source: 'agent.sharedMemorySync.isGraphAssetMaterialized' },
-                );
-                return result.type === 'boolean' && result.value;
-              },
-              storeReplaceGraph: async (graphUri, quads) => {
-                if (typeof this.store.replaceGraph !== 'function') {
-                  throw new Error('triple store does not support atomic graph replace');
-                }
-                await this.store.replaceGraph(graphUri, quads, {
-                  priority: 'background',
-                  source: 'agent.sharedMemorySync.materializeSnapshot',
-                });
-                this.invalidateListContextGraphsCache();
+              // Everything needed to materialize verified public SWM snapshots,
+              // as ONE dependency (a loose optional trio allowed a silent
+              // half-configured mode). Graph-scoped (contentScopeVersion 2) KAs
+              // carry no dkg:rootEntity, so the aggregate data phase returns 0
+              // data quads for them by design — their content arrives as
+              // immutable snapshots, and without this the catch-up lane cached
+              // every verified snapshot and never wrote one to the store.
+              snapshotMaterializer: {
+                // The SAME lock the live-gossip write path takes: this.writeLocks
+                // is the map injected into SharedMemoryHandler, and the key comes
+                // from the shared helper so the two sites cannot drift. This is
+                // what closes the check-then-replace race with gossip.
+                withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
+                  withKeyedLocks(this.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
+                // MUST prove the CONTENT is present, not merely that the metadata
+                // pointer is. The pre-fix bug inserted the head->assertionGraph
+                // marker while never writing the graph — that IS the observed
+                // "0 data + N meta" state. A marker-only predicate reports every
+                // already-broken node as materialized and skips the cached
+                // snapshot, so the repair would never reach the nodes that need
+                // it most, and a partially-fetched metadata round could strand an
+                // asset forever behind its own marker.
+                //
+                // Count the assertion graph itself and require it to match the
+                // descriptor's public quad count: exact-IRI scope, so bounded.
+                isGraphAssetMaterialized: async (asset) => {
+                  const expected = Number(asset.publicQuadsCount);
+                  if (!Number.isFinite(expected) || expected <= 0) return false;
+                  const result = await this.store.query(
+                    `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${assertSafeIri(asset.assertionGraph)}> { ?s ?p ?o } }`,
+                    { priority: 'background', source: 'agent.sharedMemorySync.isGraphAssetMaterialized' },
+                  );
+                  if (result.type !== 'bindings' || result.bindings.length === 0) return false;
+                  const raw = String(result.bindings[0]?.['n'] ?? '0').replace(/^"|"[^"]*$/g, '');
+                  const present = Number.parseInt(raw, 10);
+                  // Strictly equal: a short graph is a partial write and must be
+                  // replaced, not treated as already materialized.
+                  return Number.isFinite(present) && present === expected;
+                },
+                // Read INSIDE the lock by the caller: a lock prevents
+                // interleaving but not overwriting-with-older, and gossip may
+                // have advanced this KA while catch-up waited on the lock.
+                readStoredAssertionVersion: async (asset) => {
+                  const result = await this.store.query(
+                    `SELECT ?v WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
+                    + `<${assertSafeIri(asset.headSubject)}> `
+                    + `<http://dkg.io/ontology/assertionVersion> ?v } }`,
+                    { priority: 'background', source: 'agent.sharedMemorySync.readStoredAssertionVersion' },
+                  );
+                  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+                  const raw = String(result.bindings[0]?.['v'] ?? '');
+                  if (raw.length === 0) return null;
+                  const literal = /^"([^"]*)"/.exec(raw);
+                  return literal ? literal[1] : raw;
+                },
+                // Deliberately NOT routed through storeInsert below: that is a
+                // union insert with an oversize guard, whereas a KA graph is
+                // all-or-nothing and digest-verified. Insert would risk partial
+                // or duplicated graph state across retries.
+                replaceGraph: async (graphUri, quads) => {
+                  if (typeof this.store.replaceGraph !== 'function') {
+                    throw new Error('triple store does not support atomic graph replace');
+                  }
+                  await this.store.replaceGraph(graphUri, quads, {
+                    priority: 'background',
+                    source: 'agent.sharedMemorySync.materializeSnapshot',
+                  });
+                  this.invalidateListContextGraphsCache();
+                },
               },
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating

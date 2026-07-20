@@ -103,6 +103,7 @@ export default defineConfig({
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
+      "test/swm-public-snapshot-materialization.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
