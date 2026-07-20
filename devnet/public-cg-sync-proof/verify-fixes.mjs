@@ -184,10 +184,22 @@ async function main() {
       // be bound with VALUES the way the scale/hold-out counts are.
       // sparql-scan-allow: R2 -- devnet-only harness, never run by node runtime; one
       // purpose-built devnet store holding only this run's fixtures
+      // Must match ONLY imported markdown body text. The previous filter also
+      // matched anything carrying the run stamp — including the context graph's
+      // own name literal ("FX md <stamp>") — so it could report
+      // "PEER sees markdown CONTENT triples" while the peer had received
+      // metadata and zero imported content: exactly the #1779 signature this
+      // check exists to detect. Bind distinctive body strings that appear only
+      // in the document, and exclude the CG/operation metadata graphs.
       const contentQuery = `SELECT (COUNT(*) AS ?n) WHERE {
         GRAPH ?g { ?s ?p ?o }
         FILTER(CONTAINS(STR(?g), "fx-md-${stamp}"))
-        FILTER(isLiteral(?o) && CONTAINS(STR(?o), "${stamp}") || CONTAINS(STR(?o), "converge"))
+        FILTER(!CONTAINS(STR(?g), "_meta"))
+        FILTER(isLiteral(?o) && (
+          CONTAINS(STR(?o), "Intro paragraph for the release note")
+          || CONTAINS(STR(?o), "Public context graphs converge on both SWM and VM")
+          || CONTAINS(STR(?o), "Second section body text")
+        ))
       }`;
       const onPeer = await waitFor(async () => {
         const b = await sparql(2, peer.token, contentQuery);
