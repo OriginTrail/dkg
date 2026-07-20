@@ -15,14 +15,10 @@ import {
   requireCanonicalNQuadsV1,
 } from './nquads.js';
 import { validateRdfPolicyV1 } from './policy.js';
-import {
-  canonicalSparqlAuditBytesV1,
-  compileLocalSparqlPatchV1,
-} from './sparql.js';
 import type {
   CanonicalRdfDatasetV1,
-  CompileRdfMutationInputV1,
-  CompiledRdfMutationV1,
+  EncodeAcceptedRdfMutationInputV1,
+  EncodedAcceptedRdfMutationV1,
   RdfQuadV1,
 } from './types.js';
 
@@ -118,7 +114,7 @@ interface ReplacementCompilation {
 }
 
 function compileReplacement(
-  input: Extract<CompileRdfMutationInputV1['source'], { kind: 'replace' }>,
+  input: Extract<EncodeAcceptedRdfMutationInputV1['source'], { kind: 'replace' }>,
   base: CanonicalRdfDatasetV1,
   allowedGraphs: ReadonlySet<string>,
   policy: ProtocolTuple<'RdfPolicyV1'>,
@@ -209,7 +205,14 @@ function allGraphsAllowed(
   for (const quad of dataset.quads) requireAllowedGraph(quad.graph, allowedGraphs, policy);
 }
 
-export function compileRdfMutationV1(input: CompileRdfMutationInputV1): CompiledRdfMutationV1 {
+/**
+ * Encode an exact transition that the existing DKG semantic implementation
+ * already accepted. This boundary canonicalizes and binds bytes; it does not
+ * evaluate DKG behavior or source SPARQL.
+ */
+export function encodeAcceptedRdfMutationV1(
+  input: EncodeAcceptedRdfMutationInputV1,
+): EncodedAcceptedRdfMutationV1 {
   validateRdfPolicyV1(input.policy);
   if (!input.policy[10].includes(DKG_MUTATION_KIND)) {
     rdfError('WAL_RDF_UNAUTHORIZED', 'signed policy does not permit DKG mutation payloads');
@@ -254,7 +257,7 @@ export function compileRdfMutationV1(input: CompileRdfMutationInputV1): Compiled
 
   if (input.operation === 'DELETE') {
     if (input.source.kind !== 'delete-logical-key') {
-      rdfError('WAL_RDF_POLICY_INVALID', 'DELETE must use the deterministic logical-key deletion compiler');
+      rdfError('WAL_RDF_POLICY_INVALID', 'DELETE must encode the accepted whole-logical-key deletion outcome');
     }
     mode = PATCH_MODE;
     deletes = base;
@@ -267,26 +270,23 @@ export function compileRdfMutationV1(input: CompileRdfMutationInputV1): Compiled
     result = replacement.result;
     deletes = replacement.removed;
     inserts = replacement.inserted;
-  } else if (input.source.kind === 'sparql') {
+  } else if (input.source.kind === 'accepted-patch') {
     if (input.operation !== 'PATCH') {
-      rdfError('WAL_RDF_POLICY_INVALID', 'SPARQL compilation is available only for PATCH operations');
+      rdfError('WAL_RDF_POLICY_INVALID', 'accepted explicit patches are available only for PATCH operations');
     }
-    const patch = compileLocalSparqlPatchV1({
-      sparql: input.source.text,
-      base,
-      allowedGraphIris: allowedGraphList,
-      maximumSolutions: input.maximumSparqlSolutions,
-      maximumQuads: Number(input.policy[3]),
-    });
     mode = PATCH_MODE;
-    deletes = patch.deleteDataset;
-    inserts = patch.insertDataset;
-    result = patch.resultDataset;
-    audit = input.includeSourceSparqlAudit
-      ? canonicalSparqlAuditBytesV1(input.source.text)
-      : null;
+    deletes = canonicalizeNQuadsV1(input.source.deletesNQuads);
+    inserts = canonicalizeNQuadsV1(input.source.insertsNQuads);
+    allGraphsAllowed(deletes, allowedGraphs, input.policy);
+    allGraphsAllowed(inserts, allowedGraphs, input.policy);
+    result = applyPatch(base, deletes, inserts);
+    const sourceAuditBytes = input.source.sourceAuditBytes ?? null;
+    if (sourceAuditBytes !== null && !(sourceAuditBytes instanceof Uint8Array)) {
+      rdfError('WAL_RDF_POLICY_INVALID', 'sourceAuditBytes must be bytes or null');
+    }
+    audit = sourceAuditBytes === null ? null : new Uint8Array(sourceAuditBytes);
   } else {
-    rdfError('WAL_RDF_POLICY_INVALID', 'PUT/PATCH must compile a replacement or supported local SPARQL update');
+    rdfError('WAL_RDF_POLICY_INVALID', 'PUT/PATCH must encode an accepted replacement or explicit patch outcome');
   }
 
   assertMutationBounds(input.policy, deletes.quadCount + inserts.quadCount, result);
@@ -354,7 +354,7 @@ function validateReplacementTuple(
   return dataset;
 }
 
-export function applyExplicitRdfMutationV1(input: {
+export function deriveExplicitRdfCandidateV1(input: {
   readonly rdfMutation: ProtocolTuple<'RdfMutationV1'>;
   readonly baseNQuads: string | Uint8Array;
 }): CanonicalRdfDatasetV1 {
@@ -420,15 +420,15 @@ export function applyExplicitRdfMutationV1(input: {
   if (!sameIds(touched, mutation[8])) {
     rdfError('WAL_RDF_TOUCHED_KEYS_MISMATCH', 'touchedKeys does not match the explicit mutation');
   }
-  // sourceSparqlAuditBytesOrNull is intentionally not parsed or executed.
+  // sourceSemanticAuditBytesOrNull is intentionally not parsed or executed.
   return result;
 }
 
-export function decodeAndApplyDkgMutationV1(input: {
+export function decodeDkgMutationCandidateV1(input: {
   readonly contentBytes: Uint8Array;
   readonly baseNQuads: string | Uint8Array;
   readonly expectedPolicyObjectId: Uint8Array;
-  readonly logicalKeyCoordinates: CompileRdfMutationInputV1['logicalKey'];
+  readonly logicalKeyCoordinates: EncodeAcceptedRdfMutationInputV1['logicalKey'];
   readonly writerId: Uint8Array;
   readonly memberWriterIds: readonly Uint8Array[];
   readonly allowedGraphIris: readonly string[];
@@ -462,7 +462,7 @@ export function decodeAndApplyDkgMutationV1(input: {
     mutation[1] !== OPERATION.PUT
     && mutation[1] !== OPERATION.PATCH
     && mutation[1] !== OPERATION.DELETE
-  ) rdfError('WAL_RDF_POLICY_INVALID', 'this compiler accepts only PUT, PATCH, and DELETE mutations');
+  ) rdfError('WAL_RDF_POLICY_INVALID', 'this encoder accepts only PUT, PATCH, and DELETE mutations');
   if (mutation[6] === null) rdfError('WAL_RDF_POLICY_INVALID', 'RDF mutation payload cannot be null');
   if (!input.policy[10].includes(DKG_MUTATION_KIND)) {
     rdfError('WAL_RDF_UNAUTHORIZED', 'signed policy does not permit DKG mutation payloads');
@@ -512,7 +512,7 @@ export function decodeAndApplyDkgMutationV1(input: {
     || inserts.quadCount !== 0
     || rdfMutation[9] !== null
   )) rdfError('WAL_RDF_POLICY_INVALID', 'DELETE is not the deterministic whole-logical-key deletion');
-  const result = applyExplicitRdfMutationV1({
+  const result = deriveExplicitRdfCandidateV1({
     rdfMutation,
     baseNQuads: base.bytes,
   });

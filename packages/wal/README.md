@@ -15,11 +15,12 @@ strictly sorted, paginated full-ID enumeration bound to the same head.
 The synchronization atom remains one complete, canonical `WalObjectV1` byte
 string. Reconciliation symbols, pages, commitment nodes, mapping cursors, and
 peel state are disposable control data: they have no content IDs and cannot be
-stored or synchronized independently. This package does not import RDF,
-SPARQL, SWM/VM reducers, network transports, object payloads, or DKG semantic
-logic. A caller authenticates the signed head, runs this module over IDs, and
-then fetches each complete missing `WalObjectV1` through its object-transfer
-layer. SPARQL conflict handling remains a downstream adapter concern.
+stored or synchronized independently. The reconciliation modules do not import
+RDF, SPARQL, SWM/VM, conflict, or DKG semantic logic. A caller authenticates the
+signed head, runs reconciliation over IDs, and then fetches each complete
+missing `WalObjectV1` through its object-transfer layer. After admission, a
+separate replay/conflict adapter invokes the existing DKG semantic core; it is
+not part of set reconciliation and must not copy that core's behavior.
 
 ## Atom and trust boundary
 
@@ -43,11 +44,12 @@ object is reconstructed and its `WalObjectId` is verified.
 The daemon-facing runtime has three explicit modes. Omitting `sync.mode` is
 identical to `legacy`: no WAL runtime is registered and no WAL directory,
 worker, timer, port, or protocol is created. `parallel` registers an isolated
-shadow runtime while all production reads, writes, graph synchronization, and
-DKG semantic decisions remain legacy-authoritative. `wal` is the future
+shadow runtime while the current synchronization mechanism remains
+production-authoritative and both mechanisms share the same DKG semantic core.
+`wal` is the future
 cutover mode; it fails closed unless the caller injects a verifier that accepts
 a signed cutover artifact. A configured `cutoverId` by itself never enables
-WAL authority.
+WAL synchronization authority.
 
 Every non-legacy runtime is confined below `<DKG_HOME>/wal-v1/`:
 
@@ -74,7 +76,7 @@ identify advertisement. Only authenticated `GET_CAPABILITIES` is active at
 this milestone; reconciliation and object methods fail closed as unavailable
 until their daemon services are connected. `legacy` mode still creates no WAL
 runtime or WAL protocol registration, and `parallel` still reports legacy as
-production authority with zero WAL workers.
+synchronization authority with zero WAL workers.
 
 ## Canonical protocol identities
 

@@ -10,11 +10,11 @@ queries, and current synchronization remain untouched and authoritative.
 The implementation deliberately resolves and owns WAL runtime configuration in
 the daemon boundary rather than injecting incomplete WAL semantics into
 `DKGAgent`. Later tasks may connect mutation capture and adapters through typed
-interfaces after their canonical objects and reducers exist.
+interfaces after their canonical objects and shared-core replay adapters exist.
 
 ## Runtime contract
 
-| Mode | Registration and state | Production authority | Startup gate |
+| Mode | Registration and state | Synchronization authority | Startup gate |
 |---|---|---|---|
 | omitted / `legacy` | No runtime, directories, protocols, workers, timers, or ports | Legacy | None added |
 | `parallel` | Isolated lifecycle controller and directories below `<DKG_HOME>/wal-v1` | Legacy | Explicit operator selection |
@@ -60,7 +60,7 @@ reused.
 2. Omitted mode resolves to `legacy`, returns no runtime, creates no WAL path,
    and reports zero registered protocols and workers.
 3. `parallel` creates only the isolated shadow lifecycle state and always
-   reports `productionAuthority: legacy`.
+   reports `synchronizationAuthority: legacy`.
 4. `wal` requires both an exact lower-case bytes32 `CutoverId` and an injected
    verifier. The daemon has no configuration-only verifier path.
 5. Start, replay, drain, stop, and process-restart reconstruction are tested;

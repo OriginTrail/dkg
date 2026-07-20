@@ -162,7 +162,10 @@ export interface AdmitSignedRdfPolicyInputV1 {
   readonly expectedAuthoritySetId: Uint8Array;
   readonly membershipAuthority: WalThresholdAuthority;
   readonly canonicalWalObjectBytes: Uint8Array;
-  readonly expectedNamespaceId?: Uint8Array;
+  /** Exact active view in which the caller intends to author a mutation. */
+  readonly targetNamespaceId: Uint8Array;
+  /** Optional pin for the policy object's own carrier namespace. */
+  readonly expectedPolicyNamespaceId?: Uint8Array;
   readonly supportedAdapterVersions?: readonly bigint[];
   readonly maximumWalObjectBytes?: number;
 }
@@ -202,12 +205,19 @@ export function admitSignedRdfPolicyV1(input: AdmitSignedRdfPolicyInputV1): RdfP
   if (!bytesEqualV1(verified.walObjectId, membership[9])) {
     rdfError('WAL_RDF_POLICY_SUBSTITUTION', 'signed membership does not name this RDF policy object');
   }
+  const targetNamespaceId = bytes(input.targetNamespaceId, 32, 'targetNamespaceId');
   if (
-    input.expectedNamespaceId !== undefined
-    && !bytesEqualV1(verified.tuple[1], bytes(input.expectedNamespaceId, 32, 'expectedNamespaceId'))
-  ) rdfError('WAL_RDF_POLICY_SUBSTITUTION', 'RDF policy object is in the wrong namespace');
+    input.expectedPolicyNamespaceId !== undefined
+    && !bytesEqualV1(
+      verified.tuple[1],
+      bytes(input.expectedPolicyNamespaceId, 32, 'expectedPolicyNamespaceId'),
+    )
+  ) rdfError('WAL_RDF_POLICY_SUBSTITUTION', 'RDF policy object is in the wrong carrier namespace');
   if (!membership[8].some(namespaceId => bytesEqualV1(namespaceId, verified.tuple[1]))) {
     rdfError('WAL_RDF_UNAUTHORIZED', 'RDF policy namespace is not active in current membership');
+  }
+  if (!membership[8].some(namespaceId => bytesEqualV1(namespaceId, targetNamespaceId))) {
+    rdfError('WAL_RDF_UNAUTHORIZED', 'RDF mutation target namespace is not active in current membership');
   }
   if (!membership[5].some(writerId => bytesEqualV1(writerId, verified.writerId))) {
     rdfError('WAL_RDF_UNAUTHORIZED', 'RDF policy writer is not authorized by current membership');
@@ -238,7 +248,8 @@ export function admitSignedRdfPolicyV1(input: AdmitSignedRdfPolicyInputV1): RdfP
     policyObjectId: new Uint8Array(verified.walObjectId),
     policy,
     membershipCheckpointId,
-    namespaceId: new Uint8Array(verified.tuple[1]),
+    namespaceId: new Uint8Array(targetNamespaceId),
+    policyNamespaceId: new Uint8Array(verified.tuple[1]),
     writerId: new Uint8Array(verified.writerId),
     canonicalWalObjectBytes: new Uint8Array(input.canonicalWalObjectBytes),
   };

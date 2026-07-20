@@ -6,7 +6,7 @@ import { encodeCanonical } from '../src/cbor.js';
 import { decodeDifference, deriveReconciliationSeed, encodeSymbolCbor, encodeSymbols, mappingIndexForState, mappingIndices } from '../src/iblt.js';
 import {
   independentCborEncode,
-  independentReduceCase,
+  independentEncodeReplayConflictProjection,
   independentRoot,
   independentSymbols,
   independentVerifyWalObject
@@ -22,11 +22,11 @@ import {
   moveTierCommitment,
   namespaceId,
   payloadAssociatedDataDigest,
-  reduceCase,
+  encodeReplayConflictProjection,
   sampleEnvelope,
   signTuple,
   signatureMessage,
-  type ReducerCase
+  type ReplayConflictProjectionInput
 } from '../src/reference.js';
 import { createMembershipProof, setCommitmentRoot } from '../src/set-commitment.js';
 import { DOMAINS, ENUMS, IBLT_ALGORITHM, LIMITS, SCHEMA } from '../src/schema.js';
@@ -387,41 +387,34 @@ async function buildVectors() {
   const receiptSignature = signTuple(DOMAINS.receiptSignature, receiptUnsigned);
   const custodyReceiptBytes = encodeCanonical([...receiptUnsigned, receiptSignature]);
 
-  const idA = fixtureId('reducer/a');
-  const idB = fixtureId('reducer/b');
-  const idBase = fixtureId('reducer/base');
-  const touchedA = fixtureId('reducer/touched-a');
-  const touchedB = fixtureId('reducer/touched-b');
-  const reducerCases: ReducerCase[] = [
-    { name: 'causal-successor', operation: 'PATCH', currentHeads: [idBase], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [], mode: 'PATCH' },
-    { name: 'concurrent-disjoint-patches', operation: 'PATCH', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [touchedB], mode: 'PATCH' },
-    { name: 'concurrent-overlapping-patches', operation: 'PATCH', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [touchedA], mode: 'PATCH' },
-    { name: 'replace-versus-patch', operation: 'PUT', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [touchedB], mode: 'REPLACE' },
-    { name: 'delete-versus-update', operation: 'DELETE', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [touchedB], mode: 'PATCH' },
-    { name: 'resolve-all-heads', operation: 'RESOLVE', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [], mode: 'REPLACE', resolutionHeads: [idA, idB] },
-    { name: 'resolve-missing-head', operation: 'RESOLVE', currentHeads: [idA, idB], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [], mode: 'REPLACE', resolutionHeads: [idA] },
-    { name: 'move-tier-without-receipt', operation: 'MOVE_TIER_TARGET', currentHeads: [idBase], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [], mode: 'REPLACE', hasTierReceipt: false },
-    { name: 'move-tier-with-receipt', operation: 'MOVE_TIER_TARGET', currentHeads: [idBase], baseHeads: [idBase], touchedKeys: [touchedA], concurrentTouchedKeys: [], mode: 'REPLACE', hasTierReceipt: true }
+  const idA = fixtureId('replay-conflict/a');
+  const idB = fixtureId('replay-conflict/b');
+  const idBase = fixtureId('replay-conflict/base');
+  const replayConflictCases: ReplayConflictProjectionInput[] = [
+    { name: 'semantic-core-causal-successor', semanticStatus: 'apply', semanticActiveHeads: [idBase], semanticConflictHeads: [] },
+    { name: 'semantic-core-disjoint-patches', semanticStatus: 'merge', semanticActiveHeads: [idA, idB], semanticConflictHeads: [] },
+    { name: 'semantic-core-overlapping-patches', semanticStatus: 'conflict', semanticActiveHeads: [idBase], semanticConflictHeads: [idA, idB] },
+    { name: 'semantic-core-replace-versus-patch', semanticStatus: 'conflict', semanticActiveHeads: [idBase], semanticConflictHeads: [idA, idB] },
+    { name: 'semantic-core-delete-versus-update', semanticStatus: 'conflict', semanticActiveHeads: [idBase], semanticConflictHeads: [idA, idB] },
+    { name: 'semantic-core-complete-resolution', semanticStatus: 'apply', semanticActiveHeads: [idBase], semanticConflictHeads: [] },
+    { name: 'semantic-core-incomplete-resolution', semanticStatus: 'conflict', semanticActiveHeads: [idBase], semanticConflictHeads: [idA, idB] },
+    { name: 'semantic-core-tier-pending', semanticStatus: 'pending', semanticActiveHeads: [idBase], semanticConflictHeads: [] },
+    { name: 'semantic-core-tier-active', semanticStatus: 'apply', semanticActiveHeads: [idBase], semanticConflictHeads: [] }
   ];
-  const reducerVectors = reducerCases.map((item) => {
-    const reference = reduceCase(item);
-    const independent = independentReduceCase(item);
+  const replayConflictVectors = replayConflictCases.map((item) => {
+    const reference = encodeReplayConflictProjection(item);
+    const independent = independentEncodeReplayConflictProjection(item);
     if (
       reference.status !== independent.status ||
       !equalBytes(reference.headDigest, independent.headDigest) ||
       !equalBytes(reference.conflictDigest, independent.conflictDigest)
-    ) throw new Error(`independent reducer mismatch for ${item.name}`);
+    ) throw new Error(`independent replay-conflict mismatch for ${item.name}`);
     return {
       name: item.name,
       input: {
-        operation: item.operation,
-        currentHeads: item.currentHeads.map(hex),
-        baseHeads: item.baseHeads.map(hex),
-        touchedKeys: item.touchedKeys.map(hex),
-        concurrentTouchedKeys: item.concurrentTouchedKeys.map(hex),
-        mode: item.mode,
-        resolutionHeads: item.resolutionHeads?.map(hex) ?? null,
-        hasTierReceipt: item.hasTierReceipt ?? null
+        semanticStatus: item.semanticStatus,
+        semanticActiveHeads: item.semanticActiveHeads.map(hex),
+        semanticConflictHeads: item.semanticConflictHeads.map(hex)
       },
       expected: {
         status: reference.status,
@@ -864,7 +857,7 @@ async function buildVectors() {
       forbiddenPublicText: [sourceGraphName],
       forbiddenPublicScalarCbor: [sourceKeyEpoch, sourceActivityCount].map((value) => hex(encodeCanonical(value)))
     },
-    reducer: reducerVectors,
+    replayConflict: replayConflictVectors,
     finality: [
       { authorRequested: 0, networkMinimum: 64, effective: authorFinalityRequirement(0, 64) },
       { authorRequested: 128, networkMinimum: 64, effective: authorFinalityRequirement(128, 64) },

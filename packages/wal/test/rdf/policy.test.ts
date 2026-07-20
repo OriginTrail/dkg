@@ -126,7 +126,8 @@ function admissionInput(fixture: Awaited<ReturnType<typeof signedFixture>>) {
     expectedAuthoritySetId: authoritySetId,
     membershipAuthority: { signerAddresses: [curator.address], threshold: 1 },
     canonicalWalObjectBytes: fixture.object.canonicalBytes,
-    expectedNamespaceId: namespaceId,
+    targetNamespaceId: namespaceId,
+    expectedPolicyNamespaceId: namespaceId,
   };
 }
 
@@ -181,6 +182,7 @@ describe('signed RDF policy v1', () => {
     expect(admitted.policyObjectId).toEqual(fixture.object.walObjectId);
     expect(admitted.membershipCheckpointId).toEqual(fixture.membershipId);
     expect(admitted.namespaceId).toEqual(namespaceId);
+    expect(admitted.policyNamespaceId).toEqual(namespaceId);
     expect(admitted.writerId).toEqual(writer.address);
     expect(admitted.canonicalWalObjectBytes).toEqual(fixture.object.canonicalBytes);
   });
@@ -231,7 +233,7 @@ describe('signed RDF policy v1', () => {
     const cases = [
       { expectedMembershipCheckpointId: new Uint8Array(32) },
       { expectedAuthoritySetId: new Uint8Array(32) },
-      { expectedNamespaceId: new Uint8Array(32) },
+      { expectedPolicyNamespaceId: new Uint8Array(32) },
     ];
     for (const override of cases) {
       expect(() => admitSignedRdfPolicyV1({ ...admissionInput(fixture), ...override }))
@@ -247,12 +249,31 @@ describe('signed RDF policy v1', () => {
       expect.objectContaining({ code: 'WAL_RDF_POLICY_SUBSTITUTION' }),
     );
     const wrongNamespace = await signedFixture({ memberNamespaces: [new Uint8Array(32).fill(9)] });
-    expect(() => admitSignedRdfPolicyV1({ ...admissionInput(wrongNamespace), expectedNamespaceId: undefined }))
+    expect(() => admitSignedRdfPolicyV1({
+      ...admissionInput(wrongNamespace),
+      expectedPolicyNamespaceId: undefined,
+    }))
       .toThrow(expect.objectContaining({ code: 'WAL_RDF_UNAUTHORIZED' }));
     const wrongWriter = await signedFixture({ memberWriters: [other.address] });
     expect(() => admitSignedRdfPolicyV1(admissionInput(wrongWriter))).toThrow(
       expect.objectContaining({ code: 'WAL_RDF_UNAUTHORIZED' }),
     );
+  });
+
+  it('binds one signed collection policy to an exact active target view', async () => {
+    const targetNamespaceId = new Uint8Array(32).fill(0x44);
+    const fixture = await signedFixture({ memberNamespaces: [namespaceId, targetNamespaceId] });
+    const admitted = admitSignedRdfPolicyV1({
+      ...admissionInput(fixture),
+      targetNamespaceId,
+    });
+    expect(admitted.namespaceId).toEqual(targetNamespaceId);
+    expect(admitted.policyNamespaceId).toEqual(namespaceId);
+
+    expect(() => admitSignedRdfPolicyV1({
+      ...admissionInput(fixture),
+      targetNamespaceId: new Uint8Array(32).fill(0x45),
+    })).toThrow(expect.objectContaining({ code: 'WAL_RDF_UNAUTHORIZED' }));
   });
 
   it('rejects malformed, private, mislabeled, unsupported, and self-oversized policy envelopes', async () => {

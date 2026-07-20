@@ -14,11 +14,22 @@ current graph-sync stack, keep the current stack authoritative, and write only
 to isolated WAL/shadow projection state until the signed hard-cutover tasks are
 separately accepted.
 
+The architecture has **two synchronization mechanisms and one semantic
+system**. `legacy` names only the current synchronization mechanism. Both
+current sync and WAL replay MUST invoke the same existing DKG semantic
+implementation, SWM/VM model, verified-memory logic, chain/finality/reorg
+validation, membership authority, and cryptographic implementation. WAL
+reconciliation handles authenticated protocol bytes, `WalObjectId` sets, and
+complete `WalObjectV1` byte ranges only. The WAL replay/conflict adapter may
+schedule causal work and retain incompatible branches but MUST delegate every
+DKG-specific decision to the shared semantic core. Projection persistence MUST
+only atomically store the resulting outcome.
+
 ## Task index
 
 | ID | Task | Depends on | Primary result |
 |---|---|---|---|
-| `WAL-000` | Freeze the legacy semantic and performance baseline | — | Reproducible old-path truth and parity corpus. |
+| `WAL-000` | Freeze the shared semantic oracle and current-sync performance baseline | — | Reproducible DKG semantic truth plus current-sync measurements. |
 | `WAL-001` | Close RFC implementation-freeze decisions and vectors | `WAL-000` | One atomic `WalObjectV1`, byte-interoperable range framing, schemas, and fixtures. |
 | `WAL-002` | Scaffold WAL package, runtime modes, and isolation | `WAL-000`, `WAL-001` | Safe `legacy`/`parallel`/`wal` skeleton with legacy default. |
 | `WAL-003` | Implement canonical encoding, signatures, and object IDs | `WAL-001`, `WAL-002` | Canonical protocol objects and golden vectors. |
@@ -30,11 +41,11 @@ separately accepted.
 | `WAL-009` | Implement bounded authenticated WAL wire protocols | `WAL-002`–`WAL-008` | Three versioned protocol families with the complete frozen method catalog. |
 | `WAL-010` | Implement provider discovery, selection, failover, and cold start | `WAL-004`, `WAL-005`, `WAL-007`, `WAL-009` | Correct multi-provider retrieval and authorized bootstrap. |
 | `WAL-011` | Implement remote admission, causal closure, and quarantine | `WAL-006`–`WAL-010` | One fail-closed admission path for fetched WAL objects. |
-| `WAL-012` | Implement RDF canonicalization, mutation compiler, and signed policy | `WAL-001`, `WAL-003` | Deterministic adapter inputs without remote SPARQL execution. |
+| `WAL-012` | Implement RDF canonicalization, mutation encoding, and signed replay policy | `WAL-001`, `WAL-003` | Deterministic encoding of shared-core outcomes without remote SPARQL execution. |
 | `WAL-013` | Implement local WAL commit and publisher shadow integration | `WAL-006`–`WAL-008`, `WAL-012` | Idempotent WAL-first local objects beside legacy writes. |
-| `WAL-014` | Implement deterministic reducer and conflict resolution | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent active/conflict state. |
-| `WAL-015` | Implement atomic RDF materializer and projection rebuild | `WAL-006`, `WAL-014` | Guarded Oxigraph shadow projection with exact markers. |
-| `WAL-016` | Implement VM activation, private-safe tier movement, and reorg handling | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by admitted WAL objects. |
+| `WAL-014` | Implement deterministic replay/conflict adapter over the existing semantic core | `WAL-011`, `WAL-012`, `WAL-013` | Arrival-order-independent scheduling and conflicts with no second DKG implementation. |
+| `WAL-015` | Implement atomic projection persistence and rebuild | `WAL-006`, `WAL-014` | Persist shared-core outcomes and exact markers without semantic decisions. |
+| `WAL-016` | Feed VM/finality/reorg events into the existing semantic core | `WAL-007`, `WAL-008`, `WAL-011`, `WAL-014`, `WAL-015` | Existing VM semantics driven by WAL events without a second VM model. |
 | `WAL-017` | Implement deletion, expiry, snapshots, custody, and compaction | `WAL-004`–`WAL-007`, `WAL-011`, `WAL-014`, `WAL-015` | Bounded history with no resurrection. |
 | `WAL-018` | Implement genesis migration, backfill, and rebuild tooling | `WAL-016`, `WAL-017` | Authenticated bootstrap from existing SWM/VM state. |
 | `WAL-019` | Implement reconciliation driver and complete network shadow protocol | `WAL-009`–`WAL-018` | Pull-correct shadow convergence with persistent retries. |
@@ -46,26 +57,28 @@ separately accepted.
 
 ---
 
-## WAL-000 — Freeze the legacy semantic and performance baseline
+## WAL-000 — Freeze the shared semantic oracle and current-sync performance baseline
 
 **Focused RFC context:** Abstract; Sections 1, 18, 21, and measurable success
 criteria.
 
 ### Objective
 
-Capture the current production-authoritative SWM/VM behavior before adding WAL
-code. This task establishes the oracle used to prove that the new replication
-boundary does not rewrite DKG semantics, crypto authority, VM lifecycle, or
-operator-visible results.
+Capture the existing DKG/SWM/VM/verified-memory/cryptographic behavior as the
+single semantic oracle before adding WAL code, and measure the current
+synchronization mechanism separately. Current-sync failures are observations,
+not the semantic correctness baseline. This task proves that the new
+replication boundary invokes rather than rewrites the shared semantic core.
 
 ### Scope and deliverables
 
 - Inventory every publish, share, update, delete, expiry, membership change,
   private-access decision, VM promotion, finality, and reorg path.
-- Create a reusable golden corpus that records canonical RDF, active graph
+- Create a reusable golden corpus directly against the existing semantic core
+  that records canonical RDF, active graph
   digests, lifecycle/API state, authorization decisions, crypto validation
   outcomes, and chain evidence.
-- Add baseline scenarios for equal peers, reconnect delta, late join, current
+- Add current-sync measurement scenarios for equal peers, reconnect delta, late join, current
   full sync, interrupted sync, and store/process restart.
 - Define an evidence manifest containing commit, configuration, hardware,
   dataset, roster, chain snapshot, commands, raw digests, latency, bytes, CPU,
@@ -81,10 +94,14 @@ operator-visible results.
 
 - [ ] The corpus covers every existing supported SWM and VM mutation/lifecycle
       type and every current crypto/authorization decision named by the RFC.
-- [ ] Each fixture produces stable canonical RDF, state, conflict/lifecycle,
+- [ ] Each fixture exercises the existing semantic implementation and produces
+      stable canonical RDF, state, conflict/lifecycle,
       authorization, and VM digests suitable for old/new comparison.
-- [ ] Equal, delta, late-join, private, VM-reorg, and crash baselines run from one
+- [ ] Equal, delta, late-join, private, VM-reorg, and crash measurements run from one
       documented command family on a clean `origin/main` build.
+- [ ] Evidence explicitly distinguishes shared semantic truth from known
+      current-sync failures; current sync is never treated as the correctness
+      oracle merely because it is production-authoritative.
 - [ ] Performance profiles run at least three times and report median, p95, p99,
       bytes, requests, CPU seconds, peak RSS, and triplestore operations.
 - [ ] Raw receipts identify the exact main commit and are stored outside the
@@ -100,7 +117,7 @@ operator-visible results.
 
 ### Objective
 
-Apply every resolution in RFC v0.7 Section 22 before production implementations
+Apply every resolution in RFC v0.8 Section 22 before production implementations
 encode incompatible assumptions. The result must be an executable normative
 wire/convergence contract, not additional prose ambiguity. The conformance
 harness is TypeScript-only; this task does not add Go or another implementation
@@ -171,7 +188,7 @@ language.
 - Fix snapshot parents/base heads, post-compaction causal closure, custodian
   receipts, retention, and removed-custodian behavior.
 - Fix empty roots, nibble packing, proof framing, pagination, malformed-proof
-  rejection, reducer relations, common-base rules, resource limits, provider
+  rejection, replay/conflict relations, common-base rules, resource limits, provider
   cold start, authority rotation/HA, rollback-guard recovery, cutover cohort,
   late-node behavior, private-safe `MOVE_TIER`, and VM finality policy.
 - Freeze the measured binary64 IBLT mapping exactly: unsigned-u64 conversion,
@@ -180,7 +197,7 @@ language.
   intermediates, reassociation, or fused evaluation. No float is serialized;
   the result is a deterministic integer symbol index.
 - Publish byte fixtures for CBOR tuples, signatures, IDs, set commitments,
-  rateless IBLT symbols/peeling, object ranges, encryption, snapshots, reducer
+  rateless IBLT symbols/peeling, object ranges, encryption, snapshots, replay/conflict
   cases, and cutover objects in the spec and code repos.
 - Mirror the exact normative schema/vector files from the spec task-pack context;
   generated copies must compare byte-for-byte so dependent tasks cannot consume
@@ -216,9 +233,9 @@ language.
       new whole-object identity and that v1 does not promise cross-object range
       deduplication or pre-completion content verification.
 - [ ] All ten former RFC implementation-freeze items have the explicit normative
-      v0.7 answer merged or approved in `dkgv10-spec`; none remains implicit in code.
+      v0.8 answer merged or approved in `dkgv10-spec`; none remains implicit in code.
 - [ ] At least two independently written TypeScript test implementations consume the same fixtures
-      and produce byte-identical encodings, IDs, roots, proofs, and reducer
+      and produce byte-identical encodings, IDs, roots, proofs, and replay/conflict
       digests; no new implementation language is introduced for conformance.
 - [ ] Binary64 boundary vectors cover u64-to-binary64 rounding, the `+1.0`
       boundary, square-root/division/product rounding, `ceil`, minimum distance,
@@ -242,7 +259,8 @@ language.
 ### Objective
 
 Create the package and runtime skeleton that lets the complete WAL protocol run
-beside legacy sync without changing production authority.
+beside legacy sync without changing production synchronization authority or the
+shared semantic implementation.
 
 ### Scope and deliverables
 
@@ -439,7 +457,7 @@ transfer, authorization, admission, RDF, or SPARQL.
   simple reference root implementation. The tree is an authenticated
   commitment, not the normal wire reconciliation algorithm.
 - Implement the `ProtocolV1IbltReconciliationAlgorithm` exactly: seed
-  derivation, the RFC v0.7 binary64 symbol-membership evaluation order, degree
+  derivation, the RFC v0.8 binary64 symbol-membership evaluation order, degree
   distribution, signed-i64 count arithmetic, 32-byte ID XOR, domain-separated
   checksum XOR, deterministic symbol order, and canonical symbol tuples. This
   name denotes an algorithm, not a protocol object. The exact-integer mapping
@@ -788,15 +806,16 @@ and VM prerequisite is satisfied.
 
 ---
 
-## WAL-012 — Implement RDF canonicalization, mutation compiler, and signed policy
+## WAL-012 — Implement RDF canonicalization, mutation encoding, and signed replay policy
 
 **Focused RFC context:** Sections 6.2–6.3, 11, 12, and semantic compatibility goals.
 
 ### Objective
 
-Translate supported local DKG mutations into deterministic opaque WAL payload
-bytes while preserving current SWM/VM semantics and preventing remote arbitrary
-SPARQL execution.
+Encode transitions already accepted by the existing DKG semantic core into
+deterministic opaque WAL payload bytes while preventing remote arbitrary SPARQL
+execution. This task must not create a WAL-specific DKG or SPARQL semantic
+evaluator.
 
 ### Scope and deliverables
 
@@ -804,26 +823,34 @@ SPARQL execution.
   deterministic sorting/deduplication, skolem requirements, and state digests.
 - Implement stable author-scoped logical keys and explicitly policy-authorized
   shared-write keys.
-- Compile supported `INSERT DATA`, `DELETE DATA`, and bounded scoped
-  `DELETE/INSERT WHERE` into canonical `RdfMutationV1` replace/patch/delete
-  manifests evaluated once against declared base heads.
+- Receive graph/subject replacements, explicit deletes/inserts, or whole-key
+  deletion only after the existing DKG semantic core accepts the operation;
+  encode that exact outcome into canonical `RdfMutationV1` manifests against
+  declared base heads. `packages/wal` must contain no source-SPARQL parser or
+  evaluator.
 - Reject remote `SERVICE`, load/drop/global operations, nondeterminism, unrelated
   graph reads, escaping variables, unsupported functions, and limit violations.
-- Implement signed `RdfPolicyV1` admission and adapter-version pinning; general
+- Implement signed `RdfPolicyV1` admission and adapter-version pinning as WAL
+  replay/resource constraints. They MUST NOT replace existing membership,
+  authorization, SWM/VM, verified-memory, finality, or crypto policy. General
   SHACL is not consensus logic in v1.
 
 ### Acceptance area
 
 - [x] Canonicalization fixtures produce byte-identical N-Quads and state digests
       across supported runtimes and stores.
-- [x] Existing DKG publish/share/update/delete golden cases compile to results
+- [x] Existing DKG publish/share/update/delete golden cases encode to results
       with identical canonical RDF and authorization outcomes.
-- [x] Unsupported/nondeterministic SPARQL and graph-scope escape attempts fail
-      before WAL commit with stable reason codes.
+- [ ] Code-path instrumentation proves the current-sync path and WAL encoding/
+      replay path invoke the same semantic implementation; no operation-specific
+      DKG decision is copied into `packages/wal`.
+- [ ] Existing semantic-core tests prove unsupported/nondeterministic SPARQL and
+      graph-scope escape attempts fail before accepted-outcome encoding; WAL
+      contains no independent parser or evaluator.
 - [x] `parents`, `baseHeads`, `baseStateDigest`, `resultStateDigest`, touched keys,
-      and graph/subject replacement scopes satisfy frozen reducer relations.
+      and graph/subject replacement scopes satisfy frozen replay relations.
 - [x] Remote nodes receive only explicit canonical result bytes and never execute
-      the source SPARQL audit text.
+      source query/audit bytes.
 - [x] Policy substitution, unknown adapter version, oversized mutation, blank
       node, and shared-writer authorization negatives pass.
 
@@ -835,12 +862,14 @@ SPARQL execution.
 
 ### Objective
 
-Compile every eligible local authoritative mutation into a durable shadow WAL
-object with idempotent API results, without changing legacy write authority.
+Encode every eligible mutation accepted by the shared semantic core into a
+durable shadow WAL object with idempotent API results, without changing current
+synchronization authority.
 
 ### Scope and deliverables
 
-- Wire publisher/share/update/delete/expiry paths to the shared compiler behind
+- Wire publisher/share/update/delete/expiry paths to the shared semantic-core
+  result encoder behind
   explicit `parallel` mode.
 - Encode the complete inline adapter payload before acquiring the author-lane
   mutex and beginning the immediate SQLite transaction.
@@ -859,7 +888,8 @@ workspace handlers, `packages/agent/src/`, and `packages/wal/`.
 
 - [ ] In `legacy`, public API responses and storage/network behavior remain the
       current baseline with zero WAL side effects.
-- [ ] In `parallel`, each eligible successful legacy mutation produces exactly
+- [ ] In `parallel`, each eligible mutation successfully accepted by the shared
+      semantic core produces exactly
       one matching durable WAL object/checkpoint and isolated shadow result.
 - [ ] Same idempotency key/digest returns the same `WalObjectId` across restart;
       same key/different digest fails deterministically.
@@ -872,56 +902,71 @@ workspace handlers, `packages/agent/src/`, and `packages/wal/`.
 
 ---
 
-## WAL-014 — Implement deterministic reducer and conflict resolution
+## WAL-014 — Implement deterministic replay/conflict adapter over the existing semantic core
 
 **Focused RFC context:** Sections 3, 6.1–6.4, 12, 13, and conflict goals.
 
 ### Objective
 
-Reduce identical admitted WAL-object sets to identical active state and explicit
-conflict branches regardless of arrival, provider, retry, or replay order.
+Schedule identical admitted WAL-object sets deterministically, invoke the
+existing DKG semantic core for every candidate transition, and retain explicit
+conflict branches regardless of arrival, provider, retry, or replay order. This
+task must not create a second implementation of DKG behavior.
 
 ### Scope and deliverables
 
-- Build the per-logical-key causal DAG, validate bases, find maximal accepted
-  heads, apply compatible successors, and compute frozen maximal-common-base
-  behavior for incompatible heads.
-- Implement conservative replace/patch/delete/tier conflict policy and signed
-  single-/multi-valued/shared-write rules.
+- Build the per-logical-key causal DAG, validate protocol-level bases, find
+  maximal accepted heads, choose a deterministic replay schedule, and compute
+  frozen maximal-common-base candidates for incompatible heads.
+- Define a narrow `DkgSemanticCore` adapter over the existing implementation.
+  Current sync and WAL replay must call the same underlying functions for
+  publish/share/update/delete/expiry, membership/authorization, SWM/VM,
+  verified-memory, roots/receipts, finality/reorgs, and cryptography.
+- Classify protocol-level causal compatibility from explicit mutation
+  footprints and signed replay policy, then ask the shared semantic core to
+  validate/apply every replace/patch/delete/tier branch. Do not copy DKG
+  operation behavior into `packages/wal` or a WAL-only service.
 - Preserve every incompatible maximal branch in reserved conflict projections;
   `WalObjectId` may order processing but never select a winner.
-- Admit `RESOLVE` only from an authorized signer referencing every current
-  conflict head and supplying a complete deterministic result.
+- Route `RESOLVE` through the existing authorization and semantic core after
+  the adapter verifies that every current conflict head is referenced.
 - Detect same-sequence author equivocation, retain evidence, block the lane, and
   require the frozen epoch/governance recovery.
 
 ### Acceptance area
 
-- [ ] Every reducer fixture produces identical active-head, state, and conflict
-      digests under all WAL-object-arrival and provider permutations.
+- [ ] Every replay/conflict scenario obtains its decision from the shared
+      semantic core and then produces identical active-head, state, and
+      conflict digests under all WAL-object-arrival and provider permutations.
+- [ ] Instrumented current-sync and WAL-replay scenarios invoke the same semantic
+      entry points and return the same outcomes; static/code review finds no
+      duplicated DKG/SWM/VM/verified-memory/finality/crypto implementation.
 - [ ] Concurrent disjoint patch, same-key patch, replace/patch, replace/replace,
       delete/update, tier movement, multi-base, resolution, and equivocation
-      vectors match the normative fixtures.
+      vectors match the normative fixtures. Those fixtures consume
+      semantic-core outcomes as inputs; they do not contain a DKG decision table.
 - [ ] No incompatible branch is dropped or made active by wall clock, arrival
       order, provider identity, or lexical `WalObjectId` winner selection.
 - [ ] Unauthorized, incomplete, stale-head, or partial `RESOLVE` objects fail
       without changing active/conflict state.
 - [ ] Resource limits bound causal depth, conflict heads, touched keys, and
       recomputation work with stable blocked/quarantine outcomes.
-- [ ] Reducer output matches the old-path semantic oracle for all previously
-      defined behavior; differences are linked to an explicit RFC decision.
+- [ ] Replay output matches the shared semantic oracle for all previously
+      defined behavior. There is no permitted RFC divergence from established
+      DKG semantics in this task; a desired semantic change belongs in the
+      semantic core and applies to both synchronization mechanisms.
 
 ---
 
-## WAL-015 — Implement atomic RDF materializer and projection rebuild
+## WAL-015 — Implement atomic projection persistence and rebuild
 
 **Focused RFC context:** Sections 2, 3, 14, 17, 19, and rebuild goals.
 
 ### Objective
 
-Materialize reducer output into isolated RDF graphs with an atomic content/
-conflict/marker commit, making the graph store rebuildable rather than a second
-replication truth.
+Persist the shared semantic core's complete projection outcome into isolated
+RDF graphs with an atomic content/conflict/marker commit, making the graph store
+rebuildable rather than a second replication or semantic truth.
 
 ### Scope and deliverables
 
@@ -934,6 +979,10 @@ replication truth.
   and materialization status in `urn:dkg:wal:projection`.
 - Implement per-key locking, persistent retry, guard-failure recalculation,
   corruption detection, and full/selective projection rebuild from WAL.
+- Keep the storage boundary semantically passive: it may validate guards and
+  persistence integrity, but it must not choose heads, interpret DKG operations,
+  resolve conflicts, or implement SWM/VM, verified-memory, authorization,
+  finality, or cryptographic behavior.
 - Keep Blazegraph/non-atomic backends parallel-only until they pass the same
   fault-injection capability suite.
 
@@ -943,8 +992,11 @@ replication truth.
       old or all new; no partial canonical projection is observable.
 - [ ] Lost response is resolved by exact marker/state post-read; a different
       value blocks/recalculates instead of being treated as success.
-- [ ] Opposite reducer scheduling and process restart reach identical markers and
+- [ ] Opposite replay scheduling and process restart reach identical markers and
       RDF state.
+- [ ] Tests pass deliberately different complete semantic outcomes through the
+      same persistence method and prove the materializer stores or rejects them
+      only by atomic guard/integrity rules, never by a second semantic decision.
 - [ ] A locally complete WAL rebuilds an empty/corrupt shadow projection with
       zero network payload transfer and exact semantic digests.
 - [ ] Production reads never include shadow graphs in `parallel` mode.
@@ -953,32 +1005,39 @@ replication truth.
 
 ---
 
-## WAL-016 — Implement VM activation, privacy-safe tier movement, and reorg handling
+## WAL-016 — Feed VM/finality/reorg events into the existing semantic core
 
 **Focused RFC context:** Sections 5, 6.4–6.5, 12, 16, and VM measurable goals.
 
 ### Objective
 
-Reuse current chain and DKG VM semantics after WAL admission, while representing
-SWM-to-VM movement causally and without leaking private SWM metadata.
+Feed admitted WAL records plus VM/finality/reorg events into the existing chain
+validator and DKG semantic core, while representing SWM-to-VM movement causally
+and without leaking private SWM metadata. This task adds no second VM state
+machine.
 
 ### Scope and deliverables
 
-- Implement the frozen two-sided/opaque `MOVE_TIER` representation and source/
+- Encode/decode the frozen two-sided/opaque `MOVE_TIER` representation and source/
   target view authorization.
 - Bind VM WAL objects to existing UAL/KA identity, author, context graph, root,
   assertion version/count, receipt, transaction/log location, block hash, and
   current network finality policy.
-- Allow durable admission before activation; activate only after the current
-  chain adapter verifies all evidence and stores the verified frontier.
-- Recheck canonical block hashes; on reorg/loss of finality return VM to pending
-  and restore the last valid SWM head without deleting WAL history.
+- Allow durable admission before activation; send activation evidence through
+  the current chain adapter and shared semantic core, then persist their outcome
+  and verified frontier.
+- Feed canonical-block-hash changes from the existing watcher through the same
+  semantic core; on reorg/loss of finality persist its pending/last-valid-SWM
+  outcome without deleting WAL history.
 - Ensure an author field can only request stricter finality, never weaken policy.
 
 ### Acceptance area
 
 - [ ] Existing valid VM lifecycle vectors remain valid and every existing invalid
-      vector remains rejected through the adapter boundary.
+      vector remains rejected through the same chain/semantic-core boundary.
+- [ ] Instrumentation proves current sync and WAL event replay invoke the same
+      VM/finality/reorg implementation and SWM/VM state model; no WAL-only VM
+      transition table or crypto validation exists.
 - [ ] Premature, substituted author/root/receipt/block/log, stale version, wrong
       CG, insufficient finality, and reorg cases never produce active VM state.
 - [ ] Valid finalized transition atomically activates VM and supersedes the
@@ -987,8 +1046,8 @@ SWM-to-VM movement causally and without leaking private SWM metadata.
       graph names, epochs, counts, or causal shape.
 - [ ] Chain policy reconfiguration and stored-frontier revalidation follow the
       frozen rule across restart.
-- [ ] WAL and legacy paths produce identical VM API state and canonical RDF for
-      the golden corpus.
+- [ ] WAL sync and legacy sync produce identical VM API state and canonical RDF
+      for the golden corpus because both invoke the same semantic code paths.
 
 ---
 
@@ -1005,6 +1064,9 @@ conflicts, forging authorship, or resurrecting stale state.
 
 - Implement signed causal deletes and policy-authorized expiry bound to a signed
   vector/block frontier; local wall time may schedule but not hide state alone.
+- Feed delete/expiry requests through the existing DKG semantic core before
+  encoding or replay; the WAL task owns causal durability and retention, not a
+  second deletion or expiry policy.
 - Implement author-scoped snapshot WAL objects/manifests containing live logical
   keys, author heads, inline state digests/bytes, conflict references, covered root,
   policy, adapter, and VM frontier.
@@ -1046,9 +1108,11 @@ nodes to current authenticated state without inventing pre-WAL causal history.
   policy/adapter/VM frontier, and produces signed genesis snapshots/checkpoints/
   vectors.
 - Implement the frozen `LegacyGenesisV1` quarantine/visibility policy for
-  unclaimable state without pretending it has original author signatures.
+  unclaimable pre-WAL state without pretending it has original author
+  signatures. `LegacyGenesisV1` labels provenance, not SWM/VM semantics.
 - Implement incremental catch-up, snapshot-plus-delta, genesis bootstrap, and
-  projection-only rebuild through the same verifier/admission/reducer path.
+  projection-only rebuild through the same verifier/admission/replay adapter and
+  shared semantic-core path.
 - Produce dry-run reports, resumable execution, deterministic manifests, abort
   safety, and post-barrier proof that every new mutation creates a shadow WAL
   object.
@@ -1060,14 +1124,14 @@ nodes to current authenticated state without inventing pre-WAL causal history.
       dry-run mode.
 - [ ] Provable author state is signed only by that author; ambiguous/unclaimable
       rows remain quarantined unless explicit migration policy authorizes a
-      clearly labeled legacy view.
+      clearly labeled pre-WAL provenance view.
 - [ ] Empty, stale, below-floor, and projection-only nodes reach exact target
       roots, complete WAL objects, RDF, conflict, tombstone, and VM state.
 - [ ] Backfill performs no remote graph enumeration; local complete-WAL rebuild
       performs zero network payload transfer.
 - [ ] Barrier abort/resume and crashes at every snapshot/checkpoint/vector step
-      preserve legacy authority and never omit a post-barrier mutation.
-- [ ] Backfill p95 is no worse than the same-data/link legacy full-sync baseline
+      preserve current-sync authority and never omit a post-barrier mutation.
+- [ ] Backfill p95 is no worse than the same-data/link current-sync full-sync baseline
       and emits the required evidence manifest.
 
 ---
@@ -1078,24 +1142,30 @@ nodes to current authenticated state without inventing pre-WAL causal history.
 
 ### Objective
 
-Join signed target discovery, rateless IBLT reconciliation, WAL-object range retrieval,
-admission, replay, and shadow materialization into one durable pull-correct
-protocol operating across upgraded nodes.
+Join signed target discovery, rateless IBLT reconciliation, and WAL-object range
+retrieval into one durable pull-correct byte protocol operating across upgraded
+nodes. After complete-object admission it may enqueue the separate
+replay/conflict adapter, but reconciliation itself handles bytes and
+`WalObjectId` sets only.
 
 ### Scope and deliverables
 
 - On connect, nudge, and periodic heartbeat, obtain membership/vector/
   checkpoints, compare signed roots, choose baseline, stream rateless IBLT
   symbols, verify the decoded remote set or bounded fallback, fetch remote-only
-  complete WAL objects by ranges, admit closed work, and materialize affected
-  keys.
+  complete WAL objects by ranges, admit closed work, and enqueue affected keys
+  for the separate replay/conflict adapter.
+- Enforce a dependency boundary: reconciliation code MUST NOT import or invoke
+  RDF/SPARQL interpretation, DKG operation semantics, SWM/VM state transitions,
+  verified-memory, conflict decisions, finality/reorg rules, or crypto beyond
+  generic protocol identity/signature/authenticated-transport verification.
 - Persist reconciliation sessions, provider/retry state, missing IDs/ranges,
   queue priorities, cancellation, backpressure, and restart recovery.
 - Add best-effort checkpoint gossip/nudges only as wakeups; dropped/reordered
   nudges must not affect eventual correctness.
 - Enforce four reconciliation streams per peer, two WAL-object range streams per namespace/peer, global
   bounded materialization, policy priority, and every frozen resource limit.
-- Run exclusively in isolated WAL/shadow namespaces while legacy remains
+- Run exclusively in isolated WAL/shadow namespaces while legacy sync remains
   authoritative.
 
 ### Acceptance area
@@ -1103,6 +1173,9 @@ protocol operating across upgraded nodes.
 - [ ] Equal signed roots exchange no IBLT symbols, fallback IDs, or WAL-object
       bytes and perform zero triplestore enumeration after current heads are
       known.
+- [ ] Static dependency and instrumented devnet tests prove reconciliation sees
+      only signed control bytes, `WalObjectId` sets, and complete-object ranges;
+      semantic work begins only after atomic admission in the separate adapter.
 - [ ] Missed nudge, opposite arrival, reconnect, offline stale peer, late join,
       partial transfer, provider switch, restart, and unavailable-provider cases
       converge to the exact signed target.
@@ -1110,9 +1183,9 @@ protocol operating across upgraded nodes.
       lost work, tight retry loops, or false completion.
 - [ ] Backpressure and limits bound heap, disk staging, network fan-out, proof
       work, signatures, chain checks, conflicts, and materialization.
-- [ ] Shadow byte roots, RDF/state digests, conflicts, deletion, expiry, and VM
-      lifecycle match the `WAL-000` production oracle.
-- [ ] Disabling `parallel` stops the protocol cleanly and leaves the legacy path
+- [ ] Shadow byte roots plus shared-core RDF/state digests, conflicts, deletion,
+      expiry, and VM lifecycle match the `WAL-000` semantic oracle.
+- [ ] Disabling `parallel` stops the protocol cleanly and leaves the legacy-sync path
       untouched and authoritative.
 
 ---
@@ -1181,6 +1254,9 @@ repeatable release-blocking tests.
 - Build private authorization probes for unauthenticated/removed/stale/wrong-view/
   wrong-epoch callers and public/private tier metadata leaks.
 - Build VM substitution/finality/reorg and conflict permutation suites.
+- Add architectural tests that fail if WAL reconciliation gains semantic
+  dependencies or if WAL replay bypasses/reimplements the shared DKG semantic
+  core, SWM/VM model, verified-memory logic, or cryptographic logic.
 - Integrate sanitizer/fuzz/property tests and bounded resource assertions into CI.
 
 ### Acceptance area
@@ -1197,6 +1273,8 @@ repeatable release-blocking tests.
       concurrency, and time limits.
 - [ ] Same-sequence equivocation is retained and blocks the lane; it is never
       overwritten by arrival order.
+- [ ] Shared-core call tracing and dependency checks prove two synchronization
+      mechanisms but one semantic/verified-memory/crypto implementation.
 - [ ] The suite is deterministic enough for CI, archives failure seeds, and can
       replay an individual seed locally.
 
@@ -1234,7 +1312,7 @@ regression against the `WAL-000` baseline a release gate.
       CPU/RSS, VM, privacy, and exact-convergence results meet every numeric RFC
       requirement.
 - [ ] Each profile runs at least three times and records environment parity with
-      the legacy baseline.
+      the current-sync baseline.
 - [ ] Every cutover gate links to a reproducible evidence artifact, raw inputs,
       commands, commit, configuration, and exact digests.
 - [ ] CI fails on threshold regression or missing evidence rather than publishing
@@ -1250,9 +1328,10 @@ regression against the `WAL-000` baseline a release gate.
 
 ### Objective
 
-Implement the single coordinated transition from legacy authority to WAL
-authority without per-collection mixed mode, silent downgrade, or configuration
-override.
+Implement the single coordinated transition from legacy synchronization
+authority to WAL synchronization authority without per-collection mixed mode,
+silent downgrade, or configuration override. The DKG semantic core and SWM/VM
+model do not switch.
 
 ### Scope and deliverables
 
@@ -1267,7 +1346,8 @@ override.
 - Implement frozen active-node/author inventory, offline/decommissioned handling,
   late-node bootstrap, authority rotation, pre-activation abort, and post-write
   rollback procedure.
-- Reject registration of legacy protocols/direct graph writers after activation.
+- Reject registration of legacy-sync protocols and graph-persistence paths that
+  bypass the shared semantic core/atomic persistence boundary after activation.
 
 ### Acceptance area
 
@@ -1275,14 +1355,15 @@ override.
       `CutoverId`, manifest, protocol/adapter version, and activation frontier.
 - [ ] Missing, mismatched, stale, rolled-back, wrong-network, wrong-version, or
       invalidly signed cutover evidence fails startup closed.
-- [ ] Before WAL writes resume, any failed gate aborts to legacy authority without
-      accepting a WAL-authoritative write.
+- [ ] Before WAL writes resume, any failed gate aborts to legacy sync authority without
+      accepting a WAL-sync-authoritative write.
 - [ ] After activation, zero legacy sync handlers, initiators, fallback routes, or
-      direct canonical graph writers are reachable.
+      semantic-core-bypassing canonical graph writers are reachable.
 - [ ] Offline/late nodes cannot speak legacy; they authenticate the cutover and
       complete snapshot/delta bootstrap before readiness.
 - [ ] Cutover/restart/crash rehearsal proves exactly one authority at every
-      boundary and documents the maintenance-only rollback after WAL writes.
+      synchronization boundary and documents the maintenance-only rollback after
+      WAL writes, while proving the semantic implementation is unchanged.
 
 ---
 
@@ -1293,8 +1374,8 @@ override.
 ### Objective
 
 Prove the complete protocol against production-scale behavior, execute the
-signed hard-cutover decision process, and delete superseded legacy correctness
-paths only after all evidence gates pass.
+signed hard-cutover decision process, and delete superseded legacy
+synchronization paths only after all evidence gates pass.
 
 ### Scope and deliverables
 
@@ -1306,8 +1387,9 @@ paths only after all evidence gates pass.
   signed manifests and inventories intended for release.
 - Produce a go/no-go evidence review. Do not waive failed or missing goals by
   changing the benchmark after the run.
-- After an approved real cutover only, remove legacy graph enumeration, graph
-  page sync, duplicate reducers/recovery cursors, and handlers; retain only the
+- After an approved real cutover only, remove legacy-sync graph enumeration,
+  graph-page protocols, recovery cursors, and handlers; retain the shared DKG
+  semantic core/SWM/VM/verified-memory/crypto implementation and only the
   explicit emergency read-only export/recovery tool allowed by the RFC.
 
 ### Acceptance area
@@ -1323,8 +1405,9 @@ paths only after all evidence gates pass.
       authority throughout.
 - [ ] The real cutover requires explicit network/operator approval and the signed
       manifest; this planning task does not itself authorize production cutover.
-- [ ] Legacy deletion occurs only after WAL authority is active and stable; final
-      code search, protocol probe, and runtime tests prove no permanent second
-      correctness stack remains.
+- [ ] Legacy-sync deletion occurs only after WAL sync authority is active and
+      stable; final code search, protocol probe, and runtime tests prove one sync
+      mechanism and the unchanged single semantic stack remain.
 - [ ] Final documentation explains operator configuration, readiness, recovery,
-      non-retroactive private-key limits, and the absence of live legacy fallback.
+      non-retroactive private-key limits, and the absence of live legacy-sync
+      fallback.

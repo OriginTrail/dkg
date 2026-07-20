@@ -51,7 +51,10 @@ export interface RdfPolicyAdmissionV1 {
   readonly policyObjectId: Uint8Array;
   readonly policy: ProtocolTuple<'RdfPolicyV1'>;
   readonly membershipCheckpointId: Uint8Array;
+  /** Exact active view in which the admitted mutation will be authored. */
   readonly namespaceId: Uint8Array;
+  /** Namespace carrying the ordinary WalObjectV1 that defines the policy. */
+  readonly policyNamespaceId: Uint8Array;
   readonly writerId: Uint8Array;
   readonly canonicalWalObjectBytes: Uint8Array;
 }
@@ -73,10 +76,17 @@ export type RdfCompileSourceV1 =
       readonly graphs?: readonly RdfGraphReplacementInputV1[];
       readonly subjects?: readonly RdfSubjectReplacementInputV1[];
     }
-  | { readonly kind: 'sparql'; readonly text: string }
+  | {
+      /** Exact delta returned by the existing DKG semantic implementation. */
+      readonly kind: 'accepted-patch';
+      readonly deletesNQuads: string | Uint8Array;
+      readonly insertsNQuads: string | Uint8Array;
+      /** Optional non-consensus audit bytes. WAL never parses or executes them. */
+      readonly sourceAuditBytes?: Uint8Array | null;
+    }
   | { readonly kind: 'delete-logical-key' };
 
-export interface CompileRdfMutationInputV1 {
+export interface EncodeAcceptedRdfMutationInputV1 {
   readonly operation: 'PUT' | 'PATCH' | 'DELETE';
   readonly logicalKey: RdfLogicalKeyCoordinatesV1;
   readonly writerId: Uint8Array;
@@ -90,11 +100,9 @@ export interface CompileRdfMutationInputV1 {
   readonly source: RdfCompileSourceV1;
   readonly chainBinding?: ProtocolTuple<'ChainBindingV1'> | null;
   readonly nonConsensusTimestampMs?: bigint | null;
-  readonly includeSourceSparqlAudit?: boolean;
-  readonly maximumSparqlSolutions?: number;
 }
 
-export interface CompiledRdfMutationV1 {
+export interface EncodedAcceptedRdfMutationV1 {
   readonly logicalKey: Uint8Array;
   readonly dkgMutation: ProtocolTuple<'DkgMutationV1'>;
   readonly rdfMutation: ProtocolTuple<'RdfMutationV1'>;

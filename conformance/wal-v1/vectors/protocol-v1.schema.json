@@ -48,8 +48,8 @@
     "logicalKey": "dkg-rdf-logical-key-v1\u0000",
     "touchedKey": "dkg-rdf-touched-key-v1\u0000",
     "rdfState": "dkg-rdf-state-v1\u0000",
-    "reducerHeads": "dkg-rdf-head-set-v1\u0000",
-    "reducerConflict": "dkg-rdf-conflict-v1\u0000",
+    "replayHeads": "dkg-rdf-head-set-v1\u0000",
+    "replayConflict": "dkg-rdf-conflict-v1\u0000",
     "payloadAssociatedData": "dkg-wal-payload-ad-v1\u0000",
     "moveTierCommitment": "dkg-wal-move-tier-v1\u0000",
     "setEmpty": "dkg-wal-set-empty-v1\u0000",
@@ -352,7 +352,7 @@
         "deleteNQuadsBytes",
         "insertNQuadsBytes",
         "touchedKeys",
-        "sourceSparqlAuditBytesOrNull"
+        "sourceSemanticAuditBytesOrNull"
       ],
       "fieldTypes": [
         "literal-1",

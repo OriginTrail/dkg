@@ -79,7 +79,7 @@ exposes an authenticated operator-only capability probe. At this milestone:
 
 - real `GET_CAPABILITIES` is enabled;
 - later reconciliation and object methods fail closed as unavailable;
-- `productionAuthority` remains `legacy`;
+- `synchronizationAuthority` remains `legacy`;
 - `workersActive` remains zero; and
 - `legacy` mode still registers no WAL runtime or WAL protocols.
 
@@ -114,6 +114,6 @@ Node 24.11.1: focused integration regressions
 Isolated three-node devnet
   PASS: node 1 <-> node 2 capability exchange and node 2 restart
   PASS: node 1 <-> node 3 capability exchange and node 3 restart
-  PASS: all checked daemons mode=parallel, productionAuthority=legacy,
+  PASS: all checked daemons mode=parallel, synchronizationAuthority=legacy,
         workersActive=0, protocolsRegistered=true
 ```

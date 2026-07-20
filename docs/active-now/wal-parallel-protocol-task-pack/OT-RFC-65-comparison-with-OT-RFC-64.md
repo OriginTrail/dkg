@@ -39,17 +39,25 @@ The WAL proposal moves the boundary down one layer. The protocol reconciles an
 unordered authenticated set of immutable `WalObjectId` values using rateless
 IBLT difference discovery, transfers each complete canonical `WalObjectV1` by
 resumable byte ranges, and knows nothing about RDF or SPARQL. A deterministic
-adapter then interprets the inline opaque payload bytes, applies
-SPARQL-aware causal conflict rules, and materializes SWM/VM as a rebuildable
-projection. The WAL, not a graph catalog or triplestore, is the replicated
-source of truth.
+replay/conflict adapter then schedules the inline opaque payload bytes and
+invokes the same existing DKG semantic core used by the current synchronization
+mechanism. A separate materializer only persists that core's resulting SWM/VM
+projection atomically. The WAL, not a graph catalog or triplestore, is the
+replicated source of truth.
+
+This is explicitly two synchronization mechanisms and one semantic system. The
+`legacy` label refers only to current synchronization. It does not refer to the
+DKG semantic implementation, SWM/VM model, verified-memory logic, VM/finality
+logic, membership authority, or cryptographic implementation; those remain
+shared and singular before and after cutover.
 
 The recommendation is therefore not to discard PR #144. Preserve its authority,
 freshness, fail-closed routing, pull, VM, fault-injection, and A/B acceptance
 contracts, but replace its semantic inventory/event wire with the generic WAL
 object-set and range protocol. Keep the proposed Revision-4 single-store
-activation insight only inside the RDF adapter, where a guarded SPARQL update
-atomically advances projection content and its materialization marker.
+activation insight only inside the semantically passive materializer, where a
+guarded SPARQL update atomically advances projection content and its
+materialization marker.
 
 This comparison is pinned to PR head
 [`cf8ddb4`](https://github.com/OriginTrail/dkgv10-spec/blob/cf8ddb462afe98b9a4327a821dbcaa81edaae462/rfcs/OT-RFC-64-durable-inventory-sync.md).
@@ -372,8 +380,11 @@ SPARQL is the activation mechanism, not a conflict language.
 
 ### 7.2 WAL proposal
 
-The RDF adapter compiles SPARQL updates into explicit canonical patches and
-causal preconditions. It deterministically classifies:
+The existing DKG semantic core evaluates source operations and returns explicit
+canonical accepted outcomes. The WAL replay/conflict adapter schedules those
+bytes from causal preconditions, classifies protocol-level compatibility from
+explicit mutation footprints, and asks the same core to validate each branch.
+Together they deterministically represent:
 
 - causal successor;
 - idempotent overlap;
@@ -382,7 +393,8 @@ causal preconditions. It deterministically classifies:
 - incompatible conflict branch;
 - signed resolution referencing all heads.
 
-This is the largest semantic addition beyond PR #144. It is necessary because a
+This is the largest conflict-representation addition beyond PR #144; it is not
+a second semantic implementation. It is necessary because a
 generic set protocol will faithfully deliver concurrent records; it must not
 pretend their union automatically defines the active RDF view.
 
@@ -413,7 +425,7 @@ fallback reconciliation, range protocol, adapter contract, and explicit
 conflict model. Its justification is architectural deletion after migration:
 
 - no RDF page sync protocol;
-- no normal-versus-recovery reducers;
+- no normal-versus-recovery semantic implementations;
 - no store-derived graph delta log;
 - no transport knowledge of graph naming or KA lifecycle;
 - no need for every storage adapter to reproduce reconciliation behavior;
@@ -465,8 +477,8 @@ The WAL RFC should normatively import these PR #144 decisions:
 | SQLite inventory as protocol control truth         | `WalStore` signed checkpoints; local index implementation is replaceable |
 | Oxigraph active descriptor as network progress     | In-store RDF projection marker only                                      |
 | Non-canonical local extras and quarantine          | Pre-admission staging plus explicit adapter conflict/quarantine output   |
-| Ordered event-range replay                         | Unordered set difference plus causal reducer                             |
-| KA/RDF-aware reconciliation plus SPARQL activation | Transport-independent protocol plus `RdfSparqlAdapter`                   |
+| Ordered event-range replay                         | Unordered set difference plus a causal replay/conflict adapter that delegates to the shared semantic core |
+| KA/RDF-aware reconciliation plus SPARQL activation | Byte/ID-only protocol plus shared DKG semantic core and atomic projection persistence |
 
 ## 12. Rollout relationship
 
@@ -474,7 +486,8 @@ The PR #144 black-box convergence harness is reusable because it checks store
 end state rather than an internal mechanism. The WAL proposal should add
 byte-set and conflict assertions, then run a full-fleet shadow strategy:
 
-1. current sync authoritative, WAL local shadow;
+1. current synchronization authoritative, WAL local shadow, both invoking the
+   same semantic core;
 2. WAL network shadow and separate RDF projection;
 3. query/read parity canary;
 4. validate every collection, active author, upgraded node, and write path;
@@ -482,17 +495,18 @@ byte-set and conflict assertions, then run a full-fleet shadow strategy:
 6. reconcile the fleet to final signed vectors and prove production/shadow
    parity;
 7. activate one signed `NetworkWalCutoverV1` across the fleet;
-8. resume writes with WAL as the only authority and remove legacy handlers.
+8. resume writes with WAL as the only synchronization authority and remove
+   legacy-sync handlers, while retaining the same semantic core.
 
 The reworked WAL proposal deliberately rejects per-collection mixed authority
 and a live legacy fallback after WAL writes resume. Before activation, a failed
-gate aborts the maintenance window back to legacy authority. After activation,
+gate aborts the maintenance window back to legacy sync authority. After activation,
 rollback requires another coordinated maintenance operation and a deterministic
 projection export from WAL.
 
 If PR #144 section 12 Track 1 lands first, it becomes a useful tactical
 comparator. If the proposed Revision-4 Track-2 implementation lands first, it may
-serve as the authoritative legacy arm and its guarded SPARQL activation can
+serve as the authoritative legacy-sync arm and its guarded SPARQL activation can
 become the first RDF adapter materializer. Its semantic catalog must not become
 a second permanent replication truth after the WAL cutover. The WAL A/B run
 must record which arm was authoritative and preserve comparable v10.0.8 and
@@ -507,7 +521,7 @@ independent semantic oracle and frozen WAL vectors.
 | Remove SQLite/Oxigraph dual-authority in the current inventory RFC | PR #144 Revision 4         | One semantic store commit is simpler than cross-store coordination. |
 | Make sync independent of RDF and triplestore behavior              | WAL byte-set proposal      | Only immutable bytes and proofs cross the protocol boundary.        |
 | Support resumable large-object transfer and exact byte parity      | WAL byte-set proposal      | Whole-object ranges and final object hashes are normative.          |
-| Define deterministic concurrent SPARQL update behavior             | WAL RDF adapter            | Explicit causal merge/conflict/resolution model.                    |
+| Define deterministic concurrent SPARQL update behavior             | Shared semantic core plus WAL replay/conflict adapter | One DKG implementation with explicit causal scheduling and conflict retention. |
 | Deliver quickly without committing to the final architecture       | Parallel run               | Keep current path authoritative while applying independent gates.   |
 
 ## 14. Recommendation
@@ -522,13 +536,15 @@ but adopt the WAL proposal as the target protocol boundary. Specifically:
 2. Define `WalObjectV1`, exact byte identity, rateless IBLT reconciliation,
    signed set-commitment verification, deterministic fallback, and whole-object
    range transfer instead of semantic inventory events or catalogs.
-3. Implement the RDF/SPARQL reducer and guarded materializer as the first
-   adapter.
+3. Implement a deterministic replay/conflict adapter that invokes the existing
+   DKG semantic core, plus a guarded materializer that only persists the
+   resulting projection. Do not create WAL-specific SWM/VM, verified-memory,
+   finality, membership, or cryptographic behavior.
 4. Run byte reconciliation and shadow projection beside the current path.
 5. Consume OT-RFC-65's frozen protocol-v1 schema and vectors, then require
    byte-set equality, RDF projection equality, conflict determinism, crash replay,
    private security, backfill, and resource gates across the complete fleet.
-6. Promote WAL authority with one signed network-wide cutover, not a
+6. Promote WAL synchronization authority with one signed network-wide cutover, not a
    per-collection mixed-authority phase.
 7. Retire the PR #144 semantic inventory/catalog path and the superseded RFC-59
    received-change branches rather than retaining either as a second permanent
