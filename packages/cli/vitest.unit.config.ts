@@ -83,6 +83,12 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-ka-recovery.test.ts',
+          // #1836 — publisher.maxRetries must propagate through
+          // createPublisherControlFromStore (incl. a literal 0). Pure logic.
+          'test/publisher-maxretries-1836.test.ts',
+          // #1836 — config→construction wiring seam (runDaemonInner forwards
+          // config.publisher.maxRetries into both admission constructors).
+          'test/publisher-maxretries-wiring-1836.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
