@@ -10,6 +10,7 @@ import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import { isDurableSyncComplete } from '../durable-progress.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type {
@@ -203,7 +204,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
   const summary: DurableSyncSummary = {
     insertedTriples: 0,
-    complete: true,
+    complete: false,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,
@@ -224,6 +225,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
   };
+  let reachedEveryContextGraphTerminalBoundary = contextGraphIds.length > 0;
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -318,7 +320,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             );
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
-        summary.complete = false;
+        reachedEveryContextGraphTerminalBoundary = false;
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
         endPhase();
         break;
@@ -495,7 +497,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const updateDataCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && !metadataOnlyResponse;
-      const contextGraphComplete = batchVerifiedCleanly
+      const reachedContextGraphTerminalBoundary = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && updateMetaCheckpoint
         && updateDataCheckpoint
@@ -503,7 +505,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         && !metaResult.timedOut
         && effectiveDataResult.completed
         && !effectiveDataResult.timedOut;
-      if (!contextGraphComplete) summary.complete = false;
+      if (!reachedContextGraphTerminalBoundary) {
+        reachedEveryContextGraphTerminalBoundary = false;
+      }
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -590,7 +594,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
 
     } catch (pidErr) {
-      summary.complete = false;
+      reachedEveryContextGraphTerminalBoundary = false;
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
@@ -627,6 +631,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   if (summary.insertedTriples > 0) {
     logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
   }
+
+  summary.complete = isDurableSyncComplete(
+    summary,
+    reachedEveryContextGraphTerminalBoundary,
+  );
 
   return summary;
 }

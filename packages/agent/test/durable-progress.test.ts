@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { classifyDurableProgress } from '../src/sync/durable-progress.js';
+import {
+  classifyDurableProgress,
+  isDurableSyncComplete,
+} from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
   it('classifies inserted durable data as reconnect and readiness progress', () => {
@@ -116,5 +119,26 @@ describe('classifyDurableProgress', () => {
 
     expect(progress.madeReconnectProgress).toBe(true);
     expect(progress.madeReadinessProgress).toBe(true);
+  });
+});
+
+describe('isDurableSyncComplete', () => {
+  it('requires both a lane terminal boundary and a clean completed phase', () => {
+    const progress = { completedPhases: 1 };
+
+    expect(isDurableSyncComplete(progress, true)).toBe(true);
+    expect(isDurableSyncComplete(progress, false)).toBe(false);
+  });
+
+  it.each([
+    ['timeout', { timedOutPhases: 1 }],
+    ['transport failure', { failedPeers: 1 }],
+    ['phase failure', { failedPhases: 1 }],
+    ['denial', { deniedPhases: 1 }],
+    ['backpressure', { deferredBackpressure: 1 }],
+    ['rejected KC', { rejectedKcs: 1 }],
+    ['missing metadata', { dataRejectedMissingMeta: 1 }],
+  ])('centralizes %s as a non-complete durable result', (_label, failure) => {
+    expect(isDurableSyncComplete({ completedPhases: 1, ...failure }, true)).toBe(false);
   });
 });

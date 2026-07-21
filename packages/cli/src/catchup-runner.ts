@@ -5,6 +5,7 @@ import {
   classifyDurableProgress,
   type DKGAgent,
   type DurableProgressSummary,
+  type DurableSyncDiagnostics,
   type DurableSyncResult,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
@@ -109,10 +110,8 @@ export interface CatchupPhaseProgress extends DurableProgressSummary {
   emptyResponses?: number;
 }
 
-export type DurableLegDiagnostics = Omit<
-  Required<DurableSyncResult>,
-  'insertedTriples' | 'complete'
->;
+export type DurableLegDiagnostics = DurableSyncDiagnostics
+  & Pick<DurableSyncResult, 'deniedPhases'>;
 
 export interface DurableLegSummary {
   insertedTriples: number;
@@ -159,14 +158,10 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     ['rejectedKcs', diagnostics.rejectedKcs],
     ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
   ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
-  const progress = classifyDurableProgress(result);
-
   return {
     insertedTriples: count(result.insertedTriples),
     diagnostics,
-    complete: result.complete === true
-      && progress.completedWithoutFailure
-      && hardFailureDetails.length === 0,
+    complete: result.complete,
     hardFailureDetails,
   };
 }

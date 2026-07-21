@@ -257,7 +257,7 @@ import {
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
-import { classifyDurableProgress } from './sync/durable-progress.js';
+import { classifyDurableProgress, isDurableSyncComplete } from './sync/durable-progress.js';
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
@@ -4384,6 +4384,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ctx: OperationContext,
     remotePeerId: string,
     contextGraphId: string,
+    maxRounds?: number,
   ): Promise<DurableSyncResult> {
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
@@ -4402,6 +4403,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const outcome = await runChangelogSync({
       contextGraphId,
       limit: SYNC_PAGE_SIZE,
+      maxRounds,
       getCursor: () => {
         const c = this.changelogCursors.get(remotePeerId, contextGraphId);
         return c ? { era: c.era, seq: c.seq } : undefined;
@@ -4461,11 +4463,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           } : undefined,
         );
         result = mergeDurableSyncResults(result, r);
-        const complete = r.complete === true
-          && dropsReconciled
-          && r.timedOutPhases === 0 && r.failedPhases === 0
-          && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0
-          && r.rejectedKcs === 0;
+        const complete = r.complete && dropsReconciled;
         return { complete, insertedTriples: r.insertedTriples };
       },
       logWarn: (m) => this.log.warn(ctx, m),
@@ -4551,6 +4549,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     result.insertedTriples += insertedDataTriples + insertedMetaTriples;
     const changelogComplete = outcome.kind === 'delta'
       || (outcome.kind === 'resync' && outcome.complete);
+    if (outcome.kind === 'incomplete') result.failedPhases += 1;
     if (!changelogComplete) {
       // A legacy fallback may have completed its own fetch phases while the
       // changelog drop remains unauthoritative. Preserve inserted progress,
@@ -4568,15 +4567,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       result.completedPhases += 1;
     }
     if (outcome.kind === 'denied') result.deniedPhases += 1;
-    result.complete = result.complete === true
-      && changelogComplete
-      && result.timedOutPhases === 0
-      && result.failedPhases === 0
-      && result.failedPeers === 0
-      && result.deniedPhases === 0
-      && result.dataRejectedMissingMeta === 0
-      && result.rejectedKcs === 0
-      && (result.deferredBackpressure ?? 0) === 0;
+    result.complete = isDurableSyncComplete(result, changelogComplete);
     return result;
   }
 

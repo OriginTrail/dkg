@@ -145,3 +145,16 @@ export function classifyDurableProgress(
       && !metadataOnly,
   };
 }
+
+/**
+ * Canonical whole-run completion policy for durable requester lanes.
+ * Callers provide only whether their lane reached its own terminal boundary;
+ * the shared classifier owns every diagnostic counter that can invalidate it.
+ */
+export function isDurableSyncComplete(
+  progress: DurableProgressSummary | null | undefined,
+  reachedTerminalBoundary: boolean,
+): boolean {
+  return reachedTerminalBoundary
+    && classifyDurableProgress(progress).completedWithoutFailure;
+}

@@ -197,6 +197,51 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
+  it.each([
+    ['rejectedKcs', { rejectedKcs: 1 }],
+    ['dataRejectedMissingMeta', { dataRejectedMissingMeta: 1 }],
+    ['deniedPhases', { deniedPhases: 1 }],
+  ] as const)('returns 503 and preserves progress for a %s hard failure', async (counter, failure) => {
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed: vi.fn(async () => detailedDurableResult({
+        insertedTriples: 12,
+        insertedDataTriples: 10,
+        insertedMetaTriples: 2,
+        completedPhases: 1,
+        complete: false,
+        ...failure,
+      })),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'agent-blackbox-vm',
+        peerId: 'peer-core',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      durableComplete: false,
+      totalDurableInsertedTriples: 12,
+      results: [{
+        peerId: 'peer-core',
+        durableInsertedTriples: 12,
+        durableComplete: false,
+        durableError: `Durable sync did not complete (${counter}=1)`,
+      }],
+    });
+  });
+
   it('reports a safely checkpointed timeout as retryable incomplete progress', async () => {
     const agent = {
       peerId: 'self-peer',
