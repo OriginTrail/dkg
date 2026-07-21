@@ -449,6 +449,49 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { result: kind, ...rest });
   }
 
+  // GET /api/publisher/journal?jobId=  OR  ?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1829 — read-only append-only admission/transaction journal. By jobId, or facts-pure
+  // by lifecycle identity (derived with the SAME normalization admission persisted).
+  // txHashes are ATTEMPTED submissions — reconcile against chain, never treat as sent.
+  if (req.method === "GET" && path === "/api/publisher/journal") {
+    const jobId = url.searchParams.get("jobId")?.trim() || undefined;
+    if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
+      return jsonResponse(res, 200, result);
+    }
+    const rawContextGraphId = url.searchParams.get("contextGraphId");
+    const name = url.searchParams.get("name") ?? undefined;
+    if (!rawContextGraphId || !name) {
+      return jsonResponse(res, 400, { error: "Missing required jobId, or contextGraphId and name" });
+    }
+    const intentKey = url.searchParams.get("intentKey") ?? undefined;
+    if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+      return jsonResponse(res, 400, { error: "Malformed intentKey" });
+    }
+    const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+    const rawSubGraphName = url.searchParams.get("subGraphName");
+    if (!validateOptionalSubGraphName(rawSubGraphName, res)) return;
+    const subGraphName = rawSubGraphName ?? undefined;
+    const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+    const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+    const controlChar = new RegExp('[\u0000-\u001F\u007F]');
+    const hasControlChar = (value: string | undefined): boolean =>
+      value !== undefined && controlChar.test(value);
+    if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+      return jsonResponse(res, 400, {
+        error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+      });
+    }
+    const result = await publisherControl.readJournalByIntent({
+      contextGraphId,
+      name,
+      subGraphName,
+      agentAddress,
+      intentKey,
+    });
+    return jsonResponse(res, 200, result);
+  }
+
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
   if (req.method === "GET" && path.startsWith("/api/publisher/jobs/")) {
     const segments = path.slice("/api/publisher/jobs/".length).split("/");

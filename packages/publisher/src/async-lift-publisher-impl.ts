@@ -35,8 +35,11 @@ import type {
   AsyncLiftPublisherRecoveryResolver,
   IntentLookupInput,
   IntentLookupResult,
+  JournalReadInput,
+  JournalReadResult,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
+  VmPublishAdmissionJournalReader,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
@@ -60,11 +63,13 @@ import {
   DEFAULT_JOURNAL_GRAPH_URI,
   JOURNAL_SEQ,
   JOURNAL_LIFECYCLE_KEY,
+  JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
+  parseJournalEntry,
   serializeVmPublishIntentIndex,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
@@ -187,7 +192,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
@@ -1102,6 +1107,64 @@ export class TripleStoreAsyncLiftPublisher
       ...(failureCode !== undefined ? { failureCode } : {}),
       ...(recoveredFromStatus !== undefined ? { recoveredFromStatus } : {}),
     };
+  }
+
+  /**
+   * #1829 — facts-pure lineage read. Derives the lineageKey from the retained facts
+   * (NEVER the ephemeral #1828 job-subject index, which clear/cancel remove), so it
+   * still resolves after the job is gone. Read-only.
+   */
+  async readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    let lineageKey: string;
+    try {
+      lineageKey = knowledgeAssetVmPublishLifecycleKey(facts);
+    } catch {
+      return { entries: [], maxSeq: -1, complete: true, txHashes: [] };
+    }
+    const entries = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, lineageKey);
+    const filtered = facts.intentKey === undefined
+      ? entries
+      : entries.filter((e) => e.intentKey === facts.intentKey);
+    return this.summarizeJournal(filtered);
+  }
+
+  /** #1829 — all journal entries bearing this jobId. Read-only. */
+  async readJournalByJob(jobId: string): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    return this.summarizeJournal(await this.readJournalEntriesBy(JOURNAL_JOB_ID, jobId));
+  }
+
+  // Object-bound read of every entry whose `predicate` equals `value`, grouped by
+  // subject and parsed. A corrupt row is skipped (parseJournalEntry returns null).
+  private async readJournalEntriesBy(predicate: string, value: string): Promise<AdmissionJournalEntry[]> {
+    const result = await this.store.query(
+      `SELECT ?e ?p ?o WHERE { GRAPH <${this.journalGraphUri}> { ?e <${predicate}> ${literal(value)} . ?e ?p ?o } }`,
+    );
+    const bySubject = new Map<string, Record<string, string>>();
+    for (const row of expectBindings(result)) {
+      const subject = row['e'];
+      const p = row['p'];
+      const o = row['o'];
+      if (subject === undefined || p === undefined || o === undefined) continue;
+      const map = bySubject.get(subject) ?? {};
+      map[p] = o;
+      bySubject.set(subject, map);
+    }
+    return [...bySubject.values()]
+      .map((map) => parseJournalEntry(map))
+      .filter((e): e is AdmissionJournalEntry => e !== null)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  private summarizeJournal(entries: AdmissionJournalEntry[]): JournalReadResult {
+    const maxSeq = entries.reduce((max, e) => Math.max(max, e.seq), -1);
+    // complete = no seq gap. On oxigraph this is authoritative; on external SPARQL
+    // backends (no fsync) the highest-seq entry can be lost on crash without a visible
+    // gap — documented on JournalReadResult as best-effort there.
+    const complete = entries.length === maxSeq + 1;
+    const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
+    return { entries, maxSeq, complete, txHashes };
   }
 
   /**

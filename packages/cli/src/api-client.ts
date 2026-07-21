@@ -1241,6 +1241,32 @@ export class ApiClient {
     return this.get(`/api/publisher/job-by-intent?${qs.toString()}`);
   }
 
+  // #1829 — read-only append-only journal. By jobId, or facts-pure by lifecycle
+  // identity. txHashes are ATTEMPTED submissions — verify against chain, never treat
+  // as sent.
+  async publisherJournal(query: {
+    jobId?: string;
+    contextGraphId?: string;
+    name?: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<{
+    entries: Array<{ seq: number; at: number; kind: string; jobId: string; lineageKey: string; txHash?: string }>;
+    maxSeq: number;
+    complete: boolean;
+    txHashes: string[];
+  }> {
+    const qs = new URLSearchParams();
+    if (query.jobId !== undefined) qs.set('jobId', query.jobId);
+    if (query.contextGraphId !== undefined) qs.set('contextGraphId', query.contextGraphId);
+    if (query.name !== undefined) qs.set('name', query.name);
+    if (query.subGraphName !== undefined) qs.set('subGraphName', query.subGraphName);
+    if (query.agentAddress !== undefined) qs.set('agentAddress', query.agentAddress);
+    if (query.intentKey !== undefined) qs.set('intentKey', query.intentKey);
+    return this.get(`/api/publisher/journal?${qs.toString()}`);
+  }
+
   async publisherStats(): Promise<Record<string, number>> {
     return this.get('/api/publisher/stats');
   }

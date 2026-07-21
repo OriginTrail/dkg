@@ -163,4 +163,82 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     const rows = await journalRows();
     expect(rows.some((r) => r.jobId === 'legacy-bad')).toBe(false);
   });
+
+  // #1829 AC4 — the journal is append-only: cancel/clear/deleteJob operate on the
+  // control-plane graph only and must NEVER remove journal entries.
+  it('cancel does not remove the journal entry for the cancelled job', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect((await journalRows()).some((r) => r.jobId === jobId)).toBe(true);
+    await publisher.cancel(jobId); // accepted-only cancel deletes the job subject
+    expect(await publisher.getStatus(jobId)).toBeNull(); // job gone from control plane
+    expect((await journalRows()).some((r) => r.jobId === jobId)).toBe(true); // journal survives
+  });
+
+  it('clear(finalized) does not remove journal entries', async () => {
+    const publisher = createPublisher();
+    const jobId = await driveToValidated(publisher);
+    // Force a local no-op finalize so the job reaches 'finalized' without a chain tx.
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+    });
+    await publisher.update(jobId, 'included', {
+      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+      inclusion: { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 },
+    });
+    await publisher.update(jobId, 'finalized', {
+      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+      inclusion: { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 },
+      finalization: { mode: 'local' },
+    });
+    const before = await journalRows();
+    expect(before.length).toBeGreaterThan(0);
+    await publisher.clear('finalized');
+    expect(await publisher.getStatus(jobId)).toBeNull(); // record cleared from control plane
+    expect(await journalRows()).toEqual(before); // journal untouched
+  });
+
+  // #1829 chunk 5 — facts-pure reads.
+  const facts = { contextGraphId: 'music-social', name: 'albums' };
+
+  it('readJournalByIntent returns seq-ordered entries, complete, with distinct txHashes', async () => {
+    const publisher = createPublisher();
+    const jobId = await driveToValidated(publisher);
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+    });
+    const res = await publisher.readJournalByIntent(facts);
+    expect(res.entries.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
+    expect(res.entries.map((e) => e.kind)).toEqual(['admission', 'claimed', 'validated', 'broadcast']);
+    expect(res.maxSeq).toBe(3);
+    expect(res.complete).toBe(true);
+    expect(res.txHashes).toEqual([`0x${'ef'.repeat(32)}`]); // ATTEMPTED hash, de-duplicated
+  });
+
+  it('readJournalByIntent resolves from facts AFTER the job is cleared (AC4)', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.cancel(jobId); // removes the job + its ephemeral #1828 index
+    const res = await publisher.readJournalByIntent(facts);
+    // The lineage is still readable purely from facts (journal survived the cancel).
+    expect(res.entries.length).toBe(1);
+    expect(res.entries[0]?.kind).toBe('admission');
+  });
+
+  it('readJournalByJob returns entries for that jobId', async () => {
+    const publisher = createPublisher();
+    const jobId = await driveToValidated(publisher);
+    const res = await publisher.readJournalByJob(jobId);
+    expect(res.entries.every((e) => e.jobId === jobId)).toBe(true);
+    expect(res.entries.map((e) => e.kind)).toEqual(['admission', 'claimed', 'validated']);
+  });
+
+  it('readJournalByIntent returns empty for unknown facts', async () => {
+    const publisher = createPublisher();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const res = await publisher.readJournalByIntent({ contextGraphId: 'music-social', name: 'nope' });
+    expect(res.entries).toEqual([]);
+    expect(res.maxSeq).toBe(-1);
+    expect(res.complete).toBe(true);
+  });
 });

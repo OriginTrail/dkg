@@ -263,8 +263,11 @@ export {
   type AsyncLiftPublisherRecoveryResolver,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
+  type VmPublishAdmissionJournalReader,
   type IntentLookupInput,
   type IntentLookupResult,
+  type JournalReadInput,
+  type JournalReadResult,
 } from './async-lift-publisher.js';
 export {
   TripleStoreAsyncPromoteQueue,
