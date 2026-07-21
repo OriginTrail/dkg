@@ -151,6 +151,7 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     backoffWorthyFailures: count(result.backoffWorthyFailures),
     deferredBackpressure: count(result.deferredBackpressure),
   };
+  const insertedTriples = count(result.insertedTriples);
   const hardFailureDetails = [
     ['failedPeers', diagnostics.failedPeers],
     ['failedPhases', diagnostics.failedPhases],
@@ -158,8 +159,20 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     ['rejectedKcs', diagnostics.rejectedKcs],
     ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
   ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
+  const committedProgress = insertedTriples > 0
+    || diagnostics.insertedDataTriples > 0
+    || diagnostics.insertedMetaTriples > 0
+    || diagnostics.checkpointAdvances > 0;
+  if (!result.complete && !committedProgress && hardFailureDetails.length === 0) {
+    // A timeout/backpressure stop before the first durable boundary is not a
+    // successful no-op. Give the HTTP adapter a typed failure reason so
+    // durable-only automation keeps retrying instead of treating 200/ok as an
+    // already-synchronized graph. Safely committed prefixes remain observable
+    // as retryable progress and intentionally do not enter this branch.
+    hardFailureDetails.push('incompleteWithoutProgress=1');
+  }
   return {
-    insertedTriples: count(result.insertedTriples),
+    insertedTriples,
     diagnostics,
     complete: result.complete,
     hardFailureDetails,

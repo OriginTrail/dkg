@@ -1113,7 +1113,16 @@ WHERE {
       attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
         ? attempts.every((attempt) => attempt.durableComplete === true)
         : undefined;
-    const durableComplete = completionFor(durableAttempts);
+    // Whole-request completion is an AND over every requested CG. Flattening
+    // attempts alone can accidentally hide a CG that had no eligible peer and
+    // report the other CGs as a complete request. Preserve `undefined` for
+    // legacy/unknown result shapes, but never manufacture `true` from a strict
+    // subset of the requested graphs.
+    const perContextGraphCompletion = perCgLegs.map((cg) => completionFor(cg.perPeer));
+    const durableComplete = perContextGraphCompletion.length > 0
+      && perContextGraphCompletion.every((complete) => complete !== undefined)
+      ? perContextGraphCompletion.every((complete) => complete === true)
+      : undefined;
     const durableOnlyAllPeersFailed = includeDurable
       && !includeSharedMemory
       && durableAttempts.length > 0
