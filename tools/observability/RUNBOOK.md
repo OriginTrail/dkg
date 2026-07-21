@@ -116,10 +116,11 @@ Restart the node. Local logging (SQLite + daemon.log) is unaffected; this only a
 
 **Logs vs traces/metrics (different transports, same endpoint host):** logs ship via a hand-rolled **OTLP/HTTP JSON** exporter (the OTel Logs SDK is still "Development"), while **traces and metrics use the stable OTel SDK** OTLP/protobuf exporters. The polaris setup today only has a **logs** backend (Loki via Alloy), so leave `telemetry.traces`/`telemetry.metrics` out (or set `enabled: false`) until a traces backend (Tempo) and metrics backend (Mimir/Prometheus) are provisioned — the `node-config.example.json` shows the full three-signal shape and `config.alloy` has the matching commented routing.
 
-The local Node UI metrics collector is independent of OTLP export. Set
-`telemetry.metrics.collectionEnabled` to `false` to disable local SQLite
-snapshots and store scans without changing OTLP settings. See the
-[Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
+The local Node UI metrics collector is independent of OTLP export. Its
+`collectionEnabled`, `collectionIntervalMs`, and `storeCollectionIntervalMs`
+settings still apply when `telemetry.metrics.enabled` is false. See the
+[Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md) before
+changing full-store scan cadence on Blazegraph nodes.
 
 ## Step 4 — view in Grafana
 - **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panel is volume-by-level.

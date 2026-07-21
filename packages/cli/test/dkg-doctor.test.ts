@@ -400,11 +400,17 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'apiPort' && f.severity === 'error')).toBeDefined();
   });
 
-  it('rejects invalid local metrics collector toggle types', async () => {
+  it('rejects invalid local metrics collector intervals and toggle types', async () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({
-          telemetry: { metrics: { collectionEnabled: 'yes' } },
+          telemetry: {
+            metrics: {
+              collectionEnabled: 'yes',
+              collectionIntervalMs: 0,
+              storeCollectionIntervalMs: 2_147_483_648,
+            },
+          },
         }),
       },
     });
@@ -412,20 +418,30 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) =>
       f.subject === 'telemetry.metrics.collectionEnabled' && f.severity === 'error',
     )).toBeDefined();
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.collectionIntervalMs' && f.severity === 'error',
+    )).toBeDefined();
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.storeCollectionIntervalMs' && f.severity === 'error',
+    )).toBeDefined();
   });
 
-  it('accepts a boolean local metrics collector toggle', async () => {
+  it('accepts the documented 30-second and 12-hour collector cadences', async () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({
-          telemetry: { metrics: { collectionEnabled: false } },
+          telemetry: {
+            metrics: {
+              collectionEnabled: true,
+              collectionIntervalMs: 30_000,
+              storeCollectionIntervalMs: 43_200_000,
+            },
+          },
         }),
       },
     });
     const findings = await runConfigSanityCheck(deps);
-    expect(findings.find((f) =>
-      f.subject === 'telemetry.metrics.collectionEnabled',
-    )).toBeUndefined();
+    expect(findings.filter((f) => f.subject?.startsWith('telemetry.metrics.'))).toEqual([]);
   });
 
   it('warns on deprecated autoUpdate fields set to non-empty values', async () => {

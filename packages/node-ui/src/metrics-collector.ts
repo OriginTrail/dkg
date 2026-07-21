@@ -50,7 +50,50 @@ export interface MetricsSource {
   getRelayStats?(): RelayStatsSnapshot | null;
 }
 
-const SNAPSHOT_INTERVAL_MS = 30_000; // 30 seconds
+/** Default cadence for cheap system/network snapshots (30 seconds). */
+export const DEFAULT_METRICS_COLLECTION_INTERVAL_MS = 30_000;
+/**
+ * Default cadence for full-store cardinality scans (12 hours). These queries
+ * can saturate large remote SPARQL stores, so they deliberately do not inherit
+ * the cheap snapshot cadence.
+ */
+export const DEFAULT_STORE_METRICS_COLLECTION_INTERVAL_MS = 43_200_000;
+/** Prevent an accidentally configured tight loop from pegging the daemon. */
+export const MIN_METRICS_COLLECTION_INTERVAL_MS = 1_000;
+/** Largest delay Node timers represent without overflowing to a ~1 ms delay. */
+export const MAX_METRICS_COLLECTION_INTERVAL_MS = 2_147_483_647;
+
+export interface MetricsCollectorOptions {
+  /** Cheap system/network snapshot cadence. Default: 30 seconds. */
+  collectionIntervalMs?: number;
+  /** Expensive full-store cardinality cadence. Default: 12 hours. */
+  storeCollectionIntervalMs?: number;
+}
+
+interface StoreMetricsSnapshot {
+  totalTriples: number | null;
+  totalKCs: number | null;
+  totalKAs: number | null;
+  confirmedKCs: number | null;
+  tentativeKCs: number | null;
+  contextGraphCount: number | null;
+}
+
+export function assertMetricsCollectionIntervalMs(value: number, field: string): number {
+  if (
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < MIN_METRICS_COLLECTION_INTERVAL_MS ||
+    value > MAX_METRICS_COLLECTION_INTERVAL_MS
+  ) {
+    throw new Error(
+      `${field} must be a finite integer between ` +
+      `${MIN_METRICS_COLLECTION_INTERVAL_MS} and ${MAX_METRICS_COLLECTION_INTERVAL_MS} ms ` +
+      `(received ${String(value)})`,
+    );
+  }
+  return value;
+}
 
 /**
  * Clamp a bigint relay byte count to a safe JS Number for SQLite storage.
@@ -70,9 +113,16 @@ function bigintToSafeNumber(v: bigint): number {
  * and stores them as snapshots in SQLite.
  */
 export class MetricsCollector {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private systemTimer: ReturnType<typeof setTimeout> | null = null;
+  private storeTimer: ReturnType<typeof setTimeout> | null = null;
+  private running = false;
+  private activeStoreCollection: Promise<StoreMetricsSnapshot> | null = null;
+  private latestStoreMetrics: StoreMetricsSnapshot | null = null;
+  private initialSnapshotHandled = false;
   private prevCpuTimes: { idle: number; total: number } | null = null;
   private readonly startTime = Date.now();
+  readonly collectionIntervalMs: number;
+  readonly storeCollectionIntervalMs: number;
 
   constructor(
     private readonly db: DashboardDB,
@@ -84,16 +134,91 @@ export class MetricsCollector {
      * null. Defaults to always-collect so existing callers/tests are unchanged.
      */
     private readonly shouldCollectStoreMetrics: () => boolean = () => true,
-  ) {}
+    options: MetricsCollectorOptions = {},
+  ) {
+    this.collectionIntervalMs = assertMetricsCollectionIntervalMs(
+      options.collectionIntervalMs ?? DEFAULT_METRICS_COLLECTION_INTERVAL_MS,
+      'collectionIntervalMs',
+    );
+    this.storeCollectionIntervalMs = assertMetricsCollectionIntervalMs(
+      options.storeCollectionIntervalMs ?? DEFAULT_STORE_METRICS_COLLECTION_INTERVAL_MS,
+      'storeCollectionIntervalMs',
+    );
+  }
 
   start(): void {
-    if (this.timer) return;
-    this.collectAndStore().then(snap => {
-      this.backfillNulls(snap);
-    }).catch(() => {});
-    this.timer = setInterval(() => {
-      this.collectAndStore().catch(() => {});
-    }, SNAPSHOT_INTERVAL_MS);
+    if (this.running) return;
+    this.running = true;
+    // Start both lanes immediately. Each lane schedules its next run only
+    // after its current work settles, so neither cheap snapshots nor expensive
+    // scans can overlap with themselves. Keeping the lanes independent lets
+    // 30-second CPU/memory snapshots continue during a slow store scan.
+    void this.runSystemCollection();
+    void this.runStoreCollection();
+  }
+
+  private shouldCollectStoreMetricsSafely(): boolean {
+    try {
+      return this.shouldCollectStoreMetrics();
+    } catch {
+      return false;
+    }
+  }
+
+  private scheduleSystemCollection(): void {
+    if (!this.running) return;
+    this.systemTimer = setTimeout(() => {
+      this.systemTimer = null;
+      void this.runSystemCollection();
+    }, this.collectionIntervalMs);
+  }
+
+  private async runSystemCollection(): Promise<void> {
+    if (!this.running) return;
+    try {
+      const cachedStoreMetrics = this.shouldCollectStoreMetricsSafely()
+        ? this.latestStoreMetrics
+        : null;
+      const snap = await this.collectAndStoreInternal(false, cachedStoreMetrics);
+      if (cachedStoreMetrics && !this.initialSnapshotHandled) {
+        this.initialSnapshotHandled = true;
+        this.backfillNulls(snap);
+      }
+    } catch {
+      // Metrics are best-effort and must never stop the daemon.
+    } finally {
+      this.scheduleSystemCollection();
+    }
+  }
+
+  private scheduleStoreCollection(delayMs: number): void {
+    if (!this.running) return;
+    this.storeTimer = setTimeout(() => {
+      this.storeTimer = null;
+      void this.runStoreCollection();
+    }, delayMs);
+  }
+
+  private async runStoreCollection(): Promise<void> {
+    if (!this.running) return;
+    if (!this.shouldCollectStoreMetricsSafely()) {
+      // Keep re-evaluating the presence gate at the cheaper of the two
+      // cadences. This does not query the store, and prevents a consumer that
+      // appears just after startup from waiting 12 hours for its first scan.
+      this.scheduleStoreCollection(
+        Math.min(this.collectionIntervalMs, this.storeCollectionIntervalMs),
+      );
+      return;
+    }
+
+    try {
+      this.latestStoreMetrics = await this.collectStoreMetricsSerialized();
+    } catch {
+      // Individual source errors are already converted to null below. This is
+      // defence in depth for an unexpected collector-level failure.
+    } finally {
+      this.scheduleStoreCollection(this.storeCollectionIntervalMs);
+    }
   }
 
   private backfillNulls(snap: MetricSnapshotRow): void {
@@ -107,19 +232,38 @@ export class MetricsCollector {
   }
 
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    this.running = false;
+    if (this.systemTimer) {
+      clearTimeout(this.systemTimer);
+      this.systemTimer = null;
+    }
+    if (this.storeTimer) {
+      clearTimeout(this.storeTimer);
+      this.storeTimer = null;
     }
   }
 
   async collectAndStore(): Promise<MetricSnapshotRow> {
-    const snap = await this.collect();
+    return this.collectAndStoreInternal(this.shouldCollectStoreMetricsSafely());
+  }
+
+  private async collectAndStoreInternal(
+    includeStoreMetrics: boolean,
+    cachedStoreMetrics: StoreMetricsSnapshot | null = null,
+  ): Promise<MetricSnapshotRow> {
+    const snap = await this.collectInternal(includeStoreMetrics, cachedStoreMetrics);
     this.db.insertSnapshot(snap);
     return snap;
   }
 
   async collect(): Promise<MetricSnapshotRow> {
+    return this.collectInternal(this.shouldCollectStoreMetricsSafely());
+  }
+
+  private async collectInternal(
+    includeStoreMetrics: boolean,
+    cachedStoreMetrics: StoreMetricsSnapshot | null = null,
+  ): Promise<MetricSnapshotRow> {
     const cpuPercent = this.measureCpu();
     const mem = memoryUsage();
     const heap = mem.heapUsed;
@@ -147,12 +291,14 @@ export class MetricsCollector {
       rpcHealthy = (await this.source.isRpcHealthy()) ? 1 : 0;
     } catch { /* ignore */ }
 
-    let totalTriples: number | null = null;
-    let totalKCs: number | null = null;
-    let totalKAs: number | null = null;
-    let confirmedKCs: number | null = null;
-    let tentativeKCs: number | null = null;
-    let contextGraphCount: number | null = null;
+    let storeMetrics = cachedStoreMetrics ?? {
+      totalTriples: null,
+      totalKCs: null,
+      totalKAs: null,
+      confirmedKCs: null,
+      tentativeKCs: null,
+      contextGraphCount: null,
+    };
 
     // These six getters are full-store SPARQL scans (COUNT / COUNT(DISTINCT)
     // across every graph, plus the context-graph inventory) — the expensive
@@ -160,13 +306,8 @@ export class MetricsCollector {
     // columns null (already nullable; charts render the gap). The cheap
     // system/network metrics above always collect, so a CPU peg is still
     // recorded even while no dashboard is open. (#1066 Item 1)
-    if (this.shouldCollectStoreMetrics()) {
-      try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
-      try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
-      try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
-      try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
-      try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
-      try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+    if (includeStoreMetrics) {
+      storeMetrics = await this.collectStoreMetricsSerialized();
     }
 
     let relayCapacity: number | null = null;
@@ -206,13 +347,13 @@ export class MetricsCollector {
       direct_peers: this.source.getDirectPeerCount(),
       relayed_peers: this.source.getRelayedPeerCount(),
       mesh_peers: this.source.getMeshPeerCount(),
-      contextGraph_count: contextGraphCount,
-      total_triples: totalTriples,
-      total_kcs: totalKCs,
-      total_kas: totalKAs,
+      contextGraph_count: storeMetrics.contextGraphCount,
+      total_triples: storeMetrics.totalTriples,
+      total_kcs: storeMetrics.totalKCs,
+      total_kas: storeMetrics.totalKAs,
       store_bytes: storeBytes,
-      confirmed_kcs: confirmedKCs,
-      tentative_kcs: tentativeKCs,
+      confirmed_kcs: storeMetrics.confirmedKCs,
+      tentative_kcs: storeMetrics.tentativeKCs,
       rpc_latency_ms: rpcLatency,
       rpc_healthy: rpcHealthy,
       relay_capacity: relayCapacity,
@@ -220,6 +361,39 @@ export class MetricsCollector {
       relay_active_circuits: relayActiveCircuits,
       relay_bytes_in: relayBytesIn,
       relay_bytes_out: relayBytesOut,
+    };
+  }
+
+  private collectStoreMetricsSerialized(): Promise<StoreMetricsSnapshot> {
+    if (this.activeStoreCollection) return this.activeStoreCollection;
+    const collection = this.collectStoreMetrics();
+    this.activeStoreCollection = collection;
+    void collection.finally(() => {
+      if (this.activeStoreCollection === collection) this.activeStoreCollection = null;
+    });
+    return collection;
+  }
+
+  private async collectStoreMetrics(): Promise<StoreMetricsSnapshot> {
+    let totalTriples: number | null = null;
+    let totalKCs: number | null = null;
+    let totalKAs: number | null = null;
+    let confirmedKCs: number | null = null;
+    let tentativeKCs: number | null = null;
+    let contextGraphCount: number | null = null;
+    try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
+    try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
+    try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
+    try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
+    try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
+    try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+    return {
+      totalTriples,
+      totalKCs,
+      totalKAs,
+      confirmedKCs,
+      tentativeKCs,
+      contextGraphCount,
     };
   }
 

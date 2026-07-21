@@ -20,11 +20,11 @@ import {
   parseAutoUpdateVerifyTagSignature,
   type DkgConfig,
 } from '../../config.js';
-import { resolveMetricsCollectorConfig } from '../../metrics-collector-config.js';
 import {
   formatAutoUpdateTagVerificationWarning,
   resolveAutoUpdateGitRefPlan,
 } from '../../auto-update-ref.js';
+import { resolveMetricsCollectorConfig } from '../../metrics-collector-config.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
@@ -99,23 +99,34 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
     }
   }
 
+  // Local Node UI metrics collector config. Validate each leaf separately so
+  // one typo does not hide another in `dkg doctor` output. Daemon startup uses
+  // the same resolver (with the real environment) and fails fast as well.
   const telemetry = parsed.telemetry;
   if (telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)) {
     const metrics = (telemetry as Record<string, unknown>).metrics;
     if (metrics && typeof metrics === 'object' && !Array.isArray(metrics)) {
-      const collectionEnabled = (metrics as Record<string, unknown>).collectionEnabled;
-      if (collectionEnabled !== undefined) {
+      const metricConfig = metrics as Record<string, unknown>;
+      for (const field of [
+        'collectionEnabled',
+        'collectionIntervalMs',
+        'storeCollectionIntervalMs',
+      ] as const) {
+        if (metricConfig[field] === undefined) continue;
         try {
           resolveMetricsCollectorConfig({
-            telemetry: { metrics: { collectionEnabled } },
+            telemetry: { metrics: { [field]: metricConfig[field] } },
           } as unknown as Pick<DkgConfig, 'telemetry'>, {});
         } catch (err) {
           findings.push({
             check: 'config-sanity',
             severity: 'error',
             message: err instanceof Error ? err.message : String(err),
-            advisory: 'Set telemetry.metrics.collectionEnabled to true or false.',
-            subject: 'telemetry.metrics.collectionEnabled',
+            advisory:
+              field === 'collectionEnabled'
+                ? 'Set telemetry.metrics.collectionEnabled to true or false.'
+                : 'Use an integer from 1000 through 2147483647 milliseconds.',
+            subject: `telemetry.metrics.${field}`,
           });
         }
       }

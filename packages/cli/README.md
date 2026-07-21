@@ -49,8 +49,9 @@ dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 
 ## Node UI metrics collection
 
-Operators can disable local dashboard snapshots independently from
-OpenTelemetry metric export; see the
+Local dashboard snapshots use a 30-second system cadence and an independent
+12-hour full-store SPARQL cadence by default. Operators can tune or disable the
+collector without changing OpenTelemetry's `exportIntervalMs`; see the
 [Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
 
 ## Running a Core Node (relay operator)

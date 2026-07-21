@@ -11,8 +11,8 @@ import {
 } from '../src/daemon/metrics-queries.js';
 
 // Guards the shared COUNT parser the daemon's metric getters depend on. The
-// getters themselves are intentionally uncached (metricsSource is consumed only
-// by the 30s MetricsCollector tick, so each snapshot re-reads the store fresh).
+// getters themselves are intentionally uncached: MetricsCollector owns the
+// independently configured store cadence and serializes each actual scan.
 describe('parseRdfInt', () => {
   it('parses RDF typed-integer literals and bare numbers, defaulting to 0', () => {
     expect(parseRdfInt('"1000"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe(1000);
