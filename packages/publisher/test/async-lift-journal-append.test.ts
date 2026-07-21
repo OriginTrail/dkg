@@ -241,4 +241,32 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     expect(res.maxSeq).toBe(-1);
     expect(res.complete).toBe(true);
   });
+
+  // #1875 review (🔴): completeness is a property of the LINEAGE, not a subset. A
+  // successor job continues the lineage seq (does not restart at 0), so a by-job or
+  // intentKey-filtered read of a non-first version must NOT report spurious incomplete.
+  it('reports the lineage complete for a subset read of a successor job (no spurious incomplete)', async () => {
+    const publisher = createPublisher();
+    // First job driven to a TERMINAL state so it no longer occupies the subject and a
+    // fresh enqueue admits a genuine successor (rather than dedup returning the same job).
+    const first = await driveToValidated(publisher);
+    const bx = { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' };
+    const inc = { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 };
+    await publisher.update(first, 'broadcast', { broadcast: bx });
+    await publisher.update(first, 'included', { broadcast: bx, inclusion: inc });
+    await publisher.update(first, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
+
+    // Successor for the SAME lifecycle subject continues the lineage seq (starts > 0).
+    const second = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(second).not.toBe(first);
+
+    const full = await publisher.readJournalByIntent(facts);
+    expect(full.complete).toBe(true); // full lineage is gap-free
+
+    const bySuccessor = await publisher.readJournalByJob(second);
+    expect(bySuccessor.entries.every((e) => e.jobId === second)).toBe(true);
+    expect(bySuccessor.entries[0]?.seq).toBeGreaterThan(0); // successor entries start above 0
+    expect(bySuccessor.complete).toBe(true); // lineage-level completeness — NOT spuriously false
+    expect(bySuccessor.maxSeq).toBe(full.maxSeq); // lineage max, not the subset's own max
+  });
 });

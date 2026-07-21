@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -1251,12 +1252,7 @@ export class ApiClient {
     subGraphName?: string;
     agentAddress?: string;
     intentKey?: string;
-  }): Promise<{
-    entries: Array<{ seq: number; at: number; kind: string; jobId: string; lineageKey: string; txHash?: string }>;
-    maxSeq: number;
-    complete: boolean;
-    txHashes: string[];
-  }> {
+  }): Promise<JournalReadResult> {
     const qs = new URLSearchParams();
     if (query.jobId !== undefined) qs.set('jobId', query.jobId);
     if (query.contextGraphId !== undefined) qs.set('contextGraphId', query.contextGraphId);
