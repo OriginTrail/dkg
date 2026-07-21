@@ -44,6 +44,25 @@ describe('Genesis Knowledge', () => {
       await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: nonDefaultAddr }))
         .resolves.toMatchObject({ onChainId: expect.any(String) });
 
+      const bootstrapId = 'register-bootstrap-public';
+      const bootstrapUri = `did:dkg:context-graph:${bootstrapId}`;
+      const bootstrapMetaGraph = contextGraphMetaUri(bootstrapId);
+      const hasBootstrapPublicProof = async () => {
+        const result = await store.query(`ASK WHERE {
+          GRAPH <${bootstrapMetaGraph}> {
+            <${bootstrapUri}>
+              <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
+              <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "public" .
+          }
+        }`);
+        return result.type === 'boolean' && result.value;
+      };
+      await agent.ensureContextGraphLocal({ id: bootstrapId, name: 'Bootstrap Public' });
+      expect(await hasBootstrapPublicProof()).toBe(false);
+      await expect(agent.registerContextGraph(bootstrapId, { callerAgentAddress: nonDefaultAddr }))
+        .resolves.toMatchObject({ onChainId: expect.any(String) });
+      expect(await hasBootstrapPublicProof()).toBe(true);
+
       await agent.createContextGraph({ id: 'register-legacy-peer-curator', name: 'Legacy Peer Curator' });
       const legacyMetaGraph = contextGraphMetaUri('register-legacy-peer-curator');
       const legacyUri = 'did:dkg:context-graph:register-legacy-peer-curator';

@@ -14,6 +14,7 @@ import {
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
+  type LiftJobBroadcastMetadata,
   type LiftJobHex,
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
@@ -24,13 +25,21 @@ import {
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
   type LiftPublishSnapshotRequest,
+  type AdmissionJournalEntry,
+  type JournalKind,
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
-  AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
+  IntentLookupInput,
+  IntentLookupResult,
+  JournalReadInput,
+  JournalReadResult,
+  VmPublishIntentRecoveryPublisher,
+  VmPublishIntentIndexBackfiller,
+  VmPublishAdmissionJournalReader,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
@@ -51,8 +60,17 @@ import {
   CONTROL_WALLET_ID,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
+  DEFAULT_JOURNAL_GRAPH_URI,
+  JOURNAL_SEQ,
+  JOURNAL_LIFECYCLE_KEY,
+  JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
+  CONTROL_LIFECYCLE_KEY,
+  knowledgeAssetVmPublishLifecycleKey,
+  serializeJournalEntry,
+  parseJournalEntry,
+  serializeVmPublishIntentIndex,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
@@ -62,6 +80,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -82,6 +101,29 @@ type AsyncLiftJobHandler = {
   readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
+
+// #1829 — journal kind for a generic update()-driven transition (total over
+// LiftJobState, never throws). 'accepted' is unreachable via update()
+// (assertActiveClaimLock + all 'accepted' writes go through writeJob directly with
+// explicit admission/reaccept/recover-reset kinds), but is mapped safely.
+function statusToKind(status: LiftJobState): JournalKind {
+  switch (status) {
+    case 'accepted':
+      return 'admission';
+    case 'claimed':
+      return 'claimed';
+    case 'validated':
+      return 'validated';
+    case 'broadcast':
+      return 'broadcast';
+    case 'included':
+      return 'included';
+    case 'finalized':
+      return 'finalized';
+    case 'failed':
+      return 'failed';
+  }
+}
 
 function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
   if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
@@ -149,8 +191,13 @@ function resolveKnowledgeAssetVmPublishHandler(
   };
 }
 
-export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
+export class TripleStoreAsyncLiftPublisher
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
+  // read-modify-write seq allocation is atomic without touching the claim lock (lock
+  // order is always claim→journal; appendJournal never calls writeJob → no reentrancy).
+  private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
   private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
@@ -158,6 +205,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
+  private readonly journalGraphUri: string;
+  private readonly journalWrites: boolean;
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
@@ -201,6 +250,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
+    this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
+    this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
     this.retryBackoffMaxMs = config.retryBackoffMaxMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_MAX_MS;
@@ -256,7 +307,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         retries: { retryCount: 0, maxRetries: this.maxRetries },
         controlPlane: { jobRef: jobSubject(jobId) },
       };
-      await this.writeJob(job);
+      await this.writeJob(job, 'admission');
       return jobId;
     });
   }
@@ -279,7 +330,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const claimedJob = this.buildClaimedJob(claimed, walletId, claimToken, now, lockExpiresAt);
 
       this.assertJobMatchesStatus(claimedJob);
-      await this.writeJob(claimedJob);
+      await this.writeJob(claimedJob, 'claimed');
       await this.writeWalletLock({
         walletId,
         jobId: claimedJob.jobId,
@@ -302,7 +353,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (next.status === 'finalized') {
       await this.promoteFinalizedPrivateStaging(next);
     }
-    await this.writeJob(next);
+    await this.writeJob(next, statusToKind(next.status));
     await this.syncWalletLockForJob(next);
   }
 
@@ -314,6 +365,80 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
     return this.parseJobPayload(rows[0]?.['payload']);
+  }
+
+  async lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult> {
+    await this.ensureGraph();
+    const key = knowledgeAssetVmPublishLifecycleKey(facts);
+    // Object-bound triple pattern (not a FILTER) so the store resolves it via the
+    // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
+    //
+    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
+    // subject as delete-then-insert, so a lookup that races a state transition can
+    // transiently miss the index and return `none`. This window is pre-existing
+    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
+    // claim-locked findActive remains the authoritative dedup guard, so a transient
+    // false `none` cannot by itself create a duplicate active job. Making writeJob
+    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
+    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+    );
+    const jobs = expectBindings(result)
+      .map((row) => this.parseJobPayload(row['payload']))
+      .filter((job): job is LiftJob => job !== null);
+    if (jobs.length === 0) return { kind: 'none' };
+    // Partition on lifecycle-subject occupancy via the SHARED predicate that
+    // admission dedup (findActiveKnowledgeAssetVmPublishJob) also uses, so the two
+    // partitions are identical by construction: an occupying job (non-terminal, or
+    // a retryable failed job with retries remaining that admission would reaccept)
+    // is the live job to bind; everything else is superseded.
+    const active = jobs.filter(isOccupyingLifecycleJob);
+    const superseded = jobs.filter((job) => !isOccupyingLifecycleJob(job));
+    const intentKeyOf = (job: LiftJob): string | undefined =>
+      isKnowledgeAssetVmPublishJobRequest(job.request)
+        ? job.request.knowledgeAssetVmPublish.intentKey
+        : undefined;
+    const exact = (candidates: LiftJob[]): { exactIntentMatch?: boolean } =>
+      facts.intentKey === undefined
+        ? {}
+        : { exactIntentMatch: candidates.some((job) => intentKeyOf(job) === facts.intentKey) };
+    if (active.length > 1) return { kind: 'conflict', jobs: active };
+    if (active.length === 1) {
+      return { kind: 'active', job: active[0]!, superseded, ...exact(active) };
+    }
+    return { kind: 'superseded', jobs: superseded, ...exact(superseded) };
+  }
+
+  /**
+   * #1828 — idempotently backfill the ephemeral lifecycle index for VM-publish
+   * jobs admitted before the index existed. Reads the subjects already carrying
+   * the index and inserts ONLY the missing ones (additive insert; never
+   * deletes/rewrites, so it cannot race the runner), returning the real number
+   * of jobs repaired rather than a full-reindex count. Run once at boot.
+   */
+  async ensureVmPublishIntentIndex(): Promise<number> {
+    await this.ensureGraph();
+    const vmPublishJobs = (await this.list()).filter((job) =>
+      isKnowledgeAssetVmPublishJobRequest(job.request),
+    );
+    if (vmPublishJobs.length === 0) return 0;
+    // Subjects that already carry the lifecycle index. Object-unbound read of the
+    // one predicate — no job-payload scan — so we diff in JS and insert only the
+    // jobs missing it (VM-publish filtered above, never via a SPARQL MINUS, which
+    // would over-select raw-lift jobs).
+    const indexed = await this.store.query(
+      `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
+    );
+    const alreadyIndexed = new Set(
+      expectBindings(indexed)
+        .map((row) => row['job'])
+        .filter((subject): subject is string => typeof subject === 'string'),
+    );
+    const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
+    const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
+    if (quads.length > 0) await this.store.insert(quads);
+    return missing.length;
   }
 
   async list(filter: { status?: LiftJobState } = {}): Promise<LiftJob[]> {
@@ -529,6 +654,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
       if (!executorReturned && current?.status === 'broadcast') {
+        // The tx send happens strictly AFTER the write-ahead durably records
+        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
+        // failure rolls the transition back). So a durable 'broadcast' here means
+        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend. A
+        // pre-send failure (fsync failed → rolled back to 'validated', or an error
+        // before the write-ahead) does NOT reach here and is recorded as 'failed'
+        // below; a failed KA VM job is never chain-recovery-chased
+        // (canRetryFailedRecovery === false), and its code comes from the publish
+        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
         return current;
       }
       const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
@@ -545,7 +680,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!this.chainRecoveryResolver) {
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)), 'recover-reset');
         return true;
       }
       return false;
@@ -557,12 +692,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       await this.releaseWalletLockForJob(job);
       const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
       await this.promoteFinalizedPrivateStaging(finalized);
-      await this.writeJob(finalized);
+      await this.writeJob(finalized, 'recovered-finalize');
       return true;
     }
     if (this.hasInconclusiveRecoveryTimedOut(recoverable)) {
       await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failInconclusiveRecovery(recoverable));
+      await this.writeJob(this.failInconclusiveRecovery(recoverable), 'failed');
       return true;
     }
     return false;
@@ -606,7 +741,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
             recoverable,
             resolved.inclusion,
             resolved.finalization,
-          ));
+          ), 'recovered-finalize');
           return true;
         }
 
@@ -614,33 +749,41 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         // claim local recovery. Preserve the explicit terminal diagnosis rather
         // than silently marking the queue job finalized.
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
         return true;
       }
     }
 
     if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
     await this.releaseWalletLockForJob(job);
-    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
     return true;
   }
 
   private async findActiveKnowledgeAssetVmPublishJob(
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<{ job: LiftJob; compatible: boolean } | null> {
+    // Build the INCOMING key up front so a delimiter in the incoming facts fails the
+    // admission closed. A malformed PERSISTED job (e.g. a legacy pre-guard admission
+    // whose name carries U+001F) must NOT abort this scan and block an unrelated
+    // admission, so each persisted job's key is built defensively.
+    const requestKey = knowledgeAssetVmPublishLifecycleKey(request);
     const jobs = await this.list();
     for (const job of jobs) {
-      if (job.status === 'finalized') continue;
-      if (isFailedJob(job)) {
-        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-      }
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
+      // #1828 — occupancy + lifecycle subject via the SHARED helpers so admission
+      // dedup and the intent-recovery lookup partition jobs identically (a job that
+      // still occupies the subject is the live one; finalized/exhausted/non-retryable
+      // are superseded).
+      if (!isOccupyingLifecycleJob(job)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      const sameLifecycleSubject = publish.contextGraphId === request.contextGraphId
-        && publish.name === request.name
-        && (publish.subGraphName ?? '') === (request.subGraphName ?? '')
-        && agentAddressScopeKey(publish.agentAddress) === agentAddressScopeKey(request.agentAddress);
-      if (!sameLifecycleSubject) continue;
+      let jobKey: string;
+      try {
+        jobKey = knowledgeAssetVmPublishLifecycleKey(publish);
+      } catch {
+        continue; // skip a malformed legacy job rather than failing this admission
+      }
+      if (jobKey !== requestKey) continue;
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;
@@ -699,7 +842,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       });
       this.assertJobMatchesStatus(next);
       await this.promoteFinalizedPrivateStaging(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'finalized');
       await this.syncWalletLockForJob(next);
       return next;
     }
@@ -721,7 +864,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (current.status === 'validated') {
       next = this.mergeJob(next, 'broadcast', { broadcast: mapped.broadcast });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'broadcast');
       await this.syncWalletLockForJob(next);
     }
 
@@ -731,7 +874,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'included');
       await this.syncWalletLockForJob(next);
       return next;
     }
@@ -742,7 +885,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'included');
       await this.syncWalletLockForJob(next);
     }
 
@@ -753,7 +896,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
     this.assertJobMatchesStatus(next);
     await this.promoteFinalizedPrivateStaging(next);
-    await this.writeJob(next);
+    await this.writeJob(next, 'finalized');
     await this.syncWalletLockForJob(next);
     return next;
   }
@@ -766,7 +909,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
     }));
     this.assertJobMatchesStatus(next);
-    await this.writeJob(next);
+    await this.writeJob(next, 'failed');
     await this.syncWalletLockForJob(next);
     return next;
   }
@@ -783,7 +926,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     for (const job of interrupted) {
       if (job.status === 'claimed' || job.status === 'validated') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)));
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)), 'recover-reset');
         recovered += 1;
         continue;
       }
@@ -811,7 +954,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           const recoverable = { ...jobWithoutFailure, status: restoredStatus } as unknown as LiftJobBroadcast;
           const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
           await this.promoteFinalizedPrivateStaging(finalized);
-          await this.writeJob(finalized);
+          await this.writeJob(finalized, 'recovered-finalize');
           recovered += 1;
         }
         // If still inconclusive, leave in failed state — next recover() will retry again.
@@ -881,12 +1024,184 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (this.graphEnsured) return;
     await this.store.createGraph(this.graphUri);
     await this.store.createGraph(this.walletLockGraphUri);
+    await this.store.createGraph(this.journalGraphUri);
     this.graphEnsured = true;
   }
 
-  private async writeJob(job: LiftJob): Promise<void> {
+  private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(serializeJob(job, this.graphUri));
+    await this.appendJournal(job, kind);
+  }
+
+  /**
+   * #1829 — append one immutable journal entry for this transition. DEFENSIVE by
+   * construction (mirrors serializeVmPublishIntentIndex): it runs inside writeJob,
+   * which re-persists arbitrary persisted/legacy jobs, so it must NEVER throw back
+   * into the state machine. It:
+   *  - no-ops unless journalWrites is enabled (daemon-only) — the CLI inspector /
+   *    standalone runner must not race the node-local per-lineageKey seq;
+   *  - no-ops for the 'rollback-noop' sentinel (the #1851 rollback re-write) and any
+   *    non-named-KA job (raw-lift/KA-update have no lifecycle key; named-KA scope);
+   *  - derives lineageKey via the U+001F-guarded key helper inside try/catch and
+   *    skips a legacy delimiter-bearing job rather than propagating (else it re-opens
+   *    the #1849 scan-poisoning / delete-then-throw data-loss class);
+   *  - swallows ANY store/allocation error — the journal is auxiliary (recovery reads
+   *    the mutable record, never the journal), so a journal hiccup must not fail-close
+   *    the authoritative write. A swallowed append is an invisible gap: "complete"
+   *    means "no seq gap", not "every transition present".
+   */
+  private async appendJournal(job: LiftJob, kind: JournalKind): Promise<void> {
+    if (!this.journalWrites) return;
+    if (kind === 'rollback-noop') return;
+    if (job.request.jobType !== 'knowledge-asset-vm-publish') return;
+    let lineageKey: string;
+    try {
+      lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+    } catch {
+      return; // legacy delimiter-bearing job — skip, never propagate
+    }
+    try {
+      await this.withJournalLock(lineageKey, async () => {
+        const seq = await this.allocateJournalSeq(lineageKey);
+        const entry = this.buildJournalEntry(job, kind, lineageKey, seq);
+        await this.store.insert(serializeJournalEntry(entry, this.journalGraphUri));
+      });
+    } catch {
+      // Auxiliary log — must never abort the authoritative state write.
+    }
+  }
+
+  /** #1829 — next per-lineageKey seq: numeric MAX+1 over the journal graph, first = 0. */
+  private async allocateJournalSeq(lineageKey: string): Promise<number> {
+    const result = await this.store.query(
+      `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${this.journalGraphUri}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
+    );
+    const rows = expectBindings(result);
+    const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
+    if (raw === undefined) return 0;
+    return parseIntegerLiteral(raw) + 1;
+  }
+
+  private buildJournalEntry(job: LiftJob, kind: JournalKind, lineageKey: string, seq: number): AdmissionJournalEntry {
+    const publish = (job.request as { knowledgeAssetVmPublish: { intentKey?: string } }).knowledgeAssetVmPublish;
+    const txHash = 'broadcast' in job ? job.broadcast?.txHash : undefined;
+    const blockNumber = 'inclusion' in job ? job.inclusion?.blockNumber : undefined;
+    const merkleRoot = 'broadcast' in job ? job.broadcast?.merkleRoot : undefined;
+    const ual = 'finalization' in job ? (job.finalization as { ual?: string } | undefined)?.ual : undefined;
+    const failureCode = 'failure' in job ? job.failure?.code : undefined;
+    const recoveredFromStatus = 'recovery' in job
+      ? (job.recovery as { recoveredFromStatus?: string } | undefined)?.recoveredFromStatus
+      : undefined;
+    return {
+      seq,
+      at: this.now(),
+      kind: kind as Exclude<JournalKind, 'rollback-noop'>,
+      jobId: job.jobId,
+      lineageKey,
+      ...(publish.intentKey !== undefined ? { intentKey: publish.intentKey } : {}),
+      ...(txHash !== undefined ? { txHash } : {}),
+      ...(blockNumber !== undefined ? { blockNumber } : {}),
+      ...(merkleRoot !== undefined ? { merkleRoot } : {}),
+      ...(ual !== undefined ? { ual } : {}),
+      ...(failureCode !== undefined ? { failureCode } : {}),
+      ...(recoveredFromStatus !== undefined ? { recoveredFromStatus } : {}),
+    };
+  }
+
+  /**
+   * #1829 — facts-pure lineage read. Derives the lineageKey from the retained facts
+   * (NEVER the ephemeral #1828 job-subject index, which clear/cancel remove), so it
+   * still resolves after the job is gone. Read-only.
+   */
+  async readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    let lineageKey: string;
+    try {
+      lineageKey = knowledgeAssetVmPublishLifecycleKey(facts);
+    } catch {
+      return { entries: [], maxSeq: -1, complete: true, txHashes: [] };
+    }
+    const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, lineageKey);
+    const entries = facts.intentKey === undefined
+      ? lineage
+      : lineage.filter((e) => e.intentKey === facts.intentKey);
+    // maxSeq/complete describe the whole LINEAGE (the contiguity reference); entries and
+    // txHashes describe the queried subset (an intentKey filter is one version within it).
+    return this.summarizeJournal(entries, lineage);
+  }
+
+  /** #1829 — all journal entries bearing this jobId. Read-only. */
+  async readJournalByJob(jobId: string): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    const jobEntries = await this.readJournalEntriesBy(JOURNAL_JOB_ID, jobId);
+    if (jobEntries.length === 0) return { entries: [], maxSeq: -1, complete: true, txHashes: [] };
+    // A successor job continues the lineage seq (does NOT restart at 0), so completeness
+    // is a property of the LINEAGE, not this job's slice. Resolve the lineage from any
+    // entry (all of a job's entries share one lineageKey) and compute maxSeq/complete over it.
+    const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, jobEntries[0]!.lineageKey);
+    return this.summarizeJournal(jobEntries, lineage);
+  }
+
+  // Object-bound read of every entry whose `predicate` equals `value`, grouped by
+  // subject and parsed. A corrupt row is skipped (parseJournalEntry returns null).
+  private async readJournalEntriesBy(predicate: string, value: string): Promise<AdmissionJournalEntry[]> {
+    const result = await this.store.query(
+      `SELECT ?e ?p ?o WHERE { GRAPH <${this.journalGraphUri}> { ?e <${predicate}> ${literal(value)} . ?e ?p ?o } }`,
+    );
+    const bySubject = new Map<string, Record<string, string>>();
+    for (const row of expectBindings(result)) {
+      const subject = row['e'];
+      const p = row['p'];
+      const o = row['o'];
+      if (subject === undefined || p === undefined || o === undefined) continue;
+      const map = bySubject.get(subject) ?? {};
+      map[p] = o;
+      bySubject.set(subject, map);
+    }
+    return [...bySubject.values()]
+      .map((map) => parseJournalEntry(map))
+      .filter((e): e is AdmissionJournalEntry => e !== null)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  // `entries` is the queried subset returned to the caller; `lineage` is the full
+  // per-lineageKey set the completeness check is computed over (defaults to `entries`
+  // for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
+  // subset read never spuriously reports incomplete. On oxigraph `complete` is
+  // authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
+  // lost on crash without a visible gap — documented on JournalReadResult as best-effort.
+  private summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
+    const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
+    const complete = lineage.length === maxSeq + 1;
+    const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
+    return { entries, maxSeq, complete, txHashes };
+  }
+
+  /**
+   * #1829 — per-lineageKey mutex for the journal read-modify-write (seq allocation +
+   * insert). Distinct lineages append in parallel; the same lineage serializes. Never
+   * acquired while holding — or acquiring — the claim lock, so no reentrancy/deadlock.
+   */
+  private async withJournalLock<T>(lineageKey: string, fn: () => Promise<T>): Promise<T> {
+    // journalGraphUri is a fixed constant, so the lineageKey alone keys the bucket.
+    const key = lineageKey;
+    const previous = TripleStoreAsyncLiftPublisher.journalQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    TripleStoreAsyncLiftPublisher.journalQueues.set(key, next);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (TripleStoreAsyncLiftPublisher.journalQueues.get(key) === next) {
+        TripleStoreAsyncLiftPublisher.journalQueues.delete(key);
+      }
+    }
   }
 
   private async deleteJob(jobId: string): Promise<void> {
@@ -1047,7 +1362,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         this.mergeJob(current, 'failed', { failure: failure as any }),
       );
       this.assertJobMatchesStatus(failed);
-      await this.writeJob(failed);
+      await this.writeJob(failed, 'failed');
       await this.syncWalletLockForJob(failed);
       return failed;
     }
@@ -1107,14 +1422,46 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    await this.update(params.jobId, 'broadcast', {
-      broadcast: {
-        txHash: params.txHash,
-        walletId: params.walletId,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      },
+    await this.recordDurableBroadcastBeforeSend(current, {
+      txHash: params.txHash,
+      walletId: params.walletId,
+      merkleRoot: params.merkleRoot,
+      publicByteSize: params.publicByteSize,
     });
+  }
+
+  /**
+   * The single pre-send write-ahead boundary for the KA VM publish path: record
+   * the 'broadcast' transition and make it fsync-durable BEFORE the caller sends
+   * the tx. Runs inside the adapter's `onBroadcast` hook, which is awaited
+   * strictly before `sendSignedTransactionAndWait` (fail-closed).
+   *
+   * Durability is scoped here — not in the generic `writeJob`/`update` — so the
+   * whole-store fsync only happens at this before-send boundary (raw-lift's
+   * post-send 'broadcast' write, and every other state change, stay flush-free).
+   *
+   * On a write-ahead failure (the fsync, or the transition itself) the tx was
+   * never sent, so restore the durable prior job: the store must never report a
+   * 'broadcast' that was not fsync-durable, or recovery would chase a tx that
+   * never landed. The prior job is 'validated' (asserted by the sole caller), so
+   * restoring it takes no fsync and cannot re-fail here. The caller then fails
+   * the job from its pre-broadcast state, off the chain-recovery track.
+   */
+  private async recordDurableBroadcastBeforeSend(
+    current: LiftJob,
+    broadcast: LiftJobBroadcastMetadata,
+  ): Promise<void> {
+    try {
+      await this.update(current.jobId, 'broadcast', { broadcast });
+      await this.store.flush?.();
+    } catch (error) {
+      // #1829 — 'rollback-noop': restoring the prior 'validated' job must NOT append a
+      // duplicate journal entry (the original 'validated' entry already exists, and the
+      // pre-flush 'broadcast' entry already recorded the attempt). The subsequent
+      // failure transition emits the terminal entry.
+      await this.writeJob(current, 'rollback-noop');
+      throw error;
+    }
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {
@@ -1365,7 +1712,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       },
     };
     await this.releaseWalletLockForJob(job);
-    await this.writeJob(reaccepted);
+    await this.writeJob(reaccepted, 'reaccept');
     return reaccepted;
   }
 
@@ -1437,7 +1784,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
     this.assertJobMatchesStatus(finalized);
     await this.promoteFinalizedPrivateStaging(finalized);
-    await this.writeJob(finalized);
+    await this.writeJob(finalized, 'noop-finalized');
     await this.syncWalletLockForJob(finalized);
     return finalized;
   }
@@ -1578,8 +1925,4 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
 function txHashFromSignedPhase(phase: string): LiftJobHex | null {
   const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
   return match ? (match[1] as LiftJobHex) : null;
-}
-
-function agentAddressScopeKey(agentAddress?: string): string {
-  return agentAddress?.trim().toLowerCase() ?? '';
 }
