@@ -179,7 +179,7 @@ export interface DurableTerminalBoundaryOptions {
   readonly clearCompletedPhasesWhenIncomplete?: boolean;
 }
 
-export type DurableSyncCounterReducer = 'sum' | 'max';
+type DurableSyncCounterReducer = 'sum' | 'max';
 
 /**
  * Canonical runtime metadata for every numeric field in DurableSyncResult.
@@ -187,7 +187,7 @@ export type DurableSyncCounterReducer = 'sum' | 'max';
  * aggregation policy is declared here. Consumers can also reuse this table for
  * zero construction and normalized projections instead of duplicating fields.
  */
-export const DURABLE_SYNC_COUNTER_REDUCERS = {
+const DURABLE_SYNC_COUNTER_REDUCERS = {
   insertedTriples: 'sum',
   fetchedMetaTriples: 'sum',
   fetchedDataTriples: 'sum',
@@ -213,7 +213,7 @@ export const DURABLE_SYNC_COUNTER_REDUCERS = {
   DurableSyncCounterReducer
 >>;
 
-export type DurableSyncCounterKey = keyof typeof DURABLE_SYNC_COUNTER_REDUCERS;
+type DurableSyncCounterKey = keyof typeof DURABLE_SYNC_COUNTER_REDUCERS;
 
 /**
  * Internal durable aggregation state. The public `complete` verdict is absent
@@ -344,6 +344,25 @@ function createDurableSyncDiagnosticsBase(): InitializedDurableSyncDiagnostics {
   return Object.fromEntries(
     Object.keys(DURABLE_SYNC_COUNTER_REDUCERS).map((key) => [key, 0]),
   ) as InitializedDurableSyncDiagnostics;
+}
+
+/**
+ * Project an externally supplied public result onto the canonical initialized
+ * result contract without exposing internal reducer metadata. Consumers get a
+ * stable typed boundary; aggregation policy remains private to this module.
+ */
+export function normalizeDurableSyncResult(
+  result: DurableSyncResult,
+): InitializedDurableSyncResult {
+  const diagnostics = createDurableSyncDiagnosticsBase();
+  const normalized = diagnostics as Record<DurableSyncCounterKey, number>;
+  for (const key of Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[]) {
+    const value = result[key];
+    normalized[key] = typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? value
+      : 0;
+  }
+  return { ...diagnostics, complete: result.complete === true };
 }
 
 /** No work completed, but the caller must keep retrying. */

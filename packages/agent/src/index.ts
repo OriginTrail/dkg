@@ -274,10 +274,8 @@ export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js
 export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
-  DURABLE_SYNC_COUNTER_REDUCERS,
   isDurableSyncComplete,
-  type DurableSyncCounterKey,
-  type DurableSyncCounterReducer,
+  normalizeDurableSyncResult,
   type DurableProgressClassification,
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,

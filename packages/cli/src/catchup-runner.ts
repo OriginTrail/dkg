@@ -3,10 +3,9 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   classifyDurableProgress,
-  DURABLE_SYNC_COUNTER_REDUCERS,
+  normalizeDurableSyncResult,
   type DKGAgent,
   type DurableProgressSummary,
-  type DurableSyncCounterKey,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
 } from '@origintrail-official/dkg-agent';
@@ -165,15 +164,11 @@ export interface DurableCatchupRequestOutcome {
  * counters remain diagnostics and can describe safely committed prefixes.
  */
 export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummary {
-  const count = (value: number | undefined): number => {
-    if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
-    return value;
-  };
-  const normalizedCounters = Object.fromEntries(
-    (Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[])
-      .map((key) => [key, count(result[key])]),
-  ) as Record<DurableSyncCounterKey, number>;
-  const { insertedTriples, ...diagnostics } = normalizedCounters;
+  const {
+    insertedTriples,
+    complete,
+    ...diagnostics
+  } = normalizeDurableSyncResult(result);
   const hardFailureDetails = [
     ['failedPeers', diagnostics.failedPeers],
     ['failedPhases', diagnostics.failedPhases],
@@ -185,7 +180,7 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     || diagnostics.insertedDataTriples > 0
     || diagnostics.insertedMetaTriples > 0
     || diagnostics.checkpointAdvances > 0;
-  if (!result.complete && !committedProgress && hardFailureDetails.length === 0) {
+  if (!complete && !committedProgress && hardFailureDetails.length === 0) {
     // A timeout/backpressure stop before the first durable boundary is not a
     // successful no-op. Give the HTTP adapter a typed failure reason so
     // durable-only automation keeps retrying instead of treating 200/ok as an
@@ -196,7 +191,7 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
   return {
     insertedTriples,
     diagnostics,
-    complete: result.complete,
+    complete,
     hardFailureDetails,
   };
 }

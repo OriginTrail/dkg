@@ -4,12 +4,12 @@ import {
   createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
-  DURABLE_SYNC_COUNTER_REDUCERS,
   durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
   isDurableSyncComplete,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
+  normalizeDurableSyncResult,
 } from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
@@ -230,7 +230,7 @@ describe('durable terminal boundary model', () => {
     expect(finalizeDurableSyncCompletion(merged).complete).toBe(true);
   });
 
-  it('uses the canonical reducer metadata when folding same-peer failures', () => {
+  it('uses canonical counter policies when folding same-peer failures', () => {
     const first = createFailedPeerDurableSyncResult();
     first.failedPhases = 1;
     const second = createFailedPeerDurableSyncResult();
@@ -242,7 +242,6 @@ describe('durable terminal boundary model', () => {
       durableSyncAccumulatorFromResult(second),
     );
 
-    expect(DURABLE_SYNC_COUNTER_REDUCERS.failedPeers).toBe('max');
     expect(accumulator.diagnostics.failedPeers).toBe(1);
     expect(accumulator.diagnostics.failedPhases).toBe(3);
   });
@@ -259,6 +258,22 @@ describe('durable result factories', () => {
       complete: false,
       insertedTriples: 0,
       failedPeers: 1,
+    });
+  });
+
+  it('normalizes public results without exposing reducer metadata', () => {
+    const result = createIncompleteDurableSyncResult();
+    result.insertedTriples = Number.NaN;
+    result.insertedDataTriples = 7;
+    result.failedPhases = -1;
+    result.backoffWorthyFailures = undefined;
+
+    expect(normalizeDurableSyncResult(result)).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      insertedDataTriples: 7,
+      failedPhases: 0,
+      backoffWorthyFailures: 0,
     });
   });
 });
