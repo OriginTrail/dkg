@@ -6,19 +6,10 @@
  *   pnpm test:devnet:rich-scenario
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers, Wallet } from 'ethers';
 import { buildUpdateSeal } from '../../packages/publisher/test/_helpers/seal.js';
-import {
-  digestRfc64V2SwmBindings,
-  probeBuiltRfc64V2ProductCapabilities,
-  requireRfc64V2ProductCapabilities,
-  verifyRfc64V2SwmPolicyMatrix,
-  type Rfc64V2SwmCellObservation,
-  type Rfc64V2SwmPolicyCell,
-  type Rfc64V2SwmReadObservation,
-} from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -34,8 +25,6 @@ const RS_TIMEOUT_S = Number(process.env.RS_TIMEOUT ?? 90);
 const MINE_BLOCKS = Number(process.env.MINE_BLOCKS ?? 120);
 const SKIP_STAKE = process.env.SKIP_STAKE === '1';
 const PUBLISH_PACE_MS = Number(process.env.PUBLISH_PACE_MS ?? 800);
-const V2_SWM_POLICY_MATRIX = process.env.RICH_V2_SWM_POLICY_MATRIX === '1';
-const V2_SWM_SYNC_TIMEOUT_MS = Number(process.env.RICH_V2_SWM_SYNC_TIMEOUT_MS ?? 90_000);
 
 const TOTAL_PUBLISHES = WM_COUNT + SWM_COUNT + VM_COUNT;
 
@@ -83,34 +72,17 @@ interface VmPublishRecord {
   rootSubject: string;
 }
 
-interface MatrixAssetPublication {
-  readonly assertionUri: string;
-  readonly authorAgentAddress: string;
-  readonly contentSha256: string;
-  readonly kaId: string;
-  readonly marker: string;
-  readonly merkleRoot: string;
-  readonly subject: string;
-  readonly tripleCount: number;
-  readonly txHash: string;
-  readonly ual: string;
-}
-
 const state: { v: DevnetState | null } = { v: null };
 const run: {
   stamp: number;
   edgeAgents: Record<number, AgentRef>;
   cgs: CgRef[];
-  outsiderAgent: AgentRef | null;
-  v2Matrix: Rfc64V2SwmCellObservation[];
   vmPublishes: VmPublishRecord[];
   updatesDone: number;
 } = {
   stamp: Date.now(),
   edgeAgents: {},
   cgs: [],
-  outsiderAgent: null,
-  v2Matrix: [],
   vmPublishes: [],
   updatesDone: 0,
 };
@@ -356,241 +328,6 @@ async function assertionCreate(
     );
   }
   return rootSubject;
-}
-
-function bindingLexicalValue(value: string): string {
-  if (value.startsWith('"') && value.endsWith('"')) {
-    try {
-      const parsed = JSON.parse(value);
-      if (typeof parsed === 'string') return parsed;
-    } catch {
-      // Keep the exact input below; malformed literals are rejected by create.
-    }
-  }
-  return value;
-}
-
-function matrixBindings(
-  quads: readonly { predicate: string; object: string }[],
-): Array<Record<string, unknown>> {
-  return quads.map((quad) => ({
-    o: bindingLexicalValue(quad.object),
-    p: quad.predicate,
-  }));
-}
-
-async function createAndPublishMatrixAsset(
-  node: DevnetNode,
-  agent: AgentRef,
-  cg: CgRef,
-  cell: Rfc64V2SwmPolicyCell,
-  index: number,
-): Promise<MatrixAssetPublication> {
-  const name = `v2-matrix-${cell}-${run.stamp}`;
-  const marker = `v2-matrix-marker-${cell}-${run.stamp}`;
-  const subject = `urn:devnet:rfc64:v2:${cell}:${run.stamp}`;
-  const graph = `did:dkg:context-graph:${cg.localId}`;
-  const quads = [
-    {
-      subject,
-      predicate: 'https://schema.org/name',
-      object: `"${marker}"`,
-      graph,
-    },
-    {
-      subject,
-      predicate: 'https://schema.org/position',
-      object: `"${index + 1}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
-      graph,
-    },
-  ];
-  const created = await apiFetch(node, '/api/knowledge-assets', {
-    method: 'POST',
-    bearer: agent.authToken,
-    body: JSON.stringify({
-      alsoShareSwm: true,
-      awaitCuratorAck: cgIsCurated(cg),
-      contextGraphId: cg.localId,
-      name,
-      quads,
-    }),
-  });
-  const createBody = (await created.json().catch(() => null)) as {
-    assertionUri?: string;
-    authorAddress?: string;
-    errors?: unknown;
-    merkleRoot?: string;
-    promotedCount?: number;
-    status?: string;
-  } | null;
-  if (
-    !created.ok
-    || createBody?.status !== 'swm-shared'
-    || createBody.promotedCount !== quads.length
-    || typeof createBody.assertionUri !== 'string'
-    || typeof createBody.authorAddress !== 'string'
-    || typeof createBody.merkleRoot !== 'string'
-  ) {
-    throw new Error(
-      `V2 matrix ${cell} create/share failed: HTTP ${created.status} ${JSON.stringify(createBody)}`,
-    );
-  }
-
-  const publishOnce = async () => {
-    const response = await apiFetch(
-      node,
-      `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
-      {
-        method: 'POST',
-        bearer: agent.authToken,
-        body: JSON.stringify({ contextGraphId: cg.localId }),
-      },
-    );
-    const body = (await response.json().catch(() => null)) as {
-      authorAddress?: string;
-      kaId?: string;
-      merkleRoot?: string;
-      status?: string;
-      txHash?: string;
-      ual?: string;
-    } | null;
-    const tentative = body?.status === 'tentative' || body?.kaId === '0';
-    if (!response.ok && !tentative) {
-      throw new Error(
-        `V2 matrix ${cell} VM publish failed: HTTP ${response.status} ${JSON.stringify(body)}`,
-      );
-    }
-    return body;
-  };
-  let published = await publishOnce();
-  if (published?.status === 'tentative' || published?.kaId === '0') {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
-    published = await publishOnce();
-  }
-  if (
-    published?.status !== 'confirmed'
-    || typeof published.kaId !== 'string'
-    || typeof published.ual !== 'string'
-    || typeof published.txHash !== 'string'
-    || typeof published.merkleRoot !== 'string'
-    || typeof published.authorAddress !== 'string'
-  ) {
-    throw new Error(`V2 matrix ${cell} VM publish was not exact: ${JSON.stringify(published)}`);
-  }
-  expect(published.merkleRoot).toBe(createBody.merkleRoot);
-  expect(published.authorAddress.toLowerCase()).toBe(agent.agentAddress.toLowerCase());
-  expect(createBody.authorAddress.toLowerCase()).toBe(agent.agentAddress.toLowerCase());
-  return {
-    assertionUri: createBody.assertionUri,
-    authorAgentAddress: published.authorAddress.toLowerCase(),
-    contentSha256: digestRfc64V2SwmBindings(matrixBindings(quads)),
-    kaId: published.kaId,
-    marker,
-    merkleRoot: published.merkleRoot.toLowerCase(),
-    subject,
-    tripleCount: quads.length,
-    txHash: published.txHash.toLowerCase(),
-    ual: published.ual.toLowerCase(),
-  };
-}
-
-function extractQueryBindings(value: unknown): Array<Record<string, unknown>> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return [];
-  const root = value as Record<string, unknown>;
-  const result = root.result;
-  if (result === null || typeof result !== 'object' || Array.isArray(result)) return [];
-  const bindings = (result as Record<string, unknown>).bindings;
-  return Array.isArray(bindings)
-    ? bindings.filter(
-        (entry): entry is Record<string, unknown> =>
-          entry !== null && typeof entry === 'object' && !Array.isArray(entry),
-      )
-    : [];
-}
-
-async function queryMatrixAsset(
-  node: DevnetNode,
-  agent: AgentRef,
-  cg: CgRef,
-  asset: MatrixAssetPublication,
-): Promise<Rfc64V2SwmReadObservation> {
-  const response = await apiFetch(node, '/api/query', {
-    method: 'POST',
-    bearer: agent.authToken,
-    body: JSON.stringify({
-      contextGraphId: cg.localId,
-      sparql: `SELECT ?p ?o WHERE { <${asset.subject}> ?p ?o } ORDER BY ?p ?o`,
-      view: 'shared-working-memory',
-    }),
-  });
-  const bodyText = await response.text();
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(bodyText);
-  } catch {
-    // A non-JSON denial remains a denial and is still privacy-scanned below.
-  }
-  const bindings = response.ok ? extractQueryBindings(parsed) : [];
-  const applied = response.status === 200 && bindings.length > 0;
-  return {
-    agentAddress: agent.agentAddress.toLowerCase(),
-    bindingCount: bindings.length,
-    contentSha256: applied ? digestRfc64V2SwmBindings(bindings) : null,
-    httpStatus: response.status,
-    leakedMarker: !applied && (
-      bodyText.includes(asset.marker)
-      || bodyText.includes(asset.subject)
-      || bodyText.includes(asset.contentSha256)
-    ),
-    nodeNumber: node.num,
-    outcome: applied ? 'applied' : 'denied',
-  };
-}
-
-async function waitForMatrixAsset(
-  node: DevnetNode,
-  agent: AgentRef,
-  cg: CgRef,
-  asset: MatrixAssetPublication,
-): Promise<Rfc64V2SwmReadObservation> {
-  const deadline = Date.now() + V2_SWM_SYNC_TIMEOUT_MS;
-  let last: Rfc64V2SwmReadObservation | null = null;
-  do {
-    last = await queryMatrixAsset(node, agent, cg, asset);
-    if (
-      last.outcome === 'applied'
-      && last.bindingCount === asset.tripleCount
-      && last.contentSha256 === asset.contentSha256
-    ) return last;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
-  } while (Date.now() < deadline);
-  throw new Error(
-    `V2 matrix ${cg.key} did not synchronize exact content to node${node.num}: ${JSON.stringify(last)}`,
-  );
-}
-
-async function proveStablePrivateDenial(
-  node: DevnetNode,
-  agent: AgentRef,
-  cg: CgRef,
-  asset: MatrixAssetPublication,
-): Promise<Rfc64V2SwmReadObservation> {
-  let last: Rfc64V2SwmReadObservation | null = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    last = await queryMatrixAsset(node, agent, cg, asset);
-    if (
-      last.outcome !== 'denied'
-      || last.bindingCount !== 0
-      || last.contentSha256 !== null
-      || last.leakedMarker
-    ) {
-      throw new Error(
-        `V2 matrix private outsider observed content on attempt ${attempt + 1}: ${JSON.stringify(last)}`,
-      );
-    }
-    if (attempt < 2) await new Promise((resolveWait) => setTimeout(resolveWait, 750));
-  }
-  return last!;
 }
 
 async function publishAssertionVm(

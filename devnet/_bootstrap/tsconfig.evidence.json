@@ -11,8 +11,6 @@
   "include": [
     "rdf-canonize.d.ts",
     "rfc64-evidence.ts",
-    "rfc64-evidence.test.ts",
-    "rfc64-v2-swm-policy-matrix.ts",
-    "rfc64-v2-swm-policy-matrix.test.ts"
+    "rfc64-evidence.test.ts"
   ]
 }

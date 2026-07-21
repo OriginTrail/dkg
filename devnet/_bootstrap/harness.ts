@@ -32,21 +32,6 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ethers } from 'ethers';
 
-export {
-  RFC64_V2_FUTURE_TRANSITION_CAPABILITY,
-  RFC64_V2_REQUIRED_PRODUCT_CAPABILITIES,
-  RFC64_V2_SWM_POLICY_CELLS,
-  digestRfc64V2SwmBindings,
-  inspectRfc64V2ProductCapabilities,
-  probeBuiltRfc64V2ProductCapabilities,
-  requireRfc64V2ProductCapabilities,
-  verifyRfc64V2SwmPolicyMatrix,
-  type Rfc64V2ProductCapabilityInspection,
-  type Rfc64V2SwmCellObservation,
-  type Rfc64V2SwmReadObservation,
-  type VerifiedRfc64V2SwmPolicyMatrix,
-} from './rfc64-v2-swm-policy-matrix.js';
-
 export const REPO_ROOT = resolve(import.meta.dirname, '../..');
 export const RPC = process.env.DEVNET_RPC ?? 'http://127.0.0.1:8545';
 export const DEVNET_DIR = join(REPO_ROOT, '.devnet');

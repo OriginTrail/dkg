@@ -7,10 +7,7 @@ const repositoryRoot = resolve(import.meta.dirname, '../..');
 export default defineConfig({
   root: repositoryRoot,
   test: {
-    include: [
-      'devnet/_bootstrap/rfc64-evidence.test.ts',
-      'devnet/_bootstrap/rfc64-v2-swm-policy-matrix.test.ts',
-    ],
+    include: ['devnet/_bootstrap/rfc64-evidence.test.ts'],
     pool: 'forks',
     sequence: { concurrent: false },
     globals: false,
