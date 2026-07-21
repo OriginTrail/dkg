@@ -91,18 +91,23 @@ const UTF8 = new TextEncoder();
  * and opaque-bundle transports.
  */
 export class Rfc64CatalogAccessPolicyRegistryV1 {
-  readonly #localAgentAddress: EvmAddressV1;
-  readonly #resolveRemoteAgentAddress: (
+  readonly #localAgentAddress: EvmAddressV1 | null;
+  readonly #resolveRemoteAgentAddress: ((
     remotePeerId: string,
-  ) => Promise<EvmAddressV1 | null>;
+  ) => Promise<EvmAddressV1 | null>) | null;
   readonly #byKey = new Map<string, HeldCatalogAccessSnapshotV1>();
 
-  constructor(options: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
+  constructor(options?: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
+    if (options === undefined) {
+      this.#localAgentAddress = null;
+      this.#resolveRemoteAgentAddress = null;
+      return;
+    }
     this.#localAgentAddress = snapshotAgentAddress(
-      options?.localAgentAddress,
+      options.localAgentAddress,
       'localAgentAddress',
     );
-    if (typeof options?.resolveRemoteAgentAddress !== 'function') {
+    if (typeof options.resolveRemoteAgentAddress !== 'function') {
       throw new TypeError('resolveRemoteAgentAddress must be a function');
     }
     this.#resolveRemoteAgentAddress = options.resolveRemoteAgentAddress;
@@ -111,6 +116,24 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   /** Accept one already-authoritative current snapshot. Exact replay is idempotent. */
   accept(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, false);
+  }
+
+  /**
+   * Advance accepted-current state across one already-verified direct policy
+   * transition. The predecessor digest and monotonic era/version high-water are
+   * rechecked locally before the old authorization snapshot is replaced.
+   */
+  acceptCurrent(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, true);
+  }
+
+  #accept(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+    allowVerifiedTransition: boolean,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
     const policy = snapshotPolicy(input?.policy);
     const policyDigest = snapshotDigest(input?.policyDigest, 'policyDigest');
@@ -124,6 +147,11 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
         throw new Error('open RFC-64 catalog policy forbids an exhaustive member roster');
       }
     } else {
+      if (!this.privatePolicyAuthorityConfigured) {
+        throw new Error(
+          'RFC-64 private catalog policy requires explicit access-policy authority configuration',
+        );
+      }
       if (rosterInput === null) {
         throw new Error('invite-only RFC-64 catalog policy requires a current member roster');
       }
@@ -133,24 +161,28 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     }
 
     const key = policyKey(policy.networkId, policy.contextGraphId);
+    const held = Object.freeze({ policy, policyDigest, roster, members });
     const current = this.#byKey.get(key);
     if (current !== undefined) {
-      if (
-        current.policyDigest !== policyDigest
-        || canonicalizeContextGraphPolicyPayloadV1(current.policy)
-          !== canonicalizeContextGraphPolicyPayloadV1(policy)
-        || canonicalRoster(current.roster) !== canonicalRoster(roster)
-      ) {
-        throw new Error(
-          'RFC-64 current policy replacement requires the verified transition/high-water path',
-        );
+      if (!sameSnapshot(current, held)) {
+        if (!allowVerifiedTransition) {
+          throw new Error(
+            'RFC-64 current policy replacement requires the verified transition/high-water path',
+          );
+        }
+        assertDirectMonotonicPolicyTransition(current, held);
+        this.#byKey.set(key, held);
+        return publicSnapshot(held);
       }
       return publicSnapshot(current);
     }
 
-    const held = Object.freeze({ policy, policyDigest, roster, members });
     this.#byKey.set(key, held);
     return publicSnapshot(held);
+  }
+
+  get privatePolicyAuthorityConfigured(): boolean {
+    return this.#localAgentAddress !== null && this.#resolveRemoteAgentAddress !== null;
   }
 
   lookup(
@@ -187,7 +219,11 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     if (descriptor.catalogDisclosure === 'open-authenticated') {
       return authorization(held);
     }
-    if (held.members === null) return null;
+    if (
+      held.members === null
+      || this.#localAgentAddress === null
+      || this.#resolveRemoteAgentAddress === null
+    ) return null;
 
     const remoteAgentAddress = await this.#resolveRemoteMemberAddress(boundary.remotePeerId);
     if (remoteAgentAddress === null) return null;
@@ -223,13 +259,17 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       const held = this.#byKey.get(policyKey(networkId, contextGraphId));
       if (held === undefined || held.policyDigest !== policyDigest) return false;
       return held.policy.accessPolicy === 0
-        || held.members?.has(authorAddress) === true;
+        || (
+          this.privatePolicyAuthorityConfigured
+          && held.members?.has(authorAddress) === true
+        );
     } catch {
       return false;
     }
   }
 
   async #resolveRemoteMemberAddress(remotePeerId: string): Promise<EvmAddressV1 | null> {
+    if (this.#resolveRemoteAgentAddress === null) return null;
     try {
       const resolved = await this.#resolveRemoteAgentAddress(remotePeerId);
       return resolved === null
@@ -368,6 +408,39 @@ function snapshotPeerId(input: string): string {
 
 function canonicalRoster(roster: Readonly<MemberRosterV1> | null): string | null {
   return roster === null ? null : canonicalizeMemberRosterPayloadV1(roster);
+}
+
+function sameSnapshot(
+  left: HeldCatalogAccessSnapshotV1,
+  right: HeldCatalogAccessSnapshotV1,
+): boolean {
+  return left.policyDigest === right.policyDigest
+    && canonicalizeContextGraphPolicyPayloadV1(left.policy)
+      === canonicalizeContextGraphPolicyPayloadV1(right.policy)
+    && canonicalRoster(left.roster) === canonicalRoster(right.roster);
+}
+
+function assertDirectMonotonicPolicyTransition(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): void {
+  if (successor.policy.previousPolicyDigest !== current.policyDigest) {
+    throw new Error(
+      'RFC-64 accepted-current policy transition is not linked to the exact predecessor digest',
+    );
+  }
+  const currentEra = BigInt(current.policy.era);
+  const successorEra = BigInt(successor.policy.era);
+  const currentVersion = BigInt(current.policy.version);
+  const successorVersion = BigInt(successor.policy.version);
+  if (
+    successorEra < currentEra
+    || (successorEra === currentEra && successorVersion <= currentVersion)
+  ) {
+    throw new Error(
+      'RFC-64 accepted-current policy transition does not advance the era/version high-water',
+    );
+  }
 }
 
 function policyKey(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): string {

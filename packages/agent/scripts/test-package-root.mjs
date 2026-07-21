@@ -23,6 +23,19 @@ if (
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
+const requiredCatalogMethods = [
+  'acceptRfc64CatalogAccessSnapshotV1',
+  'publishAuthorCatalogGenesisV1',
+  'publishAuthorCatalogExactSetSuccessorV1',
+];
+for (const method of requiredCatalogMethods) {
+  if (
+    typeof root.DKGAgent.prototype[method] !== 'function'
+    || typeof legacyAgent.DKGAgent.prototype[method] !== 'function'
+  ) {
+    throw new Error(`published DKGAgent entry points did not expose ${method}`);
+  }
+}
 if (
   !Array.isArray(root.RFC64_POLICY_CELLS_V1)
   || !Object.isFrozen(root.RFC64_POLICY_CELLS_V1)
@@ -66,6 +79,7 @@ const publicRfc64Modules = [
 ];
 const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',
+  'catalog-authority-config-v1.js',
   'catalog-transport-authorization-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',

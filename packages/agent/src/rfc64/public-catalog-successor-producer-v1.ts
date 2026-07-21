@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Production boundary for the bounded public/open successor slice.
+ * Production boundary for the bounded one-bucket catalog successor slice.
  *
  * The adapter deliberately delegates catalog construction and every bundle,
  * seal, and projection codec check to the canonical RFC-64 helpers. Neither
@@ -188,7 +188,7 @@ export interface ProducedAndStagedPublicOpenExactSetSuccessorV1 {
 }
 
 /**
- * Build, authenticate, fully verify, and durably stage one public/open
+ * Build, authenticate, fully verify, and durably stage one
  * root-lane successor. Bundle-first staging prevents a served head from
  * referring to an unavailable bundle; a later control-stage failure can leave
  * only an unreferenced immutable bundle.
@@ -297,8 +297,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
 
     const producedBucket = publication.bucket;
     if (
-      publication.head.payload.subGraphName !== null
-      || publication.head.payload.bucketCount !== '1'
+      publication.head.payload.bucketCount !== '1'
       || publication.head.payload.directoryHeight !== '0'
       || publication.head.payload.totalRows !== String(preparedAssets.length)
       || publication.head.payload.version === '0'
@@ -308,7 +307,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
     ) {
       fail(
         'catalog-successor-producer-verification',
-        'produced catalog is outside the bounded public/open exact-set successor slice',
+        'produced catalog is outside the bounded exact-set successor slice',
       );
     }
 
@@ -686,8 +685,7 @@ function assertSupportedPreviousSlice(
   bucket: SignedAuthorCatalogBucketEnvelopeV1 | null,
 ): void {
   if (
-    head.payload.subGraphName !== null
-    || head.payload.bucketCount !== '1'
+    head.payload.bucketCount !== '1'
     || head.payload.directoryHeight !== '0'
     || BigInt(head.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
     || (head.payload.totalRows === '0' && bucket !== null)
@@ -697,7 +695,7 @@ function assertSupportedPreviousSlice(
   ) {
     fail(
       'catalog-successor-producer-history',
-      'previous catalog is outside the bounded public/open root-lane slice',
+      'previous catalog is outside the bounded one-bucket successor slice',
     );
   }
 }

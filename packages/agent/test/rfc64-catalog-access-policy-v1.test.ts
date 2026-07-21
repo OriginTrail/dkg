@@ -119,6 +119,23 @@ function authInput(operation: Rfc64CatalogAccessOperationV1, policyDigest: Diges
 }
 
 describe('RFC-64 D26 catalog access authorization', () => {
+  it('supports an explicit open-only registry without a dummy identity authority', async () => {
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1();
+    const openPolicy = policy(0, 1);
+    const openDigest = digestFor(openPolicy);
+    subject.accept({ policy: openPolicy, policyDigest: openDigest });
+    await expect(subject.authorize(authInput('fetch-inbound', openDigest)))
+      .resolves.toEqual({ accessPolicy: 0, policyDigest: openDigest });
+
+    const privatePolicy = policy(1, 1);
+    const privateDigest = digestFor(privatePolicy);
+    expect(() => subject.accept({
+      policy: privatePolicy,
+      policyDigest: privateDigest,
+      roster: roster(privateDigest),
+    })).toThrow(/requires explicit access-policy authority/u);
+  });
+
   it('keeps both open-sharing cells SWM-equivalent without resolving a roster identity', async () => {
     for (const publishPolicy of [0, 1] as const) {
       let resolverCalls = 0;
@@ -322,5 +339,36 @@ describe('RFC-64 D26 catalog access authorization', () => {
       policy: replacement,
       policyDigest: digestFor(replacement),
     })).toThrow(/verified transition\/high-water path/u);
+  });
+
+  it('advances only across a linked monotonic accepted-current policy transition', async () => {
+    const initial = policy(0, 1);
+    const initialDigest = digestFor(initial);
+    const subject = registry();
+    subject.acceptCurrent({ policy: initial, policyDigest: initialDigest });
+    const successor = {
+      ...policy(0, 0),
+      version: '1',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    const successorDigest = digestFor(successor);
+    subject.acceptCurrent({ policy: successor, policyDigest: successorDigest });
+
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
+    await expect(subject.authorize(authInput('fetch-inbound', initialDigest)))
+      .resolves.toBeNull();
+    await expect(subject.authorize(authInput('fetch-inbound', successorDigest)))
+      .resolves.toEqual({ accessPolicy: 0, policyDigest: successorDigest });
+
+    const unlinked = {
+      ...policy(0, 1),
+      version: '2',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    expect(() => subject.acceptCurrent({
+      policy: unlinked,
+      policyDigest: digestFor(unlinked),
+    })).toThrow(/exact predecessor digest/u);
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
   });
 });
