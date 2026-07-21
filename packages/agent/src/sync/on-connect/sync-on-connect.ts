@@ -155,7 +155,14 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     sawBackpressureDeferral = sawBackpressureDeferral || accounting.deferredByBackpressure;
     if (phase === 'durable') {
       sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || accounting.metadataOnly;
-      cleanDurableDetailedRound = cleanDurableDetailedRound || accounting.cleanNonMetadataResponse;
+      // Safely committed prefixes are useful progress, but an explicit
+      // incomplete durable result must not refresh the peer's successful-sync
+      // timestamp and suppress the next recovery attempt. Legacy counter-only
+      // results keep their existing behaviour when no completion verdict is
+      // available.
+      cleanDurableDetailedRound = cleanDurableDetailedRound || (
+        complete !== false && accounting.cleanNonMetadataResponse
+      );
     }
     return accounting;
   };
