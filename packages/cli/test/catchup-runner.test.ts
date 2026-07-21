@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
+  classifyDurableCatchupRequest,
+  runDurableCatchupLeg,
 } from '../src/catchup-runner.js';
 
 describe('catchup runner progress accounting', () => {
@@ -234,5 +236,70 @@ describe('catchup runner progress accounting', () => {
     };
     expect(catchupPeerResponded(partialThenDeferred, null)).toBe(true);
     expect(catchupPeerSucceeded(partialThenDeferred, null, false)).toBe(false);
+  });
+});
+
+describe('route-level durable catchup orchestration', () => {
+  it('adapts a detailed incomplete result and preserves its retry reason', async () => {
+    const syncFromPeerDetailed = vi.fn(async () => ({
+      insertedTriples: 0,
+      complete: false,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+      deniedPhases: 0,
+      backoffWorthyFailures: 0,
+      deferredBackpressure: 0,
+    }));
+
+    const result = await runDurableCatchupLeg(
+      { syncFromPeerDetailed },
+      'peer-a',
+      'cg-a',
+      1234,
+    );
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      error: 'Durable sync did not complete (incompleteWithoutProgress=1)',
+    });
+    expect(syncFromPeerDetailed).toHaveBeenCalledWith(
+      'peer-a',
+      ['cg-a'],
+      undefined,
+      undefined,
+      undefined,
+      { totalTimeoutMs: 1234 },
+    );
+  });
+
+  it('ANDs completion across requested CGs and classifies partial progress', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [{ durableComplete: true }],
+      [{ durableComplete: false }],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
+      perContextGraphCompletion: [true, false],
+      complete: false,
+      allPeersFailed: false,
+      incomplete: true,
+      responseStatus: 200,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_INCOMPLETE', retryable: true },
+    });
   });
 });

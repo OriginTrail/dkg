@@ -112,8 +112,10 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import {
+  classifyDurableCatchupRequest,
   createCatchupRunner,
-  summarizeDurableLeg,
+  durableCatchupCompletionFor,
+  runDurableCatchupLeg,
   type CatchupJobResult,
   type CatchupRunner,
   type DurableLegDiagnostics,
@@ -903,47 +905,20 @@ WHERE {
             }
           }
           if (durableSelected.has(candidate)) {
-            try {
-              // The agent deadline bounds network fetching, but exact graph
-              // verification and atomic store materialization must settle
-              // afterward. Racing that promise against an HTTP timer does not
-              // cancel it; it only returns a false terminal response while the
-              // write continues invisibly and lets another recovery overlap
-              // the same responder session. Await the correctness-critical
-              // settlement and report its real inserted count. The serialized
-              // peer+CG durable lane prevents automatic recovery from racing
-              // this tail.
-              if (typeof (agent as any).syncFromPeerDetailed === 'function') {
-                const detailed = await (agent as any).syncFromPeerDetailed(
-                  candidate,
-                  [cgId],
-                  undefined,
-                  undefined,
-                  undefined,
-                  { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                );
-                const durableSummary = summarizeDurableLeg(detailed);
-                durable = durableSummary.insertedTriples;
-                durableDiagnostics = durableSummary.diagnostics;
-                durableComplete = durableSummary.complete;
-                if (durableSummary.hardFailureDetails.length > 0) {
-                  durableError = `Durable sync did not complete (${durableSummary.hardFailureDetails.join(', ')})`;
-                }
-              } else {
-                durable = await (
-                  (agent as any).syncFromPeer?.(
-                    candidate,
-                    [cgId],
-                    undefined,
-                    undefined,
-                    { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                  ) ?? Promise.resolve(0)
-                );
-              }
-            } catch (err: any) {
-              durableComplete = false;
-              durableError = err?.message ?? String(err);
-            }
+            // The agent deadline bounds network fetching, but exact graph
+            // verification and atomic store materialization must settle
+            // afterward. The helper owns capability probing, typed invocation,
+            // completion classification, and legacy-agent adaptation.
+            const durableLeg = await runDurableCatchupLeg(
+              agent,
+              candidate,
+              cgId,
+              INTERNAL_DURABLE_BUDGET_MS,
+            );
+            durable = durableLeg.insertedTriples;
+            durableDiagnostics = durableLeg.diagnostics;
+            durableComplete = durableLeg.complete;
+            durableError = durableLeg.error;
           }
           return {
             peerId: candidate,
@@ -1099,48 +1074,27 @@ WHERE {
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
     }));
 
-    // A durable-only operator request must not look successful when every
-    // selected peer failed before producing a terminal sync result. The
-    // detailed `durableError` fields have always been preserved below, but an
-    // HTTP 200 + zero aggregate is easy for scripts and dashboards to mistake
-    // for an already-synchronized no-op. Keep successful zero-insert no-ops at
-    // 200, and keep mixed SWM+durable responses backward-compatible; only the
-    // unambiguous all-peer durable-only failure is a retryable 503.
-    const durableAttempts = includeDurable
-      ? perCgLegs.flatMap((cg) => cg.perPeer)
-      : [];
-    const completionFor = (attempts: PerPeerLeg[]): boolean | undefined =>
-      attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
-        ? attempts.every((attempt) => attempt.durableComplete === true)
-        : undefined;
-    // Whole-request completion is an AND over every requested CG. Flattening
-    // attempts alone can accidentally hide a CG that had no eligible peer and
-    // report the other CGs as a complete request. Preserve `undefined` for
-    // legacy/unknown result shapes, but never manufacture `true` from a strict
-    // subset of the requested graphs.
-    const perContextGraphCompletion = perCgLegs.map((cg) => completionFor(cg.perPeer));
-    const durableComplete = perContextGraphCompletion.length > 0
-      && perContextGraphCompletion.every((complete) => complete !== undefined)
-      ? perContextGraphCompletion.every((complete) => complete === true)
-      : undefined;
-    const durableOnlyAllPeersFailed = includeDurable
-      && !includeSharedMemory
-      && durableAttempts.length > 0
-      && durableAttempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
-    const responseStatus = durableOnlyAllPeersFailed ? 503 : 200;
+    // A durable-only operator request must not look successful until every
+    // detailed attempt reaches a terminal sync result. Preserve HTTP 200 for
+    // safely committed/checkpointed prefixes, but make the body explicitly
+    // retryable and `ok:false`; callers that only inspect `ok` must not confuse
+    // useful partial progress with completed catch-up. Keep mixed SWM+durable
+    // responses backward-compatible, and reserve 503 for the unambiguous case
+    // where every durable-only attempt failed without a usable result.
+    const durableOutcome = classifyDurableCatchupRequest(
+      perCgLegs.map((cg) => cg.perPeer),
+      includeDurable,
+      includeSharedMemory,
+    );
 
-    return jsonResponse(res, responseStatus, {
-      ok: !durableOnlyAllPeersFailed,
-      ...(durableOnlyAllPeersFailed ? {
-        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
-        error: 'Durable catchup failed for every selected peer',
-        retryable: true,
-      } : {}),
+    return jsonResponse(res, durableOutcome.responseStatus, {
+      ok: !durableOutcome.allPeersFailed && !durableOutcome.incomplete,
+      ...(durableOutcome.errorBody ?? {}),
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
       includeSharedMemory,
       includeDurable,
-      ...(durableComplete !== undefined ? { durableComplete } : {}),
+      ...(durableOutcome.complete !== undefined ? { durableComplete: durableOutcome.complete } : {}),
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,
       standardInsertedTriples: standardInserted,
@@ -1149,7 +1103,9 @@ WHERE {
         contextGraphId: cg.contextGraphId,
         insertedTriples: cg.insertedTriples,
         durableInsertedTriples: cg.durableInsertedTriples,
-        ...(completionFor(cg.perPeer) !== undefined ? { durableComplete: completionFor(cg.perPeer) } : {}),
+        ...(durableCatchupCompletionFor(cg.perPeer) !== undefined
+          ? { durableComplete: durableCatchupCompletionFor(cg.perPeer) }
+          : {}),
         perPeer: cg.perPeer,
       })),
       hostCatchup: hostCatchupOpted ? {

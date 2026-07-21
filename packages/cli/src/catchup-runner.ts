@@ -3,8 +3,10 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   classifyDurableProgress,
+  DURABLE_SYNC_COUNTER_REDUCERS,
   type DKGAgent,
   type DurableProgressSummary,
+  type DurableSyncCounterKey,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
 } from '@origintrail-official/dkg-agent';
@@ -120,6 +122,39 @@ export interface DurableLegSummary {
   hardFailureDetails: string[];
 }
 
+/** The only agent capabilities required by the route-level durable leg. */
+export interface DurableCatchupAgent {
+  syncFromPeerDetailed?: OmitThisParameter<DKGAgent['syncFromPeerDetailed']>;
+  syncFromPeer?: OmitThisParameter<DKGAgent['syncFromPeer']>;
+}
+
+export interface DurableCatchupLegResult {
+  insertedTriples: number;
+  complete?: boolean;
+  diagnostics?: DurableLegDiagnostics;
+  error?: string;
+}
+
+export interface DurableCatchupAttempt {
+  durableComplete?: boolean;
+  durableError?: string;
+  error?: string;
+}
+
+export interface DurableCatchupRequestOutcome {
+  attempts: DurableCatchupAttempt[];
+  perContextGraphCompletion: Array<boolean | undefined>;
+  complete?: boolean;
+  allPeersFailed: boolean;
+  incomplete: boolean;
+  responseStatus: 200 | 503;
+  errorBody: {
+    errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED' | 'DURABLE_CATCHUP_INCOMPLETE';
+    error: string;
+    retryable: true;
+  } | undefined;
+}
+
 /**
  * Adapt the agent's typed durable result for operator-facing catch-up APIs.
  * Whole-leg completion comes only from the explicit agent contract; phase
@@ -130,28 +165,11 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
     return value;
   };
-  const diagnostics: DurableLegDiagnostics = {
-    fetchedMetaTriples: count(result.fetchedMetaTriples),
-    fetchedDataTriples: count(result.fetchedDataTriples),
-    insertedMetaTriples: count(result.insertedMetaTriples),
-    insertedDataTriples: count(result.insertedDataTriples),
-    bytesReceived: count(result.bytesReceived),
-    resumedPhases: count(result.resumedPhases),
-    timedOutPhases: count(result.timedOutPhases),
-    completedPhases: count(result.completedPhases),
-    checkpointAdvances: count(result.checkpointAdvances),
-    deniedPhases: count(result.deniedPhases),
-    emptyResponses: count(result.emptyResponses),
-    metaOnlyResponses: count(result.metaOnlyResponses),
-    verifiedPrivateOnlyResponses: count(result.verifiedPrivateOnlyResponses),
-    dataRejectedMissingMeta: count(result.dataRejectedMissingMeta),
-    rejectedKcs: count(result.rejectedKcs),
-    failedPeers: count(result.failedPeers),
-    failedPhases: count(result.failedPhases),
-    backoffWorthyFailures: count(result.backoffWorthyFailures),
-    deferredBackpressure: count(result.deferredBackpressure),
-  };
-  const insertedTriples = count(result.insertedTriples);
+  const normalizedCounters = Object.fromEntries(
+    (Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[])
+      .map((key) => [key, count(result[key])]),
+  ) as Record<DurableSyncCounterKey, number>;
+  const { insertedTriples, ...diagnostics } = normalizedCounters;
   const hardFailureDetails = [
     ['failedPeers', diagnostics.failedPeers],
     ['failedPhases', diagnostics.failedPhases],
@@ -176,6 +194,113 @@ export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummar
     diagnostics,
     complete: result.complete,
     hardFailureDetails,
+  };
+}
+
+/**
+ * Execute one durable route leg behind a typed capability boundary. Detailed
+ * agents expose completion/diagnostics; older agents retain the legacy count.
+ */
+export async function runDurableCatchupLeg(
+  agent: DurableCatchupAgent,
+  peerId: string,
+  contextGraphId: string,
+  totalTimeoutMs: number,
+): Promise<DurableCatchupLegResult> {
+  try {
+    if (typeof agent.syncFromPeerDetailed === 'function') {
+      const detailed = await agent.syncFromPeerDetailed(
+        peerId,
+        [contextGraphId],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs },
+      );
+      const summary = summarizeDurableLeg(detailed);
+      return {
+        insertedTriples: summary.insertedTriples,
+        complete: summary.complete,
+        diagnostics: summary.diagnostics,
+        ...(summary.hardFailureDetails.length > 0 ? {
+          error: `Durable sync did not complete (${summary.hardFailureDetails.join(', ')})`,
+        } : {}),
+      };
+    }
+
+    return {
+      insertedTriples: typeof agent.syncFromPeer === 'function'
+        ? await agent.syncFromPeer(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          { totalTimeoutMs },
+        )
+        : 0,
+    };
+  } catch (error) {
+    return {
+      insertedTriples: 0,
+      complete: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function durableCatchupCompletionFor(
+  attempts: readonly DurableCatchupAttempt[],
+): boolean | undefined {
+  return attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
+    ? attempts.every((attempt) => attempt.durableComplete === true)
+    : undefined;
+}
+
+/**
+ * Aggregate completion across every requested CG. A complete subset must not
+ * manufacture a complete whole-request verdict when another CG had no result.
+ */
+export function classifyDurableCatchupRequest(
+  perContextGraphAttempts: ReadonlyArray<readonly DurableCatchupAttempt[]>,
+  includeDurable: boolean,
+  includeSharedMemory: boolean,
+): DurableCatchupRequestOutcome {
+  const attempts = includeDurable ? perContextGraphAttempts.flatMap((parts) => [...parts]) : [];
+  const perContextGraphCompletion = perContextGraphAttempts.map(durableCatchupCompletionFor);
+  const complete = includeDurable
+    && perContextGraphCompletion.length > 0
+    && perContextGraphCompletion.every((value) => value !== undefined)
+      ? perContextGraphCompletion.every((value) => value === true)
+      : undefined;
+  const allPeersFailed = includeDurable
+    && !includeSharedMemory
+    && attempts.length > 0
+    && attempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
+  const incomplete = includeDurable
+    && !includeSharedMemory
+    && complete === false
+    && !allPeersFailed;
+
+  return {
+    attempts,
+    perContextGraphCompletion,
+    complete,
+    allPeersFailed,
+    incomplete,
+    responseStatus: allPeersFailed ? 503 : 200,
+    errorBody: allPeersFailed
+      ? {
+        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+        error: 'Durable catchup failed for every selected peer',
+        retryable: true,
+      }
+      : incomplete
+        ? {
+          errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
+          error: 'Durable catchup committed partial progress but did not reach the terminal boundary',
+          retryable: true,
+        }
+        : undefined,
   };
 }
 

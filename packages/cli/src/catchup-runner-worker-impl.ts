@@ -146,6 +146,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // from the other peers instead of failing the entire subscribe/catch-up immediately.
   const emptyDurable = () => ({
     insertedTriples: 0,
+    complete: false,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,

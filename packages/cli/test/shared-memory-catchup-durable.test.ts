@@ -272,7 +272,9 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({
-      ok: true,
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
       durableComplete: false,
       totalDurableInsertedTriples: 155_858,
       results: [{
@@ -356,7 +358,9 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({
-      ok: true,
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
       durableComplete: false,
       totalDurableInsertedTriples: 40_000,
       results: [{
@@ -465,7 +469,9 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(res.statusCode).toBe(200);
     expect(syncFromPeerDetailed).toHaveBeenCalledTimes(2);
     expect(JSON.parse(res.body)).toMatchObject({
-      ok: true,
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
       durableComplete: false,
       results: [{ peerId, durableComplete: false }],
       perContextGraph: [
