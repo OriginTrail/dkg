@@ -240,6 +240,7 @@ import {
   type OrdinalOutcome,
   type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
+import { MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -3666,6 +3667,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
     if (!isTargetCurrent() || targets.length === 0) return new Map();
 
+    // Damping: the batched path deliberately skips the per-UAL negative cache
+    // (consulting it primes connections to every discovered agent — the walk
+    // this path exists to avoid), so the per-CG active-fetch cooldown is the
+    // only damper between this batch and the network. A wholly unproductive
+    // batch (e.g. the curator is offline) therefore costs one bounded exact
+    // fetch per sweep interval, not one per reconcile pass. Progress clears
+    // the cooldown below so a draining backlog proceeds slice after slice.
+    if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
+      this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
+      return new Map();
+    }
+
     // Capture the authenticated join-approval hint before consulting metadata:
     // older member snapshots can contain a legacy creator self-stamp that is
     // unrelated to a wallet-scoped CG's structural curator. The structural
@@ -3710,14 +3723,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ])].slice(0, 3);
     const outcomes = new Map<number, OrdinalOutcome>();
     let remaining = [...targets];
+    let attemptedFetch = false;
 
     for (const peerId of peerIds) {
       if (!isTargetCurrent() || remaining.length === 0) break;
       const connectedPeer = connectedByPeerId.get(peerId);
       if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) continue;
 
-      const requestedUals = [...new Set(remaining.map((target) => target.ual))];
-      for (const target of remaining) {
+      // The wire protocol rejects filters above MAX_EXACT_SYNC_ASSETS, so a
+      // scan batch configured larger than the protocol cap is requested in
+      // protocol-sized slices; targets past the cap stay in `remaining` for a
+      // later peer or pass. Revalidation is likewise restricted to the
+      // requested slice — each revalidated ordinal costs chain reads, and an
+      // unrequested target cannot have changed state.
+      const requestedTargets = remaining.slice(0, MAX_EXACT_SYNC_ASSETS);
+      const deferredTargets = remaining.slice(MAX_EXACT_SYNC_ASSETS);
+      const requestedUals = [...new Set(requestedTargets.map((target) => target.ual))];
+      for (const target of requestedTargets) {
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -3730,6 +3752,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
 
       try {
+        attemptedFetch = true;
         const result = await this.syncExactKnowledgeAssetsFromPeer(
           peerId,
           localCgId,
@@ -3747,7 +3770,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
 
       const stillMissing: OrdinalRecoveryTarget[] = [];
-      for (const target of remaining) {
+      for (const target of requestedTargets) {
         if (!isTargetCurrent()) break;
         const outcome = await this.reconcileChainOrdinal(
           localCgId,
@@ -3761,7 +3784,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
           stillMissing.push(outcome.recovery);
         }
       }
-      remaining = stillMissing;
+      remaining = [...stillMissing, ...deferredTargets];
+    }
+
+    // Mirror the inline path's cooldown policy: an unreachable network must
+    // not consume the fetch budget, and completed work resets the damper so
+    // the trailing `hasMore` slice of a draining backlog fetches immediately.
+    // Only a batch that reached a peer and recovered nothing leaves the
+    // cooldown standing.
+    const recoveredAny = [...outcomes.values()]
+      .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
+    if (!attemptedFetch || recoveredAny) {
+      this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
     return outcomes;
   }
