@@ -1,3 +1,5 @@
+import type { DurableSyncResult } from '../dkg-agent-types.js';
+
 /**
  * The common progress counters emitted by durable and shared-memory sync.
  * Fields are optional so older callers and diagnostic projections can be
@@ -157,4 +159,50 @@ export function isDurableSyncComplete(
 ): boolean {
   return reachedTerminalBoundary
     && classifyDurableProgress(progress).completedWithoutFailure;
+}
+
+type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
+  DurableSyncResult,
+  'backoffWorthyFailures' | 'deferredBackpressure'
+>>;
+
+function createDurableSyncResultBase(): InitializedDurableSyncResult {
+  return {
+    insertedTriples: 0,
+    complete: false,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    deniedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
+  };
+}
+
+/** Neutral merge identity: no work was needed and no failure occurred. */
+export function createCleanEmptyDurableSyncResult(): InitializedDurableSyncResult {
+  return { ...createDurableSyncResultBase(), complete: true };
+}
+
+/** No work completed, but the caller must keep retrying. */
+export function createIncompleteDurableSyncResult(): InitializedDurableSyncResult {
+  return createDurableSyncResultBase();
+}
+
+/** A peer attempt failed before producing a usable durable result. */
+export function createFailedPeerDurableSyncResult(): InitializedDurableSyncResult {
+  return { ...createDurableSyncResultBase(), failedPeers: 1 };
 }

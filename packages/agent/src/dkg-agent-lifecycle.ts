@@ -257,7 +257,13 @@ import {
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
-import { classifyDurableProgress, isDurableSyncComplete } from './sync/durable-progress.js';
+import {
+  classifyDurableProgress,
+  createCleanEmptyDurableSyncResult,
+  createFailedPeerDurableSyncResult,
+  createIncompleteDurableSyncResult,
+  isDurableSyncComplete,
+} from './sync/durable-progress.js';
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
@@ -796,32 +802,6 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptyDurableSyncResult(): DurableSyncResult {
-  return {
-    insertedTriples: 0,
-    complete: true,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    verifiedPrivateOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-  };
-}
 
 /** Merge same-peer durable results across Context Graphs and requester lanes. */
 function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): DurableSyncResult {
@@ -4031,7 +4011,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
-      return { ...emptyDurableSyncResult(), complete: false };
+      return createIncompleteDurableSyncResult();
     }
     // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
     // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
@@ -4055,7 +4035,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     if (legacyContextGraphIds.length === 0) {
-      return changelogResult ?? emptyDurableSyncResult();
+      return changelogResult ?? createCleanEmptyDurableSyncResult();
     }
     const legacyResult = await this.runLegacyDurableSync(
       ctx, remotePeerId, legacyContextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options,
@@ -4106,7 +4086,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
-      emptyResult: emptyDurableSyncResult,
+      emptyResult: createCleanEmptyDurableSyncResult,
       runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
         this,
         remotePeerId,
@@ -4319,7 +4299,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<{ result: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
-      return { result: emptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
+      return { result: createCleanEmptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
     const work = [];
@@ -4341,7 +4321,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             if (getSyncBackpressureBusyError(error)) throw error;
             this.log.warn(ctx, `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
             legacyCgs.push(contextGraphId);
-            return emptyDurableSyncResult();
+            return createCleanEmptyDurableSyncResult();
           }
         },
       });
@@ -4349,7 +4329,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const result = await runOrderedContextGraphSyncs({
       work,
       priorities: this.config.syncContextGraphPriorities,
-      emptyResult: emptyDurableSyncResult,
+      emptyResult: createCleanEmptyDurableSyncResult,
       runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
         ctx,
         item.contextGraphId,
@@ -4388,7 +4368,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
-    let result = emptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
+    let result: DurableSyncResult = createCleanEmptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
     const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
     const cgDataUri = contextGraphDataUri(contextGraphId);
     // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
@@ -5408,27 +5388,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // into HEAD's `accessDeniedPeers` counter so the existing daemon
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
-    const emptyDurable = (): DurableSyncResult => ({
-      insertedTriples: 0,
-      complete: false,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
-      completedPhases: 0,
-      checkpointAdvances: 0,
-      emptyResponses: 0,
-      metaOnlyResponses: 0,
-      verifiedPrivateOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-      rejectedKcs: 0,
-      failedPeers: 1,
-      failedPhases: 0,
-      deniedPhases: 0,
-    });
     const emptyShared = (): SharedMemorySyncResult => ({
       insertedTriples: 0,
       fetchedMetaTriples: 0,
@@ -5461,7 +5420,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const durable = await this.syncFromPeerDetailed(
           remotePeerId,
           [contextGraphId],
-        ).catch(emptyDurable);
+        ).catch(() => createFailedPeerDurableSyncResult());
         const shared = includeSharedMemory
           ? await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]).catch(emptyShared)
           : null;

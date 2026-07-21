@@ -10,7 +10,10 @@ import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
-import { isDurableSyncComplete } from '../durable-progress.js';
+import {
+  createIncompleteDurableSyncResult,
+  isDurableSyncComplete,
+} from '../durable-progress.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type {
@@ -202,29 +205,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     logDebug,
   } = context;
 
-  const summary: DurableSyncSummary = {
-    insertedTriples: 0,
-    complete: false,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    deniedPhases: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    verifiedPrivateOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-  };
+  const summary: DurableSyncSummary = createIncompleteDurableSyncResult();
   let reachedEveryContextGraphTerminalBoundary = contextGraphIds.length > 0;
 
   const recordPhaseOutcome = (

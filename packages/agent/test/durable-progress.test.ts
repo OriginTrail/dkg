@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyDurableProgress,
+  createCleanEmptyDurableSyncResult,
+  createFailedPeerDurableSyncResult,
+  createIncompleteDurableSyncResult,
   isDurableSyncComplete,
 } from '../src/sync/durable-progress.js';
 
@@ -140,5 +143,25 @@ describe('isDurableSyncComplete', () => {
     ['missing metadata', { dataRejectedMissingMeta: 1 }],
   ])('centralizes %s as a non-complete durable result', (_label, failure) => {
     expect(isDurableSyncComplete({ completedPhases: 1, ...failure }, true)).toBe(false);
+  });
+});
+
+describe('durable result factories', () => {
+  it('makes clean, incomplete, and failed-peer intent explicit', () => {
+    expect(createCleanEmptyDurableSyncResult()).toMatchObject({
+      complete: true,
+      insertedTriples: 0,
+      failedPeers: 0,
+    });
+    expect(createIncompleteDurableSyncResult()).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      failedPeers: 0,
+    });
+    expect(createFailedPeerDurableSyncResult()).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      failedPeers: 1,
+    });
   });
 });
