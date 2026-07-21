@@ -14,6 +14,7 @@ import {
   createDurableSyncAccumulator,
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
+  recordDurableSyncDiagnostics,
   type InitializedDurableSyncResult,
 } from '../durable-progress.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
@@ -194,7 +195,6 @@ export async function runDurableSync(
   } = context;
 
   const accumulator = createDurableSyncAccumulator();
-  const summary = accumulator.diagnostics;
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -205,8 +205,8 @@ export async function runDurableSync(
     },
   ) => {
     const countProgress = options.countProgress ?? true;
-    summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
-    summary.timedOutPhases += result.timedOut ? 1 : 0;
+    let completedPhases = 0;
+    let checkpointAdvances = 0;
     if (options.updateCheckpoint && countProgress) {
       if (
         result.completed &&
@@ -217,12 +217,18 @@ export async function runDurableSync(
           result.nextOffset > result.resumedFromOffset
         )
       ) {
-        summary.completedPhases += 1;
+        completedPhases = 1;
       }
       if (result.nextOffset > result.resumedFromOffset) {
-        summary.checkpointAdvances += 1;
+        checkpointAdvances = 1;
       }
     }
+    recordDurableSyncDiagnostics(accumulator, {
+      resumedPhases: result.resumedFromOffset > 0 ? 1 : 0,
+      timedOutPhases: result.timedOut ? 1 : 0,
+      completedPhases,
+      checkpointAdvances,
+    });
     if (!options.updateCheckpoint) return;
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
@@ -410,13 +416,15 @@ export async function runDurableSync(
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-      summary.bytesReceived += metaResult.bytesReceived + rawDataResult.bytesReceived;
-      summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
-      summary.fetchedDataTriples += processed.totalFetchedDataQuads;
-      summary.emptyResponses += processed.emptyResponses;
-      summary.metaOnlyResponses += processed.metaOnlyResponses;
-      summary.verifiedPrivateOnlyResponses += processed.verifiedPrivateOnlyResponses;
-      summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
+      recordDurableSyncDiagnostics(accumulator, {
+        bytesReceived: metaResult.bytesReceived + rawDataResult.bytesReceived,
+        fetchedMetaTriples: processed.totalFetchedMetaQuads,
+        fetchedDataTriples: processed.totalFetchedDataQuads,
+        emptyResponses: processed.emptyResponses,
+        metaOnlyResponses: processed.metaOnlyResponses,
+        verifiedPrivateOnlyResponses: processed.verifiedPrivateOnlyResponses,
+        dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+      });
 
       // A rejected KA means this page cannot be acknowledged safely. We may
       // still persist independently verified KAs from the page, but keeping
@@ -428,7 +436,7 @@ export async function runDurableSync(
           ctx,
           `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
         );
-        summary.rejectedKcs += processed.rejectedKcs;
+        recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
       }
 
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
@@ -534,9 +542,11 @@ export async function runDurableSync(
           // not erase truthful progress from the returned summary. The phase
           // checkpoint still advances only after the whole verified page
           // settles, preserving safe replay semantics.
-          summary.insertedDataTriples += asset.dataQuads.length;
-          summary.insertedMetaTriples += asset.metadataQuads.length;
-          summary.insertedTriples += asset.dataQuads.length + asset.metadataQuads.length;
+          recordDurableSyncDiagnostics(accumulator, {
+            insertedDataTriples: asset.dataQuads.length,
+            insertedMetaTriples: asset.metadataQuads.length,
+            insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
+          });
         } else if (outcome === 'stale') {
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {
@@ -545,13 +555,17 @@ export async function runDurableSync(
       }
       if (partitioned.remainingData.length > 0) {
         await storeInsert(partitioned.remainingData);
-        summary.insertedTriples += partitioned.remainingData.length;
-        summary.insertedDataTriples += partitioned.remainingData.length;
+        recordDurableSyncDiagnostics(accumulator, {
+          insertedTriples: partitioned.remainingData.length,
+          insertedDataTriples: partitioned.remainingData.length,
+        });
       }
       if (partitioned.remainingMeta.length > 0) {
         await storeInsert(partitioned.remainingMeta);
-        summary.insertedTriples += partitioned.remainingMeta.length;
-        summary.insertedMetaTriples += partitioned.remainingMeta.length;
+        recordDurableSyncDiagnostics(accumulator, {
+          insertedTriples: partitioned.remainingMeta.length,
+          insertedMetaTriples: partitioned.remainingMeta.length,
+        });
       }
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
@@ -583,17 +597,17 @@ export async function runDurableSync(
       }
       const backoffWorthy = isSyncBackoffWorthyError(pidErr);
       if (backoffWorthy) {
-        summary.backoffWorthyFailures += 1;
+        recordDurableSyncDiagnostics(accumulator, { backoffWorthyFailures: 1 });
       }
       if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
         onAccessDenied?.(pid);
-        summary.deniedPhases += 1;
+        recordDurableSyncDiagnostics(accumulator, { deniedPhases: 1 });
       } else if (
         peerRespondedForContextGraph ||
         didSyncPeerRespond(pidErr) ||
         !isSyncTransportFailure(pidErr)
       ) {
-        summary.failedPhases += 1;
+        recordDurableSyncDiagnostics(accumulator, { failedPhases: 1 });
       } else {
         peerFailed = true;
       }
@@ -603,13 +617,14 @@ export async function runDurableSync(
     }
   }
   if (peerFailed) {
-    summary.failedPeers = 1;
+    recordDurableSyncDiagnostics(accumulator, { failedPeers: 1 });
   }
-  if (summary.insertedTriples > 0) {
-    logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
+  const result = finalizeDurableSyncCompletion(accumulator);
+  if (result.insertedTriples > 0) {
+    logInfo(ctx, `Sync complete: ${result.insertedTriples} verified triples from ${remotePeerId}`);
   }
 
-  return finalizeDurableSyncCompletion(accumulator);
+  return result;
 }
 
 function partitionVerifiedGraphScopedAssets(

@@ -114,9 +114,12 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import {
   classifyDurableCatchupRequest,
   createCatchupRunner,
+  formatDurableCatchupFailure,
   runDurableCatchupLeg,
   type CatchupJobResult,
   type CatchupRunner,
+  type DurableCatchupFailureReason,
+  type DurableCatchupLegState,
   type DurableLegDiagnostics,
 } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../../auth.js';
@@ -832,6 +835,8 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      /** Typed internal outcome; omitted from the legacy HTTP response shape. */
+      durableState?: DurableCatchupLegState;
       /** Present when the agent supports detailed durable-sync outcomes. */
       durableComplete?: boolean;
       durableDiagnostics?: DurableLegDiagnostics;
@@ -879,8 +884,10 @@ WHERE {
         selectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
+          let durableState: DurableCatchupLegState | undefined;
           let durableComplete: boolean | undefined;
           let durableDiagnostics: DurableLegDiagnostics | undefined;
+          let durableFailureReasons: DurableCatchupFailureReason[] | undefined;
           let swmError: string | undefined;
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
@@ -919,14 +926,17 @@ WHERE {
               INTERNAL_DURABLE_BUDGET_MS,
             );
             durable = durableLeg.insertedTriples;
+            durableState = durableLeg.state;
             durableDiagnostics = durableLeg.diagnostics;
             durableComplete = durableLeg.complete;
-            durableError = durableLeg.error;
+            durableFailureReasons = durableLeg.failureReasons;
+            durableError = formatDurableCatchupFailure(durableFailureReasons);
           }
           return {
             peerId: candidate,
             insertedTriples: swm,
             durableInsertedTriples: durable,
+            durableState,
             durableComplete,
             durableDiagnostics,
             swmError,
@@ -940,6 +950,7 @@ WHERE {
             peerId: selectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
+            ...(s.value.durableState ? { durableState: s.value.durableState } : {}),
             ...(s.value.durableComplete !== undefined ? { durableComplete: s.value.durableComplete } : {}),
             ...(s.value.durableDiagnostics ? { durableDiagnostics: s.value.durableDiagnostics } : {}),
             ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
@@ -1109,7 +1120,7 @@ WHERE {
           insertedTriples: cg.insertedTriples,
           durableInsertedTriples: cg.durableInsertedTriples,
           ...(durableComplete !== undefined ? { durableComplete } : {}),
-          perPeer: cg.perPeer,
+          perPeer: cg.perPeer.map(({ durableState: _durableState, ...peer }) => peer),
         };
       }),
       hostCatchup: hostCatchupOpted ? {

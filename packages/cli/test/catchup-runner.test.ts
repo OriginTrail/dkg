@@ -274,8 +274,9 @@ describe('route-level durable catchup orchestration', () => {
 
     expect(result).toMatchObject({
       insertedTriples: 0,
+      state: 'failed',
       complete: false,
-      error: 'Durable sync did not complete (incompleteWithoutProgress=1)',
+      failureReasons: [{ code: 'incompleteWithoutProgress', count: 1 }],
     });
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       'peer-a',
@@ -306,8 +307,12 @@ describe('route-level durable catchup orchestration', () => {
   it('keeps a CG complete when any redundant peer completed cleanly', () => {
     const outcome = classifyDurableCatchupRequest([
       [
-        { durableComplete: true },
-        { durableComplete: false },
+        { durableState: 'complete', durableComplete: true },
+        {
+          durableState: 'failed',
+          durableComplete: false,
+          durableError: 'Durable sync did not complete (failedPhases=1)',
+        },
       ],
     ], true, false);
 
@@ -364,5 +369,19 @@ describe('route-level durable catchup orchestration', () => {
     });
     expect(outcome.complete).toBeUndefined();
     expect(outcome.errorBody).toBeUndefined();
+  });
+
+  it('classifies all-peer failure from typed state without parsing display text', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [{ durableState: 'failed', durableComplete: false }],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
+      complete: false,
+      allPeersFailed: true,
+      incomplete: false,
+      responseStatus: 503,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED' },
+    });
   });
 });

@@ -513,8 +513,8 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
-  it('keeps one CG complete when a redundant peer returns an incomplete prefix', async () => {
-    const peers = ['peer-complete', 'peer-incomplete'];
+  it('keeps one CG complete when a redundant peer fails', async () => {
+    const peers = ['peer-complete', 'peer-failed'];
     const syncFromPeerDetailed = vi.fn(async (candidate: string) => (
       candidate === 'peer-complete'
         ? detailedDurableResult({
@@ -529,6 +529,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
             insertedMetaTriples: 1,
             completedPhases: 1,
             checkpointAdvances: 1,
+            failedPhases: 1,
             complete: false,
           })
     ));
@@ -562,9 +563,31 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(JSON.parse(res.body)).toMatchObject({
       ok: true,
       durableComplete: true,
+      results: [
+        {
+          peerId: 'peer-complete',
+          durableComplete: true,
+        },
+        {
+          peerId: 'peer-failed',
+          durableComplete: false,
+          durableError: 'Durable sync did not complete (failedPhases=1)',
+        },
+      ],
       perContextGraph: [{
         contextGraphId: 'cg-redundant-peers',
         durableComplete: true,
+        perPeer: [
+          {
+            peerId: 'peer-complete',
+            durableComplete: true,
+          },
+          {
+            peerId: 'peer-failed',
+            durableComplete: false,
+            durableError: 'Durable sync did not complete (failedPhases=1)',
+          },
+        ],
       }],
     });
   });

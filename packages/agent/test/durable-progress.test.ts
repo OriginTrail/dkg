@@ -10,6 +10,7 @@ import {
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
   normalizeDurableSyncResult,
+  recordDurableSyncDiagnostics,
 } from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
@@ -142,6 +143,21 @@ describe('classifyDurableProgress', () => {
     expect(progress.completedReadinessCleanly).toBe(false);
   });
 
+  it('does not classify an explicitly incomplete private-only result as clean progress', () => {
+    const progress = classifyDurableProgress({
+      insertedTriples: 8,
+      insertedDataTriples: 0,
+      insertedMetaTriples: 8,
+      verifiedPrivateOnlyResponses: 1,
+      completedPhases: 1,
+    }, { complete: false });
+
+    expect(progress.hasVerifiedPrivateOnlyResponse).toBe(true);
+    expect(progress.hasCleanVerifiedPrivateOnlyCompletion).toBe(false);
+    expect(progress.madeReconnectProgress).toBe(false);
+    expect(progress.completedWithoutFailure).toBe(false);
+  });
+
   it('keeps the generic classifier counters-only and accepts an explicit durable verdict', () => {
     const counters = { completedPhases: 1 };
 
@@ -175,7 +191,7 @@ describe('isDurableSyncComplete', () => {
 describe('durable terminal boundary model', () => {
   it('keeps an incomplete lane sticky across later clean boundaries', () => {
     const accumulator = createDurableSyncAccumulator();
-    accumulator.diagnostics.completedPhases = 1;
+    recordDurableSyncDiagnostics(accumulator, { completedPhases: 1 });
 
     markDurableTerminalBoundary(accumulator, false);
     markDurableTerminalBoundary(accumulator, true);
@@ -192,7 +208,7 @@ describe('durable terminal boundary model', () => {
     });
 
     const incomplete = createDurableSyncAccumulator();
-    incomplete.diagnostics.completedPhases = 2;
+    recordDurableSyncDiagnostics(incomplete, { completedPhases: 2 });
     markDurableTerminalBoundary(incomplete, false, {
       countCompletedPhase: true,
       clearCompletedPhasesWhenIncomplete: true,
@@ -205,7 +221,7 @@ describe('durable terminal boundary model', () => {
 
   it('does not synthesize a completed phase when a blocking counter is present', () => {
     const accumulator = createDurableSyncAccumulator();
-    accumulator.diagnostics.rejectedKcs = 1;
+    recordDurableSyncDiagnostics(accumulator, { rejectedKcs: 1 });
 
     markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
 
@@ -221,16 +237,16 @@ describe('durable terminal boundary model', () => {
     const publicLane = finalizeDurableSyncCompletion(completedLane);
     const neutral = createDurableSyncAccumulator();
 
-    expect('complete' in neutral.diagnostics).toBe(false);
+    expect('complete' in neutral).toBe(false);
     const merged = mergeDurableSyncAccumulatorInto(
       neutral,
       durableSyncAccumulatorFromResult(publicLane),
     );
-    expect('complete' in merged.diagnostics).toBe(false);
+    expect('complete' in merged).toBe(false);
     expect(finalizeDurableSyncCompletion(merged).complete).toBe(true);
   });
 
-  it('uses canonical counter policies when folding same-peer failures', () => {
+  it('keeps peer failure idempotent while summing phase failures', () => {
     const first = createFailedPeerDurableSyncResult();
     first.failedPhases = 1;
     const second = createFailedPeerDurableSyncResult();
@@ -242,8 +258,10 @@ describe('durable terminal boundary model', () => {
       durableSyncAccumulatorFromResult(second),
     );
 
-    expect(accumulator.diagnostics.failedPeers).toBe(1);
-    expect(accumulator.diagnostics.failedPhases).toBe(3);
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
+      failedPeers: 1,
+      failedPhases: 3,
+    });
   });
 });
 

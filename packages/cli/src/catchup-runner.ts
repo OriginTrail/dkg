@@ -118,8 +118,23 @@ export interface DurableLegSummary {
   insertedTriples: number;
   diagnostics: DurableLegDiagnostics;
   complete: boolean;
-  hardFailureDetails: string[];
+  state: DurableCatchupLegState;
+  failureReasons: DurableCatchupFailureReason[];
 }
+
+export type DurableCatchupLegState = 'complete' | 'incomplete-progress' | 'failed' | 'legacy';
+
+export type DurableCatchupFailureCode =
+  | 'failedPeers'
+  | 'failedPhases'
+  | 'deniedPhases'
+  | 'rejectedKcs'
+  | 'dataRejectedMissingMeta'
+  | 'incompleteWithoutProgress';
+
+export type DurableCatchupFailureReason =
+  | { code: DurableCatchupFailureCode; count: number }
+  | { code: 'exception'; message: string };
 
 /** The only agent capabilities required by the route-level durable leg. */
 export interface DurableCatchupAgent {
@@ -129,12 +144,14 @@ export interface DurableCatchupAgent {
 
 export interface DurableCatchupLegResult {
   insertedTriples: number;
+  state: DurableCatchupLegState;
   complete?: boolean;
   diagnostics?: DurableLegDiagnostics;
-  error?: string;
+  failureReasons?: DurableCatchupFailureReason[];
 }
 
 export interface DurableCatchupAttempt {
+  durableState?: DurableCatchupLegState;
   durableComplete?: boolean;
   durableError?: string;
   error?: string;
@@ -164,36 +181,60 @@ export interface DurableCatchupRequestOutcome {
  * counters remain diagnostics and can describe safely committed prefixes.
  */
 export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummary {
-  const {
-    insertedTriples,
-    complete,
-    ...diagnostics
-  } = normalizeDurableSyncResult(result);
-  const hardFailureDetails = [
+  const normalized = normalizeDurableSyncResult(result);
+  const { insertedTriples, complete, ...diagnostics } = normalized;
+  const failureReasons = [
     ['failedPeers', diagnostics.failedPeers],
     ['failedPhases', diagnostics.failedPhases],
     ['deniedPhases', diagnostics.deniedPhases],
     ['rejectedKcs', diagnostics.rejectedKcs],
     ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
-  ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
+  ].flatMap(([code, count]) => Number(count) > 0 ? [{
+      code: code as DurableCatchupFailureCode,
+      count: Number(count),
+    }] : []);
   const committedProgress = insertedTriples > 0
     || diagnostics.insertedDataTriples > 0
     || diagnostics.insertedMetaTriples > 0
     || diagnostics.checkpointAdvances > 0;
-  if (!complete && !committedProgress && hardFailureDetails.length === 0) {
+  if (!complete && !committedProgress && failureReasons.length === 0) {
     // A timeout/backpressure stop before the first durable boundary is not a
     // successful no-op. Give the HTTP adapter a typed failure reason so
     // durable-only automation keeps retrying instead of treating 200/ok as an
     // already-synchronized graph. Safely committed prefixes remain observable
     // as retryable progress and intentionally do not enter this branch.
-    hardFailureDetails.push('incompleteWithoutProgress=1');
+    failureReasons.push({ code: 'incompleteWithoutProgress', count: 1 });
   }
+  const state: DurableCatchupLegState = complete && failureReasons.length === 0
+    ? 'complete'
+    : failureReasons.length > 0
+      ? 'failed'
+      : 'incomplete-progress';
   return {
     insertedTriples,
     diagnostics,
-    complete,
-    hardFailureDetails,
+    complete: state === 'complete',
+    state,
+    failureReasons,
   };
+}
+
+/** Convert typed leg failures to the legacy operator-facing message at the HTTP boundary. */
+export function formatDurableCatchupFailure(
+  reasons: readonly DurableCatchupFailureReason[] | undefined,
+): string | undefined {
+  if (!reasons || reasons.length === 0) return undefined;
+  const exception = reasons.find(
+    (reason): reason is Extract<DurableCatchupFailureReason, { code: 'exception' }> => (
+      reason.code === 'exception'
+    ),
+  );
+  if (exception) return exception.message;
+  return `Durable sync did not complete (${reasons
+    .map((reason) => reason.code === 'exception'
+      ? reason.message
+      : `${reason.code}=${reason.count}`)
+    .join(', ')})`;
 }
 
 /**
@@ -219,11 +260,10 @@ export async function runDurableCatchupLeg(
       const summary = summarizeDurableLeg(detailed);
       return {
         insertedTriples: summary.insertedTriples,
+        state: summary.state,
         complete: summary.complete,
         diagnostics: summary.diagnostics,
-        ...(summary.hardFailureDetails.length > 0 ? {
-          error: `Durable sync did not complete (${summary.hardFailureDetails.join(', ')})`,
-        } : {}),
+        ...(summary.failureReasons.length > 0 ? { failureReasons: summary.failureReasons } : {}),
       };
     }
 
@@ -237,12 +277,17 @@ export async function runDurableCatchupLeg(
           { totalTimeoutMs },
         )
         : 0,
+      state: 'legacy',
     };
   } catch (error) {
     return {
       insertedTriples: 0,
+      state: 'failed',
       complete: false,
-      error: error instanceof Error ? error.message : String(error),
+      failureReasons: [{
+        code: 'exception',
+        message: error instanceof Error ? error.message : String(error),
+      }],
     };
   }
 }
@@ -281,7 +326,10 @@ export function classifyDurableCatchupRequest(
   const allPeersFailed = includeDurable
     && !includeSharedMemory
     && attempts.length > 0
-    && attempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
+    && attempts.every((attempt) => (
+      attempt.durableState === 'failed'
+      || (attempt.durableState === undefined && Boolean(attempt.error))
+    ));
   const noEligibleAttempts = missingContextGraphAttempt && attempts.length === 0;
   const incomplete = includeDurable
     && !includeSharedMemory

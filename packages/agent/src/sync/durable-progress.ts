@@ -184,8 +184,8 @@ type DurableSyncCounterReducer = 'sum' | 'max';
 /**
  * Canonical runtime metadata for every numeric field in DurableSyncResult.
  * The satisfies clause makes a newly added counter a compile error until its
- * aggregation policy is declared here. Consumers can also reuse this table for
- * zero construction and normalized projections instead of duplicating fields.
+ * aggregation policy is declared here. The table stays module-private; public
+ * consumers use typed factories and normalization helpers.
  */
 const DURABLE_SYNC_COUNTER_REDUCERS = {
   insertedTriples: 'sum',
@@ -220,34 +220,92 @@ type DurableSyncCounterKey = keyof typeof DURABLE_SYNC_COUNTER_REDUCERS;
  * here by design: boundary aggregation and a finalized result must not share
  * one boolean whose meaning changes midway through a run.
  */
-export interface DurableSyncAccumulator {
-  diagnostics: InitializedDurableSyncDiagnostics;
-  allTerminalBoundariesReached: boolean;
-  observedTerminalBoundaries: number;
+export class DurableSyncAccumulator {
+  private diagnostics: InitializedDurableSyncDiagnostics;
+
+  private allTerminalBoundariesReached: boolean;
+
+  private observedTerminalBoundaries: number;
+
+  constructor(result?: DurableSyncResult) {
+    if (result) {
+      const { complete, ...diagnostics } = normalizeDurableSyncResult(result);
+      this.diagnostics = diagnostics;
+      this.allTerminalBoundariesReached = complete;
+      this.observedTerminalBoundaries = 1;
+      return;
+    }
+    this.diagnostics = createDurableSyncDiagnosticsBase();
+    this.allTerminalBoundariesReached = true;
+    this.observedTerminalBoundaries = 0;
+  }
+
+  recordDiagnostics(partial: Partial<InitializedDurableSyncDiagnostics>): this {
+    this.diagnostics = mergeDurableSyncDiagnostics(
+      this.diagnostics,
+      normalizeDurableSyncDiagnostics(partial),
+    );
+    return this;
+  }
+
+  merge(part: DurableSyncAccumulator): this {
+    this.diagnostics = mergeDurableSyncDiagnostics(this.diagnostics, part.diagnostics);
+    this.allTerminalBoundariesReached =
+      this.allTerminalBoundariesReached && part.allTerminalBoundariesReached;
+    this.observedTerminalBoundaries += part.observedTerminalBoundaries;
+    return this;
+  }
+
+  recordTerminalBoundary(
+    reachedTerminalBoundary: boolean,
+    options: DurableTerminalBoundaryOptions = {},
+  ): this {
+    if (!reachedTerminalBoundary && options.clearCompletedPhasesWhenIncomplete) {
+      this.diagnostics.completedPhases = 0;
+    }
+    if (
+      reachedTerminalBoundary
+      && options.countCompletedPhase
+      && !classifyDurableProgress(this.diagnostics).hasBlockingFailure
+    ) {
+      this.diagnostics.completedPhases += 1;
+    }
+    this.allTerminalBoundariesReached =
+      this.allTerminalBoundariesReached && reachedTerminalBoundary;
+    this.observedTerminalBoundaries += 1;
+    return this;
+  }
+
+  hasBackoffWorthyFailure(): boolean {
+    return this.diagnostics.backoffWorthyFailures > 0;
+  }
+
+  hasTerminalBoundary(): boolean {
+    return this.observedTerminalBoundaries > 0;
+  }
+
+  finalize(): InitializedDurableSyncResult {
+    return {
+      ...this.diagnostics,
+      complete: this.observedTerminalBoundaries > 0
+        && isDurableSyncComplete(
+          this.diagnostics,
+          this.allTerminalBoundariesReached,
+        ),
+    };
+  }
 }
 
 /** Start a neutral internal fold. It is never exposed as a public result. */
 export function createDurableSyncAccumulator(): DurableSyncAccumulator {
-  return {
-    diagnostics: createDurableSyncDiagnosticsBase(),
-    allTerminalBoundariesReached: true,
-    observedTerminalBoundaries: 0,
-  };
+  return new DurableSyncAccumulator();
 }
 
 /** Convert one finalized public result into an internal fold contribution. */
 export function durableSyncAccumulatorFromResult(
   result: DurableSyncResult,
 ): DurableSyncAccumulator {
-  const { complete, ...diagnostics } = result;
-  return {
-    diagnostics: {
-      ...createDurableSyncDiagnosticsBase(),
-      ...diagnostics,
-    },
-    allTerminalBoundariesReached: complete === true,
-    observedTerminalBoundaries: 1,
-  };
+  return new DurableSyncAccumulator(result);
 }
 
 function mergeDurableSyncDiagnostics(
@@ -269,14 +327,7 @@ export function mergeDurableSyncAccumulatorInto(
   target: DurableSyncAccumulator,
   part: DurableSyncAccumulator,
 ): DurableSyncAccumulator {
-  Object.assign(
-    target.diagnostics,
-    mergeDurableSyncDiagnostics(target.diagnostics, part.diagnostics),
-  );
-  target.allTerminalBoundariesReached =
-    target.allTerminalBoundariesReached && part.allTerminalBoundariesReached;
-  target.observedTerminalBoundaries += part.observedTerminalBoundaries;
-  return target;
+  return target.merge(part);
 }
 
 /** Fold a finalized lane result into an existing internal aggregate. */
@@ -284,10 +335,27 @@ export function mergeDurableSyncResultIntoAccumulator(
   accumulator: DurableSyncAccumulator,
   result: DurableSyncResult,
 ): DurableSyncAccumulator {
-  return mergeDurableSyncAccumulatorInto(
-    accumulator,
-    durableSyncAccumulatorFromResult(result),
-  );
+  return accumulator.merge(durableSyncAccumulatorFromResult(result));
+}
+
+/** Record typed counter deltas without exposing the accumulator's mutable state. */
+export function recordDurableSyncDiagnostics(
+  accumulator: DurableSyncAccumulator,
+  diagnostics: Partial<InitializedDurableSyncDiagnostics>,
+): DurableSyncAccumulator {
+  return accumulator.recordDiagnostics(diagnostics);
+}
+
+export function durableSyncAccumulatorHasBackoffWorthyFailure(
+  accumulator: DurableSyncAccumulator,
+): boolean {
+  return accumulator.hasBackoffWorthyFailure();
+}
+
+export function durableSyncAccumulatorHasTerminalBoundary(
+  accumulator: DurableSyncAccumulator,
+): boolean {
+  return accumulator.hasTerminalBoundary();
 }
 
 /**
@@ -302,35 +370,14 @@ export function markDurableTerminalBoundary(
   reachedTerminalBoundary: boolean,
   options: DurableTerminalBoundaryOptions = {},
 ): DurableSyncAccumulator {
-  const result = accumulator.diagnostics;
-  if (!reachedTerminalBoundary && options.clearCompletedPhasesWhenIncomplete) {
-    result.completedPhases = 0;
-  }
-  if (
-    reachedTerminalBoundary
-    && options.countCompletedPhase
-    && !classifyDurableProgress(result).hasBlockingFailure
-  ) {
-    result.completedPhases += 1;
-  }
-  accumulator.allTerminalBoundariesReached =
-    accumulator.allTerminalBoundariesReached && reachedTerminalBoundary;
-  accumulator.observedTerminalBoundaries += 1;
-  return accumulator;
+  return accumulator.recordTerminalBoundary(reachedTerminalBoundary, options);
 }
 
 /** Assign the public completion verdict once, after every lane is folded. */
 export function finalizeDurableSyncCompletion(
   accumulator: DurableSyncAccumulator,
 ): InitializedDurableSyncResult {
-  return {
-    ...accumulator.diagnostics,
-    complete: accumulator.observedTerminalBoundaries > 0
-      && isDurableSyncComplete(
-        accumulator.diagnostics,
-        accumulator.allTerminalBoundariesReached,
-      ),
-  };
+  return accumulator.finalize();
 }
 
 export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
@@ -351,18 +398,25 @@ function createDurableSyncDiagnosticsBase(): InitializedDurableSyncDiagnostics {
  * result contract without exposing internal reducer metadata. Consumers get a
  * stable typed boundary; aggregation policy remains private to this module.
  */
+function normalizeDurableSyncDiagnostics(
+  diagnostics: Partial<InitializedDurableSyncDiagnostics>,
+): InitializedDurableSyncDiagnostics {
+  const normalized = createDurableSyncDiagnosticsBase();
+  for (const key of Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[]) {
+    const value = diagnostics[key];
+    normalized[key] = value !== undefined && Number.isFinite(value) && value > 0 ? value : 0;
+  }
+  return normalized;
+}
+
+/** Stable public adapter for consumers that need a fully initialized result. */
 export function normalizeDurableSyncResult(
   result: DurableSyncResult,
 ): InitializedDurableSyncResult {
-  const diagnostics = createDurableSyncDiagnosticsBase();
-  const normalized = diagnostics as Record<DurableSyncCounterKey, number>;
-  for (const key of Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[]) {
-    const value = result[key];
-    normalized[key] = typeof value === 'number' && Number.isFinite(value) && value > 0
-      ? value
-      : 0;
-  }
-  return { ...diagnostics, complete: result.complete === true };
+  return {
+    ...normalizeDurableSyncDiagnostics(result),
+    complete: result.complete === true,
+  };
 }
 
 /** No work completed, but the caller must keep retrying. */

@@ -262,11 +262,14 @@ import {
   createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
+  durableSyncAccumulatorHasBackoffWorthyFailure,
+  durableSyncAccumulatorHasTerminalBoundary,
   durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
   mergeDurableSyncResultIntoAccumulator,
+  recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
 import {
@@ -4087,11 +4090,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ),
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
-        summary.diagnostics.deferredBackpressure += 1;
+        recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
         return markDurableTerminalBoundary(summary, false);
       },
       shouldStop: (part) => Boolean(
-        stopOnBackoffWorthyFailure && part.diagnostics.backoffWorthyFailures > 0,
+        stopOnBackoffWorthyFailure
+        && durableSyncAccumulatorHasBackoffWorthyFailure(part),
       ),
       onDeferred: (item, error) => this.log.info(
         ctx,
@@ -4323,7 +4327,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ),
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
-        summary.diagnostics.deferredBackpressure += 1;
+        recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
         return markDurableTerminalBoundary(summary, false);
       },
       onDeferred: (item, error) => this.log.info(
@@ -4331,7 +4335,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         `Deferring changelog sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
       ),
     });
-    const result = accumulator.observedTerminalBoundaries > 0
+    const result = durableSyncAccumulatorHasTerminalBoundary(accumulator)
       ? finalizeDurableSyncCompletion(accumulator)
       : undefined;
     return { result, remainingLegacyCgs: legacyCgs };
@@ -4473,8 +4477,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const verifiedGraphScopedDataGraphs = new Set(
           processed.verifiedGraphScopedDataGraphs,
         );
-        accumulator.diagnostics.rejectedKcs += processed.rejectedKcs;
-        accumulator.diagnostics.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
+        recordDurableSyncDiagnostics(accumulator, {
+          rejectedKcs: processed.rejectedKcs,
+          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+        });
         const plan = planPageApply({
           records: page.records,
           nextSeq: page.nextSeq,
@@ -4503,20 +4509,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
         }
         if (!plan.deferred && processed.rejectedKcs === 0) {
-          accumulator.diagnostics.verifiedPrivateOnlyResponses =
-            accumulator.diagnostics.verifiedPrivateOnlyResponses
-            + processed.verifiedPrivateOnlyResponses;
+          recordDurableSyncDiagnostics(accumulator, {
+            verifiedPrivateOnlyResponses: processed.verifiedPrivateOnlyResponses,
+          });
         }
         return { advanceTo: plan.advanceTo, applied: plan.applied, deferred: plan.deferred };
       },
     });
-    accumulator.diagnostics.insertedDataTriples += insertedDataTriples;
-    accumulator.diagnostics.insertedMetaTriples += insertedMetaTriples;
-    accumulator.diagnostics.insertedTriples += insertedDataTriples + insertedMetaTriples;
+    recordDurableSyncDiagnostics(accumulator, {
+      insertedDataTriples,
+      insertedMetaTriples,
+      insertedTriples: insertedDataTriples + insertedMetaTriples,
+    });
     const changelogComplete = outcome.kind === 'delta'
       || (outcome.kind === 'resync' && outcome.complete);
-    if (outcome.kind === 'incomplete') accumulator.diagnostics.failedPhases += 1;
-    if (outcome.kind === 'denied') accumulator.diagnostics.deniedPhases += 1;
+    if (outcome.kind === 'incomplete') {
+      recordDurableSyncDiagnostics(accumulator, { failedPhases: 1 });
+    }
+    if (outcome.kind === 'denied') {
+      recordDurableSyncDiagnostics(accumulator, { deniedPhases: 1 });
+    }
     // A legacy fallback may have completed its own fetch phases while the
     // changelog drop remains unauthoritative. Preserve inserted progress, but
     // do not surface those phase completions as CG readiness evidence.
