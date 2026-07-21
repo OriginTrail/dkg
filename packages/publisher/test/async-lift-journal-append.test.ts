@@ -13,6 +13,12 @@ import {
   parseLiteral,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_INCLUSION,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from './_helpers/ka-vm-publish.js';
 
 // #1829 chunk 2-3 — appendJournal hooked into writeJob: per-lineageKey monotonic seq,
 // explicit kinds, daemon-only gating, and #1849 defensiveness (a legacy U+001F job
@@ -37,52 +43,10 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     });
   }
 
-  function kaVmPublishRequest(overrides: Record<string, unknown> = {}) {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
-    return {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [] as string[],
-      contentScopeVersion: 2 as const,
-      kaUal,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: { r: (`0x${'34'.repeat(32)}`) as `0x${string}`, vs: (`0x${'56'.repeat(32)}`) as `0x${string}` },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: kaUal,
-      ...overrides,
-    };
-  }
-
-  async function driveToValidated(publisher: TripleStoreAsyncLiftPublisher, overrides: Record<string, unknown> = {}): Promise<string> {
+  async function driveToValidated(publisher: TripleStoreAsyncLiftPublisher, overrides: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(overrides));
     await publisher.claimNext('wallet-1');
-    await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
-    });
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     return jobId;
   }
 
@@ -180,15 +144,15 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     const jobId = await driveToValidated(publisher);
     // Force a local no-op finalize so the job reaches 'finalized' without a chain tx.
     await publisher.update(jobId, 'broadcast', {
-      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+      broadcast: KA_VM_BROADCAST_TX,
     });
     await publisher.update(jobId, 'included', {
-      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
-      inclusion: { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 },
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
     });
     await publisher.update(jobId, 'finalized', {
-      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
-      inclusion: { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 },
+      broadcast: KA_VM_BROADCAST_TX,
+      inclusion: KA_VM_INCLUSION,
       finalization: { mode: 'local' },
     });
     const before = await journalRows();
@@ -205,7 +169,7 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     const publisher = createPublisher();
     const jobId = await driveToValidated(publisher);
     await publisher.update(jobId, 'broadcast', {
-      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
+      broadcast: KA_VM_BROADCAST_TX,
     });
     const res = await publisher.readJournalByIntent(facts);
     expect(res.entries.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
@@ -250,8 +214,8 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     // First job driven to a TERMINAL state so it no longer occupies the subject and a
     // fresh enqueue admits a genuine successor (rather than dedup returning the same job).
     const first = await driveToValidated(publisher);
-    const bx = { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' };
-    const inc = { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 };
+    const bx = KA_VM_BROADCAST_TX;
+    const inc = KA_VM_INCLUSION;
     await publisher.update(first, 'broadcast', { broadcast: bx });
     await publisher.update(first, 'included', { broadcast: bx, inclusion: inc });
     await publisher.update(first, 'finalized', { broadcast: bx, inclusion: inc, finalization: { mode: 'local' } });
