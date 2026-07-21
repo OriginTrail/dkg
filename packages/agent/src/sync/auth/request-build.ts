@@ -4,6 +4,7 @@ import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
+import { encodeExactAssetUals, requireExactAssetUals } from '../exact-assets.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -57,6 +58,13 @@ export interface SyncRequestEnvelope {
    */
   sinceBatchId?: string;
   /**
+   * Additive, UNSIGNED exact-KA response filter. It can only narrow an already
+   * authorized Context Graph read. Upgraded responders serve metadata and data
+   * for these UALs only; old responders ignore it, while the upgraded requester
+   * still filters their full response before verification/storage.
+   */
+  assetUals?: string[];
+  /**
    * R9 (SECURITY) — member SWM recovery marker. When set, the recovery path
    * serves PLAINTEXT member-to-member, so the responder MUST authorize it via
    * the strict members-only `isMemberRecoveryAuthorized` hard-deny gate (a
@@ -88,6 +96,7 @@ interface BuildSyncRequestParams {
   authPurpose?: string;
   authSelector?: string;
   sinceBatchId?: string;
+  assetUals?: string[];
   syncSessionId?: string;
   needsAuth: boolean;
   /**
@@ -147,6 +156,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     authPurpose,
     authSelector,
     sinceBatchId,
+    assetUals: rawAssetUals,
     syncSessionId,
     needsAuth,
     recovery,
@@ -173,6 +183,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
   const useByteBudgetPage = !includeSharedMemory && phase === 'data' && requestedLimit > SYNC_PAGE_SIZE;
+  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
@@ -191,7 +202,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     // Trailing keyed tokens are additive; old responders ignore the extra parts.
     const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
     const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
+    const assetsSuffix = assetUals ? `|assets|${encodeExactAssetUals(assetUals)}` : '';
+    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`);
   }
 
   const request: SyncRequestEnvelope = {
@@ -241,6 +253,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // authorization; only narrows the responder's result set).
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
+  if (assetUals) request.assetUals = assetUals;
   if (useByteBudgetPage) {
     request.pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
     request.pageRowsHint = requestedLimit;

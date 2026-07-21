@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  filterExactAssetDurablePayload,
+  runDurableSync,
+} from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -11,10 +14,78 @@ interface FetchCall {
   graphUri: string;
   snapshotRef: string | undefined;
   sinceBatchId: string | undefined;
+  assetUals: string[] | undefined;
 }
+
+describe('exact-asset rolling-upgrade filter', () => {
+  it('drops already-present KAs from an old responder full-CG response', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const existing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const wantedGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const existingGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/8';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: wantedGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: existing, predicate: 'http://dkg.io/ontology/assertionGraph', object: existingGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:wanted', predicate: 'urn:p', object: '"wanted"', graph: wantedGraph },
+      { subject: 'urn:existing', predicate: 'urn:p', object: '"existing"', graph: existingGraph },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(data, meta, [wanted]);
+
+    expect(filtered.metaQuads.map((quad) => quad.subject)).toEqual([wanted, wanted]);
+    expect(filtered.dataQuads.map((quad) => quad.graph)).toEqual([wantedGraph]);
+  });
+
+  it('threads exactAssetUalsFor into both fetch phases and filters an old-responder payload before verification', async () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const extra = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const wantedGraph = 'did:dkg:context-graph:mfacts/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const extraGraph = 'did:dkg:context-graph:mfacts/_verifiable_memory/0x0000000000000000000000000000000000000001/8';
+    const metaGraph = 'did:dkg:context-graph:mfacts/_meta';
+    // An OLD responder ignores the filter and returns the whole CG: both KAs.
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: wantedGraph, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: metaGraph },
+      { subject: extra, predicate: 'http://dkg.io/ontology/assertionGraph', object: extraGraph, graph: metaGraph },
+      { subject: extra, predicate: 'http://dkg.io/ontology/kaUal', object: extra, graph: metaGraph },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:wanted', predicate: 'urn:p', object: '"wanted"', graph: wantedGraph },
+      { subject: 'urn:extra', predicate: 'urn:p', object: '"extra"', graph: extraGraph },
+    ] as Quad[];
+    const { calls, context, processCalls } = makeContext({
+      exactAssetUalsFor: () => [wanted],
+      pageQuads: { data, meta },
+    });
+
+    await runDurableSync(context);
+
+    // Both phases must carry the exact filter on the wire…
+    const metaCall = calls.find((c) => c.phase === 'meta')!;
+    const dataCall = calls.find((c) => c.phase === 'data')!;
+    expect(metaCall.assetUals).toEqual([wanted]);
+    expect(dataCall.assetUals).toEqual([wanted]);
+    // …and the worker must only ever see the requested KA's quads, even though
+    // the (old) responder returned the extra KA too.
+    expect(processCalls).toHaveLength(1);
+    expect(processCalls[0]!.metaCount).toBe(2);
+    expect(processCalls[0]!.dataCount).toBe(1);
+  });
+
+  it('does not thread a filter when exactAssetUalsFor is not wired', async () => {
+    const { calls, context } = makeContext();
+    await runDurableSync(context);
+    expect(calls.every((c) => c.assetUals === undefined)).toBe(true);
+  });
+});
 
 function makeContext(options: {
   sinceBatchIdFor?: (cg: string) => string | undefined;
+  exactAssetUalsFor?: (cg: string) => string[] | undefined;
+  pageQuads?: { data: Quad[]; meta: Quad[] };
   contextGraphIds?: string[];
   syncAgentsMeta?: boolean;
   processResult?: {
@@ -34,7 +105,9 @@ function makeContext(options: {
   const insertedBatches: Quad[][] = [];
   const deletedCheckpoints: string[] = [];
   const page = (phase: 'data' | 'meta'): SyncPageResult => ({
-    quads: phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
+    quads: options.pageQuads
+      ? (options.pageQuads[phase] as never[])
+      : phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
     bytesReceived: phase === 'data' ? 20 : 10,
     resumedFromOffset: 0,
     nextOffset: phase === 'data' ? 1 : 2,
@@ -65,11 +138,13 @@ function makeContext(options: {
         _deadline: number,
         snapshotRef?: string,
         sinceBatchId?: string,
+        assetUals?: string[],
       ) => {
-        calls.push({ contextGraphId, phase, graphUri, snapshotRef, sinceBatchId });
+        calls.push({ contextGraphId, phase, graphUri, snapshotRef, sinceBatchId, assetUals });
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
+      exactAssetUalsFor: options.exactAssetUalsFor,
       processDurableBatchInWorker: async (
         dataQuads: Quad[],
         metaQuads: Quad[],

@@ -7,6 +7,7 @@ import {
 import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
   createDurableDataSyncSessionId,
@@ -161,7 +162,7 @@ interface FetchSyncPagesParams {
    * members-only `isMemberRecoveryAuthorized`). Default false ⇒ normal sync.
    */
   recovery?: boolean;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean) => Promise<Uint8Array>;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean, assetUals?: string[]) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -169,6 +170,8 @@ interface FetchSyncPagesParams {
    * (never local MAX, which would skip gaps). Omitted ⇒ full scan.
    */
   sinceBatchId?: string;
+  /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
+  assetUals?: string[];
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   /**
    * Per-attempt send hook. `DKGAgent`'s production adapter sends raw
@@ -246,6 +249,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     recovery,
     buildSyncRequest,
     sinceBatchId,
+    assetUals,
     parseAndFilter,
     send,
     logWarn,
@@ -259,7 +263,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // terminal outcome. Every started phase is guaranteed a finish() below.
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
+  const assetKey = assetUals ? exactAssetFilterKey(assetUals) : undefined;
+  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery, assetKey);
   if (forceFreshSession) {
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
@@ -343,7 +348,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         requestFactory: async () => {
           throwIfAborted(signal);
           successfulPageSize = activePageSize;
-          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
+          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, assetUals);
           throwIfAborted(signal);
           return request;
         },

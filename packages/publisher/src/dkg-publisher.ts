@@ -27,7 +27,10 @@ import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
-import { validateKnowledgeAssetPublishRequest, validatePublishRequest } from './validation.js';
+import {
+  validateCanonicalGraphScopedKnowledgeAssetPayload,
+  validatePublishRequest,
+} from './validation.js';
 import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
   assertionOriginalGraph,
@@ -2695,11 +2698,10 @@ export class DKGPublisher implements Publisher {
         graphPublish.scope,
         options.subGraphName,
       );
-      const validation = validateKnowledgeAssetPublishRequest(
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
         allSkolemizedQuads.map((quad) => ({ ...quad, graph: vmGraph })),
         vmGraph,
         graphPublish.publicTripleCount,
-        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
@@ -4640,11 +4642,10 @@ export class DKGPublisher implements Publisher {
       });
       allSkolemizedQuads = canonicalParts.publicQuads;
       canonicalPrivateQuads = canonicalParts.privateQuads;
-      const validation = validateKnowledgeAssetPublishRequest(
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
         allSkolemizedQuads.map((quad) => ({ ...quad, graph: dataGraph })),
         dataGraph,
         graphUpdate.publicTripleCount,
-        { allowCanonicalSkolemTerms: true },
       );
       if (!validation.valid) {
         throw new Error(`Validation failed: ${validation.errors.join('; ')}`);

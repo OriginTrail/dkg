@@ -6,6 +6,12 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
+import {
+  materializeGraphScopedSwmRecoveryAsset,
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
+import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -62,6 +68,19 @@ interface SharedMemorySyncContext {
   }>;
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
+  /**
+   * Everything needed to MATERIALIZE verified public SWM snapshots into the
+   * triple store, as ONE cohesive dependency — the contract (and the
+   * production implementation) live in `swm-snapshot-materializer.ts`.
+   *
+   * Why it exists at all: contentScopeVersion-2 KAs carry no dkg:rootEntity,
+   * so the aggregate data phase legitimately returns 0 data quads for them —
+   * their content travels as immutable snapshots. The catch-up lane fetched
+   * and VERIFIED those snapshots and then never wrote them, so a node that
+   * missed the live gossip stayed empty forever ("0 data + N meta triples").
+   * Absent entirely => materialization is skipped (never half-applied).
+   */
+  snapshotMaterializer?: SharedMemorySnapshotMaterializer;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -74,6 +93,21 @@ interface SharedMemorySyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
+
+/**
+ * True when the locally stored head version outranks the descriptor we are
+ * about to materialize. BigInt-compared when both parse; anything unparseable
+ * is treated as OUTRANKING — failing safe means never destroying local state
+ * whose ordering we cannot establish.
+ */
+function storedVersionOutranksDescriptor(stored: string, descriptorVersion: string): boolean {
+  try {
+    return BigInt(stored) > BigInt(descriptorVersion);
+  } catch {
+    return true;
+  }
+}
+
 export async function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
@@ -84,6 +118,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     processSharedMemoryBatch,
     ensureContextGraph,
     storeInsert,
+    snapshotMaterializer,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -223,6 +258,136 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.droppedDataTriples += dropped;
       }
 
+      // MATERIALIZE verified snapshots into the store, mirroring the private
+      // recovery lane (`swm-recovery.ts` materializeReadySnapshot).
+      //
+      // Descriptors are parsed ONLY from verified meta, and only when the meta
+      // phase completed: parseGraphScopedSwmRecoveryDescriptors throws on
+      // incomplete metadata, and this lane pages meta, so a timed-out page would
+      // otherwise abort the whole CG fanout. A parse failure here must degrade to
+      // "no materialization this round" — never take down the sync.
+      const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
+      if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
+        try {
+          for (const descriptor of parseGraphScopedSwmRecoveryDescriptors({
+            contextGraphId: pid,
+            metaQuads: processed.verifiedMeta,
+            // Without the subgraph admission context every KA under a
+            // REGISTERED subgraph is judged to live in an unregistered metadata
+            // graph. The parser then throws, the catch clears ALL descriptors,
+            // and materialization is silently disabled for the whole context
+            // graph — not just for the subgraph KA that triggered it.
+            ...(registeredSubGraphNames ? { registeredSubGraphNames } : {}),
+            ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
+          })) {
+            const ref = descriptor.publicSnapshotRef;
+            if (!ref) continue; // no immutable snapshot for this KA
+            const list = snapshotDescriptorsByRef.get(ref) ?? [];
+            list.push(descriptor);
+            snapshotDescriptorsByRef.set(ref, list);
+          }
+        } catch (err) {
+          logWarn(ctx, `SWM sync could not parse graph-scoped snapshot descriptors for "${pid}": `
+            + `${err instanceof Error ? err.message : String(err)}`);
+          snapshotDescriptorsByRef.clear();
+        }
+      }
+      let materializedGraphs = 0;
+      let materializationFailures = 0;
+      let materializedQuads = 0;
+      const materializedKeys = new Set<string>();
+      const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
+        const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
+        if (!descriptors?.length || !snapshotMaterializer || !publicSnapshotStore) return;
+        for (const descriptor of descriptors) {
+          const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+          if (materializedKeys.has(graphKey)) continue;
+          try {
+            await snapshotMaterializer.withKaWriteLock(
+              pid,
+              descriptor.subGraphName,
+              descriptor.kaUal,
+              async () => {
+                // ALL decisions live INSIDE the lock. Between our pre-lock view
+                // of the world and acquisition, live gossip may have committed
+                // this KA — the lock stops the interleaving, and the two
+                // re-checks below stop the other failure the lock alone cannot:
+                // replacing newer content with an older verified snapshot.
+                //
+                // (a) Version ordering. A stored head newer than the descriptor
+                // means gossip advanced this KA past our snapshot; replacing
+                // would be overwrite-with-older, byte-for-byte the regression
+                // this path once shipped (peer at 76 quads clobbered to 27).
+                // Unparseable versions count as newer: when we cannot reason
+                // about ordering we must not destroy. Nor may we "repair" the
+                // head rows here — gossip owns a newer head and its
+                // delete-then-insert already wrote it unambiguously.
+                const storedHead = await snapshotMaterializer.readStoredHead(descriptor);
+                if (
+                  storedHead.version !== null
+                  && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
+                ) {
+                  materializedKeys.add(graphKey);
+                  logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
+                    + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
+                  return;
+                }
+                // (b) Exact content already present. Count AND digest: a
+                // marker-only or short graph is the pre-fix broken state and
+                // must be REPAIRED; an equal-count graph with a different
+                // digest is an OLDER version of the same size and must be
+                // replaced, not skipped.
+                if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
+                  if (storedHead.needsRepair) {
+                    // Content is already this descriptor's, but the head
+                    // subject still carries union-insert residue (several
+                    // version/operation rows) — e.g. a prior round replaced
+                    // the graph and then failed before finishing the metadata
+                    // swap. Collapse the head now; the fresh verified meta for
+                    // this descriptor is re-inserted after the snapshot phase,
+                    // exactly like the replace path below.
+                    await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                  }
+                  materializedKeys.add(graphKey);
+                  return;
+                }
+                const asset = await materializeGraphScopedSwmRecoveryAsset({
+                  descriptor,
+                  fetchedDataQuads: [],
+                  publicSnapshotStore,
+                });
+                await ensureContextGraph(pid);
+                await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
+                // Graph first, THEN the head swap — a crash between the two
+                // leaves content newer than the head, which the next round
+                // repairs (digest matches → head collapsed above). The swap
+                // deletes the old head + its operations so the append-style
+                // `storeInsert(processed.verifiedMeta)` below lands on a clean
+                // subject instead of stacking a second version onto it
+                // (LIMIT-1 head readers would otherwise see an arbitrary mix).
+                await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                materializedKeys.add(graphKey);
+                materializedGraphs += 1;
+                materializedQuads += asset.quads.length;
+                logInfo(ctx, `SWM sync for "${pid}": materialized snapshot ${snapshotRef} `
+                  + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
+              },
+            );
+          } catch (err) {
+            // A failed replace must never be able to look materialized later.
+            // Suppressing it here while the surrounding sync still inserts the
+            // graph-scoped head marker makes the loss PERMANENT: the next pass
+            // sees that marker, isGraphAssetMaterialized returns true, and the
+            // missing assertion graph is skipped forever. Record the failure so
+            // the caller keeps the phase incomplete and withholds the metadata
+            // that would otherwise certify a graph that was never written.
+            materializationFailures += 1;
+            logWarn(ctx, `SWM sync failed to materialize snapshot ${snapshotRef} for "${pid}": `
+              + `${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      };
+
       const snapshotStartedAt = Date.now();
       const snapshotSync = await syncPublicSnapshotsForMeta({
         ctx,
@@ -234,14 +399,39 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         fetchSyncPages,
         deleteCheckpoint,
         setCheckpoint,
+        // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
+        // runs already cached the blobs materializes them on the next pass
+        // without refetching a byte.
+        ...(snapshotDescriptorsByRef.size > 0
+          ? { onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref) }
+          : {}),
       });
+      if (materializedGraphs > 0) {
+        summary.insertedTriples += materializedQuads;
+        // Also data progress: lifecycle readiness classifies a round with zero
+        // insertedDataTriples as metadata-only, which would mis-report a
+        // successful graph-scoped materialization as "no data".
+        summary.insertedDataTriples += materializedQuads;
+        logInfo(ctx, `SWM sync for "${pid}": materialized ${materializedGraphs} graph-scoped `
+          + `KA snapshot(s) totalling ${materializedQuads} triples`);
+      }
       summary.bytesReceived += snapshotSync.bytesReceived;
       summary.resumedPhases += snapshotSync.resumedPhases;
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
-      if (!snapshotSync.completed) {
+      // A snapshot that verified but could not be written must be treated
+      // exactly like a snapshot phase that did not complete. Otherwise the meta
+      // insert below stamps a graph-scoped head marker for an assertion graph
+      // that was never materialized, and every later pass skips it as already
+      // present — turning a transient store error into permanent, silent loss.
+      const snapshotPhaseUsable = snapshotSync.completed && materializationFailures === 0;
+      if (materializationFailures > 0) {
+        logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
+          + `not materialized — holding the phase incomplete so metadata cannot certify them`);
+      }
+      if (!snapshotPhaseUsable) {
         // The responder was reachable, but the snapshot phase did not produce
         // a complete, verified snapshot. Preserve any verified data prefix
         // below, while keeping the overall sync result non-successful so the

@@ -142,6 +142,8 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePrivateMetaAskQuery } from './context-graph-private-meta-proof.js';
+import { buildAuthoritativePublicMetaAskQuery } from './context-graph-public-meta-proof.js';
+import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -229,12 +231,14 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { requireExactAssetUals } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -540,6 +544,7 @@ function syncPageFetchCoalescingKey(params: {
   sinceBatchId?: string;
   recovery?: boolean;
   forceFreshSession?: boolean;
+  assetUals?: readonly string[];
 }): string {
   return JSON.stringify([
     params.remotePeerId,
@@ -551,6 +556,7 @@ function syncPageFetchCoalescingKey(params: {
     params.sinceBatchId ?? null,
     params.recovery === true,
     params.forceFreshSession === true,
+    params.assetUals ?? null,
   ]);
 }
 
@@ -619,6 +625,7 @@ function durableSyncSingleFlightKey(params: {
   hasPhaseCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
+  exactAssetUals?: readonly string[];
 }): string | null {
   if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
     return null;
@@ -629,6 +636,7 @@ function durableSyncSingleFlightKey(params: {
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
     totalTimeoutMs: params.totalTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
+    exactAssetUals: params.exactAssetUals ?? null,
   });
 }
 
@@ -753,6 +761,10 @@ export type DurableSyncOptions = {
    * independently so an API caller cannot create an unbounded sync operation.
    */
   totalTimeoutMs?: number;
+  /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
+  exactAssetUals?: string[];
+  /** Admission override for foreground VM recovery. */
+  priority?: number;
 };
 
 const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
@@ -907,8 +919,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     lane: SyncSchedulerLane,
     label: string,
     work: () => Promise<T>,
+    priorityOverride?: number,
   ): Promise<T> {
-    const priority = contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
+    const priority = priorityOverride
+      ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
     return withGlobalSyncBackpressure(
       {
         policy: resolveSyncGlobalBackpressure(this.config),
@@ -963,6 +977,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
+
+    // Public definitions were historically written only to ONTOLOGY while
+    // late-subscriber admission requires the canonical proof in root `_meta`.
+    // Repair only graphs whose ontology creator is this exact peer. This runs
+    // after libp2p has exposed the stable peer ID but before protocol handlers
+    // and sync serving are registered. Foreign/discovered graphs remain
+    // ineligible; conflicting local policy remains fail-closed.
+    try {
+      const repaired = await repairCreatorPublicMetaProjections(
+        this.store,
+        this.node.peerId.toString(),
+      );
+      if (repaired.repairedGraphs > 0) {
+        this.log.info(
+          ctx,
+          `Repaired authoritative public metadata for ${repaired.repairedGraphs} creator-owned context graph(s) (${repaired.insertedTriples} triples)`,
+        );
+      }
+      if (repaired.conflictingGraphs.length > 0) {
+        this.log.warn(
+          ctx,
+          `Skipped authoritative public metadata repair for ${repaired.conflictingGraphs.length} context graph(s) with conflicting root policy: ${repaired.conflictingGraphs.join(', ')}`,
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to repair creator-owned public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // Load registered agents from triple store; auto-register default if none exist.
     // loadAgentsFromStore restores defaultAgentAddress from the persisted
@@ -4077,6 +4121,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           stopOnBackoffWorthyFailure,
           undefined,
           totalTimeoutMs,
+          options?.exactAssetUals,
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
@@ -4091,6 +4136,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           work,
+          options?.priority,
         ),
       ),
       merge: mergeDurableSyncResults,
@@ -4116,8 +4162,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
+      exactAssetUals: options?.exactAssetUals,
     });
     return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
+  }
+
+  /**
+   * Foreground VM repair for one bounded set of locally-missing KAs.
+   * Upgraded peers serve only these descriptors/payload graphs. Responses from
+   * older peers are accepted for rolling compatibility, but runDurableSync
+   * filters them back to this exact set before verification or storage.
+   */
+  async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    requestedAssetUals: string[],
+  ): Promise<DurableSyncResult> {
+    const assetUals = requireExactAssetUals(requestedAssetUals);
+    const ctx = createOperationContext('sync');
+    return this.runLegacyDurableSync(
+      ctx,
+      remotePeerId,
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      {
+        exactAssetUals: assetUals,
+        stopOnBackoffWorthyFailure: true,
+        totalTimeoutMs: 60_000,
+        priority: 1_000,
+      },
+    );
   }
 
   /** Execute one legacy durable Context Graph after its caller owns admission. */
@@ -4132,6 +4208,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     stopOnBackoffWorthyFailure?: boolean,
     onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
     totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+    exactAssetUals?: string[],
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     return runDurableSync({
@@ -4168,8 +4245,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         undefined,
         undefined,
         onVerifiedFullSnapshot !== undefined,
+        exactAssetUals,
       ),
       sinceBatchIdFor,
+      exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
       storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
@@ -4177,14 +4256,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         source: 'agent.durableSync.storeInsert',
       }),
       storeGraphScopedAsset: async (asset) => {
-        const authenticatedAsset = await authenticateVerifiedGraphScopedAsset(
+        const authentication = await authenticateVerifiedGraphScopedAsset(
           this.chain,
           asset,
-          (cgId) => this.getContextGraphOnChainId(cgId),
+          (localContextGraphId, onChainContextGraphId) => this.localCgMatchesOnChainSlot(
+            localContextGraphId,
+            onChainContextGraphId.toString(),
+            ctx,
+            { requireCommittedNameHash: true },
+          ),
         );
+        const verifiedOnChainId = authentication.onChainContextGraphId;
+        const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
+        if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
+          this.bindSubscriptionOnChainId(
+            asset.contextGraphId,
+            subscription,
+            verifiedOnChainId,
+          );
+          this.persistContextGraphSubscriptionState(asset.contextGraphId);
+        }
         const outcome = await materializeVerifiedGraphScopedAsset({
           store: this.store,
-          asset: authenticatedAsset,
+          asset: authentication.asset,
           options: {
             priority: 'background',
             source: 'agent.durableSync.graphScopedMaterialization',
@@ -4195,7 +4289,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
         if (outcome === 'applied') {
           this.invalidateListContextGraphsCache();
-          this.contextGraphMetaProjection.markDirtyFromQuads(authenticatedAsset.metadataQuads);
+          this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
         }
         return outcome;
       },
@@ -4494,6 +4588,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Authoritative snapshot callers must rotate the responder session even
     // when an unfinished offset-zero requester session is still cached.
     forceFreshSession?: boolean,
+    // Exact VM recovery filter. Kept in the checkpoint, coalescing, wire, and
+    // responder-session identities so offsets can never cross asset batches.
+    assetUals?: string[],
   ): Promise<SyncPageResult> {
     const coalescingKey = syncPageFetchCoalescingKey({
       remotePeerId,
@@ -4505,6 +4602,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sinceBatchId,
       recovery,
       forceFreshSession,
+      assetUals,
     });
     const inFlight = inFlightSyncPageFetchesFor(this);
     const existing = inFlight.get(coalescingKey);
@@ -4540,6 +4638,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       graphUri,
       snapshotRef,
       sinceBatchId,
+      assetUals,
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
@@ -4783,6 +4882,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
               },
+              // Everything needed to materialize verified public SWM snapshots,
+              // as ONE dependency (a loose optional trio allowed a silent
+              // half-configured mode). Graph-scoped (contentScopeVersion 2) KAs
+              // carry no dkg:rootEntity, so the aggregate data phase returns 0
+              // data quads for them by design — their content arrives as
+              // immutable snapshots, and without this the catch-up lane cached
+              // every verified snapshot and never wrote one to the store.
+              // Thin wiring only: the materialization policy (content-digest
+              // guard, MAX head read + duplicate repair, atomic replace, head
+              // metadata swap) lives in `swm-snapshot-materializer.ts`. What
+              // the agent contributes here is its own resources — the store,
+              // the SAME lock map injected into SharedMemoryHandler (sharing
+              // the map + key helper is what closes the check-then-replace
+              // race with gossip), and list-cache invalidation.
+              snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+              }),
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
                 // literals BEFORE insert so the SWM page cursor advances instead
@@ -6807,7 +6925,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
-    let hasActivePublicOnChainProof = false;
+    let hasActivePublicOnChainProof: boolean | undefined;
     if (hasUnregisteredPlaceholder && options?.rejectUnregisteredPlaceholder === true) {
       // Replicas do not rewrite the creator's local registrationStatus marker,
       // so a legitimately registered public CG can still say "unregistered".
@@ -6815,8 +6933,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // non-zero id, active slot, accessPolicy=public); a legacy local shadow
       // has no such proof, and a private slot cannot borrow its public ontology
       // fallback.
-      hasActivePublicOnChainProof = await this.contextGraphActivePublicOnChainFromRegistry(
+      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
         contextGraphId,
+        createOperationContext('sync'),
       ).catch(() => false);
     }
     // Curated/private CG creation in 10.0.6 emits this complete definition in
@@ -6850,6 +6969,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) {
       return true;
     }
+
+    // Public subscriptions have no member credential to prove. A complete
+    // root definition that explicitly says `accessPolicy="public"` is the
+    // corresponding authoritative metadata gate; publisher allowlists do not
+    // alter that read/subscription policy. Keep this separate from the private
+    // definition above so private bootstrap still requires the current local
+    // member delegation.
+    const authoritativePublicDefinitionResult = await this.store.query(
+      buildAuthoritativePublicMetaAskQuery(contextGraphId),
+    );
+    if (
+      authoritativePublicDefinitionResult.type === 'boolean' &&
+      authoritativePublicDefinitionResult.value === true &&
+      // A replica may retain the creator's local-only placeholder. When the
+      // caller explicitly rejects that shape, preserve the existing fresh
+      // active-public chain requirement instead of trusting the shadow alone.
+      (!hasUnregisteredPlaceholder || options?.rejectUnregisteredPlaceholder !== true || hasActivePublicOnChainProof)
+    ) {
+      return true;
+    }
+
+    // A tracked, active registration with live accessPolicy=public is an
+    // independent authority. This covers chain-discovered subscriptions whose
+    // local ontology/control projection has not landed yet. The registry
+    // resolver is fail-closed: it requires an identity-bound on-chain id,
+    // liveness, and policy=public, so a private or stale slot cannot pass.
+    if (hasActivePublicOnChainProof === undefined) {
+      hasActivePublicOnChainProof = await this.isContextGraphPublicOnChain(
+        contextGraphId,
+        createOperationContext('sync'),
+      ).catch(() => false);
+    }
+    if (hasActivePublicOnChainProof) return true;
 
     // `ensureContextGraphLocal` remains authoritative for explicit public
     // network defaults, including namespaced defaults. Reject that otherwise-

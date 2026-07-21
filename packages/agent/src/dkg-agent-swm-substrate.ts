@@ -916,6 +916,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
         contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        // Same live on-chain predicate the SENDER uses to decide plaintext vs
+        // encrypted SWM (`resolveWorkspaceRecipientsGated`). Wiring it here
+        // keeps both sides of the wire on one authority. Without it the
+        // receiver judged from local allowedAgent/participantAgent triples and
+        // permanently dropped the plaintext writes the sender is supposed to
+        // send on a public CG — silently breaking member->curator SWM shares on
+        // every public/curated context graph.
+        publicAccessPolicyOnChainOracle: (cgId: string) =>
+          this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members

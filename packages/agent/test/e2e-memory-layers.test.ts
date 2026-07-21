@@ -19,6 +19,7 @@ import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
+import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
 import {
   assertionLifecycleUri,
   contextGraphMetaUri,
@@ -2130,7 +2131,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     return lastResult;
   }
 
-  it('A drafts in WM → promotes to SWM → gossips to B → publishes → B finalizes', async () => {
+  it('an imported Markdown KA survives WM → SWM gossip → VM on a second node', async () => {
     const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -2164,42 +2165,99 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(1500);
 
-    // Step 1: A creates assertion in WM
-    await nodeA.assertion.create(CG_ID, 'two-node-draft');
-    await nodeA.assertion.write(CG_ID, 'two-node-draft', [
-      { subject: `${ENTITY_BASE}:two-node`, predicate: 'http://schema.org/name', object: '"Two Node Entity"' },
+    // Step 1: use the production Markdown extractor, including the blank-node
+    // section hierarchy that originally made imported KAs appear empty on the
+    // receiving node. The two daemon-owned linkage rows below are written by
+    // the real import-file route alongside this extractor output.
+    const assertionName = 'two-node-markdown';
+    const assertionUri = contextGraphAssertionUri(
+      CG_ID,
+      nodeA.defaultAgentAddress ?? nodeA.peerId,
+      assertionName,
+    );
+    const fileUri = `urn:dkg:file:keccak256:${'a'.repeat(64)}`;
+    const extracted = extractFromMarkdown({
+      markdown: [
+        '---',
+        'type: Report',
+        'title: Construction safety notes',
+        'status: approved',
+        '---',
+        '',
+        '# Construction safety notes',
+        '',
+        'Shared with [[Site Alpha]] and tagged #safety.',
+        '',
+        '## Equipment',
+        '',
+        'Inspect lifting equipment.',
+        '',
+        '### Cranes',
+        '',
+        'Check every crane before use.',
+      ].join('\n'),
+      agentDid: `did:dkg:agent:${nodeA.defaultAgentAddress ?? nodeA.peerId}`,
+      documentIri: assertionUri,
+      sourceFileIri: fileUri,
+    });
+    expect(extracted.triples.some((quad) => quad.subject.startsWith('_:dkg-md-section-'))).toBe(true);
+
+    await nodeA.assertion.create(CG_ID, assertionName);
+    await nodeA.assertion.write(CG_ID, assertionName, [
+      ...extracted.triples,
+      ...extracted.sourceFileLinkage,
+      {
+        subject: extracted.subjectIri,
+        predicate: 'http://dkg.io/ontology/sourceContentType',
+        object: '"text/markdown"',
+      },
+      {
+        subject: extracted.subjectIri,
+        predicate: 'http://dkg.io/ontology/markdownForm',
+        object: fileUri,
+      },
     ]);
 
     // Step 2: A promotes to SWM (gossips to B)
-    await nodeA.assertion.promote(CG_ID, 'two-node-draft');
+    await nodeA.assertion.promote(CG_ID, assertionName);
 
-    // Step 3: B receives via gossip
+    const receiverMarkdownQuery = `SELECT ?title ?contentType ?section ?sectionName WHERE {
+      <${assertionUri}> <http://schema.org/name> ?title ;
+        <http://dkg.io/ontology/sourceContentType> ?contentType ;
+        <http://dkg.io/ontology/hasSection> ?section .
+      ?section <http://schema.org/name> ?sectionName .
+    }`;
+
+    // Step 3: B receives the document and its canonicalized section entity via gossip.
     const bSwm = await pollUntil(
       () => nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_BASE}:two-node> <http://schema.org/name> ?name }`,
+        receiverMarkdownQuery,
         { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
     );
     expect(bSwm.length).toBe(1);
-    expect(bSwm[0]?.['name']).toBe('"Two Node Entity"');
+    expect(bSwm[0]).toMatchObject({
+      title: '"Construction safety notes"',
+      contentType: '"text/markdown"',
+      sectionName: '"Equipment"',
+    });
+    expect(bSwm[0]?.['section']).toMatch(/^urn:dkg:ka-skolem:c14n\d+$/);
 
     // Step 4: A publishes from SWM → chain
     const pubResult = await nodeA.publishFromSharedMemory(CG_ID, 'all');
     expect(pubResult.status).toBe('confirmed');
 
-    // Step 5: B receives finalization → promotes to data graph
+    // Step 5: B receives finalization and exposes the same document/entity
+    // relationship from VM, proving publication does not lose Markdown content.
     const bData = await pollUntil(
-      () => nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_BASE}:two-node> <http://schema.org/name> ?name }`,
-        CG_ID,
-      ),
+      () => nodeB.query(receiverMarkdownQuery, CG_ID),
       (b) => b.length > 0,
       20_000,
     );
     expect(bData.length).toBe(1);
-    expect(bData[0]?.['name']).toBe('"Two Node Entity"');
+    expect(bData[0]).toEqual(bSwm[0]);
   }, 60_000);
 });
 

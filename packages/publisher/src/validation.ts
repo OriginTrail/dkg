@@ -106,6 +106,29 @@ export function validateKnowledgeAssetPublishRequest(
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Validate a canonical graph-scoped KA at a trusted protocol boundary.
+ *
+ * Graph-scoped senders canonicalize Markdown and other RDF blank nodes before
+ * transmission, so exact public `urn:dkg:ka-skolem:c14nN` terms are standard
+ * wire data. User-authored input should continue to use the strict validator
+ * above; this named policy keeps receiver/update/ACK call sites consistent
+ * while still rejecting blank nodes and every private, forged, predicate, or
+ * graph use of the reserved namespace.
+ */
+export function validateCanonicalGraphScopedKnowledgeAssetPayload(
+  nquads: readonly Quad[],
+  expectedGraph: string,
+  publicTripleCount: number,
+): ValidationResult {
+  return validateKnowledgeAssetPublishRequest(
+    nquads,
+    expectedGraph,
+    publicTripleCount,
+    { allowCanonicalSkolemTerms: true },
+  );
+}
+
 function isForbiddenKnowledgeAssetSkolemTerm(
   term: string,
   options: { allowCanonicalSkolemTerms?: boolean },
