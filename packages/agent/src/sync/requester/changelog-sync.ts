@@ -198,11 +198,14 @@ export interface ChangelogSyncDeps {
    */
   runResync(dropCandidates: readonly string[]): Promise<ResyncOutcome>;
   logWarn?(message: string): void;
+  /** Test/containment override; production uses the defensive 100,000-round bound. */
+  maxRounds?: number;
 }
 
 export type ChangelogSyncOutcome =
   | { kind: 'delta' | 'denied'; applied: number }
-  | { kind: 'resync'; applied: number; complete: boolean };
+  | { kind: 'resync'; applied: number; complete: boolean }
+  | { kind: 'incomplete'; applied: number; reason: 'round-limit' };
 
 /** After this many consecutive no-forward-progress rounds, fall back to a full resync. */
 const RESYNC_AFTER_STALLED_ROUNDS = 3;
@@ -222,7 +225,8 @@ const RESYNC_AFTER_STALLED_ROUNDS = 3;
 export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<ChangelogSyncOutcome> {
   let applied = 0;
   let stalledRounds = 0;
-  for (let round = 0; round < 100_000; round++) {
+  const maxRounds = deps.maxRounds ?? 100_000;
+  for (let round = 0; round < maxRounds; round++) {
     const cursor = deps.getCursor();
     const priorSeq = cursor?.seq ?? 0;
     const requestBytes = encodeChangelogRequest({
@@ -270,5 +274,5 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
     if (!deferred && advanceTo >= resp.headSeq) return { kind: 'delta', applied };
   }
   deps.logWarn?.('changelog sync exceeded the round bound; stopping (misbehaving peer?)');
-  return { kind: 'delta', applied };
+  return { kind: 'incomplete', applied, reason: 'round-limit' };
 }

@@ -43,6 +43,7 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 function durableResult() {
   return {
     insertedTriples: 1,
+    complete: true,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 1,
     insertedMetaTriples: 0,
@@ -350,6 +351,44 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
     expect(result.cleanPlaneCompletions?.durable).toEqual({
       verifiedDataPeers: 1,
+      verifiedPrivateOnlyPeers: 0,
+      emptyPeers: 0,
+    });
+  });
+
+  it('keeps explicit incomplete progress out of clean completion evidence', async () => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-incomplete', includeSharedMemory: false },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              isPrivateContextGraph: true,
+              peerIds: ['peer-partial'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return { ...durableResult(), complete: false };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    // peersSucceeded is liveness/progress accounting only. Readiness consumes
+    // the separate cleanPlaneCompletions proof, which must remain empty.
+    expect(result).toMatchObject({
+      peersResponded: 1,
+      peersSucceeded: 1,
+      dataSynced: 1,
+    });
+    expect(result.cleanPlaneCompletions?.durable).toEqual({
+      verifiedDataPeers: 0,
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
     });

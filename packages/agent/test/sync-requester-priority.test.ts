@@ -144,6 +144,7 @@ describe('requester per-CG priority admission', () => {
     expect(summary.deferredBackpressure).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.backoffWorthyFailures).toBe(0);
+    expect(summary.complete).toBe(false);
   });
 
   it('marks changelog admission pressure deferred without routing that graph to legacy', async () => {
