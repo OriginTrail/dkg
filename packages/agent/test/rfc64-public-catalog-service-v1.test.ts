@@ -288,6 +288,57 @@ function countEvent(router: RecordingRouter, event: string): number {
 }
 
 describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
+  it('preserves direct open-only construction and rejects private snapshots', async () => {
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+    });
+    service.start();
+    const accepted = service.acceptOpenPolicy({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    expect(accepted.policy.accessPolicy).toBe(0);
+
+    const privatePolicy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private`, 1, 1);
+    const privateDigest = `0x${'31'.repeat(32)}` as Digest32V1;
+    expect(() => service.acceptPolicySnapshot({
+      policy: privatePolicy,
+      policyDigest: privateDigest,
+      roster: memberRoster(privatePolicy, privateDigest),
+    })).toThrow(/requires explicit access-policy authority/u);
+    await service.close();
+  });
+
+  it('advances a verified current policy and rejects the old digest immediately', async () => {
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+    });
+    service.start();
+    const initial = catalogPolicy(CONTEXT_GRAPH_ID, 0, 1);
+    const initialDigest = `0x${'32'.repeat(32)}` as Digest32V1;
+    service.acceptPolicySnapshot({ policy: initial, policyDigest: initialDigest });
+    const successor = {
+      ...catalogPolicy(CONTEXT_GRAPH_ID, 0, 0),
+      version: '1',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    const successorDigest = `0x${'33'.repeat(32)}` as Digest32V1;
+    service.acceptPolicySnapshot({ policy: successor, policyDigest: successorDigest });
+
+    await expect(service.announceCatalogHead({
+      announcement: announcement(initialDigest),
+      peers: [],
+    })).rejects.toThrow(/not bound to the locally accepted policy/u);
+    await expect(service.announceCatalogHead({
+      announcement: announcement(successorDigest),
+      peers: [],
+    })).resolves.toMatchObject({ announcedPeers: [], failedPeers: [] });
+    await service.close();
+  });
+
   it('accepts all four policy cells and requires a roster only for private access', async () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: new RecordingRouter().asProtocolRouter(),

@@ -115,7 +115,6 @@ export type {
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
   PublishAuthorCatalogGenesisParamsV1,
-  PublishAuthorCatalogGenesisResultV1,
   Rfc64CatalogAuthorSignerV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {

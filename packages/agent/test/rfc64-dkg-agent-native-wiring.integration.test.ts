@@ -224,7 +224,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       roster,
     })).toMatchObject({ policyDigest, roster: { policyDigest } });
 
-    const published = await configured.publishAuthorCatalogGenesisV1({
+    const privateGenesis = {
       scope: {
         networkId: NETWORK_ID,
         contextGraphId: CONTEXT_GRAPH_ID,
@@ -241,14 +241,19 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       issuedAt: FIXED_HEAD_ISSUED_AT,
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
-    });
+    } as const;
+    await expect(configured.publishAuthorCatalogGenesisV1({
+      ...privateGenesis,
+      peers: ['12D3KooPrivateReceiver'],
+    })).rejects.toThrow(/private catalog peer fan-out requires scope-bound/u);
+    const published = await configured.publishAuthorCatalogGenesisV1(privateGenesis);
     expect(published.announcement).toMatchObject({
       policyDigest,
       subGraphName: 'service-lane',
       catalogEra: '0',
     });
 
-    const successor = await configured.publishAuthorCatalogExactSetSuccessorV1({
+    const privateSuccessor = {
       previousHead: {
         objectDigest: published.headObjectDigest,
         signatureVariantDigest: published.signatureVariantDigest,
@@ -263,7 +268,14 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       deployment: NATIVE_DEPLOYMENT,
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [],
-    });
+    } as const;
+    await expect(configured.publishOpenAuthorCatalogExactSetSuccessorV1(privateSuccessor))
+      .rejects.toThrow(/public\/open compatibility successor requires the root lane/u);
+    await expect(configured.publishAuthorCatalogExactSetSuccessorV1({
+      ...privateSuccessor,
+      peers: ['12D3KooPrivateReceiver'],
+    })).rejects.toThrow(/private catalog peer fan-out requires scope-bound/u);
+    const successor = await configured.publishAuthorCatalogExactSetSuccessorV1(privateSuccessor);
     expect(successor).toMatchObject({
       announcement: {
         policyDigest,
