@@ -3,9 +3,11 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   classifyDurableProgress,
-  FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  normalizeDurableSyncResult,
   type DKGAgent,
   type DurableProgressSummary,
+  type DurableSyncDiagnostics,
+  type DurableSyncResult,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
@@ -109,18 +111,275 @@ export interface CatchupPhaseProgress extends DurableProgressSummary {
   emptyResponses?: number;
 }
 
+export type DurableLegDiagnostics = DurableSyncDiagnostics
+  & Pick<DurableSyncResult, 'deniedPhases'>;
+
+export interface DurableLegSummary {
+  insertedTriples: number;
+  diagnostics: DurableLegDiagnostics;
+  complete: boolean;
+  state: DurableCatchupLegState;
+  failureReasons: DurableCatchupFailureReason[];
+}
+
+export type DurableCatchupLegState = 'complete' | 'incomplete-progress' | 'failed' | 'legacy';
+
+export type DurableCatchupFailureCode =
+  | 'failedPeers'
+  | 'failedPhases'
+  | 'deniedPhases'
+  | 'rejectedKcs'
+  | 'dataRejectedMissingMeta'
+  | 'incompleteWithoutProgress';
+
+export type DurableCatchupFailureReason =
+  | { code: DurableCatchupFailureCode; count: number }
+  | { code: 'exception'; message: string };
+
+/** The only agent capabilities required by the route-level durable leg. */
+export interface DurableCatchupAgent {
+  syncFromPeerDetailed?: OmitThisParameter<DKGAgent['syncFromPeerDetailed']>;
+  syncFromPeer?: OmitThisParameter<DKGAgent['syncFromPeer']>;
+}
+
+export interface DurableCatchupLegResult {
+  insertedTriples: number;
+  state: DurableCatchupLegState;
+  complete?: boolean;
+  diagnostics?: DurableLegDiagnostics;
+  failureReasons?: DurableCatchupFailureReason[];
+}
+
+export interface DurableCatchupAttempt {
+  durableState?: DurableCatchupLegState;
+  durableComplete?: boolean;
+  durableError?: string;
+  error?: string;
+}
+
+export interface DurableCatchupRequestOutcome {
+  attempts: DurableCatchupAttempt[];
+  perContextGraphCompletion: Array<boolean | undefined>;
+  complete?: boolean;
+  allPeersFailed: boolean;
+  noEligibleAttempts: boolean;
+  incomplete: boolean;
+  responseStatus: 200 | 503;
+  errorBody: {
+    errorCode:
+      | 'DURABLE_CATCHUP_ALL_PEERS_FAILED'
+      | 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS'
+      | 'DURABLE_CATCHUP_INCOMPLETE';
+    error: string;
+    retryable: true;
+  } | undefined;
+}
+
+/**
+ * Adapt the agent's typed durable result for operator-facing catch-up APIs.
+ * Whole-leg completion comes only from the explicit agent contract; phase
+ * counters remain diagnostics and can describe safely committed prefixes.
+ */
+export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummary {
+  const normalized = normalizeDurableSyncResult(result);
+  const { insertedTriples, complete, ...diagnostics } = normalized;
+  const failureReasons = [
+    ['failedPeers', diagnostics.failedPeers],
+    ['failedPhases', diagnostics.failedPhases],
+    ['deniedPhases', diagnostics.deniedPhases],
+    ['rejectedKcs', diagnostics.rejectedKcs],
+    ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
+  ].flatMap(([code, count]) => Number(count) > 0 ? [{
+      code: code as DurableCatchupFailureCode,
+      count: Number(count),
+    }] : []);
+  const committedProgress = insertedTriples > 0
+    || diagnostics.insertedDataTriples > 0
+    || diagnostics.insertedMetaTriples > 0
+    || diagnostics.checkpointAdvances > 0;
+  if (!complete && !committedProgress && failureReasons.length === 0) {
+    // A timeout/backpressure stop before the first durable boundary is not a
+    // successful no-op. Give the HTTP adapter a typed failure reason so
+    // durable-only automation keeps retrying instead of treating 200/ok as an
+    // already-synchronized graph. Safely committed prefixes remain observable
+    // as retryable progress and intentionally do not enter this branch.
+    failureReasons.push({ code: 'incompleteWithoutProgress', count: 1 });
+  }
+  const state: DurableCatchupLegState = complete && failureReasons.length === 0
+    ? 'complete'
+    : failureReasons.length > 0
+      ? 'failed'
+      : 'incomplete-progress';
+  return {
+    insertedTriples,
+    diagnostics,
+    complete: state === 'complete',
+    state,
+    failureReasons,
+  };
+}
+
+/** Convert typed leg failures to the legacy operator-facing message at the HTTP boundary. */
+export function formatDurableCatchupFailure(
+  reasons: readonly DurableCatchupFailureReason[] | undefined,
+): string | undefined {
+  if (!reasons || reasons.length === 0) return undefined;
+  const exception = reasons.find(
+    (reason): reason is Extract<DurableCatchupFailureReason, { code: 'exception' }> => (
+      reason.code === 'exception'
+    ),
+  );
+  if (exception) return exception.message;
+  return `Durable sync did not complete (${reasons
+    .map((reason) => reason.code === 'exception'
+      ? reason.message
+      : `${reason.code}=${reason.count}`)
+    .join(', ')})`;
+}
+
+/**
+ * Execute one durable route leg behind a typed capability boundary. Detailed
+ * agents expose completion/diagnostics; older agents retain the legacy count.
+ */
+export async function runDurableCatchupLeg(
+  agent: DurableCatchupAgent,
+  peerId: string,
+  contextGraphId: string,
+  totalTimeoutMs: number,
+): Promise<DurableCatchupLegResult> {
+  try {
+    if (typeof agent.syncFromPeerDetailed === 'function') {
+      const detailed = await agent.syncFromPeerDetailed(
+        peerId,
+        [contextGraphId],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs },
+      );
+      const summary = summarizeDurableLeg(detailed);
+      return {
+        insertedTriples: summary.insertedTriples,
+        state: summary.state,
+        complete: summary.complete,
+        diagnostics: summary.diagnostics,
+        ...(summary.failureReasons.length > 0 ? { failureReasons: summary.failureReasons } : {}),
+      };
+    }
+
+    return {
+      insertedTriples: typeof agent.syncFromPeer === 'function'
+        ? await agent.syncFromPeer(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          { totalTimeoutMs },
+        )
+        : 0,
+      state: 'legacy',
+    };
+  } catch (error) {
+    return {
+      insertedTriples: 0,
+      state: 'failed',
+      complete: false,
+      failureReasons: [{
+        code: 'exception',
+        message: error instanceof Error ? error.message : String(error),
+      }],
+    };
+  }
+}
+
+export function durableCatchupCompletionFor(
+  attempts: readonly DurableCatchupAttempt[],
+): boolean | undefined {
+  if (attempts.some((attempt) => attempt.durableComplete === true)) return true;
+  return attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
+    ? false
+    : undefined;
+}
+
+/**
+ * Aggregate completion across every requested CG. A complete subset must not
+ * manufacture a complete whole-request verdict when another CG had no result.
+ */
+export function classifyDurableCatchupRequest(
+  perContextGraphAttempts: ReadonlyArray<readonly DurableCatchupAttempt[]>,
+  includeDurable: boolean,
+  includeSharedMemory: boolean,
+): DurableCatchupRequestOutcome {
+  const attempts = includeDurable ? perContextGraphAttempts.flatMap((parts) => [...parts]) : [];
+  const perContextGraphCompletion = perContextGraphAttempts.map(durableCatchupCompletionFor);
+  const missingContextGraphAttempt = includeDurable
+    && !includeSharedMemory
+    && perContextGraphAttempts.length > 0
+    && perContextGraphAttempts.some((parts) => parts.length === 0);
+  const everyContextGraphCompletionKnown = perContextGraphCompletion.length > 0
+    && perContextGraphCompletion.every((value) => value !== undefined);
+  const complete = missingContextGraphAttempt
+    ? false
+    : includeDurable && everyContextGraphCompletionKnown
+      ? perContextGraphCompletion.every((value) => value === true)
+      : undefined;
+  const allPeersFailed = includeDurable
+    && !includeSharedMemory
+    && attempts.length > 0
+    && attempts.every((attempt) => (
+      attempt.durableState === 'failed'
+      || (attempt.durableState === undefined && Boolean(attempt.error))
+    ));
+  const noEligibleAttempts = missingContextGraphAttempt && attempts.length === 0;
+  const incomplete = includeDurable
+    && !includeSharedMemory
+    && complete === false
+    && !allPeersFailed;
+
+  return {
+    attempts,
+    perContextGraphCompletion,
+    complete,
+    allPeersFailed,
+    noEligibleAttempts,
+    incomplete,
+    responseStatus: allPeersFailed || noEligibleAttempts ? 503 : 200,
+    errorBody: allPeersFailed
+      ? {
+        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+        error: 'Durable catchup failed for every selected peer',
+        retryable: true,
+      }
+      : noEligibleAttempts
+        ? {
+          errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
+          error: 'Durable catchup had no eligible peer for any requested context graph',
+          retryable: true,
+        }
+      : incomplete
+        ? {
+          errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
+          error: 'Durable catchup committed partial progress but did not reach the terminal boundary',
+          retryable: true,
+        }
+        : undefined,
+  };
+}
+
 export function catchupPlaneCompletedWithoutFailure(
   progress: CatchupPhaseProgress | null | undefined,
+  complete?: boolean,
 ): boolean {
-  return classifyDurableProgress(progress).completedWithoutFailure;
+  return classifyDurableProgress(progress, { complete }).completedWithoutFailure;
 }
 
 export function catchupPeerSucceeded(
   durable: CatchupPhaseProgress,
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
+  durableComplete?: boolean,
 ): boolean {
-  const durableProgress = classifyDurableProgress(durable);
+  const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
   const sharedProgress = shared ? classifyDurableProgress(shared) : null;
   if (
     !catchupPeerResponded(durable, shared)
@@ -292,22 +551,11 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'syncDurable': {
         const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
-        );
+        return agent.syncFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'syncSharedMemory': {
         const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncSharedMemoryFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
-        );
+        return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'finalizeCatchup': {
         const [contextGraphId] = args as [string, number, number];
@@ -330,8 +578,6 @@ class InlineCatchupRunner implements CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
-      priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-      retryDeferredBackpressure: true,
     }) as Promise<CatchupJobResult>;
   }
 

@@ -720,6 +720,40 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not promote subscription readiness from an explicitly incomplete durable result', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('coalesced-cg');
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => ({
+        ...cleanDurableSyncResult(),
+        complete: false,
+        insertedTriples: 40_000,
+        fetchedDataTriples: 40_000,
+        insertedDataTriples: 40_000,
+        checkpointAdvances: 1,
+      });
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
+
+      expect(result.peersResponded).toBe(1);
+      expect(result.dataSynced).toBe(40_000);
+      expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not join catch-up rounds with different shareable identity fields', async () => {
     const cases: Array<{
       name: string;

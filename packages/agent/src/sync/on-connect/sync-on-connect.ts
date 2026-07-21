@@ -76,7 +76,10 @@ interface SyncResultAccounting {
   cleanNonMetadataResponse: boolean;
 }
 
-function classifySyncResult(result: SyncFromPeerResult): SyncResultAccounting {
+function classifySyncResult(
+  result: SyncFromPeerResult,
+  complete?: boolean,
+): SyncResultAccounting {
   if (typeof result === 'number') {
     return {
       insertedTriples: result,
@@ -90,7 +93,7 @@ function classifySyncResult(result: SyncFromPeerResult): SyncResultAccounting {
     };
   }
 
-  const progress = classifyDurableProgress(result);
+  const progress = classifyDurableProgress(result, { complete });
   return {
     insertedTriples: result.insertedTriples,
     madeProgress: progress.madeReconnectProgress,
@@ -138,7 +141,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     result: SyncFromPeerResult,
     phase: 'durable' | 'shared',
   ): SyncResultAccounting => {
-    const accounting = classifySyncResult(result);
+    const complete = phase === 'durable'
+      && typeof result !== 'number'
+      && 'complete' in result
+      && typeof result.complete === 'boolean'
+        ? result.complete
+        : undefined;
+    const accounting = classifySyncResult(result, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;

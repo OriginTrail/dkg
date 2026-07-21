@@ -20,12 +20,7 @@ import {
   resolveImportedArtifactMetadata,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import {
-  type PromoteJob,
-  type PromoteJobState,
-  SAFE_CLEAR_JOB_ID_PATTERN,
-  SAFE_CLEAR_JOB_ID_MAX_LENGTH,
-} from '@origintrail-official/dkg-publisher';
+import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
 import {
   jsonResponse,
@@ -121,12 +116,9 @@ export class ImportArtifactRouteError extends Error {
 }
 
 export function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
-  // Grammar + length bound are imported from the publisher (the single authoritative
-  // job-id contract, also enforced control-plane-side by `isSafeClearJobId`) so route
-  // acceptance and control-plane acceptance cannot drift.
   if (!jobId) return { valid: false, reason: "jobId is required" };
-  if (jobId.length > SAFE_CLEAR_JOB_ID_MAX_LENGTH) return { valid: false, reason: "jobId is too long" };
-  if (!SAFE_CLEAR_JOB_ID_PATTERN.test(jobId)) {
+  if (jobId.length > 256) return { valid: false, reason: "jobId is too long" };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(jobId)) {
     return {
       valid: false,
       reason: "jobId may only contain letters, numbers, '.', '_', ':', and '-'",

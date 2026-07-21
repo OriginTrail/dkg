@@ -186,6 +186,8 @@ export {
   type PendingSenderKeyEntry,
   type AssertionArtifactKind,
   type ImportedArtifactByteStore,
+  type DurableSyncDiagnostics,
+  type DurableSyncResult,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,
@@ -270,14 +272,12 @@ export {
 export { mapWithConcurrency } from './map-with-concurrency.js';
 export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
-  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
-  FOREGROUND_CATCHUP_SYNC_PRIORITY,
-  retryCatchupPlaneOnBackpressure,
-  type CatchupBackpressureResult,
-} from './sync/catchup-backpressure-retry.js';
-export {
   classifyDurableProgress,
+  createFailedPeerDurableSyncResult,
+  isDurableSyncComplete,
+  normalizeDurableSyncResult,
   type DurableProgressClassification,
+  type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`

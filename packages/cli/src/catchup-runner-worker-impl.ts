@@ -1,8 +1,8 @@
 import { parentPort } from 'node:worker_threads';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  createFailedPeerDurableSyncResult,
   mapWithConcurrency,
-  retryCatchupPlaneOnBackpressure,
 } from '@origintrail-official/dkg-agent';
 import {
   catchupPeerResponded,
@@ -148,27 +148,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we can
   // from the other peers instead of failing the entire subscribe/catch-up immediately.
-  const emptyDurable = () => ({
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    verifiedPrivateOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 1,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  });
   const emptyShared = () => ({
     insertedTriples: 0,
     fetchedMetaTriples: 0,
@@ -196,22 +175,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable,
     CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
     async (peerId) => {
-      const rawDurable = await retryCatchupPlaneOnBackpressure(
-        () => invoke<any>('syncDurable', peerId, request.contextGraphId),
-      ).catch(() => emptyDurable());
+      const rawDurable = await invoke<any>('syncDurable', peerId, request.contextGraphId)
+        .catch(() => createFailedPeerDurableSyncResult());
       const durable = {
         ...rawDurable,
         verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
       };
-
-      // Durable metadata is required to authorize/materialize SWM. If VM is
-      // still locally deferred after bounded retries, leave SWM untouched for
-      // this peer. If only SWM is deferred, retry just SWM so the already-
-      // completed durable plane is never fetched a second time.
-      const shared = request.includeSharedMemory && (durable.deferredBackpressure ?? 0) === 0
-        ? await retryCatchupPlaneOnBackpressure(
-            () => invoke<any>('syncSharedMemory', peerId, request.contextGraphId),
-          ).catch(() => emptyShared())
+      const shared = request.includeSharedMemory
+        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
         : null;
       return { durable, shared };
     },
@@ -242,7 +213,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
     peerDenied = peerDenied || durable.deniedPhases > 0;
 
-    if (catchupPlaneCompletedWithoutFailure(durable)) {
+    if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
       if ((durable.insertedDataTriples ?? 0) > 0) {
         cleanPlaneCompletions.durable.verifiedDataPeers += 1;
       }
@@ -298,7 +269,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // completed with no timeout. Mirrors the inline
     // `syncContextGraphFromConnectedPeers` path so both runners report the
     // same shape.
-    if (catchupPeerSucceeded(durable, shared, peerDenied)) {
+    if (catchupPeerSucceeded(durable, shared, peerDenied, durable.complete)) {
       peersSucceeded += 1;
     }
   }

@@ -40,10 +40,8 @@ import type {
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
   VmPublishAdmissionJournalReader,
-  VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
-import { isSafeClearJobId, type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
@@ -82,7 +80,6 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
-  isClearableTerminalLiftJob,
   isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
@@ -195,7 +192,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
@@ -995,24 +992,17 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') return 0;
 
-    // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
-    // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
-    // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
-    // after retry() flips it active. Without this lock the "a transitioning job cannot be
-    // swept" guarantee does not hold.
-    return this.withClaimLock(async () => {
-      let retried = 0;
-      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-        // Jobs that failed with a recovery-phase resolution must go through recover(),
-        // not retry(), to avoid double-publishing if the original tx eventually lands.
-        if (job.failure.resolution === 'retry_recovery') continue;
+    let retried = 0;
+    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+      // Jobs that failed with a recovery-phase resolution must go through recover(),
+      // not retry(), to avoid double-publishing if the original tx eventually lands.
+      if (job.failure.resolution === 'retry_recovery') continue;
 
-        await this.reacceptFailedJob(job);
-        retried += 1;
-      }
-      return retried;
-    });
+      await this.reacceptFailedJob(job);
+      retried += 1;
+    }
+    return retried;
   }
 
   async clear(status: 'finalized' | 'failed'): Promise<number> {
@@ -1020,54 +1010,14 @@ export class TripleStoreAsyncLiftPublisher
     const jobs = await this.list({ status });
     let cleared = 0;
     for (const job of jobs) {
-      // #1837 — single terminal-clear authority shared with clearTerminalJob: skips
-      // retry_recovery-failed jobs (a pending on-chain tx may still land). Behavior is
-      // identical to the prior inline `resolution === 'retry_recovery'` guard.
-      if (!isClearableTerminalLiftJob(job)) continue;
+      // Protect retry_recovery jobs — they may still have a pending on-chain tx
+      // that periodic recovery will finalize. Only explicit cancel can remove them.
+      if (status === 'failed' && isFailedJob(job) && job.failure.resolution === 'retry_recovery') continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
       cleared += 1;
     }
     return cleared;
-  }
-
-  /**
-   * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withClaimLock so it is
-   * serialized against claimNext/enqueue/reaccept and retry() (the only terminal→active
-   * transitions) — a job transitioning cannot be swept, and concurrent clears are
-   * deterministic (exactly one 'cleared', the rest 'already_absent'). deleteJob is
-   * subject-scoped to the control-plane graph, so it never touches another job or the
-   * #1829 journal. Never throws / never mutates on a reject.
-   */
-  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
-    // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
-    // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
-    // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
-    // instead of the bounded outcome.
-    if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
-    return this.withClaimLock(async () => {
-      await this.ensureGraph();
-      const rows = expectBindings(
-        await this.store.query(
-          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
-        ),
-      );
-      if (rows.length === 0) return { outcome: 'already_absent' };
-      // Parse defensively — a corrupt persisted payload must surface as rejected(malformed),
-      // never throw (parseJobPayload does an unguarded JSON.parse).
-      let job: LiftJob | null;
-      try {
-        job = this.parseJobPayload(rows[0]?.['payload']);
-      } catch {
-        return { outcome: 'rejected', reason: 'malformed' };
-      }
-      if (job === null) return { outcome: 'rejected', reason: 'malformed' };
-      if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
-      if (!isClearableTerminalLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
-      await this.releaseWalletLockForJob(job);
-      await this.deleteJob(jobId);
-      return { outcome: 'cleared' };
-    });
   }
 
   private async ensureGraph(): Promise<void> {

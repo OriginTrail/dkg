@@ -111,7 +111,17 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  classifyDurableCatchupRequest,
+  createCatchupRunner,
+  formatDurableCatchupFailure,
+  runDurableCatchupLeg,
+  type CatchupJobResult,
+  type CatchupRunner,
+  type DurableCatchupFailureReason,
+  type DurableCatchupLegState,
+  type DurableLegDiagnostics,
+} from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -797,7 +807,11 @@ WHERE {
       }
     };
 
-    if (!peerIdParam && connectedPeerIds().length === 0) {
+    if (
+      !peerIdParam
+      && connectedPeerIds().length === 0
+      && !(includeDurable && !includeSharedMemory)
+    ) {
       return jsonResponse(res, 200, {
         contextGraphIds: cgIds,
         peersAttempted: 0,
@@ -821,6 +835,11 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      /** Typed internal outcome; omitted from the legacy HTTP response shape. */
+      durableState?: DurableCatchupLegState;
+      /** Present when the agent supports detailed durable-sync outcomes. */
+      durableComplete?: boolean;
+      durableDiagnostics?: DurableLegDiagnostics;
       swmError?: string;
       durableError?: string;
       error?: string;
@@ -865,6 +884,10 @@ WHERE {
         selectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
+          let durableState: DurableCatchupLegState | undefined;
+          let durableComplete: boolean | undefined;
+          let durableDiagnostics: DurableLegDiagnostics | undefined;
+          let durableFailureReasons: DurableCatchupFailureReason[] | undefined;
           let swmError: string | undefined;
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
@@ -892,30 +915,33 @@ WHERE {
             }
           }
           if (durableSelected.has(candidate)) {
-            try {
-              // The agent deadline bounds network fetching, but exact graph
-              // verification and atomic store materialization must settle
-              // afterward. Racing that promise against an HTTP timer does not
-              // cancel it; it only returns a false terminal response while the
-              // write continues invisibly and lets another recovery overlap
-              // the same responder session. Await the correctness-critical
-              // settlement and report its real inserted count. The serialized
-              // peer+CG durable lane prevents automatic recovery from racing
-              // this tail.
-              durable = await (
-                (agent as any).syncFromPeer?.(
-                  candidate,
-                  [cgId],
-                  undefined,
-                  undefined,
-                  { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                ) ?? Promise.resolve(0)
-              );
-            } catch (err: any) {
-              durableError = err?.message ?? String(err);
-            }
+            // The agent deadline bounds network fetching, but exact graph
+            // verification and atomic store materialization must settle
+            // afterward. The helper owns capability probing, typed invocation,
+            // completion classification, and legacy-agent adaptation.
+            const durableLeg = await runDurableCatchupLeg(
+              agent,
+              candidate,
+              cgId,
+              INTERNAL_DURABLE_BUDGET_MS,
+            );
+            durable = durableLeg.insertedTriples;
+            durableState = durableLeg.state;
+            durableDiagnostics = durableLeg.diagnostics;
+            durableComplete = durableLeg.complete;
+            durableFailureReasons = durableLeg.failureReasons;
+            durableError = formatDurableCatchupFailure(durableFailureReasons);
           }
-          return { peerId: candidate, insertedTriples: swm, durableInsertedTriples: durable, swmError, durableError } as PerPeerLeg;
+          return {
+            peerId: candidate,
+            insertedTriples: swm,
+            durableInsertedTriples: durable,
+            durableState,
+            durableComplete,
+            durableDiagnostics,
+            swmError,
+            durableError,
+          } as PerPeerLeg;
         }),
       );
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
@@ -924,6 +950,9 @@ WHERE {
             peerId: selectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
+            ...(s.value.durableState ? { durableState: s.value.durableState } : {}),
+            ...(s.value.durableComplete !== undefined ? { durableComplete: s.value.durableComplete } : {}),
+            ...(s.value.durableDiagnostics ? { durableDiagnostics: s.value.durableDiagnostics } : {}),
             ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
             ...(s.value.durableError ? { durableError: s.value.durableError } : {}),
           };
@@ -1028,6 +1057,7 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      durableComplete?: boolean;
       swmError?: string;
       durableError?: string;
       otherErrors?: string[];
@@ -1037,6 +1067,11 @@ WHERE {
         const entry = perPeerAggregate.get(p.peerId) ?? { peerId: p.peerId, insertedTriples: 0, durableInsertedTriples: 0 };
         entry.insertedTriples += p.insertedTriples;
         entry.durableInsertedTriples += p.durableInsertedTriples;
+        if (p.durableComplete !== undefined) {
+          entry.durableComplete = entry.durableComplete === undefined
+            ? p.durableComplete
+            : entry.durableComplete && p.durableComplete;
+        }
         if (p.swmError && !entry.swmError) entry.swmError = p.swmError;
         if (p.durableError && !entry.durableError) entry.durableError = p.durableError;
         if (p.error) entry.otherErrors = [...(entry.otherErrors ?? []), p.error];
@@ -1047,48 +1082,47 @@ WHERE {
       peerId: r.peerId,
       insertedTriples: r.insertedTriples,
       durableInsertedTriples: r.durableInsertedTriples,
+      ...(r.durableComplete !== undefined ? { durableComplete: r.durableComplete } : {}),
       ...(r.swmError ? { swmError: r.swmError } : {}),
       ...(r.durableError ? { durableError: r.durableError } : {}),
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
     }));
 
-    // A durable-only operator request must not look successful when every
-    // selected peer failed before producing a terminal sync result. The
-    // detailed `durableError` fields have always been preserved below, but an
-    // HTTP 200 + zero aggregate is easy for scripts and dashboards to mistake
-    // for an already-synchronized no-op. Keep successful zero-insert no-ops at
-    // 200, and keep mixed SWM+durable responses backward-compatible; only the
-    // unambiguous all-peer durable-only failure is a retryable 503.
-    const durableAttempts = includeDurable
-      ? perCgLegs.flatMap((cg) => cg.perPeer)
-      : [];
-    const durableOnlyAllPeersFailed = includeDurable
-      && !includeSharedMemory
-      && durableAttempts.length > 0
-      && durableAttempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
-    const responseStatus = durableOnlyAllPeersFailed ? 503 : 200;
+    // A durable-only operator request must not look successful until every
+    // detailed attempt reaches a terminal sync result. Preserve HTTP 200 for
+    // safely committed/checkpointed prefixes, but make the body explicitly
+    // retryable and `ok:false`; callers that only inspect `ok` must not confuse
+    // useful partial progress with completed catch-up. Keep mixed SWM+durable
+    // responses backward-compatible, and reserve 503 for the unambiguous case
+    // where every durable-only attempt failed without a usable result.
+    const durableOutcome = classifyDurableCatchupRequest(
+      perCgLegs.map((cg) => cg.perPeer),
+      includeDurable,
+      includeSharedMemory,
+    );
 
-    return jsonResponse(res, responseStatus, {
-      ok: !durableOnlyAllPeersFailed,
-      ...(durableOnlyAllPeersFailed ? {
-        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
-        error: 'Durable catchup failed for every selected peer',
-        retryable: true,
-      } : {}),
+    return jsonResponse(res, durableOutcome.responseStatus, {
+      ok: !durableOutcome.allPeersFailed && !durableOutcome.incomplete,
+      ...(durableOutcome.errorBody ?? {}),
       contextGraphIds: cgIds,
       peersAttempted: perPeerAggregate.size,
       includeSharedMemory,
       includeDurable,
+      ...(durableOutcome.complete !== undefined ? { durableComplete: durableOutcome.complete } : {}),
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,
       standardInsertedTriples: standardInserted,
       results,
-      perContextGraph: perCgLegs.map((cg) => ({
-        contextGraphId: cg.contextGraphId,
-        insertedTriples: cg.insertedTriples,
-        durableInsertedTriples: cg.durableInsertedTriples,
-        perPeer: cg.perPeer,
-      })),
+      perContextGraph: perCgLegs.map((cg, index) => {
+        const durableComplete = durableOutcome.perContextGraphCompletion[index];
+        return {
+          contextGraphId: cg.contextGraphId,
+          insertedTriples: cg.insertedTriples,
+          durableInsertedTriples: cg.durableInsertedTriples,
+          ...(durableComplete !== undefined ? { durableComplete } : {}),
+          perPeer: cg.perPeer.map(({ durableState: _durableState, ...peer }) => peer),
+        };
+      }),
       hostCatchup: hostCatchupOpted ? {
         ranFallback: hostCatchup.length > 0,
         triggeredForContextGraphIds: hostCatchup.map((h) => h.contextGraphId),

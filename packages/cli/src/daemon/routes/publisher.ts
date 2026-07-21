@@ -186,7 +186,6 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
-import { respondTerminalClearOutcome } from './terminal-clear-response.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -545,28 +544,5 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     }
     const count = await publisherControl.clear(status);
     return jsonResponse(res, 200, { cleared: count, status });
-  }
-
-  // POST /api/publisher/clear-job  { jobId }
-  // #1837 — atomic by-exact-jobId TERMINAL clear. DISTINCT from cancel (which aborts an
-  // ACCEPTED job) and from bulk /clear (status-scoped): clears exactly one job iff it is
-  // in a native terminal state, is idempotent for an absent job (already_absent = 200,
-  // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
-  if (req.method === "POST" && path === "/api/publisher/clear-job") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let clearJobParsed: any;
-    try {
-      clearJobParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    // `JSON.parse("null")` etc. succeeds but yields a non-object; optional-chain so a
-    // `null`/primitive body falls through to the malformed guard (400), never a
-    // destructure TypeError → 500.
-    const jobId = clearJobParsed && typeof clearJobParsed === "object" ? clearJobParsed.jobId : undefined;
-    if (typeof jobId !== "string" || jobId.trim().length === 0) {
-      return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
-    }
-    return respondTerminalClearOutcome(res, await publisherControl.clearTerminalJob(jobId), jobId);
   }
 }

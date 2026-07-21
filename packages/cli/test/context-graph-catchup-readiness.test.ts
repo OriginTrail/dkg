@@ -164,8 +164,12 @@ describe('context graph catch-up readiness classification', () => {
   });
 
   it('keeps same-peer partial progress unready when no peer completed cleanly', () => {
+    const result = mixedPeerResult(0);
+    // The worker may count a peer that committed useful partial progress as a
+    // liveness success. That counter is deliberately not readiness evidence.
+    result.peersSucceeded = 1;
     const classification = classifyContextGraphCatchupReadiness({
-      result: mixedPeerResult(0),
+      result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
       isPrivate: true,
@@ -179,6 +183,7 @@ describe('context graph catch-up readiness classification', () => {
         sharedMemoryVerified: false,
       },
     });
+    expect(classification.eventPayload).toBeUndefined();
   });
 
   it('accepts a public clean-empty peer when another peer denies', () => {
