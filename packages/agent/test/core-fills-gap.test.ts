@@ -2233,6 +2233,57 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fetchCount).toBe(2);
   });
 
+  it('never sends an exact request to a peer the network-admission boundary rejects', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmAdmissionGate', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const rejectedPeer = '12D3KooWExactRejectedPeer';
+    const admittedPeer = '12D3KooWExactAdmittedPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-admission';
+    const connected = [rejectedPeer, admittedPeer].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactAdmissionLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    // The curator hint points at the peer the admission boundary rejects — a
+    // hint must never bypass the identity gate.
+    (internals as any).preferredSyncPeers.set(localCgId, rejectedPeer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [rejectedPeer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).networkAdmissionCoordinator = {
+      isAcceptedPeer: (peerId: string) => peerId === admittedPeer,
+      isRejectedPeer: (peerId: string) => peerId === rejectedPeer,
+      ensureAdmitted: async () => false,
+    };
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeer = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+        failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    });
+    const target = {
+      ordinal: 0,
+      ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7',
+      kaId: '7',
+      reason: 'no-swm' as const,
+    };
+
+    const result = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+
+    expect(fetches).toEqual([admittedPeer]);
+    expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillWatermarkAhead', chainAdapter: chain });

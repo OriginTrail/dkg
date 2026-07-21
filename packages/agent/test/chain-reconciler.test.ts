@@ -312,6 +312,83 @@ describe('reconcileContextGraph — sweep', () => {
     expect(state.watermark).toBe(0);
     expect(state.scanOrdinal).toBe(0);
   });
+
+  it('discards recovered outcomes when the binding flips during batch recovery', async () => {
+    let current = true;
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 10,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: {
+          ordinal,
+          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+          kaId: String(ordinal),
+          reason: 'no-swm',
+        },
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        // The rebind lands while the long recovery await is in flight. The
+        // recovered outcomes belong to the OLD binding and must be discarded.
+        current = false;
+        return new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 5n);
+
+    expect(result.staleTarget).toBe(true);
+    expect(result.reconciled).toBe(0);
+    expect(result.hasMore).toBe(false);
+    expect(state.watermark).toBe(0);
+    expect(state.scanOrdinal).toBe(0);
+    expect(persisted).toEqual([]);
+  });
+
+  it('contains a worker failure: siblings drain, no new ordinals start, then the pass rejects', async () => {
+    const attempted: number[] = [];
+    const completed: number[] = [];
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    const { deps } = makeDeps({
+      getKCCount: async () => 6,
+      maxOrdinalsPerPass: 6,
+      maxOrdinalConcurrency: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        if (ordinal === 0) {
+          throw new Error('ordinal 0 exploded');
+        }
+        if (ordinal === 1) {
+          await slowGate;
+        }
+        completed.push(ordinal);
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const pass = reconcileContextGraph(deps, state, 'cg', 1n);
+    let settled = false;
+    void pass.catch(() => undefined).then(() => { settled = true; });
+
+    // Let the failing worker reject and the dispatch loops observe it.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The pass must still be waiting on the in-flight sibling ordinal…
+    expect(settled).toBe(false);
+    releaseSlow();
+    await expect(pass).rejects.toThrow('ordinal 0 exploded');
+
+    // …and after the failure no NEW ordinal may have been dispatched.
+    expect(attempted).toEqual([0, 1]);
+    expect(completed).toEqual([1]);
+    expect(state.watermark).toBe(0);
+  });
 });
 
 describe('VmReconcileDispatcher scheduling', () => {
