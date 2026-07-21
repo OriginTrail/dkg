@@ -327,6 +327,8 @@ export {
   serializeWorkspacePublicSnapshotQuads,
   workspacePublicQuadsDigest,
   type SharedMemoryPublicSnapshotStorageConfig,
+  type SnapshotPageIndexRecord,
+  type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
 export { UpdateHandler } from './update-handler.js';

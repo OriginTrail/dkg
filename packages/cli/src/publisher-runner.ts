@@ -37,6 +37,7 @@ import {
   type LiftJobIncluded,
   type PublishOptions,
   type V10ACKProviderParams,
+  type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -182,6 +183,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -200,6 +202,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+      publicSnapshotStore: args.publicSnapshotStore,
     });
     await runtime.runner.start();
     logPublisherWalletAttribution(runtime.wallets, args.log);
@@ -394,6 +397,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -407,7 +411,8 @@ export async function createPublisherRuntimeFromAgent(args: {
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
-    publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
+    publicSnapshotStore: args.publicSnapshotStore
+      ?? createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
 }
@@ -883,12 +888,16 @@ function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
+  pageIndexStore?: SnapshotPageIndexStore,
 ): WorkspacePublicSnapshotStore | undefined {
   const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
   if (snapshotConfig?.enabled === false) {
     return undefined;
   }
-  return new FileWorkspacePublicSnapshotStore(snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'));
+  return new FileWorkspacePublicSnapshotStore(
+    snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'),
+    pageIndexStore,
+  );
 }
 
 function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {

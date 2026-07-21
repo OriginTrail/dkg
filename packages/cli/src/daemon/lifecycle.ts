@@ -148,6 +148,7 @@ import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
+import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
@@ -1600,6 +1601,12 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
+  const publicSnapshotStore = createPublicSnapshotStore(
+    dkgDir(),
+    { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
+    snapshotPageIndexStore,
+  );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
     : chainBase?.hubAddress
@@ -1736,6 +1743,7 @@ export async function runDaemonInner(
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
+    publicSnapshotStore,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
@@ -1969,7 +1977,7 @@ export async function runDaemonInner(
   let shuttingDown = false;
 
   const publisherControl = createPublisherControlFromStore(agent.store, {
-    publicSnapshotStore: createPublicSnapshotStore(dkgDir(), config),
+    publicSnapshotStore,
     // #1836 — the daemon admission instance MUST carry the operator's retry
     // budget; without it every API-admitted VM-publish job was stamped with the
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
@@ -2259,6 +2267,7 @@ export async function runDaemonInner(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          publicSnapshotStore,
           log,
         });
         publisherState = outcome;
