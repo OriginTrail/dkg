@@ -131,7 +131,6 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
-  withKeyedLocks, swmKaWriteLockKey,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -239,6 +238,7 @@ import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -4853,69 +4853,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // data quads for them by design — their content arrives as
               // immutable snapshots, and without this the catch-up lane cached
               // every verified snapshot and never wrote one to the store.
-              snapshotMaterializer: {
-                // The SAME lock the live-gossip write path takes: this.writeLocks
-                // is the map injected into SharedMemoryHandler, and the key comes
-                // from the shared helper so the two sites cannot drift. This is
-                // what closes the check-then-replace race with gossip.
-                withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
-                  withKeyedLocks(this.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
-                // MUST prove the CONTENT is present, not merely that the metadata
-                // pointer is. The pre-fix bug inserted the head->assertionGraph
-                // marker while never writing the graph — that IS the observed
-                // "0 data + N meta" state. A marker-only predicate reports every
-                // already-broken node as materialized and skips the cached
-                // snapshot, so the repair would never reach the nodes that need
-                // it most, and a partially-fetched metadata round could strand an
-                // asset forever behind its own marker.
-                //
-                // Count the assertion graph itself and require it to match the
-                // descriptor's public quad count: exact-IRI scope, so bounded.
-                isGraphAssetMaterialized: async (asset) => {
-                  const expected = Number(asset.publicQuadsCount);
-                  if (!Number.isFinite(expected) || expected <= 0) return false;
-                  const result = await this.store.query(
-                    `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${assertSafeIri(asset.assertionGraph)}> { ?s ?p ?o } }`,
-                    { priority: 'background', source: 'agent.sharedMemorySync.isGraphAssetMaterialized' },
-                  );
-                  if (result.type !== 'bindings' || result.bindings.length === 0) return false;
-                  const raw = String(result.bindings[0]?.['n'] ?? '0').replace(/^"|"[^"]*$/g, '');
-                  const present = Number.parseInt(raw, 10);
-                  // Strictly equal: a short graph is a partial write and must be
-                  // replaced, not treated as already materialized.
-                  return Number.isFinite(present) && present === expected;
-                },
-                // Read INSIDE the lock by the caller: a lock prevents
-                // interleaving but not overwriting-with-older, and gossip may
-                // have advanced this KA while catch-up waited on the lock.
-                readStoredAssertionVersion: async (asset) => {
-                  const result = await this.store.query(
-                    `SELECT (MAX(?v) AS ?v) WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { `
-                    + `<${assertSafeIri(asset.headSubject)}> `
-                    + `<http://dkg.io/ontology/assertionVersion> ?v } }`,
-                    { priority: 'background', source: 'agent.sharedMemorySync.readStoredAssertionVersion' },
-                  );
-                  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-                  const raw = String(result.bindings[0]?.['v'] ?? '');
-                  if (raw.length === 0) return null;
-                  const literal = /^"([^"]*)"/.exec(raw);
-                  return literal ? literal[1] : raw;
-                },
-                // Deliberately NOT routed through storeInsert below: that is a
-                // union insert with an oversize guard, whereas a KA graph is
-                // all-or-nothing and digest-verified. Insert would risk partial
-                // or duplicated graph state across retries.
-                replaceGraph: async (graphUri, quads) => {
-                  if (typeof this.store.replaceGraph !== 'function') {
-                    throw new Error('triple store does not support atomic graph replace');
-                  }
-                  await this.store.replaceGraph(graphUri, quads, {
-                    priority: 'background',
-                    source: 'agent.sharedMemorySync.materializeSnapshot',
-                  });
-                  this.invalidateListContextGraphsCache();
-                },
-              },
+              // Thin wiring only: the materialization policy (content-digest
+              // guard, MAX head read + duplicate repair, atomic replace, head
+              // metadata swap) lives in `swm-snapshot-materializer.ts`. What
+              // the agent contributes here is its own resources — the store,
+              // the SAME lock map injected into SharedMemoryHandler (sharing
+              // the map + key helper is what closes the check-then-replace
+              // race with gossip), and list-cache invalidation.
+              snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+              }),
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
                 // literals BEFORE insert so the SWM page cursor advances instead
