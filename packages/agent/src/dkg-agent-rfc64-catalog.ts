@@ -20,7 +20,6 @@
 
 import {
   ZERO_DIGEST32_V1,
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
@@ -54,6 +53,7 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
+import { readBoundedPublicOpenRootLaneHeadV1 } from './rfc64/bounded-public-open-root-lane-head-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
 import type { Rfc64PublicCatalogReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
@@ -781,12 +781,12 @@ async function loadPublicOpenRootLaneHistoryV1(
   if (storedHead === null) throw new Error('RFC-64 predecessor head is not durably staged');
   assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
   const previousHead = storedHead.envelope;
-  if (
-    previousHead.payload.subGraphName !== null
-    || previousHead.payload.bucketCount !== '1'
-    || previousHead.payload.directoryHeight !== '0'
-    || BigInt(previousHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
-  ) {
+  let boundedHead: ReturnType<typeof readBoundedPublicOpenRootLaneHeadV1>;
+  try {
+    boundedHead = readBoundedPublicOpenRootLaneHeadV1(previousHead, {
+      allowGenesis: true,
+    });
+  } catch {
     throw new Error('RFC-64 predecessor is outside the public/open root-lane slice');
   }
 
@@ -804,11 +804,11 @@ async function loadPublicOpenRootLaneHistoryV1(
   if (descriptor === undefined || !('bucketDigest' in descriptor)) {
     throw new Error('RFC-64 predecessor root has no level-zero bucket descriptor');
   }
-  if (descriptor.rowCount !== previousHead.payload.totalRows) {
+  if (descriptor.rowCount !== boundedHead.rowCount.toString()) {
     throw new Error('RFC-64 predecessor root row count does not match its head');
   }
   if (
-    (previousHead.payload.totalRows === '0')
+    (boundedHead.rowCount === 0)
     !== (descriptor.bucketDigest === ZERO_DIGEST32_V1)
   ) {
     throw new Error('RFC-64 predecessor empty-bucket descriptor is inconsistent');
@@ -823,7 +823,7 @@ async function loadPublicOpenRootLaneHistoryV1(
     if (storedBucket === null) throw new Error('RFC-64 predecessor bucket is not staged');
     assertSignedAuthorCatalogBucketEnvelopeV1(storedBucket.envelope);
     previousBucket = storedBucket.envelope;
-    if (previousBucket.payload.rows.length !== Number(previousHead.payload.totalRows)) {
+    if (previousBucket.payload.rows.length !== boundedHead.rowCount) {
       throw new Error('RFC-64 predecessor bucket row count does not match its head');
     }
   }

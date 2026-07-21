@@ -12,7 +12,6 @@
 import {
   assertAuthorCatalogHeadScopeBindingV1,
   computeAuthorCatalogScopeDigestV1,
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CountV1,
@@ -21,6 +20,7 @@ import {
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 
+import { readBoundedPublicOpenRootLaneHeadV1 } from './bounded-public-open-root-lane-head-v1.js';
 import type { Rfc64InventoryV1OperationsV1 } from './inventory-v1/index.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
@@ -170,6 +170,7 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
     const staged = await this.options.readStagedCatalogHead(announcement);
     if (staged === null) return null;
     const head = staged.envelope;
+    let expectedRowCount: CountV1 | null = null;
     try {
       if (
         head.objectDigest !== announcement.catalogHeadObjectDigest
@@ -179,19 +180,20 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
         throw new Error('staged head identity or exact signature variant differs from announcement');
       }
       assertAuthorCatalogHeadScopeBindingV1(head.payload, trustedCatalogScope);
-      const totalRows = BigInt(head.payload.totalRows);
+      const boundedHead = readBoundedPublicOpenRootLaneHeadV1(head, {
+        allowGenesis: true,
+      });
       if (
-        totalRows < 0n
-        || totalRows > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
-        || (announcement.catalogVersion === '0' && totalRows !== 0n)
-        || (announcement.catalogVersion !== '0' && totalRows < 1n)
+        (announcement.catalogVersion === '0' && boundedHead.rowCount !== 0)
+        || (announcement.catalogVersion !== '0' && boundedHead.rowCount < 1)
       ) {
         throw new Error('staged head totalRows is outside the bounded lane');
       }
+      expectedRowCount = boundedHead.rowCount.toString() as CountV1;
     } catch {
       return null;
     }
-    return head.payload.totalRows as CountV1;
+    return expectedRowCount;
   }
 
   async reconcileHead(

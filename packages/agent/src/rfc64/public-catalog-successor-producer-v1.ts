@@ -58,6 +58,7 @@ import {
   type AuthorAgentDelegationEvidenceV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
+import { readBoundedPublicOpenRootLaneHeadV1 } from './bounded-public-open-root-lane-head-v1.js';
 import {
   produceSparseAuthorCatalogSuccessorV1,
   type ProducedAuthorCatalogPublicationV1,
@@ -645,19 +646,23 @@ function assertSupportedPreviousSlice(
   head: SignedAuthorCatalogHeadEnvelopeV1,
   bucket: SignedAuthorCatalogBucketEnvelopeV1 | null,
 ): void {
-  if (
-    head.payload.subGraphName !== null
-    || head.payload.bucketCount !== '1'
-    || head.payload.directoryHeight !== '0'
-    || BigInt(head.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
-    || (head.payload.totalRows === '0' && bucket !== null)
-    || (head.payload.totalRows !== '0'
-      && bucket?.payload.rows.length !== Number(head.payload.totalRows))
-    || head.payload.directoryRootDigest === ZERO_DIGEST32_V1
-  ) {
+  try {
+    const boundedHead = readBoundedPublicOpenRootLaneHeadV1(head, {
+      allowGenesis: true,
+    });
+    if (
+      (boundedHead.rowCount === 0 && bucket !== null)
+      || (boundedHead.rowCount !== 0
+        && bucket?.payload.rows.length !== boundedHead.rowCount)
+      || head.payload.directoryRootDigest === ZERO_DIGEST32_V1
+    ) {
+      throw new Error('previous head objects do not match the bounded row count');
+    }
+  } catch (cause) {
     fail(
       'catalog-successor-producer-history',
       'previous catalog is outside the bounded public/open root-lane slice',
+      cause,
     );
   }
 }

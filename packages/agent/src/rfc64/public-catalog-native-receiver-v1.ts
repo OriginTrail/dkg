@@ -69,6 +69,7 @@ import {
   verifyAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
+import { readBoundedPublicOpenRootLaneHeadV1 } from './bounded-public-open-root-lane-head-v1.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
@@ -1020,15 +1021,20 @@ function claimsGenesisHistory(head: SignedAuthorCatalogHeadEnvelopeV1): boolean 
 }
 
 function assertEmptyGenesisHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
-  if (
-    head.payload.subGraphName !== null
-    || head.payload.era !== '0'
-    || head.payload.bucketCount !== '1'
-    || head.payload.directoryHeight !== '0'
-    || head.payload.totalRows !== '0'
-    || head.payload.version !== '0'
-    || head.payload.previousHeadDigest !== null
-  ) {
+  try {
+    const boundedHead = readBoundedPublicOpenRootLaneHeadV1(head, {
+      allowGenesis: true,
+    });
+    if (
+      head.payload.era !== '0'
+      || boundedHead.rowCount !== 0
+      || !boundedHead.isGenesis
+      || head.payload.version !== '0'
+      || head.payload.previousHeadDigest !== null
+    ) {
+      throw new Error('head is not the canonical empty genesis');
+    }
+  } catch {
     fail(
       'catalog-native-receiver-slice',
       'genesis bootstrap requires the canonical empty public/open root catalog',
@@ -1100,26 +1106,20 @@ function assertMonotonicSuccessorHistory(
 }
 
 function assertBoundedSuccessorHead(head: SignedAuthorCatalogHeadEnvelopeV1): number {
-  let totalRows = 0;
   try {
-    totalRows = Number(BigInt(head.payload.totalRows));
-  } catch {}
-  if (
-    head.payload.subGraphName !== null
-    || head.payload.bucketCount !== '1'
-    || head.payload.directoryHeight !== '0'
-    || !Number.isSafeInteger(totalRows)
-    || totalRows < 1
-    || totalRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
-    || head.payload.version === '0'
-    || head.payload.previousHeadDigest === null
-  ) {
+    const boundedHead = readBoundedPublicOpenRootLaneHeadV1(head, {
+      allowGenesis: false,
+    });
+    if (boundedHead.rowCount < 1) {
+      throw new RangeError('bounded successor is empty');
+    }
+    return boundedHead.rowCount;
+  } catch {
     fail(
       'catalog-native-receiver-slice',
       `bounded receiver requires 1..${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} root-lane rows in one non-genesis successor bucket`,
     );
   }
-  return totalRows;
 }
 
 function isExactAppliedSuccessorSnapshot(
