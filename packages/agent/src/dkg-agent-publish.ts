@@ -179,6 +179,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
 import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
 import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
@@ -1490,6 +1491,10 @@ export class PublishMethods extends DKGAgentBase {
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(this.store, {
       publicSnapshotStore: this.publicSnapshotStore,
+      // #1836 — honor the operator's publisher.maxRetries on this admission path
+      // too (EPCIS / Kafka plugins publish through the agent, not the daemon
+      // control instance). Nullish → the publisher's built-in default.
+      maxRetries: this.config.publisherMaxRetries,
     });
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     return { captureID };
@@ -2436,6 +2441,7 @@ export class PublishMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: '"unregistered"', graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${curatorAgentAddress}`, graph: cgMetaGraph },
+      ...buildAuthoritativePublicMetaQuads(contextGraphId),
     ];
 
     await this.store.insert(quads);

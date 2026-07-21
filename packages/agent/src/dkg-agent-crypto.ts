@@ -977,21 +977,25 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * caller naming the slot directly, not a cleartext→numeric remapping, so it is
    * treated like the bare-numeric raw-slot path (not identity-bound) and gated
    * by liveness + fresh policy alone.
+   *
+   * `requireCommittedNameHash` is the strict durable-sync mode: unlike the
+   * legacy policy probe, it rejects malformed ids and adapters that cannot
+   * prove a non-numeric local id from the chain commitment. The canonical
+   * direct numeric self-address remains valid in either mode.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
+    options?: { requireCommittedNameHash?: boolean },
   ): Promise<boolean> {
-    const getNameHash = this.chain.getContextGraphNameHash;
-    if (typeof getNameHash !== 'function') return true;
     let numericId: bigint;
     try {
       numericId = BigInt(onChainId);
     } catch {
-      return true;
+      return options?.requireCommittedNameHash !== true;
     }
-    if (numericId <= 0n) return true;
+    if (numericId <= 0n) return options?.requireCommittedNameHash !== true;
 
     const trimmed = contextGraphId.trim();
     // DIRECT NUMERIC SELF-ADDRESS: a local CG whose own id IS its numeric
@@ -1005,7 +1009,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // so name-hash binding is inapplicable — defer to the liveness + fresh-policy
     // gate. The stale-mapping risk the name-hash defends against (#884 review
     // 🔴 GaZk2) only exists for a cleartext id that REMAPS to a different slot.
-    if (/^\d+$/.test(trimmed) && trimmed === onChainId.trim()) return true;
+    if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) return true;
+    const getNameHash = this.chain.getContextGraphNameHash;
+    if (typeof getNameHash !== 'function') {
+      return options?.requireCommittedNameHash !== true;
+    }
     // A locally-resolved (cleartext) id can be committed two ways, and both are
     // legitimate (#884 review 🔴 GZumc + 🔴 GaJf_), so accept a match against EITHER:
     //   - CLEARTEXT (always): a curator-created CG stores its cleartext id (even
@@ -1027,7 +1035,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     try {
       acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
     } catch {
-      return true;
+      return options?.requireCommittedNameHash !== true;
     }
     if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && this.isWireIdKeyedSubscription(trimmed)) {
       acceptable.add(trimmed.toLowerCase());

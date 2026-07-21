@@ -879,6 +879,22 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
+  /**
+   * Maximum chain ordinals one CG may process before yielding the single VM
+   * worker. Ten keeps exact missing-KA pulls useful while bounding cross-CG
+   * latency and the per-request UAL filter.
+   */
+  static readonly VM_RECONCILE_BATCH_SIZE =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /**
+   * Parallel ordinal work per CG. Combined with the default two-CG dispatcher
+   * concurrency this caps chain/store pressure at ten in-flight ordinals.
+   */
+  static readonly VM_RECONCILE_ORDINAL_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_ORDINAL_CONCURRENCY']) || 5);
+  /** Keep a slow peer recovery for one CG from blocking every other CG. */
+  static readonly VM_RECONCILE_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CONCURRENCY']) || 2);
   static readonly VM_RECONCILE_MAX_FOREGROUND_BURST =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_MAX_FOREGROUND_BURST']) || 8);
   static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =

@@ -417,6 +417,35 @@ describe('StorageACKHandler graph-scoped updates', () => {
     expect(ack.declineMessage).toContain('newMerkleLeafCount mismatch');
   });
 
+  it('ACKs canonical Markdown section entities from the exact SWM graph', async () => {
+    const store = new OxigraphStore();
+    const section = 'urn:dkg:ka-skolem:c14n0';
+    const quads: Quad[] = [
+      {
+        subject: 'urn:document:construction-notes',
+        predicate: 'http://dkg.io/ontology/hasSection',
+        object: section,
+        graph: EXACT_SWM_GRAPH,
+      },
+      {
+        subject: section,
+        predicate: 'http://schema.org/name',
+        object: '"Safety"',
+        graph: EXACT_SWM_GRAPH,
+      },
+    ];
+    await store.insert(quads);
+    const handler = new StorageACKHandler(
+      store,
+      config(ethers.Wallet.createRandom()),
+      new TypedEventBus(),
+    );
+
+    const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 0), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
   it('keeps a legacy sub-graph update on the legacy handler', async () => {
     const quad: Quad = {
       subject: 'urn:legacy:entity',
@@ -450,9 +479,9 @@ describe('StorageACKHandler graph-scoped updates', () => {
     expect(isStorageACKDecline(ack)).toBe(false);
   });
 
-  it('declines reserved skolem terms received over the graph-scoped ACK protocol', async () => {
+  it('declines non-canonical reserved skolem terms over the graph-scoped ACK protocol', async () => {
     const malicious: Quad[] = [{
-      subject: 'urn:dkg:ka-skolem:c14n0',
+      subject: 'urn:dkg:ka-skolem:attacker',
       predicate: 'urn:p:value',
       object: '"attacker-authored"',
       graph: EXACT_SWM_GRAPH,

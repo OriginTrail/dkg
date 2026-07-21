@@ -181,6 +181,8 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+  /** Additive exact-KA response filter; present-but-invalid parses fail closed. */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — UNSIGNED member-recovery marker. When set, the responder
    * authorizes via the strict members-only `isMemberRecoveryAuthorized`
@@ -1131,6 +1133,13 @@ export interface DKGAgentConfig {
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-Oxigraph immutable public SWM operation snapshots. Defaults on when dataDir is set. */
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
+  /**
+   * Max automatic-retry budget stamped onto async VM-publish jobs admitted
+   * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors
+   * the daemon's `publisher.maxRetries`. Nullish → the publisher's built-in
+   * default; `0` disables auto-retry. (#1836)
+   */
+  publisherMaxRetries?: number;
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;

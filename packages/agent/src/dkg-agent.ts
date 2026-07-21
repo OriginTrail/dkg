@@ -2589,7 +2589,17 @@ export class DKGAgent extends DKGAgentBase {
         );
         if (gossipMessage) {
           try {
-            await agent.publishWorkspaceGossip(contextGraphId, gossipMessage, createOperationContext('share'), gossipSigner);
+            // Preserve the immutable operation id through the fan-out seam.
+            // Direct share() already does this; assertion promotion previously
+            // dropped it, so receiver acknowledgements/watchdog retries could
+            // not be correlated for imported (including Markdown) KAs.
+            await agent.publishWorkspaceGossip(
+              contextGraphId,
+              gossipMessage,
+              createOperationContext('share'),
+              gossipSigner,
+              shareOperationId,
+            );
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }

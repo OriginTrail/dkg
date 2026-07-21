@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { validatePublishRequest } from '../src/validation.js';
+import {
+  validateCanonicalGraphScopedKnowledgeAssetPayload,
+  validateKnowledgeAssetPublishRequest,
+  validatePublishRequest,
+} from '../src/validation.js';
 import type { KAManifestEntry } from '../src/publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -91,5 +95,40 @@ describe('validatePublishRequest', () => {
     const r = validatePublishRequest(nquads, manifest(root), P, new Set());
     expect(r.valid).toBe(false);
     expect(r.errors.some((e) => e.includes('Rule 5'))).toBe(true);
+  });
+});
+
+describe('canonical graph-scoped KA validation policy', () => {
+  const publicCanonical = 'urn:dkg:ka-skolem:c14n0';
+
+  it('accepts exact public canonical Markdown section terms only at the named wire boundary', () => {
+    const canonical = [quad(
+      'urn:document:1',
+      'http://dkg.io/ontology/hasSection',
+      publicCanonical,
+    ), quad(
+      publicCanonical,
+      'http://schema.org/name',
+      '"Safety"',
+    )];
+
+    expect(validateKnowledgeAssetPublishRequest(canonical, G, 2).valid).toBe(false);
+    expect(validateCanonicalGraphScopedKnowledgeAssetPayload(canonical, G, 2)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
+  it.each<[string, Quad]>([
+    ['private canonical subject', quad('urn:dkg:ka-skolem:private:c14n0', 'urn:p', '"x"')],
+    ['private canonical object', quad('urn:s', 'urn:p', 'urn:dkg:ka-skolem:private:c14n0')],
+    ['forged reserved subject', quad('urn:dkg:ka-skolem:attacker', 'urn:p', '"x"')],
+    ['reserved predicate', quad('urn:s', publicCanonical, '"x"')],
+    ['reserved graph', quad('urn:s', 'urn:p', '"x"', publicCanonical)],
+    ['blank-node subject', quad('_:section', 'urn:p', '"x"')],
+    ['blank-node object', quad('urn:s', 'urn:p', '_:section')],
+  ])('rejects %s', (_label, malicious) => {
+    const result = validateCanonicalGraphScopedKnowledgeAssetPayload([malicious], G, 1);
+    expect(result.valid).toBe(false);
   });
 });

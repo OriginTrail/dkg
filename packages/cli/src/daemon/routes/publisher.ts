@@ -193,6 +193,7 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -321,6 +322,57 @@ import {
 import type { RequestContext } from './context.js';
 
 
+interface PublisherLifecycleFacts {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress: string;
+  intentKey?: string;
+}
+
+// #1828/#1829 — parse + validate the lifecycle facts shared by GET /job-by-intent and
+// GET /journal from query params, using the SAME normalization admission persisted (or a
+// facts read silently misses entries): contextGraphId trimmed + prefix-stripped
+// (normalizeContextGraphIdOrUri); an empty subGraphName rejected (root lane = OMIT the
+// param); agentAddress defaulted to the caller lane (admission persists a non-empty lane,
+// an explicit param wins); C0/DEL control chars rejected so a crafted value cannot forge a
+// colliding U+001F-joined lifecycle key. Returns null after sending a 400 on any violation.
+function parsePublisherLifecycleFactsFromQuery(
+  url: URL,
+  res: ServerResponse,
+  requestAgentAddress: string,
+): PublisherLifecycleFacts | null {
+  const rawContextGraphId = url.searchParams.get("contextGraphId");
+  const name = url.searchParams.get("name") ?? undefined;
+  if (!rawContextGraphId || !name) {
+    jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
+    return null;
+  }
+  const intentKey = url.searchParams.get("intentKey") ?? undefined;
+  if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+    jsonResponse(res, 400, { error: "Malformed intentKey" });
+    return null;
+  }
+  const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+  const rawSubGraphName = url.searchParams.get("subGraphName");
+  if (!validateOptionalSubGraphName(rawSubGraphName, res)) return null;
+  const subGraphName = rawSubGraphName ?? undefined;
+  const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+  const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+  const hasControlChar = (value: string | undefined): boolean =>
+    value !== undefined && [...value].some((ch) => {
+      const code = ch.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+  if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+    jsonResponse(res, 400, {
+      error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+    });
+    return null;
+  }
+  return { contextGraphId, name, subGraphName, agentAddress, intentKey };
+}
+
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -389,6 +441,34 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
     return jsonResponse(res, 200, { job, payload });
+  }
+
+  // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1828 — read-only durable-admission recovery, keyed on the lifecycle facts a
+  // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
+  // when supplied, only qualifies exactIntentMatch. Never mutates.
+  if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
+    const { kind, ...rest } = lookup;
+    return jsonResponse(res, 200, { result: kind, ...rest });
+  }
+
+  // GET /api/publisher/journal?jobId=  OR  ?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1829 — read-only append-only admission/transaction journal. By jobId, or facts-pure
+  // by lifecycle identity (derived with the SAME normalization admission persisted).
+  // txHashes are ATTEMPTED submissions — reconcile against chain, never treat as sent.
+  if (req.method === "GET" && path === "/api/publisher/journal") {
+    const jobId = url.searchParams.get("jobId")?.trim() || undefined;
+    if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
+      return jsonResponse(res, 200, result);
+    }
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const result = await publisherControl.readJournalByIntent(facts);
+    return jsonResponse(res, 200, result);
   }
 
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)

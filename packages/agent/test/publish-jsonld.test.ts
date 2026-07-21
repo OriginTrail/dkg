@@ -289,6 +289,33 @@ describe('publishJsonLd', () => {
     expect(result.status).toBe('confirmed');
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
+  it('stamps configured publisher.maxRetries onto agent publishAsync jobs (EPCIS/Kafka path, #1836)', async () => {
+    // #1836 — the agent's own publishAsync (used by the EPCIS/Kafka plugins) must
+    // stamp the operator-configured retry budget onto the queued job, not fall
+    // back to the publisher default. Reverting publishAsync to construct
+    // TripleStoreAsyncLiftPublisher without maxRetries makes this assert 10.
+    const { agent, store } = await createAgent('AsyncMaxRetriesBot', { publisherMaxRetries: 0 });
+    await agent.createContextGraph({ id: 'async-maxretries', name: 'AsyncMaxRetries', description: '' });
+    await agent.registerContextGraph('async-maxretries');
+
+    const { captureID } = await agent.publishAsync(
+      'did:dkg:context-graph:async-maxretries',
+      {
+        private: {
+          '@context': 'http://schema.org/',
+          '@id': 'http://example.org/AsyncMaxRetries',
+          '@type': 'Thing',
+          'name': 'Async MaxRetries',
+        },
+      },
+      { localOnly: true },
+    );
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const job = await asyncPublisher.getStatus(captureID);
+    expect(job?.retries.maxRetries).toBe(0);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
   it('async private-only JSON-LD enqueues one rootless KA with one non-root challenge anchor', async () => {
     const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
     await agent.createContextGraph({ id: 'async-priv-only', name: 'AsyncPrivateOnly', description: '' });
@@ -320,6 +347,8 @@ describe('publishJsonLd', () => {
     expect(request.kaUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/\d+$/);
     expect(request.accessPolicy).toBe('allowList');
     expect(request.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    // #1836 — with publisherMaxRetries unset the agent path keeps the publisher default.
+    expect(job?.retries.maxRetries).toBe(10);
     // With a positive public challenge leaf the local queue may complete and
     // clean its mutable assertion lifecycle immediately. The immutable queued
     // request above is the durable contract; do not race cleanup by resolving

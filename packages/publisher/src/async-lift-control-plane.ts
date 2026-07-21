@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { LiftJob, LiftJobHex, LiftJobRequest } from './lift-job.js';
+import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind } from './lift-job.js';
 
 export const DEFAULT_CONTROL_GRAPH_URI = 'urn:dkg:publisher:control-plane';
 export const DEFAULT_WALLET_LOCK_GRAPH_URI = 'urn:dkg:publisher:wallet-locks';
@@ -41,6 +42,14 @@ export const CONTROL_UPDATED_AT = 'urn:dkg:publisher:updatedAt';
 export const CONTROL_RETRY_COUNT = 'urn:dkg:publisher:retryCount';
 export const CONTROL_MAX_RETRIES = 'urn:dkg:publisher:maxRetries';
 export const CONTROL_LAST_RETRY_REASON = 'urn:dkg:publisher:lastRetryReason';
+// #1828 — ephemeral secondary index on the (mutable) job subject enabling O(1)
+// intent recovery. This triple lives on jobRef, so clear/cancel/deleteJob remove
+// it with the job. PR3 (#1829) append-only journal MUST key intent on its OWN
+// journal subjects — never rely on the job-subject index for durability.
+// `lifecycleKey` mirrors the promote queue's uniquenessKey (the dedup subject).
+// Intent exactness is derived from the parsed payload at lookup time, so no
+// separate intentKey triple is materialized.
+export const CONTROL_LIFECYCLE_KEY = 'urn:dkg:publisher:lifecycleKey';
 export const CONTROL_WALLET_ID = 'urn:dkg:publisher:walletId';
 export const CONTROL_CLAIMED_BY = 'urn:dkg:publisher:claimedBy';
 export const CONTROL_CLAIM_TOKEN = 'urn:dkg:publisher:claimToken';
@@ -80,6 +89,31 @@ export const CONTROL_LOCK_STATUS = 'urn:dkg:publisher:lockStatus';
 export const CONTROL_LOCK_ACQUIRED_AT = 'urn:dkg:publisher:lockAcquiredAt';
 export const CONTROL_LOCK_EXPIRES_AT = 'urn:dkg:publisher:lockExpiresAt';
 export const CONTROL_LOCK_LAST_HEARTBEAT_AT = 'urn:dkg:publisher:lockLastHeartbeatAt';
+
+// #1829 — append-only admission & transaction journal. NODE-LOCAL by construction:
+// the sync responder serves only `did:dkg:context-graph:*` graphs, so every
+// `urn:dkg:publisher:*` graph (control-plane, wallet-locks, and this journal) is
+// node-local, and the per-lineageKey `MAX(seq)+1` allocation RELIES on that
+// exclusivity (a cross-node merge would collide subjects and pollute the MAX scan).
+// Dedicated predicates (never reuse CONTROL_*) keep the seq scope + delete-guard
+// reasoning unambiguous. Do NOT register as a ChangelogStore reserved graph —
+// reserving silently strips the append quads.
+export const DEFAULT_JOURNAL_GRAPH_URI = 'urn:dkg:publisher:journal';
+export const JOURNAL_ENTRY_TYPE = 'urn:dkg:publisher:JournalEntry';
+export const JOURNAL_SEQ = 'urn:dkg:publisher:journalSeq';
+export const JOURNAL_AT = 'urn:dkg:publisher:journalAt';
+export const JOURNAL_KIND = 'urn:dkg:publisher:journalKind';
+export const JOURNAL_JOB_ID = 'urn:dkg:publisher:journalJobId';
+export const JOURNAL_INTENT_KEY = 'urn:dkg:publisher:journalIntentKey';
+export const JOURNAL_LIFECYCLE_KEY = 'urn:dkg:publisher:journalLifecycleKey';
+export const JOURNAL_TX_HASH = 'urn:dkg:publisher:journalTxHash';
+export const JOURNAL_BLOCK_NUMBER = 'urn:dkg:publisher:journalBlockNumber';
+export const JOURNAL_MERKLE_ROOT = 'urn:dkg:publisher:journalMerkleRoot';
+export const JOURNAL_UAL = 'urn:dkg:publisher:journalUal';
+export const JOURNAL_FAILURE_CODE = 'urn:dkg:publisher:journalFailureCode';
+export const JOURNAL_RECOVERED_FROM_STATUS = 'urn:dkg:publisher:journalRecoveredFromStatus';
+export const JOURNAL_SUPERSEDES_JOB_ID = 'urn:dkg:publisher:journalSupersedesJobId';
+export const JOURNAL_SUCCESSOR_JOB_ID = 'urn:dkg:publisher:journalSuccessorJobId';
 
 export interface WalletLockRecord {
   readonly walletId: string;
@@ -204,7 +238,157 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
     pushOptional(quads, jobRef, CONTROL_TX_HASH_CHECKED, job.recovery.txHashChecked, graphUri, literal);
   }
 
+  // #1828 — materialize the ephemeral recovery index on the job subject.
+  quads.push(...serializeVmPublishIntentIndex(job, graphUri));
+
   return quads;
+}
+
+/** Canonical agent lane for a VM-publish lifecycle subject (case-insensitive, trimmed). */
+function agentAddressScopeKey(agentAddress?: string): string {
+  return agentAddress?.trim().toLowerCase() ?? '';
+}
+
+/**
+ * #1828 — the lifecycle subject a VM-publish job dedups on
+ * (contextGraphId, name, subGraphName, agent lane), joined by U+001F (a control
+ * char absent from every component) into one literal for indexed equality
+ * lookup, mirroring the promote queue's uniquenessKey. MUST stay identical to
+ * findActiveKnowledgeAssetVmPublishJob's tuple — both derive it from here.
+ */
+export function knowledgeAssetVmPublishLifecycleKey(publish: {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress?: string;
+}): string {
+  const separator = String.fromCharCode(0x1f);
+  const components = [
+    publish.contextGraphId,
+    publish.name,
+    publish.subGraphName ?? '',
+    agentAddressScopeKey(publish.agentAddress),
+  ];
+  // The components are joined with U+001F, so a component that itself contains the
+  // delimiter would shift the boundaries and collide two distinct intents onto one
+  // lifecycle subject. The recovery route rejects control chars, but the admission
+  // validators (validateAssertionName/validateSubGraphName) do NOT exclude U+001F —
+  // so fail closed HERE, the single point every path (admission dedup, index, and
+  // lookup) funnels through, rather than silently alias. #1828 review.
+  if (components.some((component) => component.includes(separator))) {
+    throw new Error(
+      'knowledgeAssetVmPublishLifecycleKey: components must not contain the U+001F delimiter',
+    );
+  }
+  return components.join(separator);
+}
+
+/**
+ * #1828 — the ephemeral lifecycle-key index triple on the job subject, for
+ * VM-publish jobs only. Single source used by both serializeJob and the boot
+ * backfill so the index is built identically everywhere. Intent exactness is
+ * derived from the parsed payload at lookup time (no separate intentKey triple).
+ */
+export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Quad[] {
+  if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
+  const jobRef = jobSubject(job.jobId);
+  const publish = job.request.knowledgeAssetVmPublish;
+  let lifecycleKey: string;
+  try {
+    lifecycleKey = knowledgeAssetVmPublishLifecycleKey(publish);
+  } catch {
+    // A malformed legacy job (a component carrying the U+001F delimiter, admitted
+    // before the key guard existed) is left un-indexed rather than throwing — never
+    // let one bad persisted job abort a writeJob or the whole boot backfill. New
+    // writes are still rejected upstream (the incoming key is built fail-closed).
+    return [];
+  }
+  return [
+    quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(lifecycleKey), graphUri),
+  ];
+}
+
+// #1829 — journal entry subject. The lineageKey is the raw lifecycle tuple (may
+// contain the U+001F delimiter and is unbounded), so hash it for a stable, opaque,
+// injection-safe IRI segment; seq is zero-padded so lexical subject order matches
+// numeric seq order. Deliberately NOT the bare graph string, to avoid subject/graph
+// string-prefix overlap.
+export function journalLineageKeyHash(lineageKey: string): string {
+  return createHash('sha256').update(lineageKey, 'utf8').digest('hex');
+}
+
+export function journalEntrySubject(lineageKey: string, seq: number): string {
+  return `urn:dkg:publisher:journal-entry:${journalLineageKeyHash(lineageKey)}:${String(seq).padStart(12, '0')}`;
+}
+
+/** #1829 — serialize one append-only journal entry into the node-local journal graph. */
+export function serializeJournalEntry(entry: AdmissionJournalEntry, graphUri: string): Quad[] {
+  const subject = journalEntrySubject(entry.lineageKey, entry.seq);
+  const quads: Quad[] = [
+    quad(subject, RDF_TYPE_PREDICATE, iri(JOURNAL_ENTRY_TYPE), graphUri),
+    quad(subject, JOURNAL_SEQ, integer(entry.seq), graphUri),
+    quad(subject, JOURNAL_AT, integer(entry.at), graphUri),
+    quad(subject, JOURNAL_KIND, literal(entry.kind), graphUri),
+    quad(subject, JOURNAL_JOB_ID, literal(entry.jobId), graphUri),
+    quad(subject, JOURNAL_LIFECYCLE_KEY, literal(entry.lineageKey), graphUri),
+  ];
+  pushOptional(quads, subject, JOURNAL_INTENT_KEY, entry.intentKey, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_TX_HASH, entry.txHash, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_BLOCK_NUMBER, entry.blockNumber, graphUri, integer);
+  pushOptional(quads, subject, JOURNAL_MERKLE_ROOT, entry.merkleRoot, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_UAL, entry.ual, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_FAILURE_CODE, entry.failureCode, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_RECOVERED_FROM_STATUS, entry.recoveredFromStatus, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_SUPERSEDES_JOB_ID, entry.supersedesJobId, graphUri, literal);
+  pushOptional(quads, subject, JOURNAL_SUCCESSOR_JOB_ID, entry.successorJobId, graphUri, literal);
+  return quads;
+}
+
+/**
+ * #1829 — parse one journal entry from its SELECT bindings (predicate→object map).
+ * Returns null if a required field is missing/malformed so a corrupt row is skipped,
+ * never throwing into a read scan.
+ */
+export function parseJournalEntry(row: Record<string, string | undefined>): AdmissionJournalEntry | null {
+  const seqRaw = row[JOURNAL_SEQ];
+  const atRaw = row[JOURNAL_AT];
+  const kindRaw = row[JOURNAL_KIND];
+  const jobIdRaw = row[JOURNAL_JOB_ID];
+  const lineageKeyRaw = row[JOURNAL_LIFECYCLE_KEY];
+  if (seqRaw === undefined || atRaw === undefined || kindRaw === undefined || jobIdRaw === undefined || lineageKeyRaw === undefined) {
+    return null;
+  }
+  try {
+    const entry: AdmissionJournalEntry = {
+      seq: parseIntegerLiteral(seqRaw),
+      at: parseIntegerLiteral(atRaw),
+      kind: parseLiteral(kindRaw) as PersistedJournalKind,
+      jobId: parseLiteral(jobIdRaw) as string,
+      lineageKey: parseLiteral(lineageKeyRaw) as string,
+      ...optionalString(row, JOURNAL_INTENT_KEY, 'intentKey'),
+      ...optionalString(row, JOURNAL_TX_HASH, 'txHash'),
+      ...optionalInteger(row, JOURNAL_BLOCK_NUMBER, 'blockNumber'),
+      ...optionalString(row, JOURNAL_MERKLE_ROOT, 'merkleRoot'),
+      ...optionalString(row, JOURNAL_UAL, 'ual'),
+      ...optionalString(row, JOURNAL_FAILURE_CODE, 'failureCode'),
+      ...optionalString(row, JOURNAL_RECOVERED_FROM_STATUS, 'recoveredFromStatus'),
+      ...optionalString(row, JOURNAL_SUPERSEDES_JOB_ID, 'supersedesJobId'),
+      ...optionalString(row, JOURNAL_SUCCESSOR_JOB_ID, 'successorJobId'),
+    };
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function optionalString(row: Record<string, string | undefined>, predicate: string, field: string): Record<string, string> {
+  const raw = row[predicate];
+  return raw === undefined ? {} : { [field]: parseLiteral(raw) as string };
+}
+
+function optionalInteger(row: Record<string, string | undefined>, predicate: string, field: string): Record<string, number> {
+  const raw = row[predicate];
+  return raw === undefined ? {} : { [field]: parseIntegerLiteral(raw) };
 }
 
 export function serializeRequest(request: LiftJobRequest, subject: string, graphUri: string): Quad[] {
