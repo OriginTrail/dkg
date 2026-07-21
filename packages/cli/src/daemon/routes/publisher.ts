@@ -545,4 +545,30 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     const count = await publisherControl.clear(status);
     return jsonResponse(res, 200, { cleared: count, status });
   }
+
+  // POST /api/publisher/clear-job  { jobId }
+  // #1837 — atomic by-exact-jobId TERMINAL clear. DISTINCT from cancel (which aborts an
+  // ACCEPTED job) and from bulk /clear (status-scoped): clears exactly one job iff it is
+  // in a native terminal state, is idempotent for an absent job (already_absent = 200,
+  // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
+  if (req.method === "POST" && path === "/api/publisher/clear-job") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let clearJobParsed: any;
+    try {
+      clearJobParsed = JSON.parse(body || "{}");
+    } catch {
+      return jsonResponse(res, 400, { error: "Invalid JSON body" });
+    }
+    const { jobId } = clearJobParsed;
+    if (typeof jobId !== "string" || jobId.trim().length === 0) {
+      return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
+    }
+    const outcome = await publisherControl.clearTerminalJob(jobId);
+    if (outcome.outcome === "cleared" || outcome.outcome === "already_absent") {
+      return jsonResponse(res, 200, { ...outcome, jobId });
+    }
+    // rejected: malformed → 400 (bad input); nonterminal/unknown → 409 (server-side state)
+    const status = outcome.reason === "malformed" ? 400 : 409;
+    return jsonResponse(res, status, { ...outcome, jobId });
+  }
 }

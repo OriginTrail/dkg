@@ -72,6 +72,19 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
+ * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
+ * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
+ * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
+ * still carry a pending on-chain tx that periodic recovery will finalize, so only explicit
+ * cancel removes them. A `retry_recovery`-failed job is therefore treated as
+ * NONTERMINAL-for-cleanup.
+ */
+export function isClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isTerminalLiftJobState(job.status)
+    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
  * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal
  * state, or a failed job admission would still reaccept (retryable with retries
  * remaining). Admission dedup (findActiveKnowledgeAssetVmPublishJob) and the

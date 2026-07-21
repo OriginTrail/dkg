@@ -267,6 +267,8 @@ export {
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
   type VmPublishAdmissionJournalReader,
+  type VmPublishTerminalJobClearer,
+  type TerminalJobClearOutcome,
   type IntentLookupInput,
   type IntentLookupResult,
   type JournalReadInput,
@@ -294,6 +296,7 @@ export {
   type PromoteRequest,
   type PromoteResult,
   type PromoteStats,
+  type PromoteTerminalJobClearer,
 } from './async-promote-queue.js';
 export {
   AsyncLiftRunner,

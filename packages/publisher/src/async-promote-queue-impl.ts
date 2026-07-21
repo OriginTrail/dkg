@@ -18,6 +18,7 @@
  */
 
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { TerminalJobClearOutcome } from './async-lift-publisher-types.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -26,6 +27,7 @@ import {
   PROMOTE_JOB_STATES,
   type AsyncPromoteQueue,
   type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer,
   type PromoteAttemptError,
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
@@ -48,10 +50,12 @@ import {
   comparePromoteJobs,
   defaultBackoffMs,
   expectBindings,
+  isTerminalPromoteJobState,
   jobSubject,
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
+  parseLiteral,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   serializeJob,
@@ -68,7 +72,7 @@ type PromoteConflictLookup = {
   laneScope: ReturnType<typeof promoteLaneConflictScope>;
 };
 
-export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
+export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
   /**
    * Per-graph-URI mutex map. Serialises uniqueness-affecting mutations
    * callers can't both observe stale state and then persist conflicting
@@ -597,6 +601,47 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(serializeJob(job, this.graphUri));
     await this.store.flush?.();
+  }
+
+  // #1837 — subject-scoped record removal (the delete half of writeJob, no re-insert).
+  // All of a job's triples live under jobSubject(jobId) in the single control-plane
+  // graph, so this provably cannot touch another job or another graph.
+  private async deleteJob(jobId: string): Promise<void> {
+    await this.store.deleteByPattern({ subject: jobSubject(jobId), graph: this.graphUri });
+    await this.store.flush?.();
+  }
+
+  /**
+   * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withMutationLock, which
+   * already serializes EVERY transition (incl. the only terminal→active path, recover()
+   * failed→queued), so a transitioning job cannot be swept and concurrent clears are
+   * deterministic — no new lock needed. Reads the denormalized state triple to split
+   * already_absent / unknown / malformed without a JSON.parse that collapses them. Never
+   * throws / never mutates on a reject.
+   */
+  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+    if (!jobId || jobId.trim().length === 0) return { outcome: 'rejected', reason: 'malformed' };
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      const stateRows = expectBindings(
+        await this.store.query(
+          `SELECT ?state WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_STATE}> ?state } }`,
+        ),
+      );
+      if (stateRows.length === 0) return { outcome: 'already_absent' };
+      const rawState = stateRows[0]?.['state'];
+      const state = rawState === undefined ? undefined : String(parseLiteral(rawState));
+      if (state === undefined || !(PROMOTE_JOB_STATES as readonly string[]).includes(state)) {
+        return { outcome: 'rejected', reason: 'unknown' };
+      }
+      // State literal is a known enum value; the full payload must also parse (a corrupt
+      // payload with a valid state triple is malformed, not unknown).
+      const job = await this.readJob(jobId);
+      if (job === null) return { outcome: 'rejected', reason: 'malformed' };
+      if (!isTerminalPromoteJobState(job.state)) return { outcome: 'rejected', reason: 'nonterminal' };
+      await this.deleteJob(jobId);
+      return { outcome: 'cleared' };
+    });
   }
 
   private assertLeaseHeld(job: PromoteJob, claimToken: string): void {

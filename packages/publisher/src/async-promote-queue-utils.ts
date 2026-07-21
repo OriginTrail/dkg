@@ -58,6 +58,20 @@ export const ACTIVE_PROMOTE_STATES: readonly PromoteJobState[] = [
   'failed_retrying',
 ];
 
+/**
+ * #1837 — native terminal states for a by-jobId terminal clear. Unlike the lift queue
+ * there is NO carve-out: nothing background re-drives a terminal promote row (no on-chain
+ * tx; recover() failed→queued is manual-only + locked; reconcileExpiredRunning touches
+ * only 'running'; conflict detection gates on ACTIVE states), so both terminal states are
+ * uniformly clearable — a `requiresManualInspection` (partial-ambiguity) failed row
+ * included (data-safe: nothing reads a removed row).
+ */
+export const TERMINAL_PROMOTE_JOB_STATES: readonly PromoteJobState[] = ['succeeded', 'failed'];
+
+export function isTerminalPromoteJobState(state: PromoteJobState): boolean {
+  return state === 'succeeded' || state === 'failed';
+}
+
 export function jobSubject(jobId: string): string {
   return `urn:dkg:promote-queue:job:${jobId}`;
 }

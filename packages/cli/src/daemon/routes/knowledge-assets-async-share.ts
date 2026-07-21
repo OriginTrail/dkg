@@ -238,3 +238,19 @@ export async function handleKaShareJobRecover(ctx: RequestContext, jobId: string
     throw err;
   }
 }
+
+// ── POST /api/knowledge-assets/swm/share-jobs/:jobId/clear ────────────────────
+//
+// #1837 — atomic by-exact-jobId TERMINAL record removal. DISTINCT from the DELETE
+// cancellation above (which rewrites a queued job to failed+cancelled and RETAINS the
+// row): this REMOVES a native-terminal (succeeded|failed) job record and is idempotent
+// (already_absent = 200, not 404). The caller passes the already url-decoded jobId.
+export async function handleKaShareJobClear(ctx: RequestContext, jobId: string): Promise<void> {
+  const { res, agent } = ctx;
+  const outcome = await agent.assertion.clearPromoteAsync(jobId);
+  if (outcome.outcome === "cleared" || outcome.outcome === "already_absent") {
+    return jsonResponse(res, 200, { ...outcome, jobId });
+  }
+  const status = outcome.reason === "malformed" ? 400 : 409;
+  return jsonResponse(res, status, { ...outcome, jobId });
+}

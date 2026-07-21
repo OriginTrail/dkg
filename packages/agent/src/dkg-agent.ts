@@ -107,6 +107,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -2968,6 +2969,11 @@ export class DKGAgent extends DKGAgentBase {
       async recoverPromoteAsync(jobId: string): Promise<void> {
         return agent.promoteQueue.recover(jobId);
       },
+      // #1837 — atomic by-jobId terminal clear (record removal). Distinct from
+      // cancelPromoteAsync (queued abort, retains the row).
+      async clearPromoteAsync(jobId: string): Promise<TerminalJobClearOutcome> {
+        return agent.promoteQueue.clearTerminalJob(jobId);
+      },
     };
   }
 
@@ -2983,11 +2989,13 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }
-    return this._promoteQueue;
+    // The instance is always a TripleStoreAsyncPromoteQueue, which implements both the
+    // base queue and the #1837 terminal-clear capability.
+    return this._promoteQueue as AsyncPromoteQueue & PromoteTerminalJobClearer;
   }
 
   /**

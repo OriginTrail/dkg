@@ -125,6 +125,30 @@ export interface VmPublishAdmissionJournalReader {
 }
 
 /**
+ * #1837 — bounded outcome of an atomic by-exact-jobId TERMINAL clear, shared by BOTH
+ * the lift publisher and the SWM promote queue for symmetry. The control method owns
+ * every reason INCLUDING `malformed` (a corrupt persisted payload is only detectable
+ * inside the method, never at the HTTP route). Never throws and never mutates on a
+ * reject. `already_absent` is a SUCCESS (idempotent repeat), distinct from a rejection.
+ */
+export type TerminalJobClearOutcome =
+  | { readonly outcome: 'cleared' }
+  | { readonly outcome: 'already_absent' }
+  | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'unknown' | 'malformed' };
+
+/**
+ * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
+ * #1828/#1829 capabilities); a MUTATION/admin capability, not a query. Clears the exact
+ * job ONLY when it is in a native terminal state, rejects otherwise without mutation,
+ * and is idempotent for an absent job. Never broadens to other jobs. On the lift side
+ * this preserves the #1829 append-only journal by construction (subject-scoped delete
+ * in the control-plane graph only).
+ */
+export interface VmPublishTerminalJobClearer {
+  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
+}
+
+/**
  * #1828 — one-shot storage maintenance: (re)build the ephemeral intent index for
  * VM-publish jobs admitted before it existed. This is a boot-time repair, not a
  * runtime publisher behaviour, so it lives on its OWN narrow interface — the
