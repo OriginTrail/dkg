@@ -20,14 +20,9 @@ import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
 const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
-// Max times maintainIndex re-runs its bounded hasGraph probe when a concurrent
-// write bumps the mutation generation mid-probe, before falling back to a full
-// rebuild. Caps worst-case cost at K bounded probes vs one O(store) scan.
+// Max times a bounded hasGraph probe is repeated when a concurrent write bumps
+// the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
-// Opt-in diagnostic (env DKG_DEBUG_GRAPHSET_INDEX=1): logs the true source of
-// each realized dirty rebuild + retry-exhaustion, since the rebuild scan option
-// hardcodes source='graph-set-index.rebuild' and discards the discriminator.
-const DEBUG_GRAPHSET_INDEX = process.env.DKG_DEBUG_GRAPHSET_INDEX === '1';
 
 export type GraphSetMutationSource =
   | 'seed'
@@ -70,6 +65,18 @@ export type GraphSetMutationEvent =
       source: GraphSetRefreshSource;
     };
 
+export type GraphSetDiagnosticEvent =
+  | {
+      type: 'dirty-rebuild';
+      source: GraphSetMutationSource;
+      graphCount: number;
+    }
+  | {
+      type: 'probe-retry-exhausted';
+      source: GraphSetMutationSource;
+      probeCount: number;
+    };
+
 export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
   /** Revalidate after this interval. Use 0 to revalidate on every read. */
@@ -86,6 +93,8 @@ export interface GraphSetIndexStoreOptions {
   revalidateFailureMaxBackoffMs?: number;
   now?: () => number;
   onMutation?: (event: GraphSetMutationEvent) => void;
+  /** Instance-scoped operational diagnostics; failures are ignored. */
+  onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 }
 
 interface RefreshFlight<T> {
@@ -188,6 +197,7 @@ export class GraphSetIndexStore implements TripleStore {
   private readonly revalidateFailureMaxBackoffMs: number;
   private readonly now: () => number;
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
+  private readonly onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 
   private graphs: Set<string> | null = null;
   private nextRevalidateAt = 0;
@@ -218,6 +228,7 @@ export class GraphSetIndexStore implements TripleStore {
     );
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
+    this.onDiagnostic = options.onDiagnostic;
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -514,8 +525,9 @@ export class GraphSetIndexStore implements TripleStore {
     flight: RefreshFlight<Set<string>>,
   ): Promise<Set<string>> {
     for (;;) {
-      const isDirtyRebuild = this.pendingFullRefresh != null;
-      const sourceForScan = this.pendingFullRefresh ?? source;
+      const dirtyRebuildSource = this.pendingFullRefresh;
+      const isDirtyRebuild = dirtyRebuildSource != null;
+      const sourceForScan = dirtyRebuildSource ?? source;
       const generation = this.mutationGeneration;
       // #1549: force the bulk full-store `SELECT DISTINCT ?g` rebuild onto the
       // BACKGROUND lane ONLY when it is a DIRTY rebuild (an opaque server-side UPDATE
@@ -548,9 +560,12 @@ export class GraphSetIndexStore implements TripleStore {
       // would have retried, preserving the pending refresh source for the next
       // scan attempt).
       this.pendingFullRefresh = null;
-      if (DEBUG_GRAPHSET_INDEX && isDirtyRebuild) {
-        // eslint-disable-next-line no-console
-        console.warn(`[graph-set-index] DIRTY-REBUILD realized source=${String(sourceForScan)} graphs=${next.size}`);
+      if (isDirtyRebuild) {
+        this.emitDiagnostic({
+          type: 'dirty-rebuild',
+          source: dirtyRebuildSource,
+          graphCount: next.size,
+        });
       }
       this.replaceGraphSet(next, sourceForScan);
       return this.graphs!;
@@ -566,42 +581,40 @@ export class GraphSetIndexStore implements TripleStore {
     this.pendingFullRefresh ??= source;
   }
 
-  private async maintainIndex<T>(
-    source: PendingFullRefreshSource,
-    inspect: () => Promise<T>,
-    apply: (result: T) => void,
-  ): Promise<void> {
-    // #1549 follow-up: the incremental maintenance below reads committed store
-    // state via bounded hasGraph probes (`inspect`) and applies an idempotent
-    // add/remove (`apply`). If a CONCURRENT write bumps `mutationGeneration`
-    // during our in-flight probe, the previous implementation demoted this
-    // correctly-scoped incremental update to an O(store) `scheduleFullRefresh`.
-    // Under per-UAL (not global) promote/finalize locks, that race fires under
-    // ordinary bulk-publish concurrency and stampedes the store scheduler with
-    // full `SELECT DISTINCT ?g` rebuilds. Because `inspect` is idempotent and
-    // `apply` is idempotent, simply RE-PROBE against the now-current state
-    // (mirrors `refreshIndexLoop`'s `continue`-on-generation-drift) and only
-    // fall back to a full rebuild after sustained churn.
+  private async probeStableGraphPresence(
+    graphs: string[],
+    source: TouchedGraphMutationSource,
+    options?: QueryOptions,
+  ): Promise<Array<{ graph: string; present: boolean }> | null> {
+    // hasGraph is the only operation inside this retry boundary. Applying the
+    // stable result below is synchronous, so a write cannot interleave between
+    // the generation check and the graph-set update.
     for (let attempt = 0; attempt < MAINTAIN_INDEX_MAX_PROBE_RETRIES; attempt++) {
       const generation = this.mutationGeneration;
       try {
-        const result = await inspect();
-        if (!this.graphs) return;
+        const graphPresence = await Promise.all(
+          graphs.map(async (graph) => ({
+            graph,
+            present: await this.inner.hasGraph(graph, options),
+          })),
+        );
+        if (!this.graphs) return null;
         if (generation !== this.mutationGeneration) {
           continue;
         }
-        apply(result);
-        return;
+        return graphPresence;
       } catch {
         this.clearIndex();
-        return;
+        return null;
       }
     }
-    if (DEBUG_GRAPHSET_INDEX) {
-      // eslint-disable-next-line no-console
-      console.warn(`[graph-set-index] maintain race exhausted ${MAINTAIN_INDEX_MAX_PROBE_RETRIES} probes source=${String(source)}`);
-    }
+    this.emitDiagnostic({
+      type: 'probe-retry-exhausted',
+      source,
+      probeCount: MAINTAIN_INDEX_MAX_PROBE_RETRIES,
+    });
     this.scheduleFullRefresh(source);
+    return null;
   }
 
   private clearIndex(): void {
@@ -668,29 +681,28 @@ export class GraphSetIndexStore implements TripleStore {
   ): Promise<void> {
     if (!this.graphs) return;
     const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
-    await this.maintainIndex(
-      source,
-      () => Promise.all(
-        uniqueGraphs.map(async (graph) => ({
-          graph,
-          present: await this.inner.hasGraph(graph, options),
-        })),
-      ),
-      (graphPresence) => {
-        for (const { graph, present } of graphPresence) {
-          if (present) {
-            this.addGraphs([graph], source);
-          } else {
-            this.removeGraphs([graph], source);
-          }
-        }
-      },
-    );
+    const graphPresence = await this.probeStableGraphPresence(uniqueGraphs, source, options);
+    if (!graphPresence) return;
+    for (const { graph, present } of graphPresence) {
+      if (present) {
+        this.addGraphs([graph], source);
+      } else {
+        this.removeGraphs([graph], source);
+      }
+    }
   }
 
   private emit(event: GraphSetMutationEvent): void {
     try {
       this.onMutation?.(event);
+    } catch {
+      // Observability hooks must not make already-committed store writes fail.
+    }
+  }
+
+  private emitDiagnostic(event: GraphSetDiagnosticEvent): void {
+    try {
+      this.onDiagnostic?.(event);
     } catch {
       // Observability hooks must not make already-committed store writes fail.
     }
