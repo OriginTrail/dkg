@@ -50,8 +50,15 @@ export type {
 
 export { StructuredLogger } from './structured-logger.js';
 export { OperationTracker } from './operation-tracker.js';
-export { MetricsCollector } from './metrics-collector.js';
-export type { MetricsSource } from './metrics-collector.js';
+export {
+  MetricsCollector,
+  DEFAULT_METRICS_COLLECTION_INTERVAL_MS,
+  DEFAULT_STORE_METRICS_COLLECTION_INTERVAL_MS,
+  MIN_METRICS_COLLECTION_INTERVAL_MS,
+  MAX_METRICS_COLLECTION_INTERVAL_MS,
+  assertMetricsCollectionIntervalMs,
+} from './metrics-collector.js';
+export type { MetricsSource, MetricsCollectorOptions } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
 export { scopeNotifications, PCA_COST_COVERED_TYPE } from './notifications-scope.js';
 export type {

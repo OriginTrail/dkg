@@ -1137,8 +1137,9 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
-  // Resolve the local collector toggle before constructing daemon resources.
-  // This is independent from OTLP metrics export configuration.
+  // Resolve and validate local metrics collection before constructing the
+  // agent/store or replacing process output. This is independent of OTLP
+  // export config and invalid values fail startup without partial resources.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
   const logFile = logPath();
   // Rotate before installing the in-process stdout/stderr tee so startup does
@@ -2539,17 +2540,14 @@ export async function runDaemonInner(
       }
       return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds, shadowContextGraphIds);
     },
-    // The count getters below each issue a data-proportional full-scan COUNT,
-    // but the only caller is the 30 s metrics tick (metricsSource is consumed
-    // solely by MetricsCollector — no on-demand /api/status path), so each tick
-    // already re-reads the store fresh and there is nothing concurrent to
-    // coalesce. They are intentionally left uncached so a snapshot never serves
-    // a stale count and can't mask a store outage. The context-graph count
+    // The count getters below each issue a data-proportional full-scan COUNT.
+    // MetricsCollector owns their configured store cadence and serializes calls
+    // (including its cold-start API fallback), so the source deliberately adds
+    // no second cache or timer. The context-graph count
     // avoids the composite context-graph listing enrichment path. It uses the
     // cached store graph inventory plus backed subscription/declaration evidence,
     // then dedupes local layer graphs. It intentionally includes private CG graphs
     // that are backed by local subscription/declaration state.
-    // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);
@@ -2656,6 +2654,10 @@ export async function runDaemonInner(
       metricsSource,
       dkgDir(),
       () => metricsPresence.hasRecentConsumer(),
+      {
+        collectionIntervalMs: metricsCollectorConfig.collectionIntervalMs,
+        storeCollectionIntervalMs: metricsCollectorConfig.storeCollectionIntervalMs,
+      },
     );
     metricsCollector.start();
   }

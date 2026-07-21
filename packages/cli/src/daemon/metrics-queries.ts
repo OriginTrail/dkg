@@ -24,10 +24,10 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
 const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 
 /**
- * Total triples across the default graph and all named graphs. Run on the 30s
- * metrics-collector cadence via `getTotalTriples` (see the metrics source in
- * `lifecycle.ts`). It is the heaviest read the collector issues and the one the
- * store-read-latency benchmark tracks.
+ * Total triples across the default graph and all named graphs. Run on the
+ * independently configured store-metrics cadence via `getTotalTriples` (see
+ * the metrics source in `lifecycle.ts`). It is the heaviest read the collector
+ * issues and the one the store-read-latency benchmark tracks.
  */
 export const GET_TOTAL_TRIPLES_SPARQL =
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';

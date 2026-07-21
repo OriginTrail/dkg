@@ -116,9 +116,10 @@ export async function handleNodeUIRequest(
     // Serve the latest tick-written snapshot rather than live-collecting.
     // A live collect() re-runs the full-store COUNT scans on every request, so
     // an external poller (Grafana / health probe) could hammer a saturated
-    // store. The periodic collector already refreshes the snapshot (effective
-    // 30s TTL) and a store outage still surfaces as null columns rather than
-    // being masked. (#1066 Item 1)
+    // store. The periodic collector refreshes cheap fields on its configured
+    // system cadence and cardinality fields on the separate store cadence; a
+    // failed scheduled scan replaces cached cardinalities with null columns.
+    // (#1066 Item 1)
     const snap = db.getLatestSnapshot();
     if (snap) return json(res, 200, snap);
     // Cold start only: no snapshot yet (before the first tick). Fall back to a

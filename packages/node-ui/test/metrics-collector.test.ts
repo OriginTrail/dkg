@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,12 @@ afterEach(() => {
 });
 
 describe('MetricsCollector', () => {
+  it('uses the supported 30-second system and 12-hour store defaults', () => {
+    const collector = new MetricsCollector(db, mockSource(), dir);
+    expect(collector.collectionIntervalMs).toBe(30_000);
+    expect(collector.storeCollectionIntervalMs).toBe(43_200_000);
+  });
+
   it('collects a snapshot with all metrics', async () => {
     const collector = new MetricsCollector(db, mockSource(), dir);
     const snap = await collector.collect();
@@ -114,25 +120,17 @@ describe('MetricsCollector', () => {
     collector.stop();
   });
 
-  it('start is idempotent — a second start() does not allocate a second interval', () => {
-    const collector = new MetricsCollector(db, mockSource(), dir);
-
-    // Peek at the private timer handle through a narrow cast. Re-entrant
-    // start() calls previously had no observable check; a regression that
-    // fires `setInterval` twice would leak the first handle and silently
-    // double the DB write rate. Comparing the timer reference before and
-    // after the second start() locks in the "no second interval" contract.
-    const internal = collector as unknown as { timer: ReturnType<typeof setInterval> | null };
-
+  it('start is idempotent — a second start() does not launch another initial collection', async () => {
+    let calls = 0;
+    const collector = new MetricsCollector(db, mockSource({
+      getStoreBytes: async () => { calls++; return 65_536; },
+    }), dir);
     collector.start();
-    const firstTimer = internal.timer;
-    expect(firstTimer).not.toBeNull();
-
     collector.start();
-    expect(internal.timer).toBe(firstTimer);
+    await new Promise(r => setTimeout(r, 100));
+    expect(calls).toBe(1);
 
     collector.stop();
-    expect(internal.timer).toBeNull();
   });
 
   it('cpu measurement returns 0 on first call (no baseline)', async () => {
@@ -269,6 +267,230 @@ describe('MetricsCollector', () => {
       expect(snap.relay_capacity).toBeNull();
       expect(snap.relay_bytes_in).toBeNull();
     });
+  });
+});
+
+describe('MetricsCollector scheduling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs the initial collection immediately, before an interval elapses', async () => {
+    let calls = 0;
+    const collector = new MetricsCollector(
+      db,
+      mockSource({ getStoreBytes: async () => { calls++; return 65_536; } }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 5_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(calls).toBe(1);
+    expect(db.getLatestSnapshot()).toBeDefined();
+    collector.stop();
+  });
+
+  it('keeps cheap snapshots frequent while store scans use their slower cadence', async () => {
+    let cheapCalls = 0;
+    let storeCalls = 0;
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getPeerCount: () => { cheapCalls++; return 5; },
+        getTotalTriples: async () => { storeCalls++; return 1_000; },
+      }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 5_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storeCalls).toBe(1); // documented immediate startup attempt
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(cheapCalls).toBe(5);
+    expect(storeCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(cheapCalls).toBe(6);
+    expect(storeCalls).toBe(2);
+    collector.stop();
+  });
+
+  it('honors a 12-hour store interval after the documented initial scan', async () => {
+    let storeCalls = 0;
+    const twelveHours = 43_200_000;
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getTotalTriples: async () => { storeCalls++; return 1_000; },
+      }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: twelveHours, storeCollectionIntervalMs: twelveHours },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storeCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(twelveHours - 1);
+    expect(storeCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(storeCalls).toBe(2);
+    collector.stop();
+  });
+
+  it('never overlaps collection when a tick takes longer than its interval', async () => {
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getStoreBytes: async () => {
+          calls++;
+          active++;
+          maxActive = Math.max(maxActive, active);
+          await new Promise<void>(resolve => releases.push(resolve));
+          active--;
+          return 65_536;
+        },
+      }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 1_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toBe(1);
+    expect(maxActive).toBe(1);
+
+    releases.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+
+    collector.stop();
+    releases.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('continues cheap snapshots while a slow store scan remains serialized', async () => {
+    let cheapCalls = 0;
+    let storeCalls = 0;
+    let activeStoreCalls = 0;
+    let maxActiveStoreCalls = 0;
+    const releases: Array<() => void> = [];
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getPeerCount: () => { cheapCalls++; return 5; },
+        getTotalTriples: async () => {
+          storeCalls++;
+          activeStoreCalls++;
+          maxActiveStoreCalls = Math.max(maxActiveStoreCalls, activeStoreCalls);
+          await new Promise<void>(resolve => releases.push(resolve));
+          activeStoreCalls--;
+          return 1_000;
+        },
+      }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 1_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storeCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(cheapCalls).toBe(6); // immediate + five one-second system ticks
+    expect(storeCalls).toBe(1);
+    expect(maxActiveStoreCalls).toBe(1);
+
+    releases.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(storeCalls).toBe(2);
+    expect(maxActiveStoreCalls).toBe(1);
+
+    collector.stop();
+    releases.shift()?.();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('stop during an active collection prevents every future tick', async () => {
+    let calls = 0;
+    let release!: () => void;
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getStoreBytes: async () => {
+          calls++;
+          await new Promise<void>(resolve => { release = resolve; });
+          return 65_536;
+        },
+      }),
+      undefined,
+      () => true,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 1_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);
+
+    collector.stop();
+    await vi.advanceTimersByTimeAsync(10_000);
+    release();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(calls).toBe(1);
+    const internal = collector as unknown as {
+      systemTimer: ReturnType<typeof setTimeout> | null;
+      storeTimer: ReturnType<typeof setTimeout> | null;
+    };
+    expect(internal.systemTimer).toBeNull();
+    expect(internal.storeTimer).toBeNull();
+  });
+
+  it('keeps probing the presence gate cheaply and scans when a consumer appears', async () => {
+    let watching = false;
+    let storeCalls = 0;
+    const collector = new MetricsCollector(
+      db,
+      mockSource({
+        getTotalTriples: async () => { storeCalls++; return 1_000; },
+      }),
+      undefined,
+      () => watching,
+      { collectionIntervalMs: 1_000, storeCollectionIntervalMs: 5_000 },
+    );
+
+    collector.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(storeCalls).toBe(0);
+
+    watching = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(storeCalls).toBe(1);
+    collector.stop();
   });
 });
 

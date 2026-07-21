@@ -726,8 +726,22 @@ export interface DkgConfig {
       token?: string;
       /** PeriodicExportingMetricReader interval. Default 30000ms. */
       exportIntervalMs?: number;
-      /** Enable local Node UI SQLite metric snapshots. Default true. */
+      /**
+       * Local Node UI snapshot collector toggle. Independent of `enabled`,
+       * which controls OTLP metric export. Default true. Environment override:
+       * DKG_METRICS_COLLECTION_ENABLED.
+       */
       collectionEnabled?: boolean;
+      /**
+       * Cheap local system/network snapshot cadence. Default 30000ms.
+       * Environment override: DKG_METRICS_COLLECTION_INTERVAL_MS.
+       */
+      collectionIntervalMs?: number;
+      /**
+       * Full-store SPARQL cardinality cadence. Default 43200000ms (12 hours).
+       * Environment override: DKG_STORE_METRICS_COLLECTION_INTERVAL_MS.
+       */
+      storeCollectionIntervalMs?: number;
     };
   };
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
