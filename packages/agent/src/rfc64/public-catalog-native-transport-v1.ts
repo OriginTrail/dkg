@@ -43,10 +43,16 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 import type {
-  Rfc64CatalogAccessAuthorizationInputV1,
   Rfc64CatalogAccessAuthorizationV1,
   Rfc64CatalogAccessPolicyRegistryV1,
 } from './catalog-access-policy-v1.js';
+import {
+  normalizeRfc64CatalogTransportAuthorizerV1,
+  recheckCurrentRfc64CatalogPolicyAfterAwaitV1,
+  withAuthorizedCurrentRfc64CatalogPolicyV1,
+  withCurrentRfc64CatalogPolicyV1,
+} from './catalog-transport-authorization-v1.js';
+import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
 
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/by-digest' as const;
@@ -239,20 +245,11 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     if (typeof options.readKaBundleByDigest !== 'function') {
       fail('catalog-native-input', 'readKaBundleByDigest must be a function');
     }
-    const currentAuthorizer = options.authorizeCatalogOperation;
-    const legacyAuthorizer = options.authorizeOpenCatalogOperation;
-    if (
-      (typeof currentAuthorizer !== 'function' && typeof legacyAuthorizer !== 'function')
-      || (typeof currentAuthorizer === 'function' && typeof legacyAuthorizer === 'function')
-    ) {
-      fail(
-        'catalog-native-input',
-        'exactly one catalog access-policy authorizer must be configured',
-      );
-    }
-    this.#authorizeCatalogOperation = typeof currentAuthorizer === 'function'
-      ? (input) => currentAuthorizer(toCatalogAccessAuthorizationInput(input))
-      : (input) => legacyAuthorizer!(input);
+    this.#authorizeCatalogOperation = normalizeRfc64CatalogTransportAuthorizerV1({
+      current: options.authorizeCatalogOperation,
+      legacyOpen: options.authorizeOpenCatalogOperation,
+      invalidConfiguration: (message) => fail('catalog-native-input', message),
+    });
     if (typeof options.verifyIssuerSignature !== 'function') {
       fail('catalog-native-input', 'verifyIssuerSignature must be a function');
     }
@@ -299,19 +296,24 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const request = parseCatalogObjectRequest(encodeRequest(requestInput));
-    await this.requireCatalogPolicy('catalog-object-fetch-outbound', remotePeerId, request);
-    const response = await this.router.send(
+    const response = await this.withCurrentCatalogPolicy(
+      'catalog-object-fetch-outbound',
       remotePeerId,
-      RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
-      encodeRequest(request),
-      sendOptions,
+      request,
+      () => this.router.send(
+        remotePeerId,
+        RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
+        encodeRequest(request),
+        sendOptions,
+      ),
     );
     const envelope = parseCatalogObjectResponse(response);
-    await this.requireCatalogPolicy('catalog-object-fetch-outbound', remotePeerId, request);
     if (envelope === null) return null;
     assertCatalogObjectMatchesRequest(envelope, request);
-    const issuerSignature = await this.verifyExactIssuerSignature(envelope);
-    await this.requireCatalogPolicy('catalog-object-fetch-outbound', remotePeerId, request);
+    const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+      () => this.requireCatalogPolicy('catalog-object-fetch-outbound', remotePeerId, request),
+      () => this.verifyExactIssuerSignature(envelope),
+    );
     return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
   }
 
@@ -330,15 +332,18 @@ export class Rfc64PublicCatalogNativeTransportV1 {
         'advertised KA bundle exceeds this receiver transport resource ceiling',
       );
     }
-    await this.requireCatalogPolicy('ka-bundle-fetch-outbound', remotePeerId, request);
-    const response = await this.router.send(
+    const response = await this.withCurrentCatalogPolicy(
+      'ka-bundle-fetch-outbound',
       remotePeerId,
-      RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
-      encodeRequest(request),
-      sendOptions,
+      request,
+      () => this.router.send(
+        remotePeerId,
+        RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
+        encodeRequest(request),
+        sendOptions,
+      ),
     );
     const bundle = parseBundleResponse(response, request);
-    await this.requireCatalogPolicy('ka-bundle-fetch-outbound', remotePeerId, request);
     return bundle;
   }
 
@@ -349,30 +354,26 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const request = parseCatalogObjectRequest(data);
-    if (!await this.isCatalogPolicyAuthorized('catalog-object-fetch-inbound', remotePeerId, request)) {
+    const served = await this.withAuthorizedCurrentCatalogPolicy(
+      'catalog-object-fetch-inbound',
+      remotePeerId,
+      request,
+      async () => {
+        const envelope = await this.options.readCatalogObjectByDigest(request.targetObjectDigest);
+        if (envelope === null) return null;
+        assertCatalogObjectMatchesRequest(envelope, request);
+        await this.verifyExactIssuerSignature(envelope);
+        const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
+        if (bytes.byteLength + 1 > RFC64_PUBLIC_CATALOG_OBJECT_FETCH_RESPONSE_MAX_BYTES_V1) {
+          fail('catalog-native-resource-refused', 'catalog object exceeds the response ceiling');
+        }
+        return foundResponse(bytes);
+      },
+    );
+    if (!served.authorized) {
       return Uint8Array.of(FETCH_DENIED);
     }
-    const envelope = await this.options.readCatalogObjectByDigest(request.targetObjectDigest);
-    if (envelope === null) {
-      if (!await this.isCatalogPolicyAuthorized(
-        'catalog-object-fetch-inbound',
-        remotePeerId,
-        request,
-      )) {
-        return Uint8Array.of(FETCH_DENIED);
-      }
-      return Uint8Array.of(FETCH_NOT_FOUND);
-    }
-    assertCatalogObjectMatchesRequest(envelope, request);
-    await this.verifyExactIssuerSignature(envelope);
-    if (!await this.isCatalogPolicyAuthorized('catalog-object-fetch-inbound', remotePeerId, request)) {
-      return Uint8Array.of(FETCH_DENIED);
-    }
-    const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
-    if (bytes.byteLength + 1 > RFC64_PUBLIC_CATALOG_OBJECT_FETCH_RESPONSE_MAX_BYTES_V1) {
-      fail('catalog-native-resource-refused', 'catalog object exceeds the response ceiling');
-    }
-    return foundResponse(bytes);
+    return served.value ?? Uint8Array.of(FETCH_NOT_FOUND);
   }
 
   private async handleBundleFetch(
@@ -386,25 +387,34 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       > BigInt(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1)) {
       fail('catalog-native-resource-refused', 'requested KA bundle exceeds the response ceiling');
     }
-    if (!await this.isCatalogPolicyAuthorized('ka-bundle-fetch-inbound', remotePeerId, request)) {
+    const served = await this.withAuthorizedCurrentCatalogPolicy(
+      'ka-bundle-fetch-inbound',
+      remotePeerId,
+      request,
+      async () => {
+        const bundle = await this.options.readKaBundleByDigest(request.blobDigest);
+        if (bundle === null) return null;
+        assertExactBundle(bundle, request);
+        return foundResponse(bundle);
+      },
+    );
+    if (!served.authorized) {
       return Uint8Array.of(FETCH_DENIED);
     }
-    const bundle = await this.options.readKaBundleByDigest(request.blobDigest);
-    if (bundle === null) {
-      if (!await this.isCatalogPolicyAuthorized(
-        'ka-bundle-fetch-inbound',
-        remotePeerId,
-        request,
-      )) {
-        return Uint8Array.of(FETCH_DENIED);
-      }
-      return Uint8Array.of(FETCH_NOT_FOUND);
-    }
-    assertExactBundle(bundle, request);
-    if (!await this.isCatalogPolicyAuthorized('ka-bundle-fetch-inbound', remotePeerId, request)) {
-      return Uint8Array.of(FETCH_DENIED);
-    }
-    return foundResponse(bundle);
+    return served.value ?? Uint8Array.of(FETCH_NOT_FOUND);
+  }
+
+  private async withAuthorizedCurrentCatalogPolicy<Value>(
+    operation: Rfc64PublicCatalogNativeOperationV1,
+    remotePeerId: string,
+    request: Rfc64PublicCatalogObjectFetchRequestV1
+      | Rfc64PublicCatalogBundleFetchRequestV1,
+    work: () => Value | Promise<Value>,
+  ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
+    return withAuthorizedCurrentRfc64CatalogPolicyV1(
+      () => this.isCatalogPolicyAuthorized(operation, remotePeerId, request),
+      work,
+    );
   }
 
   private async isCatalogPolicyAuthorized(
@@ -423,6 +433,19 @@ export class Rfc64PublicCatalogNativeTransportV1 {
       ) return false;
       throw cause;
     }
+  }
+
+  private withCurrentCatalogPolicy<Value>(
+    operation: Rfc64PublicCatalogNativeOperationV1,
+    remotePeerId: string,
+    request: Rfc64PublicCatalogObjectFetchRequestV1
+      | Rfc64PublicCatalogBundleFetchRequestV1,
+    work: () => Value | Promise<Value>,
+  ): Promise<Value> {
+    return withCurrentRfc64CatalogPolicyV1(
+      () => this.requireCatalogPolicy(operation, remotePeerId, request),
+      work,
+    );
   }
 
   private async requireCatalogPolicy(
@@ -494,18 +517,6 @@ export class Rfc64PublicCatalogNativeTransportV1 {
   private requireStarted(): void {
     if (!this.#started) fail('catalog-native-state', 'catalog native transport is not started');
   }
-}
-
-function toCatalogAccessAuthorizationInput(
-  input: Rfc64PublicCatalogNativeAuthorizationInputV1,
-): Rfc64CatalogAccessAuthorizationInputV1 {
-  return Object.freeze({
-    operation: input.operation,
-    remotePeerId: input.remotePeerId,
-    networkId: input.networkId,
-    contextGraphId: input.contextGraphId,
-    policyDigest: input.policyDigest,
-  });
 }
 
 export function encodeRfc64PublicCatalogObjectFetchRequestV1(

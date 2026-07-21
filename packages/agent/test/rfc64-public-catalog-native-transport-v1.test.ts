@@ -1,7 +1,6 @@
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
-  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   DKGNode,
   ProtocolRouter,
   canonicalizeSignedControlEnvelopeBytes,
@@ -9,10 +8,8 @@ import {
   encodeOpaqueKaBundleV1,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
-  type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
-  type MemberRosterV1,
   type SignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
@@ -20,7 +17,6 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
-import { Rfc64CatalogAccessPolicyRegistryV1 } from '../src/rfc64/catalog-access-policy-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
@@ -32,6 +28,7 @@ import {
   type Rfc64PublicCatalogNativeFetchScopeV1,
   Rfc64PublicCatalogNativeTransportErrorV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
+import { createRfc64CatalogAccessPolicyRegistryFixture } from './support/rfc64-catalog-access-policy-fixture.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -74,51 +71,17 @@ function policyRegistry(
   contextGraphId: ContextGraphIdV1,
   accessPolicy: 0 | 1,
   publishPolicy: 0 | 1,
-): Rfc64CatalogAccessPolicyRegistryV1 {
-  const registry = new Rfc64CatalogAccessPolicyRegistryV1({
+) {
+  return createRfc64CatalogAccessPolicyRegistryFixture({
     localAgentAddress,
-    resolveRemoteAgentAddress: async () => remoteAgentAddress,
-  });
-  const policy = {
-    networkId: 'otp:20430',
+    remoteAgentAddress,
     contextGraphId,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    era: '0',
-    version: '0',
-    previousPolicyDigest: null,
     accessPolicy,
     publishPolicy,
-    publishAuthority: publishPolicy === 0 ? CURATOR : null,
-    publishAuthorityAccountId: '0',
-    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-    administrativeDelegationDigest: null,
-    source: {
-      kind: 'owner-signed-unregistered',
-      ownerAddress: AUTHOR,
-      ownerAuthorityEra: '0',
-    },
-    effectiveAt: '0',
-    issuedAt: '0',
-  } satisfies ContextGraphPolicyV1;
-  const roster = accessPolicy === 0 ? null : {
-    networkId: policy.networkId,
-    contextGraphId: policy.contextGraphId,
-    ownershipTransitionDigest: null,
-    era: '0',
-    version: '0',
-    previousRosterDigest: null,
     policyDigest: POLICY_DIGEST,
-    administrativeDelegationDigest: null,
-    members: [
-      { agentAddress: LOCAL_MEMBER, roles: ['holder', 'provider'] },
-      { agentAddress: REMOTE_MEMBER, roles: ['holder', 'provider'] },
-    ],
-    issuedAt: '0',
-  } satisfies MemberRosterV1;
-  registry.accept({ policy, policyDigest: POLICY_DIGEST, roster });
-  return registry;
+    ownerAddress: AUTHOR,
+    curatorAddress: CURATOR,
+  });
 }
 
 describe('RFC-64 public catalog native content transport v1', () => {
