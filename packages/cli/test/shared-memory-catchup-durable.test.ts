@@ -99,6 +99,111 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(agent.getPeerProtocols).not.toHaveBeenCalled();
   });
 
+  it('probes an explicit durable peer even when its protocol advertisement is absent', async () => {
+    const cgId = 'explicit-durable-probe-cg';
+    const peerId = 'peer-live-with-stale-identify';
+    const syncFromPeerDetailed = vi.fn(async () => detailedDurableResult({
+      insertedTriples: 23,
+      insertedDataTriples: 20,
+      insertedMetaTriples: 3,
+      complete: true,
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => []),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        peerId,
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.getPeerProtocols).not.toHaveBeenCalled();
+    expect(syncFromPeerDetailed).toHaveBeenCalledWith(
+      peerId,
+      [cgId],
+      undefined,
+      undefined,
+      undefined,
+      { totalTimeoutMs: 109_000 },
+    );
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      peersAttempted: 1,
+      totalDurableInsertedTriples: 23,
+      results: [{
+        peerId,
+        durableInsertedTriples: 23,
+        durableComplete: true,
+      }],
+      perContextGraph: [{
+        contextGraphId: cgId,
+        durableComplete: true,
+        perPeer: [{
+          peerId,
+          durableInsertedTriples: 23,
+          durableComplete: true,
+          durableDiagnostics: {
+            insertedDataTriples: 20,
+            insertedMetaTriples: 3,
+          },
+        }],
+      }],
+    });
+  });
+
+  it('still filters an implicitly enumerated durable peer without sync advertisement', async () => {
+    const cgId = 'implicit-unsupported-durable-cg';
+    const peerId = 'peer-legacy';
+    const syncFromPeerDetailed = vi.fn();
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{
+            remotePeer: { toString: () => peerId },
+          }],
+        },
+      },
+      getPeerProtocols: vi.fn(async () => []),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(agent.getPeerProtocols).toHaveBeenCalledWith(peerId);
+    expect(syncFromPeerDetailed).not.toHaveBeenCalled();
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
+      durableComplete: false,
+      peersAttempted: 0,
+    });
+  });
+
   it('supports durable-only recovery without starting either SWM catchup path', async () => {
     const cgId = 'private-durable-only-cg';
     const peerId = 'peer-curator';
