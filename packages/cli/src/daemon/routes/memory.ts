@@ -864,7 +864,14 @@ WHERE {
         continue;
       }
       const baseCandidatePeers = await candidatePeersForContextGraph(cgId);
-      const unsupportedPeers = await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
+      // An explicit peerId is an operator-directed bounded probe. libp2p's
+      // identify-backed peerStore can lag a live connection, so an absent
+      // protocol advertisement must not suppress the wire negotiation the
+      // operator requested. Default peer enumeration remains conservative and
+      // filters peers that are known not to advertise the current sync wire.
+      const unsupportedPeers = peerIdParam
+        ? new Set<string>()
+        : await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
       const privateCuratorPeerIds = await privateCuratorPeersForContextGraph(cgId);
       const swmSelectedPeers = canUseSharedMemory
         ? swmCatchupPeerSelector.select({
