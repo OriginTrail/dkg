@@ -433,17 +433,11 @@ describe('useMemoryEntities hook', () => {
     expect(hook).toContain("type TrustLevel = 'working' | 'shared' | 'verified'");
   });
 
-  it('queries WM, SWM, and VM in parallel', () => {
-    // Hook was refactored from `view: 'shared-working-memory' | 'verifiable-memory'`
-    // to per-layer SPARQL builders that walk the named-graph space directly
-    // (see the rationale comment in useMemoryEntities.ts) so per-sub-graph
-    // SWM/VM partitions are covered and each triple carries its source `?g`.
-    // The original intent of this test — that all three layers are fetched
-    // in parallel — is still asserted, just against the new shape.
-    expect(hook).toContain('Promise.all');
-    expect(hook).toContain('wmSparql');
-    expect(hook).toContain('swmSparql');
-    expect(hook).toContain('vmSparql');
+  it('loads one daemon-owned memory-layer snapshot instead of broad layer SPARQL fan-out', () => {
+    expect(hook).toContain('fetchMemoryLayersDeduped');
+    expect(hook).not.toContain('GRAPH ?g');
+    expect(hook).not.toContain('wmSparql');
+    expect(hook).not.toContain('Promise.all');
   });
 
   it('builds entity map grouped by subject URI', () => {

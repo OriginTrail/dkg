@@ -333,6 +333,10 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  readContextGraphNamedGraphStats,
+  readMemoryLayers,
+} from '../context-graph-read-model.js';
 
 import type { RequestContext } from './context.js';
 
@@ -877,6 +881,48 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // POST /api/context-graph/memory-layers  { contextGraphId }
+  //
+  // Purpose-built read model for the node UI. The old UI issued three broad
+  // GRAPH ?g queries and opted into every context-graph partition; the scoped
+  // query engine then injected a potentially enormous VALUES allow-list. On a
+  // large, actively publishing CG, Oxigraph planned those as Cartesian joins
+  // and client-side HTTP timeouts left the server evaluations running. This
+  // endpoint discovers graph names through GraphSetIndexStore and reads small
+  // batches of concrete GRAPH IRIs serially.
+  if (req.method === 'POST' && path === '/api/context-graph/memory-layers') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const contextGraphId = parsed.contextGraphId;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+
+    const disconnected = new AbortController();
+    const abortRead = () => disconnected.abort(new Error('Memory-layer client disconnected'));
+    const abortIfUnfinished = () => {
+      if (!res.writableEnded) abortRead();
+    };
+    req.once('aborted', abortRead);
+    res.once('close', abortIfUnfinished);
+    try {
+      const snapshot = await readMemoryLayers(agent.store, contextGraphId, {
+        signal: disconnected.signal,
+      });
+      if (!res.writableEnded && !res.destroyed) {
+        return jsonResponse(res, 200, { contextGraphId, ...snapshot });
+      }
+      return;
+    } catch (err: any) {
+      if (disconnected.signal.aborted || res.destroyed) return;
+      return jsonResponse(res, 500, {
+        error: err?.message ?? 'Failed to read context-graph memory layers',
+      });
+    } finally {
+      req.removeListener('aborted', abortRead);
+      res.removeListener('close', abortIfUnfinished);
+    }
+  }
+
   // GET /api/sub-graph/list?contextGraphId=...
   // Returns per-sub-graph metadata + entity/triple counts so UIs can render a
   // SubGraphBar without a second round-trip per sub-graph.
@@ -886,45 +932,28 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
       const registered = await agent.listSubGraphs(contextGraphId!);
-      // One pass enumerates *all* named graphs in the project + their
-      // distinct-subject and triple counts. Sub-graph ownership is inferred
-      // from the named-graph path segment after the context-graph id:
+      // Enumerate named graphs through the graph-set index, then aggregate
+      // exact-IRI query batches. Sub-graph ownership is inferred from the
+      // named-graph path segment after the context-graph id:
       //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
       //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
-      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      // Unlike the old GRAPH ?g aggregate, this never creates a giant VALUES
+      // allow-list or an unbounded CartesianProductJoinIterator in Oxigraph.
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const sparql = `
-          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
-          WHERE {
-            GRAPH ?g { ?s ?p ?o }
-            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
-          }
-          GROUP BY ?g
-        `;
-        const result = await agent.query(sparql, {
-          contextGraphId: contextGraphId!,
-          includeContextGraphPartitions: true,
-        });
-        const parseCount = (v: any) => {
-          if (v === undefined || v === null) return 0;
-          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
-          const m = String(s).match(/^"?(\d+)/);
-          return m ? Number(m[1]) : 0;
-        };
-        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
-          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
-          if (!g || !g.startsWith(prefix)) continue;
-          const tail = g.slice(prefix.length);
+        const graphStats = await readContextGraphNamedGraphStats(agent.store, contextGraphId!);
+        for (const row of graphStats) {
+          if (!row.graph.startsWith(prefix)) continue;
+          const tail = row.graph.slice(prefix.length);
           // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
           // Only care about the first segment, but skip daemon-internal graphs.
           const firstSlash = tail.indexOf('/');
           const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
           if (!seg || seg.startsWith('_')) continue;
           const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
-          entry.entityCount += parseCount(row.entities);
-          entry.tripleCount += parseCount(row.triples);
+          entry.entityCount += row.entityCount;
+          entry.tripleCount += row.tripleCount;
           counts.set(seg, entry);
         }
       } catch {

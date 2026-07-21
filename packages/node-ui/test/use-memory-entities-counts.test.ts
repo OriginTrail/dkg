@@ -71,35 +71,28 @@ describe('useMemoryEntities canonical layer counts', () => {
     root = createRoot(container);
 
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      const { sparql = '', contextGraphId = 'cg' } =
-        JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
-      const isVm = sparql.includes('_verifiable_memory_meta');
-      // PR #818 sweep 3 — WM SPARQL now contains `STRENDS(...,
-      // "/_meta")` for the meta-exclusion filter, so the SWM
-      // detection needs the discriminating clause that's still
-      // SWM-exclusive: the `/_shared_memory` tail check.
-      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+      const { contextGraphId = 'cg' } =
+        JSON.parse(String(init?.body ?? '{}')) as { contextGraphId?: string };
       const graphBase = `did:dkg:context-graph:${contextGraphId}`;
-      const bindings = isVm
-        ? [
-            typeBinding('urn:test:verified', graphBase),
-            typeBinding('urn:test:full-pipeline', graphBase),
-          ]
-        : isSwm
-          ? [
-              typeBinding('urn:test:promoted', `${graphBase}/notes/_shared_memory`),
-              typeBinding('urn:test:full-pipeline', `${graphBase}/notes/_shared_memory`),
-            ]
-          : [
-              typeBinding('urn:test:promoted', `${graphBase}/notes/assertion/agent/a-1`),
-              typeBinding('urn:test:full-pipeline', `${graphBase}/notes/assertion/agent/a-1`),
-              typeBinding('urn:test:draft', `${graphBase}/notes/assertion/agent/a-2`),
-              typeBinding('urn:test:draft', `${graphBase}/docs/assertion/agent/a-3`),
-              uriBinding('urn:test:draft', MENTIONS, 'urn:test:object-only', `${graphBase}/docs/assertion/agent/a-3`),
-            ];
       return {
         ok: true,
-        json: async () => ({ result: { bindings } }),
+        json: async () => ({ contextGraphId, layers: {
+          wm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:promoted', `${graphBase}/notes/assertion/agent/a-1`),
+            typeBinding('urn:test:full-pipeline', `${graphBase}/notes/assertion/agent/a-1`),
+            typeBinding('urn:test:draft', `${graphBase}/notes/assertion/agent/a-2`),
+            typeBinding('urn:test:draft', `${graphBase}/docs/assertion/agent/a-3`),
+            uriBinding('urn:test:draft', MENTIONS, 'urn:test:object-only', `${graphBase}/docs/assertion/agent/a-3`),
+          ] },
+          swm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:promoted', `${graphBase}/notes/_shared_memory`),
+            typeBinding('urn:test:full-pipeline', `${graphBase}/notes/_shared_memory`),
+          ] },
+          vm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:verified', graphBase),
+            typeBinding('urn:test:full-pipeline', graphBase),
+          ] },
+        } }),
       } as Response;
     }));
   });
@@ -126,36 +119,9 @@ describe('useMemoryEntities canonical layer counts', () => {
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:full-pipeline:verified');
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:object-only');
 
-    const queryBodies = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; includeContextGraphPartitions?: boolean });
-    expect(queryBodies).toHaveLength(3);
-    expect(queryBodies.every(body => body.includeContextGraphPartitions === true)).toBe(true);
-
-    const vmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('_verifiable_memory_meta'));
-    expect(vmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
-    expect(vmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
-
-    // PR #818 Codex sweep 3 (ux-lead Finding 1 verdict) — WM and
-    // SWM SPARQL queries gain the same meta-namespace exclusions VM
-    // already enforces. Profile artifacts (prof:* — project profile
-    // configuration) live under `<cg>/meta/...` and are loaded by
-    // `useProjectProfile` directly via its own SPARQL; without the
-    // upstream filter here they also leak into `memory.entityList`,
-    // becoming "root entities" in every consumer downstream (the
-    // GH #806 family root cause).
-    const wmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('CONTAINS(STR(?g), "/assertion/")'));
-    expect(wmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
-    expect(wmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
-    expect(wmRequest?.sparql).toContain('!STRENDS(STR(?g), "/_meta")');
-
-    const swmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('STRENDS(STR(?g), "/_shared_memory")'));
-    expect(swmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta/_shared_memory"');
-    expect(swmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(String(url)).toContain('/api/context-graph/memory-layers');
+    expect(JSON.parse(String(init?.body ?? '{}'))).toEqual({ contextGraphId: 'cg-counts' });
   });
 });
