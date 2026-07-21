@@ -1850,6 +1850,16 @@ function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudge
  * lane, so a single plan access per page means per-call refresh semantics are
  * equivalent and simpler there.
  */
+/**
+ * Sessionless callers (no `syncSessionId` => no memo cache key) rebuild the
+ * plan on EVERY page: per-page discovery + chunked GROUP BY cost (bounded, and
+ * still far cheaper than the deleted global-sort query), no `requireExisting`
+ * protection, and a fresh digest sidecar per plan object. Offset>0 pages
+ * against a mutating store can therefore skip or duplicate rows for such
+ * requesters — sessionless TTL paging is BEST-EFFORT, and the per-subject
+ * digest guard does NOT cover it. This matches the exposure of the old OFFSET
+ * lane (not a regression); requester-side verification still gates admission.
+ */
 function createSessionPlanGetter<T>(
   memo: {
     get(
