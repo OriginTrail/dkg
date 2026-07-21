@@ -198,4 +198,11 @@ export interface AsyncLiftPublisherConfig {
   ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * #1829 — enable append-only admission/transaction journal writes. DAEMON-ONLY:
+   * left OFF for the CLI inspector and standalone `dkg publisher run` so a second
+   * OS process on the same store never races the node-local per-lineageKey seq
+   * allocation. Reads never require this flag. Defaults to OFF.
+   */
+  journalWrites?: boolean;
 }

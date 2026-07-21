@@ -15,6 +15,8 @@ export default defineConfig({
       'test/verify-proposal-handler.test.ts',
       'test/views-min-trust-extra.test.ts',
       'test/async-lift-validation.test.ts',
+      'test/async-lift-journal-serialize.test.ts',
+      'test/async-lift-journal-append.test.ts',
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-broadcast-durability.test.ts',
       'test/async-lift-intent-lookup.test.ts',
