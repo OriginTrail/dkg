@@ -24,6 +24,8 @@ export default defineConfig({
       "test/promote-async-default-agent.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/sync-envelope-cursor.test.ts",
+      "test/exact-assets.test.ts",
+      "test/exact-asset-responder.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",
       "test/swm/host-mode-store.test.ts",

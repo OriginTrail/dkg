@@ -2804,9 +2804,9 @@ async function readDurableMetaRowsPage(
 /**
  * Serve only the immutable V2 descriptors for an explicitly requested KA set.
  * The caller intersects the request with the confirmed manifest first, so this
- * query cannot expose tentative workspace descriptors. Ten descriptors fit in
- * one ordinary sync page, but OFFSET/LIMIT remains deterministic for protocol
- * compatibility and future descriptor growth.
+ * query cannot expose tentative workspace descriptors. The protocol caps the
+ * VALUES list at ten UALs, so read that bounded descriptor set once, sort it,
+ * and take the requested page in memory instead of OFFSET-scanning `_meta`.
  */
 async function readExactDurableMetaRowsPage(
   store: TripleStore,
@@ -2821,19 +2821,19 @@ async function readExactDurableMetaRowsPage(
   if (safeLimit === 0 || assetUals.length === 0) return [];
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const values = assetUals.map((ual) => `<${assertSafeIri(ual)}>`).join(' ');
+  // sparql-scan-allow: R4 -- ?s is bound to at most ten exact, confirmed KA UALs by the protocol filter
   const result = await store.query(`
     SELECT ?s ?p ?o WHERE {
       VALUES ?s { ${values} }
       GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
     }
-    ORDER BY ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
   `, syncResponderStoreOptions(signal, 'sync.responder.readExactDurableMetaRowsPage'));
   if (result.type !== 'bindings') return [];
   return result.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: metaGraph }))
-    .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o));
+    .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o))
+    .sort(compareRows)
+    .slice(safeOffset, safeOffset + safeLimit);
 }
 
 async function readDurableDeltaRowsPageAcrossGraphs(
