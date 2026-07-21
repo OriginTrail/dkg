@@ -55,6 +55,7 @@ export default defineConfig({
       "test/sync-responder-snapshot-cache.test.ts",
       "test/sync-responder-cursor.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
+      "test/sync-responder-swm-meta-ceiling.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
       "test/sync-page-frame-budget.test.ts",
       "test/sync-byte-budget-pages.test.ts",
