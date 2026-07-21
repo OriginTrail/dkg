@@ -37,15 +37,15 @@ export type GraphSetMutationSource =
   | 'query'
   | 'update';
 
-type TouchedGraphMutationSource =
+export type GraphSetTouchedMutationSource =
   | 'delete'
   | 'deleteByPattern'
   | 'deleteBySubjectPrefix'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
-type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
+type GraphSetRefreshSource = 'seed' | 'revalidate' | GraphSetTouchedMutationSource | 'query';
+export type GraphSetPendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
   | {
@@ -68,12 +68,12 @@ export type GraphSetMutationEvent =
 export type GraphSetDiagnosticEvent =
   | {
       type: 'dirty-rebuild';
-      source: GraphSetMutationSource;
+      source: GraphSetPendingFullRefreshSource;
       graphCount: number;
     }
   | {
       type: 'probe-retry-exhausted';
-      source: GraphSetMutationSource;
+      source: GraphSetTouchedMutationSource;
       probeCount: number;
     };
 
@@ -209,7 +209,7 @@ export class GraphSetIndexStore implements TripleStore {
    * be applied incrementally. The stored source preserves the observer contract
    * while deferring expensive full-store scans until the next graph read.
    */
-  private pendingFullRefresh: PendingFullRefreshSource | null = null;
+  private pendingFullRefresh: GraphSetPendingFullRefreshSource | null = null;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -576,14 +576,14 @@ export class GraphSetIndexStore implements TripleStore {
     this.mutationGeneration++;
   }
 
-  private scheduleFullRefresh(source: PendingFullRefreshSource): void {
+  private scheduleFullRefresh(source: GraphSetPendingFullRefreshSource): void {
     this.bumpMutation();
     this.pendingFullRefresh ??= source;
   }
 
   private async maintainStableGraphPresence(
     graphs: string[],
-    source: TouchedGraphMutationSource,
+    source: GraphSetTouchedMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     // hasGraph is the only operation inside this retry boundary. Applying the
@@ -682,7 +682,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async maintainTouchedGraphs(
     graphs: string[],
-    source: TouchedGraphMutationSource,
+    source: GraphSetTouchedMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     if (!this.graphs) return;

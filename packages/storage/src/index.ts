@@ -63,6 +63,8 @@ export {
   type GraphSetDiagnosticEvent,
   type GraphSetMutationEvent,
   type GraphSetMutationSource,
+  type GraphSetPendingFullRefreshSource,
+  type GraphSetTouchedMutationSource,
 } from './graph-set-index-store.js';
 export {
   CHANGELOG_GRAPH,
