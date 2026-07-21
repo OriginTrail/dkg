@@ -17,7 +17,10 @@ import {
   readPid,
   isProcessRunning,
 } from '../config.js';
-import { deriveBlazegraphContainerName } from '../daemon/blazegraph-docker.js';
+import {
+  deriveBlazegraphContainerName,
+  parseBlazegraphNamespaceEndpoint,
+} from '../daemon/blazegraph-docker.js';
 import {
   executeHardenMigration,
   type HardenStep,
@@ -46,17 +49,6 @@ export function parseHardenPortOption(value: string): number {
   return port;
 }
 
-/** Same namespace extraction the container-name derivation uses. */
-function namespaceFromStoreUrl(url: unknown): string | null {
-  if (typeof url !== 'string') return null;
-  const match = url.match(/\/bigdata\/namespace\/([^/]+)\/sparql\/?$/);
-  if (!match) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return null;
-  }
-}
 
 function printPlan(steps: HardenStep[]): void {
   console.log('\nMigration plan:');
@@ -136,7 +128,7 @@ export function registerStoreCommand(program: Command): void {
         );
         process.exit(1);
       }
-      const namespace = namespaceFromStoreUrl(storeConfig.options?.url);
+      const namespace = parseBlazegraphNamespaceEndpoint(storeConfig.options?.url)?.namespace ?? null;
       if (!namespace) {
         console.error(
           'Could not extract the Blazegraph namespace from store.options.url — ' +

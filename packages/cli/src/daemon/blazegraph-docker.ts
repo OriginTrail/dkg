@@ -386,21 +386,49 @@ export function buildBlazegraphRunArgs(opts: {
  * Returns null when neither is available — callers must treat that as
  * "not managed" and never touch docker.
  */
+/** Parsed shape of a managed Blazegraph namespace SPARQL endpoint URL. */
+export interface BlazegraphNamespaceEndpoint {
+  /** Decoded namespace segment. */
+  namespace: string;
+  /** Everything before `/bigdata/…` (scheme + host + port). */
+  baseUrl: string;
+  /** Canonical namespace SPARQL URL rebuilt from the parsed parts. */
+  sparqlUrl: string;
+}
+
+/**
+ * THE parser for the managed Blazegraph endpoint shape
+ * (`…/bigdata/namespace/<ns>/sparql`). The harden command, the container-name
+ * derivation and the monitor all reason about the same store URL; parsing it
+ * in one place keeps their interpretations from drifting when the endpoint
+ * shape (or an explicit config namespace field) changes.
+ */
+export function parseBlazegraphNamespaceEndpoint(
+  url: unknown,
+): BlazegraphNamespaceEndpoint | null {
+  if (typeof url !== 'string') return null;
+  const match = url.match(/^(.*)\/bigdata\/namespace\/([^/]+)\/sparql\/?$/);
+  if (!match) return null;
+  try {
+    const namespace = decodeURIComponent(match[2]);
+    return {
+      namespace,
+      baseUrl: match[1],
+      sparqlUrl: sparqlUrlForNamespace(match[1], namespace),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function deriveBlazegraphContainerName(
   storeOptions: Record<string, unknown> | undefined,
 ): string | null {
   if (typeof storeOptions?.containerName === 'string' && storeOptions.containerName) {
     return storeOptions.containerName;
   }
-  const url = storeOptions?.url;
-  if (typeof url !== 'string') return null;
-  const match = url.match(/\/bigdata\/namespace\/([^/]+)\/sparql\/?$/);
-  if (!match) return null;
-  try {
-    return sanitiseContainerName(decodeURIComponent(match[1]));
-  } catch {
-    return null;
-  }
+  const endpoint = parseBlazegraphNamespaceEndpoint(storeOptions?.url);
+  return endpoint ? sanitiseContainerName(endpoint.namespace) : null;
 }
 
 function sparqlUrlForNamespace(baseUrl: string, namespace: string): string {
@@ -470,11 +498,52 @@ async function inspectContainer(
  * `dkg store harden` migration (blazegraph-harden.ts) reuses the same
  * readiness poll after recreating a container.
  */
+/**
+ * Fetch with a hard deadline that holds even when the fetch implementation
+ * ignores its abort signal (a container that accepts TCP but never completes
+ * the HTTP response, or an injected probe fetch). The elapsed-time loops in
+ * this module only check time BETWEEN probes, so one never-settling fetch
+ * would otherwise hang a caller forever — post-rename in the harden
+ * migration that stranded the node with the store renamed away and the
+ * rollback path unreachable. Race gives the guarantee; the signal lets a
+ * real fetch also release its socket.
+ */
+export async function fetchWithDeadline(
+  fetchImpl: typeof globalThis.fetch,
+  input: string,
+  init: Parameters<typeof globalThis.fetch>[1],
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`store probe timed out after ${timeoutMs}ms: ${input}`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    if (timer.unref) timer.unref();
+  });
+  try {
+    return await Promise.race([
+      fetchImpl(input, { ...init, signal: controller.signal }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Per-probe fetch deadline used by every readiness/verify probe below. */
+export const STORE_PROBE_TIMEOUT_MS = 15_000;
+
 export async function waitForBlazegraphReady(opts: {
   url: string;
   fetch: typeof globalThis.fetch;
   intervalMs: number;
   timeoutMs: number;
+  /** Deadline for ONE status fetch; a hung probe counts as a failed probe. */
+  probeTimeoutMs?: number;
   log: (msg: string) => void;
 }): Promise<void> {
   const start = Date.now();
@@ -482,13 +551,22 @@ export async function waitForBlazegraphReady(opts: {
   while (Date.now() - start < opts.timeoutMs) {
     attempt++;
     try {
-      const r = await opts.fetch(`${opts.url}/bigdata/status`, { method: 'GET' });
+      // Bounded per probe: the while-condition only checks time BETWEEN
+      // probes, so an unbounded fetch against a listening-but-wedged
+      // container would hang this loop forever instead of timing out.
+      const remaining = Math.max(1, opts.timeoutMs - (Date.now() - start));
+      const r = await fetchWithDeadline(
+        opts.fetch,
+        `${opts.url}/bigdata/status`,
+        { method: 'GET' },
+        Math.min(opts.probeTimeoutMs ?? STORE_PROBE_TIMEOUT_MS, remaining),
+      );
       if (r.ok) {
         opts.log(`  Blazegraph ready after ${attempt} probe(s) (~${Math.round((Date.now() - start) / 1000)}s).`);
         return;
       }
     } catch {
-      // Container not listening yet — keep polling.
+      // Container not listening yet (or the probe timed out) — keep polling.
     }
     await new Promise((res) => setTimeout(res, opts.intervalMs));
   }

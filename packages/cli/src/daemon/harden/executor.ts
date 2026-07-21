@@ -63,6 +63,12 @@ export interface ExecuteHardenMigrationOptions {
   /** Readiness-poll bounds for the verify step (tests shrink these). */
   readyTimeoutMs?: number;
   readyIntervalMs?: number;
+  /**
+   * Deadline for ONE readiness/ASK/identity fetch (tests shrink it). A
+   * never-settling probe response must become a normal verification
+   * failure — and post-rename, a rollback — never an unbounded await.
+   */
+  probeTimeoutMs?: number;
 }
 
 export interface HardenMigrationResult {
@@ -220,7 +226,7 @@ export async function executeHardenMigration(
   // Already-hardened path: verify and report; nothing to migrate.
   if (info.state === 'hardened') {
     log(`Container "${containerName}" already has the journal volume mounted — verifying.`);
-    if (!(await askOk(fetchImpl, sparqlUrl))) {
+    if (!(await askOk(fetchImpl, sparqlUrl, opts.probeTimeoutMs))) {
       throw new Error(
         `Hardened container "${containerName}" exists but ASK probe failed at ${sparqlUrl}. ` +
         `Check \`docker ps\` / \`docker logs ${containerName}\`.`,
@@ -501,12 +507,13 @@ export async function executeHardenMigration(
         // container's own health-start-period is 120s) — a short window here
         // would roll back a perfectly healthy migration mid-boot.
         timeoutMs: opts.readyTimeoutMs ?? 180_000,
+        probeTimeoutMs: opts.probeTimeoutMs,
         log,
       });
-      if (!(await askOk(fetchImpl, sparqlUrl))) {
+      if (!(await askOk(fetchImpl, sparqlUrl, opts.probeTimeoutMs))) {
         throw new Error(`ASK probe failed at ${sparqlUrl}`);
       }
-      if (!(await identityTagPresent(fetchImpl, sparqlUrl))) {
+      if (!(await identityTagPresent(fetchImpl, sparqlUrl, opts.probeTimeoutMs))) {
         throw new Error(
           `identity-tag probe returned no binding at ${sparqlUrl} — the migrated data did not follow`,
         );

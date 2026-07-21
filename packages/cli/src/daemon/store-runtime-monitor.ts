@@ -106,6 +106,33 @@ function hardenLockIsLive(lockPath: string, log: (m: string) => void): boolean {
 }
 
 /**
+ * The ONE managed-container restart primitive, shared by the runtime
+ * monitor and boot recovery. Owns the restart-only argv (`restart -t 30`,
+ * never rm/recreate/volume ops), the bounded runner timeout, and the
+ * normalization of spawn rejections (ENOENT, EMFILE, …) into a failed
+ * exit — both callers run from contexts where an escaped rejection would
+ * land in the daemon's unhandledRejection handler. Callers keep their own
+ * cooldown sources, stats and logging around this primitive, so changing
+ * the restart operation itself can never drift between the two flows.
+ */
+async function restartManagedContainer(
+  docker: DockerRunner,
+  containerName: string,
+): Promise<{ exitCode: number; stderr: string }> {
+  try {
+    return await docker.run(
+      ['restart', '-t', '30', containerName],
+      { timeoutMs: 120_000 },
+    );
+  } catch (err) {
+    return {
+      exitCode: -1,
+      stderr: `docker spawn failed: ${(err as Error).message ?? String(err)}`,
+    };
+  }
+}
+
+/**
  * Resolve the docker container the daemon is allowed to auto-restart for
  * a given runtime store config, or null when the store is not a
  * daemon-managed Blazegraph (operator-managed stores and every other
@@ -286,24 +313,11 @@ export function createStoreRuntimeMonitor(
       }
 
       // Restart-ONLY — the monitor never removes, recreates, or touches
-      // volumes; recreation is exclusively `dkg store harden`.
-      //
-      // The runner REJECTS on spawn errors (ENOENT, EMFILE, …) — this tick
-      // runs from `void tick()` on a timer, so an escaped rejection would
-      // land in the daemon's unhandledRejection handler. Catch, count, log.
+      // volumes; recreation is exclusively `dkg store harden`. The shared
+      // primitive normalizes spawn rejections, so this timer-driven tick
+      // can never leak an unhandled rejection.
       docker ??= defaultDockerRunner();
-      let restart: { exitCode: number; stderr: string };
-      try {
-        restart = await docker.run(
-          ['restart', '-t', '30', opts.managedContainerName],
-          { timeoutMs: 120_000 },
-        );
-      } catch (err) {
-        restart = {
-          exitCode: -1,
-          stderr: `docker spawn failed: ${(err as Error).message ?? String(err)}`,
-        };
-      }
+      const restart = await restartManagedContainer(docker, opts.managedContainerName);
       if (restart.exitCode === 0) {
         stats.restartsTotal += 1;
         stats.lastRestartAt = now();
@@ -434,18 +448,7 @@ export async function attemptManagedStoreBootRecovery(opts: {
         );
       });
     }
-    let restart: { exitCode: number; stderr: string };
-    try {
-      restart = await docker.run(
-        ['restart', '-t', '30', opts.managedContainerName],
-        { timeoutMs: 120_000 },
-      );
-    } catch (err) {
-      restart = {
-        exitCode: -1,
-        stderr: `docker spawn failed: ${(err as Error).message ?? String(err)}`,
-      };
-    }
+    const restart = await restartManagedContainer(docker, opts.managedContainerName);
     if (restart.exitCode !== 0) {
       opts.log(
         `[store.monitor] boot-recovery restart failed for ${opts.managedContainerName}: ` +

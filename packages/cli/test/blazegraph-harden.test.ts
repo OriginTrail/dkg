@@ -628,6 +628,54 @@ describe('executeHardenMigration', () => {
     expect(calls.some((c) => c[0] === 'cp')).toBe(false);
   });
 
+  it('rolls back when the readiness probe HANGS instead of settling (bounded verification, no strand)', async () => {
+    // The reviewer scenario: the hardened container accepts TCP/HTTP but a
+    // status fetch never completes — and, like any injected/wedged
+    // implementation, IGNORES its abort signal. Before the fix the
+    // elapsed-time check only ran BETWEEN probes, so the migration awaited
+    // forever post-rename with the store renamed away and the rollback
+    // unreachable. Every probe now carries its own deadline.
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn } = verifierFetch();
+    const hangingStatus: typeof globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).endsWith('/bigdata/status')) {
+        return new Promise<never>(() => {}); // never settles, ignores the signal
+      }
+      return fn(input, init);
+    }) as typeof globalThis.fetch;
+
+    await expect(executeHardenMigration({
+      ...baseOpts(runner, hangingStatus),
+      readyTimeoutMs: 100,
+      probeTimeoutMs: 10,
+    })).rejects.toThrow(/verification failed.*restored/is);
+
+    expect(calls).toContainEqual(['rename', BACKUP, NAME]);
+    expect(calls).toContainEqual(['start', NAME]);
+    assertSafetyInvariants(calls, migrationDir, true);
+  });
+
+  it('rolls back when the SPARQL ASK probe HANGS instead of settling', async () => {
+    // Readiness succeeds; the ASK response never completes. The per-probe
+    // deadline must convert the hang into an ordinary verification failure
+    // so the existing rollback path runs.
+    const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+    const { fn } = verifierFetch();
+    const hangingSparql: typeof globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).endsWith('/bigdata/status')) return fn(input, init);
+      return new Promise<never>(() => {}); // ASK + identity probes hang
+    }) as typeof globalThis.fetch;
+
+    await expect(executeHardenMigration({
+      ...baseOpts(runner, hangingSparql),
+      probeTimeoutMs: 10,
+    })).rejects.toThrow(/verification failed.*restored/is);
+
+    expect(calls).toContainEqual(['rename', BACKUP, NAME]);
+    expect(calls).toContainEqual(['start', NAME]);
+    assertSafetyInvariants(calls, migrationDir, true);
+  });
+
   it('rolls back to the backup when post-swap verification fails (ASK dead)', async () => {
     const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
     const { fn } = verifierFetch({ askOk: false });

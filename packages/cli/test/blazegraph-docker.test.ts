@@ -48,6 +48,9 @@ import {
   blazegraphVolumeName,
   blazegraphHealthCmd,
   deriveBlazegraphContainerName,
+  parseBlazegraphNamespaceEndpoint,
+  fetchWithDeadline,
+  waitForBlazegraphReady,
   BLAZEGRAPH_IMAGE,
   BLAZEGRAPH_CONTAINER_PORT,
   BLAZEGRAPH_DATA_DIR,
@@ -714,6 +717,72 @@ describe('deriveBlazegraphContainerName', () => {
     expect(deriveBlazegraphContainerName({
       url: 'http://127.0.0.1:9999/bigdata/namespace/My%20Node/sparql',
     })).toBe('dkg-blazegraph-my-node');
+  });
+});
+
+describe('parseBlazegraphNamespaceEndpoint (the ONE managed-endpoint parser)', () => {
+  it('parses namespace, base URL and canonical SPARQL URL from a fleet-shaped URL', () => {
+    expect(parseBlazegraphNamespaceEndpoint('http://127.0.0.1:9999/bigdata/namespace/dkg/sparql'))
+      .toEqual({
+        namespace: 'dkg',
+        baseUrl: 'http://127.0.0.1:9999',
+        sparqlUrl: 'http://127.0.0.1:9999/bigdata/namespace/dkg/sparql',
+      });
+  });
+
+  it('decodes an encoded namespace and re-encodes it canonically', () => {
+    expect(parseBlazegraphNamespaceEndpoint('http://h:1/bigdata/namespace/My%20Node/sparql'))
+      .toEqual({
+        namespace: 'My Node',
+        baseUrl: 'http://h:1',
+        sparqlUrl: 'http://h:1/bigdata/namespace/My%20Node/sparql',
+      });
+  });
+
+  it('rejects non-strings and non-namespace URLs', () => {
+    expect(parseBlazegraphNamespaceEndpoint(undefined)).toBeNull();
+    expect(parseBlazegraphNamespaceEndpoint(42)).toBeNull();
+    expect(parseBlazegraphNamespaceEndpoint('http://h:1/sparql')).toBeNull();
+    expect(parseBlazegraphNamespaceEndpoint('not a url')).toBeNull();
+  });
+});
+
+describe('bounded store probes (post-rename hang fix)', () => {
+  it('fetchWithDeadline rejects after the deadline even when the fetch IGNORES its abort signal', async () => {
+    const neverSettles: typeof globalThis.fetch =
+      (async () => new Promise<never>(() => {})) as typeof globalThis.fetch;
+    const started = Date.now();
+    await expect(fetchWithDeadline(neverSettles, 'http://x/probe', {}, 20))
+      .rejects.toThrow(/timed out after 20ms/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('waitForBlazegraphReady times out (instead of hanging) when every status fetch never settles', async () => {
+    const neverSettles: typeof globalThis.fetch =
+      (async () => new Promise<never>(() => {})) as typeof globalThis.fetch;
+    await expect(waitForBlazegraphReady({
+      url: 'http://127.0.0.1:1',
+      fetch: neverSettles,
+      intervalMs: 1,
+      timeoutMs: 60,
+      probeTimeoutMs: 10,
+      log: () => {},
+    })).rejects.toThrow(/did not become ready within 60ms/);
+  });
+
+  it('waitForBlazegraphReady still succeeds through a slow-but-settling probe', async () => {
+    const slowOk: typeof globalThis.fetch = (async () => {
+      await new Promise((res) => setTimeout(res, 5));
+      return new Response('ok', { status: 200 });
+    }) as typeof globalThis.fetch;
+    await expect(waitForBlazegraphReady({
+      url: 'http://127.0.0.1:1',
+      fetch: slowOk,
+      intervalMs: 1,
+      timeoutMs: 5_000,
+      probeTimeoutMs: 1_000,
+      log: () => {},
+    })).resolves.toBeUndefined();
   });
 });
 

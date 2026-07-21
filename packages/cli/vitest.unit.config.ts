@@ -20,6 +20,9 @@ export default defineConfig({
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/status-route-store-quads.test.ts',
+          // #1817 review — /api/status must actually EXPOSE the store-monitor
+          // counters the monitor units only prove are maintained.
+          'test/status-route-store-monitor.test.ts',
           'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
