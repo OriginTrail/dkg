@@ -2718,6 +2718,123 @@ export class EVMChainAdapterBase {
     }
   }
 
+  /**
+   * Adopt-existing-mint (ChainAdapter.getMintedKnowledgeAssetProvenance):
+   * verify chain truth for an already-minted kaId and recover the mint tx's
+   * provenance from the KnowledgeAssetCreated log. See chain-adapter.ts for
+   * the contract. Verification failures throw typed errors; an unrecoverable
+   * log (pruned RPC) returns null so the caller rethrows its original error.
+   */
+  async getMintedKnowledgeAssetProvenance(
+    kaId: bigint,
+    expectedMerkleRoot: Uint8Array,
+    expectedContextGraphId: bigint,
+  ): Promise<OnChainPublishResult | null> {
+    const storage = this.contracts.knowledgeAssetStorage;
+    if (!storage) return null;
+    const expectedHex = ethers.hexlify(expectedMerkleRoot).toLowerCase();
+
+    // 1. Chain root must be EXACTLY the locally sealed root, and exactly one
+    //    version (a superseded mint must go through named recovery — adopting
+    //    index 0 would later stamp vmCurrentAssertion to a stale version).
+    const roots: Array<{ publisher: string; merkleRoot: string; timestamp: bigint }> =
+      await this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', kaId);
+    if (!roots || roots.length === 0) {
+      throw Object.assign(
+        new Error(`adopt-existing-mint: kaId ${kaId} reported minted but has no on-chain merkle roots`),
+        { code: 'KA_ID_COLLISION' },
+      );
+    }
+    if (ethers.hexlify(roots[0].merkleRoot).toLowerCase() !== expectedHex) {
+      throw Object.assign(
+        new Error(
+          `adopt-existing-mint: kaId ${kaId} on-chain root ${ethers.hexlify(roots[0].merkleRoot)} `
+            + `does not match locally sealed root ${expectedHex} — refusing to adopt someone else's content`,
+        ),
+        { code: 'KA_ID_COLLISION' },
+      );
+    }
+    if (roots.length > 1) {
+      throw Object.assign(
+        new Error(`adopt-existing-mint: kaId ${kaId} has ${roots.length} merkle roots (updated since mint); use named recovery`),
+        { code: 'KA_SUPERSEDED' },
+      );
+    }
+
+    // 2. CG binding: the minted KA must belong to the CG this publish targets.
+    if (this.contracts.contextGraphStorage) {
+      const boundCg = BigInt(
+        await this.readContract(
+          this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
+          'kaToContextGraph', kaId,
+        ),
+      );
+      if (boundCg !== expectedContextGraphId) {
+        throw Object.assign(
+          new Error(`adopt-existing-mint: kaId ${kaId} bound to CG ${boundCg}, expected ${expectedContextGraphId}`),
+          { code: 'KA_CG_MISMATCH' },
+        );
+      }
+    }
+
+    // 3. Recover the mint tx via the KnowledgeAssetCreated(kaId indexed) log.
+    //    The contract stored block.timestamp verbatim into roots[0].timestamp,
+    //    so binary-search the block by timestamp and scan a padded window.
+    //    Everything below is best-effort: any failure -> null (caller rethrows).
+    try {
+      const mintTs = Number(roots[0].timestamp);
+      const storageAddress = String(storage.target);
+      const { fromBlock, head, scanProviders } = await this.resolveKaStorageDeployBlock(storageAddress);
+      let lo = fromBlock;
+      let hi = head;
+      while (lo < hi) {
+        const mid = lo + Math.floor((hi - lo) / 2);
+        const ts = await this.getBlockTimestamp(mid);
+        if (ts >= mintTs) hi = mid; else lo = mid + 1;
+      }
+      const PAD = 128; // absorbs same-timestamp neighbours; single getLogs page
+      const scanLo = Math.max(fromBlock, lo - PAD);
+      const scanHi = Math.min(head, lo + PAD);
+      const filter = storage.filters.KnowledgeAssetCreated(kaId);
+      const connected = new Map<JsonRpcProvider, Contract>();
+      const { logs } = await this.queryEventLogsPage(
+        storage, filter, scanLo, scanHi, scanProviders, connected, 'adoptExistingMint',
+      );
+      if (logs.length === 0) return null;
+      const found = logs[0];
+      const parsed = 'args' in found && (found as ethers.EventLog).args
+        ? (found as ethers.EventLog)
+        : null;
+      const parsedArgs = parsed?.args ?? storage.interface.parseLog(found)?.args;
+      if (!parsedArgs) return null;
+      // Independent binding of the tx to the content: the event's merkleRoot
+      // must equal the sealed root too, not just storage state.
+      if (ethers.hexlify(parsedArgs.merkleRoot).toLowerCase() !== expectedHex) {
+        throw Object.assign(
+          new Error(`adopt-existing-mint: kaId ${kaId} mint-event root does not match sealed root`),
+          { code: 'KA_ID_COLLISION' },
+        );
+      }
+      return {
+        batchId: kaId,
+        kaId,
+        startKAId: kaId,
+        endKAId: kaId,
+        merkleRoot: expectedMerkleRoot,
+        knowledgeAssetsContract: storageAddress.toLowerCase(),
+        txHash: found.transactionHash,
+        blockNumber: found.blockNumber,
+        txIndex: found.index,
+        blockTimestamp: mintTs,
+        publisherAddress: roots[0].publisher,
+        authorAddress: String(parsedArgs.author),
+      };
+    } catch (err) {
+      if ((err as { code?: string })?.code === 'KA_ID_COLLISION') throw err;
+      return null;
+    }
+  }
+
   protected async getBlockTimestamp(blockNumber: number): Promise<number> {
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most

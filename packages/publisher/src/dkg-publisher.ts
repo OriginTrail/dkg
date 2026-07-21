@@ -1,6 +1,6 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
-import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, getKaIdAlreadyMintedKaId } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
@@ -3904,6 +3904,7 @@ export class DKGPublisher implements Publisher {
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
+          try {
           onChainResult = await this.chain.createKnowledgeAssets!({
             publishOperationId,
             contextGraphId: v10CgId,
@@ -3943,6 +3944,25 @@ export class DKGPublisher implements Publisher {
             })),
             onBroadcast: emitWriteAheadStart,
           });
+          } catch (mintErr) {
+            // Adopt-existing-mint: a KaIdAlreadyMinted revert for OUR reserved
+            // kaId is cryptographic proof this exact publish already landed
+            // (an earlier attempt confirmed while a transient error — RPC
+            // confirm-wait failure / replacement-fee nonce race — made us
+            // record failure). Verify chain truth + recover the mint tx's
+            // provenance, synthesize onChainResult, and fall through into the
+            // UNCHANGED success path so the local state is by-construction
+            // identical to a normal confirmed publish. Anything not provably
+            // ours rethrows unchanged.
+            onChainResult = await this.adoptExistingMintOrRethrow({
+              mintErr,
+              reservedKaId,
+              kcMerkleRoot,
+              v10CgId,
+              hasSeal: graphPublish !== undefined && options.precomputedAttestation !== undefined,
+              ctx,
+            });
+          }
         } finally {
           if (wroteAhead) onPhase?.('chain:writeahead', 'end');
         }
@@ -9061,6 +9081,55 @@ export class DKGPublisher implements Publisher {
    * source of truth for the id and eliminates the double-allocation that would
    * otherwise burn a second `(author, number)` on every finalize→publish.
    */
+  /**
+   * Adopt-existing-mint: called from the createKnowledgeAssets catch. When the
+   * revert is KaIdAlreadyMinted for exactly our reserved kaId on a sealed
+   * graph publish, verify chain truth and recover the mint provenance via
+   * ChainAdapter.getMintedKnowledgeAssetProvenance; otherwise (or when the
+   * log is unrecoverable) rethrow the ORIGINAL error — never synthesize a
+   * txHash (finalization-handler.ts:1345 invariant).
+   */
+  private async adoptExistingMintOrRethrow(args: {
+    mintErr: unknown;
+    reservedKaId: bigint | undefined;
+    kcMerkleRoot: Uint8Array;
+    v10CgId: bigint;
+    hasSeal: boolean;
+    ctx: OperationContext;
+  }): Promise<OnChainPublishResult> {
+    const mintedKaId = getKaIdAlreadyMintedKaId(args.mintErr);
+    const provenanceFn = this.chain.getMintedKnowledgeAssetProvenance?.bind(this.chain);
+    if (
+      mintedKaId === undefined
+      || args.reservedKaId === undefined
+      || mintedKaId !== args.reservedKaId
+      || !args.hasSeal
+      || provenanceFn === undefined
+    ) {
+      throw args.mintErr;
+    }
+    this.log.warn(
+      args.ctx,
+      `[adopt-existing-mint] kaId ${args.reservedKaId} already minted on-chain; `
+        + 'verifying sealed root against chain and recovering mint provenance',
+    );
+    const synthesized = await provenanceFn(args.reservedKaId, args.kcMerkleRoot, args.v10CgId);
+    if (!synthesized) {
+      this.log.warn(
+        args.ctx,
+        `[adopt-existing-mint] mint provenance unrecoverable for kaId ${args.reservedKaId} `
+          + '(pruned/non-archive RPC?); rethrowing original mint error',
+      );
+      throw args.mintErr;
+    }
+    this.log.info(
+      args.ctx,
+      `[adopt-existing-mint] adopted kaId ${args.reservedKaId} `
+        + `tx=${synthesized.txHash} block=${synthesized.blockNumber}; continuing confirmed publish path`,
+    );
+    return synthesized;
+  }
+
   private async ensureReservedKaId(author: string, precomputed?: bigint): Promise<bigint | undefined> {
     if (precomputed !== undefined) return precomputed;
     if (!this.kaAllocator) return undefined;

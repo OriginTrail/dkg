@@ -272,6 +272,32 @@ export function enrichEvmError(err: unknown): string | null {
  * falls back to string matching on the message / shortMessage / reason /
  * nested cause so a stringified or re-wrapped revert is still caught.
  */
+/**
+ * Adopt-existing-mint (see dkg-publisher adoptExistingMintOrRethrow): decode a
+ * `KaIdAlreadyMinted(uint256 kaId)` custom-error revert and return the minted
+ * kaId. Unlike `isTooLowAllowanceError` there is deliberately NO string-matching
+ * fallback: adoption is state-changing and must cross-check the decoded kaId
+ * against the locally reserved id, so we require the structured decode that
+ * `enrichEvmError` stamps at `err.revert`.
+ */
+export function getKaIdAlreadyMintedKaId(err: unknown): bigint | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  // enrichEvmError is idempotent — call defensively in case no upstream layer
+  // (isRetryableRpcError / allowance recovery) enriched this error object yet.
+  enrichEvmError(err);
+  const e = err as { revert?: { name?: unknown; args?: unknown[] }; cause?: unknown };
+  if (e.revert?.name === 'KaIdAlreadyMinted') {
+    const raw = e.revert.args?.[0];
+    try {
+      return raw == null ? undefined : BigInt(raw as string | number | bigint);
+    } catch {
+      return undefined;
+    }
+  }
+  if (e.cause && typeof e.cause === 'object') return getKaIdAlreadyMintedKaId(e.cause);
+  return undefined;
+}
+
 export function isTooLowAllowanceError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as {
