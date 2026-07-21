@@ -10,7 +10,6 @@ import {
   canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
   computeControlSignatureVariantDigestHex,
   parseCanonicalSignedAuthorCatalogHeadEnvelopeV1,
-  type ContextGraphAccessPolicyV1,
   type ContextGraphIdV1,
   type DecimalU64V1,
   type Digest32V1,
@@ -25,6 +24,18 @@ import {
   readVerifiedControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
+
+import type {
+  Rfc64CatalogAccessAuthorizationV1,
+  Rfc64CatalogAccessPolicyRegistryV1,
+} from './catalog-access-policy-v1.js';
+import {
+  normalizeRfc64CatalogTransportAuthorizerV1,
+  recheckCurrentRfc64CatalogPolicyAfterAwaitV1,
+  withAuthorizedCurrentRfc64CatalogPolicyV1,
+  withCurrentRfc64CatalogPolicyV1,
+} from './catalog-transport-authorization-v1.js';
+import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
 
 /**
  * Additive RFC-64 protocol IDs. Their `/catalog/1` component is the wire
@@ -113,14 +124,11 @@ export interface Rfc64PublicCatalogAuthorizationInputV1 {
 }
 
 /**
- * A caller-minted current-policy decision. The transport independently requires
- * `accessPolicy === 0` and an exact digest match, so returning a private policy or
- * a different policy generation always fails closed.
+ * A caller-minted current-policy decision. The transport independently validates
+ * the access-policy cell and exact digest match; the registry decides whether
+ * the authenticated remote is authorized for an open or invite-only cell.
  */
-export interface Rfc64PublicCatalogAuthorizationV1 {
-  readonly accessPolicy: ContextGraphAccessPolicyV1;
-  readonly policyDigest: Digest32V1;
-}
+export type Rfc64PublicCatalogAuthorizationV1 = Rfc64CatalogAccessAuthorizationV1;
 
 export interface Rfc64PublicCatalogControlObjectReaderV1 {
   getVerifiedObject(input: {
@@ -142,8 +150,10 @@ export interface FetchedRfc64PublicCatalogHeadV1 {
 
 export interface Rfc64PublicCatalogTransportOptionsV1 {
   readonly controlObjects: Rfc64PublicCatalogControlObjectReaderV1;
-  /** Must consult accepted current policy state, not the untrusted wire hint. */
-  readonly authorizeOpenCatalogOperation: (
+  /** Preferred V2 contract: the accepted-current access-policy registry. */
+  readonly authorizeCatalogOperation?: Rfc64CatalogAccessPolicyRegistryV1['authorize'];
+  /** @deprecated Gate-1 compatibility until the service wiring migrates. */
+  readonly authorizeOpenCatalogOperation?: (
     input: Rfc64PublicCatalogAuthorizationInputV1,
   ) => Promise<Rfc64PublicCatalogAuthorizationV1 | null>;
   /** Generic envelope cryptography only; object-specific head/scope binding is local. */
@@ -181,15 +191,18 @@ export class Rfc64PublicCatalogTransportErrorV1 extends Error {
 }
 
 /**
- * Small public/open RFC-64 transport slice.
+ * Small RFC-64 author-catalog transport slice.
  *
  * It deliberately does not select peers, activate catalog state, admit candidate
- * rows, or support invite-only policy. Announcements are only untrusted hints;
+ * rows. Announcements are only untrusted hints;
  * every served and received head is fetched by both exact digests, structurally
  * bound to the hint, and reverified with the generic signature verifier.
  */
 export class Rfc64PublicCatalogTransportV1 {
   #started = false;
+  readonly #authorizeCatalogOperation: (
+    input: Rfc64PublicCatalogAuthorizationInputV1,
+  ) => Promise<Rfc64PublicCatalogAuthorizationV1 | null>;
 
   constructor(
     private readonly router: ProtocolRouter,
@@ -198,9 +211,11 @@ export class Rfc64PublicCatalogTransportV1 {
     if (typeof options?.controlObjects?.getVerifiedObject !== 'function') {
       fail('catalog-transport-input', 'controlObjects.getVerifiedObject must be a function');
     }
-    if (typeof options.authorizeOpenCatalogOperation !== 'function') {
-      fail('catalog-transport-input', 'authorizeOpenCatalogOperation must be a function');
-    }
+    this.#authorizeCatalogOperation = normalizeRfc64CatalogTransportAuthorizerV1({
+      current: options.authorizeCatalogOperation,
+      legacyOpen: options.authorizeOpenCatalogOperation,
+      invalidConfiguration: (message) => fail('catalog-transport-input', message),
+    });
     if (typeof options.verifyIssuerSignature !== 'function') {
       fail('catalog-transport-input', 'verifyIssuerSignature must be a function');
     }
@@ -250,12 +265,16 @@ export class Rfc64PublicCatalogTransportV1 {
     this.requireStarted();
     const peerId = snapshotPeerId(remotePeerId);
     const announcement = parseAnnouncement(encodeAnnouncement(announcementInput));
-    await this.requireOpenPolicy('announce-outbound', peerId, announcement);
-    const response = await this.router.send(
+    const response = await this.withCurrentCatalogPolicy(
+      'announce-outbound',
       peerId,
-      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
-      encodeAnnouncement(announcement),
-      sendOptions,
+      announcement,
+      () => this.router.send(
+        peerId,
+        RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+        encodeAnnouncement(announcement),
+        sendOptions,
+      ),
     );
     if (response.byteLength === 1 && response[0] === ANNOUNCEMENT_DENIED) {
       fail('catalog-transport-policy-denied', 'remote peer denied the catalog-head announcement');
@@ -263,7 +282,6 @@ export class Rfc64PublicCatalogTransportV1 {
     if (response.byteLength !== 1 || response[0] !== ACK[0]) {
       fail('catalog-transport-wire', 'catalog-head announcement returned an invalid acknowledgement');
     }
-    await this.requireOpenPolicy('announce-outbound', peerId, announcement);
   }
 
   async fetchCatalogHead(
@@ -274,19 +292,25 @@ export class Rfc64PublicCatalogTransportV1 {
     this.requireStarted();
     const peerId = snapshotPeerId(remotePeerId);
     const announcement = parseAnnouncement(encodeAnnouncement(announcementInput));
-    await this.requireOpenPolicy('fetch-outbound', peerId, announcement);
     const request = requestFromAnnouncement(announcement);
-    const response = await this.router.send(
+    const response = await this.withCurrentCatalogPolicy(
+      'fetch-outbound',
       peerId,
-      RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
-      encodeFetchRequest(request),
-      sendOptions,
+      announcement,
+      () => this.router.send(
+        peerId,
+        RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+        encodeFetchRequest(request),
+        sendOptions,
+      ),
     );
     const envelope = parseFetchResponse(response);
-    await this.requireOpenPolicy('fetch-outbound', peerId, announcement);
     if (envelope === null) return null;
     assertHeadMatchesAnnouncement(envelope, announcement);
-    const issuerSignature = await this.verifyExactIssuerSignature(envelope);
+    const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
+      () => this.requireCatalogPolicy('fetch-outbound', peerId, announcement),
+      () => this.verifyExactIssuerSignature(envelope),
+    );
     return Object.freeze({
       envelope: deepFreeze(envelope),
       issuerSignature,
@@ -300,11 +324,13 @@ export class Rfc64PublicCatalogTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const announcement = parseAnnouncement(data);
-    if (!await this.isOpenPolicy('announce-inbound', remotePeerId, announcement)) {
-      return Uint8Array.of(ANNOUNCEMENT_DENIED);
-    }
-    await this.options.onCatalogHeadAvailable(announcement, remotePeerId);
-    if (!await this.isOpenPolicy('announce-inbound', remotePeerId, announcement)) {
+    const admitted = await this.withAuthorizedCurrentCatalogPolicy(
+      'announce-inbound',
+      remotePeerId,
+      announcement,
+      () => this.options.onCatalogHeadAvailable(announcement, remotePeerId),
+    );
+    if (!admitted.authorized) {
       return Uint8Array.of(ANNOUNCEMENT_DENIED);
     }
     return ACK;
@@ -317,53 +343,65 @@ export class Rfc64PublicCatalogTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const request = parseFetchRequest(data);
-    if (!await this.isOpenPolicy('fetch-inbound', remotePeerId, request)) {
+    const served = await this.withAuthorizedCurrentCatalogPolicy(
+      'fetch-inbound',
+      remotePeerId,
+      request,
+      async () => {
+        const stored = await this.options.controlObjects.getVerifiedObject({
+          objectDigest: request.catalogHeadObjectDigest,
+          signatureVariantDigest: request.signatureVariantDigest,
+          verifyIssuerSignature: this.options.verifyIssuerSignature,
+        });
+        if (stored === null) return null;
+        let envelope: SignedAuthorCatalogHeadEnvelopeV1;
+        try {
+          assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+          envelope = stored.envelope;
+          assertHeadMatchesRequest(envelope, request);
+          assertExactIssuerSignatureProof(envelope, stored.issuerSignature);
+        } catch (cause) {
+          fail(
+            'catalog-transport-object-mismatch',
+            'stored object is not the exact requested author-catalog head',
+            cause,
+          );
+        }
+        const envelopeBytes = canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1(envelope);
+        const response = new Uint8Array(1 + envelopeBytes.byteLength);
+        response[0] = FETCH_FOUND;
+        response.set(envelopeBytes, 1);
+        if (response.byteLength > RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1) {
+          fail('catalog-transport-wire', 'author-catalog head exceeds the v1 fetch response cap');
+        }
+        return response;
+      },
+    );
+    if (!served.authorized) {
       return Uint8Array.of(FETCH_DENIED);
     }
-    const stored = await this.options.controlObjects.getVerifiedObject({
-      objectDigest: request.catalogHeadObjectDigest,
-      signatureVariantDigest: request.signatureVariantDigest,
-      verifyIssuerSignature: this.options.verifyIssuerSignature,
-    });
-    if (stored === null) {
-      if (!await this.isOpenPolicy('fetch-inbound', remotePeerId, request)) {
-        return Uint8Array.of(FETCH_DENIED);
-      }
-      return Uint8Array.of(FETCH_NOT_FOUND);
-    }
-    let envelope: SignedAuthorCatalogHeadEnvelopeV1;
-    try {
-      assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-      envelope = stored.envelope;
-      assertHeadMatchesRequest(envelope, request);
-      assertExactIssuerSignatureProof(envelope, stored.issuerSignature);
-    } catch (cause) {
-      fail(
-        'catalog-transport-object-mismatch',
-        'stored object is not the exact requested author-catalog head',
-        cause,
-      );
-    }
-    const envelopeBytes = canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1(envelope);
-    const response = new Uint8Array(1 + envelopeBytes.byteLength);
-    response[0] = FETCH_FOUND;
-    response.set(envelopeBytes, 1);
-    if (response.byteLength > RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1) {
-      fail('catalog-transport-wire', 'author-catalog head exceeds the v1 fetch response cap');
-    }
-    if (!await this.isOpenPolicy('fetch-inbound', remotePeerId, request)) {
-      return Uint8Array.of(FETCH_DENIED);
-    }
-    return response;
+    return served.value ?? Uint8Array.of(FETCH_NOT_FOUND);
   }
 
-  private async isOpenPolicy(
+  private async withAuthorizedCurrentCatalogPolicy<Value>(
+    operation: Rfc64PublicCatalogOperationV1,
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    work: () => Value | Promise<Value>,
+  ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
+    return withAuthorizedCurrentRfc64CatalogPolicyV1(
+      () => this.isCatalogPolicyAuthorized(operation, remotePeerId, scope),
+      work,
+    );
+  }
+
+  private async isCatalogPolicyAuthorized(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
     scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
   ): Promise<boolean> {
     try {
-      await this.requireOpenPolicy(operation, remotePeerId, scope);
+      await this.requireCatalogPolicy(operation, remotePeerId, scope);
       return true;
     } catch (cause) {
       if (
@@ -374,7 +412,19 @@ export class Rfc64PublicCatalogTransportV1 {
     }
   }
 
-  private async requireOpenPolicy(
+  private withCurrentCatalogPolicy<Value>(
+    operation: Rfc64PublicCatalogOperationV1,
+    remotePeerId: string,
+    scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
+    work: () => Value | Promise<Value>,
+  ): Promise<Value> {
+    return withCurrentRfc64CatalogPolicyV1(
+      () => this.requireCatalogPolicy(operation, remotePeerId, scope),
+      work,
+    );
+  }
+
+  private async requireCatalogPolicy(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
     scope: Rfc64PublicCatalogHeadAnnouncementV1 | Rfc64PublicCatalogHeadFetchRequestV1,
@@ -390,12 +440,15 @@ export class Rfc64PublicCatalogTransportV1 {
     }) satisfies Rfc64PublicCatalogAuthorizationInputV1;
     let authorization: Rfc64PublicCatalogAuthorizationV1 | null;
     try {
-      authorization = await this.options.authorizeOpenCatalogOperation(input);
+      authorization = await this.#authorizeCatalogOperation(input);
     } catch (cause) {
-      fail('catalog-transport-policy-denied', 'open catalog policy authorization failed', cause);
+      fail('catalog-transport-policy-denied', 'catalog access-policy authorization failed', cause);
     }
-    if (authorization === null || authorization.accessPolicy !== 0) {
-      fail('catalog-transport-policy-denied', 'catalog operation is not authorized by open access policy');
+    if (
+      authorization === null
+      || (authorization.accessPolicy !== 0 && authorization.accessPolicy !== 1)
+    ) {
+      fail('catalog-transport-policy-denied', 'catalog operation is not access-policy authorized');
     }
     try {
       assertCanonicalDigest(authorization.policyDigest, 'authorized policyDigest');
