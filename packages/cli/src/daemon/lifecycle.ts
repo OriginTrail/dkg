@@ -149,6 +149,7 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
@@ -1746,6 +1747,9 @@ export async function runDaemonInner(
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
+    // #1836 — forward the operator retry budget to the agent so its own
+    // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
+    publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
@@ -1964,10 +1968,19 @@ export async function runDaemonInner(
   let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
   let shuttingDown = false;
 
-  const publisherControl = createPublisherControlFromStore(
-    agent.store,
-    createPublicSnapshotStore(dkgDir(), config),
-  );
+  const publisherControl = createPublisherControlFromStore(agent.store, {
+    publicSnapshotStore: createPublicSnapshotStore(dkgDir(), config),
+    // #1836 — the daemon admission instance MUST carry the operator's retry
+    // budget; without it every API-admitted VM-publish job was stamped with the
+    // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
+    maxRetries: config.publisher?.maxRetries,
+  });
+  // #1828 — one-time idempotent backfill of the durable-admission intent index
+  // for VM-publish jobs admitted before it existed. Additive-only (RDF set
+  // semantics), so it is safe here — before the runner starts — and fail-open so
+  // a backfill hiccup never blocks boot. Contract unit-tested in
+  // vm-publish-intent-backfill.test.ts.
+  await backfillVmPublishIntentIndexOnBoot(publisherControl, log);
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
     log(

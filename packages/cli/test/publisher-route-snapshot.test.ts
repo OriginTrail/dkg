@@ -45,7 +45,7 @@ describe('publisher routes with disk public snapshot refs', () => {
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Route Snapshot"', graph: '' },
     ], { publisherPeerId: 'peer-route' });
 
-    const publisherControl = createPublisherControlFromStore(store, publicSnapshotStore);
+    const publisherControl = createPublisherControlFromStore(store, { publicSnapshotStore });
     const jobId = await seedLegacyRawLiftTestJob(store, {
       contextGraphId: CONTEXT_GRAPH,
       swmId: write.shareOperationId,
