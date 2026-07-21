@@ -257,7 +257,6 @@ import {
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
-import { retryCatchupPlaneOnBackpressure } from './sync/catchup-backpressure-retry.js';
 import { classifyDurableProgress } from './sync/durable-progress.js';
 import {
   getSyncBackpressureSnapshot,
@@ -608,16 +607,12 @@ function contextGraphCatchupSingleFlightKey(params: {
   includeSharedMemory: boolean;
   maxPeers?: number;
   peerRotationKey?: string;
-  priority?: number;
-  retryDeferredBackpressure?: boolean;
 }): string {
   return syncSingleFlightKey('context-graph-catchup', {
     contextGraphId: params.contextGraphId,
     includeSharedMemory: params.includeSharedMemory,
     maxPeers: normalizedCatchupMaxPeers(params.maxPeers),
     peerRotationKey: params.peerRotationKey ?? null,
-    priority: params.priority ?? null,
-    retryDeferredBackpressure: params.retryDeferredBackpressure === true,
   });
 }
 
@@ -631,7 +626,6 @@ function durableSyncSingleFlightKey(params: {
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
   exactAssetUals?: readonly string[];
-  priority?: number;
 }): string | null {
   if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
     return null;
@@ -643,7 +637,6 @@ function durableSyncSingleFlightKey(params: {
     totalTimeoutMs: params.totalTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
-    priority: params.priority ?? null,
   });
 }
 
@@ -653,7 +646,6 @@ function sharedMemorySyncSingleFlightKey(params: {
   stopOnBackoffWorthyFailure?: boolean;
   publicContextGraphIds: readonly string[];
   privateRecoverFromCurator: readonly string[];
-  priority?: number;
 }): string {
   return syncSingleFlightKey('shared-memory-sync', {
     remotePeerId: params.remotePeerId,
@@ -661,7 +653,6 @@ function sharedMemorySyncSingleFlightKey(params: {
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
     publicContextGraphIds: params.publicContextGraphIds,
     privateRecoverFromCurator: params.privateRecoverFromCurator,
-    priority: params.priority ?? null,
   });
 }
 
@@ -4051,13 +4042,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
     if (asChangelogReader(this.store) !== null && contextGraphIds.length > 0) {
       try {
-        const lane = await this.runChangelogLane(
-          ctx,
-          remotePeerId,
-          contextGraphIds,
-          onAccessDenied,
-          options?.priority,
-        );
+        const lane = await this.runChangelogLane(ctx, remotePeerId, contextGraphIds, onAccessDenied);
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
         if ((changelogResult.deferredBackpressure ?? 0) > 0) return changelogResult;
@@ -4157,7 +4142,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       exactAssetUals: options?.exactAssetUals,
-      priority: options?.priority,
     });
     return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
   }
@@ -4309,7 +4293,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphIds: string[],
     onAccessDenied?: (contextGraphId: string) => void,
-    priority?: number,
   ): Promise<{ result: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
@@ -4350,7 +4333,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         item.lane,
         item.operationId,
         run,
-        priority,
       ),
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({
@@ -4779,8 +4761,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       stopOnBackoffWorthyFailure?: boolean;
       sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
-      /** Admission override for foreground catch-up. */
-      priority?: number;
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
@@ -4847,7 +4827,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       stopOnBackoffWorthyFailure,
       publicContextGraphIds,
       privateRecoverFromCurator,
-      priority: options?.priority,
     });
 
     const runSync = async (): Promise<SharedMemorySyncResult> => {
@@ -5001,7 +4980,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           run,
-          options?.priority,
         ),
         merge: mergeSharedMemorySyncResults,
         markDeferred: (summary) => ({
@@ -5106,15 +5084,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
-    options?: {
-      includeSharedMemory?: boolean;
-      maxPeers?: number;
-      peerRotationKey?: string;
-      /** Admission override used by explicit foreground catch-up callers. */
-      priority?: number;
-      /** Retry only locally-deferred planes; completed planes are not rerun. */
-      retryDeferredBackpressure?: boolean;
-    },
+    options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string },
   ): Promise<{
     /** Ordered connected peers before optional maxPeers windowing. */
     connectedPeers: number;
@@ -5167,8 +5137,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       includeSharedMemory,
       maxPeers: options?.maxPeers,
       peerRotationKey: options?.peerRotationKey,
-      priority: options?.priority,
-      retryDeferredBackpressure: options?.retryDeferredBackpressure,
     });
 
     return runSyncSingleFlight(this, singleFlightKey, async (): Promise<ContextGraphCatchupResult> => {
@@ -5218,8 +5186,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
         totalPeers: orderedPeers.length,
-        priority: options?.priority,
-        retryDeferredBackpressure: options?.retryDeferredBackpressure,
       });
     });
   }
@@ -5310,11 +5276,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
-    stats?: {
-      totalPeers?: number;
-      priority?: number;
-      retryDeferredBackpressure?: boolean;
-    },
+    stats?: { totalPeers?: number },
   ): Promise<{
     /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
@@ -5470,37 +5432,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncCapable,
       CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
       async (remotePeerId) => {
-        const runDurable = () => this.syncFromPeerDetailed(
+        const durable = await this.syncFromPeerDetailed(
           remotePeerId,
           [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          stats?.priority === undefined ? undefined : { priority: stats.priority },
-        );
-        const durable = await (
-          stats?.retryDeferredBackpressure
-            ? retryCatchupPlaneOnBackpressure(runDurable)
-            : runDurable()
         ).catch(emptyDurable);
-
-        // SWM authorization/materialization depends on durable metadata. If
-        // durable admission remains deferred, do not manufacture a premature
-        // SWM denial. Once durable completes, retry only SWM; a successful VM
-        // plane is never fetched again just because SWM hit local pressure.
-        let shared: SharedMemorySyncResult | null = null;
-        if (includeSharedMemory && (durable.deferredBackpressure ?? 0) === 0) {
-          const runShared = () => this.syncSharedMemoryFromPeerDetailed(
-            remotePeerId,
-            [contextGraphId],
-            stats?.priority === undefined ? undefined : { priority: stats.priority },
-          );
-          shared = await (
-            stats?.retryDeferredBackpressure
-              ? retryCatchupPlaneOnBackpressure(runShared)
-              : runShared()
-          ).catch(emptyShared);
-        }
+        const shared = includeSharedMemory
+          ? await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]).catch(emptyShared)
+          : null;
         return { durable, shared };
       },
     );

@@ -3,7 +3,6 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   classifyDurableProgress,
-  FOREGROUND_CATCHUP_SYNC_PRIORITY,
   type DKGAgent,
   type DurableProgressSummary,
 } from '@origintrail-official/dkg-agent';
@@ -292,22 +291,11 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'syncDurable': {
         const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
-        );
+        return agent.syncFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'syncSharedMemory': {
         const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncSharedMemoryFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
-        );
+        return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
       }
       case 'finalizeCatchup': {
         const [contextGraphId] = args as [string, number, number];
@@ -330,8 +318,6 @@ class InlineCatchupRunner implements CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
-      priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-      retryDeferredBackpressure: true,
     }) as Promise<CatchupJobResult>;
   }
 

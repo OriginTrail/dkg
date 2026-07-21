@@ -54,11 +54,7 @@ function durableContext(contextGraphIds: string[]) {
 
 function lifecycleAgent(
   priorities: Record<string, number>,
-  runAdmission: (
-    contextGraphId: string,
-    work: () => Promise<unknown>,
-    priorityOverride?: number,
-  ) => Promise<unknown>,
+  runAdmission: (contextGraphId: string, work: () => Promise<unknown>) => Promise<unknown>,
 ) {
   return {
     config: { syncContextGraphPriorities: priorities },
@@ -99,8 +95,7 @@ function lifecycleAgent(
       _lane: string,
       _label: string,
       work: () => Promise<unknown>,
-      priorityOverride?: number,
-    ) => runAdmission(contextGraphId, work, priorityOverride),
+    ) => runAdmission(contextGraphId, work),
     log: { info: noop, warn: noop, debug: noop },
   };
 }
@@ -124,27 +119,6 @@ describe('requester per-CG priority admission', () => {
     );
 
     expect(admissions).toEqual(['high', 'default', 'low']);
-  });
-
-  it('passes a foreground durable priority override through admission', async () => {
-    const priorityOverrides: Array<number | undefined> = [];
-    const agent = lifecycleAgent({}, async (_contextGraphId, work, priorityOverride) => {
-      priorityOverrides.push(priorityOverride);
-      return work();
-    });
-
-    await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(
-      agent,
-      ctx,
-      'peer',
-      ['foreground'],
-      undefined,
-      undefined,
-      undefined,
-      { priority: 2_000 },
-    );
-
-    expect(priorityOverrides).toEqual([2_000]);
   });
 
   it('preserves completed durable progress when a later admission is deferred', async () => {
@@ -174,7 +148,6 @@ describe('requester per-CG priority admission', () => {
 
   it('marks changelog admission pressure deferred without routing that graph to legacy', async () => {
     const admissions: string[] = [];
-    const priorityOverrides: Array<number | undefined> = [];
     const emptyResult = {
       insertedTriples: 0,
       fetchedMetaTriples: 0,
@@ -206,10 +179,8 @@ describe('requester per-CG priority admission', () => {
         _lane: string,
         _label: string,
         work: () => Promise<unknown>,
-        priorityOverride?: number,
       ) => {
         admissions.push(contextGraphId);
-        priorityOverrides.push(priorityOverride);
         if (contextGraphId === 'second') {
           throw new SyncBackpressureBusyError('queue full');
         }
@@ -224,20 +195,16 @@ describe('requester per-CG priority admission', () => {
       ctx,
       'peer',
       ['first', 'second', 'third'],
-      undefined,
-      2_000,
     );
 
     expect(admissions).toEqual(['first', 'second']);
     expect(lane.result.completedPhases).toBe(1);
     expect(lane.result.deferredBackpressure).toBe(1);
     expect(lane.remainingLegacyCgs).toEqual([]);
-    expect(priorityOverrides).toEqual([2_000, 2_000]);
   });
 
   it('preserves completed shared-memory progress when a later admission is deferred', async () => {
     const admissions: string[] = [];
-    const priorityOverrides: Array<number | undefined> = [];
     const warnings: string[] = [];
     const contextGraphIds = ['first', 'second', 'third'];
     const agent = {
@@ -272,10 +239,8 @@ describe('requester per-CG priority admission', () => {
         _lane: string,
         _label: string,
         work: () => Promise<unknown>,
-        priorityOverride?: number,
       ) => {
         admissions.push(contextGraphId);
-        priorityOverrides.push(priorityOverride);
         if (contextGraphId === 'second') {
           throw new SyncBackpressureBusyError('queue full');
         }
@@ -298,7 +263,6 @@ describe('requester per-CG priority admission', () => {
         privateRecoverFromCurator: [],
         eligibleContextGraphIds: contextGraphIds,
       },
-      priority: 2_000,
     });
 
     expect(admissions).toEqual(['first', 'second']);
@@ -308,7 +272,6 @@ describe('requester per-CG priority admission', () => {
     expect(summary.deferredBackpressure).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.backoffWorthyFailures).toBe(0);
-    expect(priorityOverrides).toEqual([2_000, 2_000]);
   });
 
   it('counts several failed Context Graphs from one remote as one failed peer', async () => {

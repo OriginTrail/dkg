@@ -1,9 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import {
-  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-  mapWithConcurrency,
-  retryCatchupPlaneOnBackpressure,
-} from '@origintrail-official/dkg-agent';
+import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS, mapWithConcurrency } from '@origintrail-official/dkg-agent';
 import {
   catchupPeerResponded,
   catchupPeerSucceeded,
@@ -196,22 +192,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable,
     CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
     async (peerId) => {
-      const rawDurable = await retryCatchupPlaneOnBackpressure(
-        () => invoke<any>('syncDurable', peerId, request.contextGraphId),
-      ).catch(() => emptyDurable());
+      const rawDurable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
       const durable = {
         ...rawDurable,
         verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
       };
-
-      // Durable metadata is required to authorize/materialize SWM. If VM is
-      // still locally deferred after bounded retries, leave SWM untouched for
-      // this peer. If only SWM is deferred, retry just SWM so the already-
-      // completed durable plane is never fetched a second time.
-      const shared = request.includeSharedMemory && (durable.deferredBackpressure ?? 0) === 0
-        ? await retryCatchupPlaneOnBackpressure(
-            () => invoke<any>('syncSharedMemory', peerId, request.contextGraphId),
-          ).catch(() => emptyShared())
+      const shared = request.includeSharedMemory
+        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
         : null;
       return { durable, shared };
     },
