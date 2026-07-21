@@ -59,6 +59,7 @@ export class CountingStore implements TripleStore {
 export class ControlledProbeStore extends CountingStore {
   private gateProbes = false;
   private readonly pendingProbeReleases: Array<() => void> = [];
+  private readonly probeArrivalWaiters: Array<() => void> = [];
 
   enableProbeGates(): void {
     this.gateProbes = true;
@@ -69,12 +70,8 @@ export class ControlledProbeStore extends CountingStore {
   }
 
   async waitForProbe(): Promise<void> {
-    for (let attempt = 0; attempt < 50 && this.pendingProbeReleases.length === 0; attempt++) {
-      await Promise.resolve();
-    }
-    if (this.pendingProbeReleases.length === 0) {
-      throw new Error('Timed out waiting for controlled hasGraph probe');
-    }
+    if (this.pendingProbeReleases.length > 0) return;
+    await new Promise<void>((resolve) => { this.probeArrivalWaiters.push(resolve); });
   }
 
   releaseProbe(): void {
@@ -86,7 +83,10 @@ export class ControlledProbeStore extends CountingStore {
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     const present = await super.hasGraph(graphUri, options);
     if (this.gateProbes) {
-      await new Promise<void>((resolve) => { this.pendingProbeReleases.push(resolve); });
+      await new Promise<void>((resolve) => {
+        this.pendingProbeReleases.push(resolve);
+        for (const notify of this.probeArrivalWaiters.splice(0)) notify();
+      });
     }
     return present;
   }
