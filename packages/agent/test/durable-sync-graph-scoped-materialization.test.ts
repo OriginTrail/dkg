@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -740,6 +740,122 @@ describe('durable graph-scoped KA materialization', () => {
 
     expect(exactAssets).toHaveLength(1);
     expect(inserted.filter((quad) => quad.subject === legacyUal)).toEqual(legacyMeta);
+  });
+
+  it('retries transient chain verification failures before advancing checkpoints', async () => {
+    vi.useFakeTimers();
+    try {
+      const v2Data = dataQuad(2);
+      const v2Meta = metadata(2);
+      const checkpointAttempts: number[] = [];
+      const warnings: string[] = [];
+      let attempts = 0;
+
+      const sync = runDurableSync({
+        ctx,
+        remotePeerId: 'peer-transient-chain-read',
+        contextGraphIds: [contextGraphId],
+        createContextGraphSyncDeadline: () => Date.now() + 60_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+          phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+        ),
+        processDurableBatchInWorker: async () => ({
+          verifiedData: [v2Data],
+          verifiedMeta: v2Meta,
+          verifiedGraphScopedDataGraphs: [assertionGraph],
+          totalFetchedDataQuads: 1,
+          totalFetchedMetaQuads: v2Meta.length,
+          rejectedKcs: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 0,
+          verifiedPrivateOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+        }),
+        storeInsert: async () => {},
+        storeGraphScopedAsset: async () => {
+          attempts += 1;
+          if (attempts < 3) {
+            throw Object.assign(
+              new Error('publish provenance is not chain-valid'),
+              { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+            );
+          }
+          return 'applied';
+        },
+        deleteCheckpoint: () => { checkpointAttempts.push(attempts); },
+        setCheckpoint: () => {},
+        logInfo: () => {},
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logDebug: () => {},
+      });
+
+      await vi.runAllTimersAsync();
+      const summary = await sync;
+
+      expect(attempts).toBe(3);
+      expect(warnings).toHaveLength(2);
+      expect(warnings.every((message) => message.includes(
+        'Retrying graph-scoped durable materialization',
+      ))).toBe(true);
+      expect(checkpointAttempts).toEqual([3, 3]);
+      expect(summary.failedPhases).toBe(0);
+      expect(summary.insertedDataTriples).toBe(1);
+      expect(summary.insertedMetaTriples).toBe(v2Meta.length + 1);
+      expect(summary.insertedTriples).toBe(
+        summary.insertedDataTriples + summary.insertedMetaTriples,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry deterministic chain root mismatches', async () => {
+    const v2Data = dataQuad(2);
+    const v2Meta = metadata(2);
+    let attempts = 0;
+    const warnings: string[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-invalid-root',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [v2Data],
+        verifiedMeta: v2Meta,
+        verifiedGraphScopedDataGraphs: [assertionGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: v2Meta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => {
+        attempts += 1;
+        throw Object.assign(
+          new Error('latest on-chain Merkle root does not match'),
+          { code: 'VM_CHAIN_ROOT_MISMATCH' },
+        );
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: (_ctx, message) => { warnings.push(message); },
+      logDebug: () => {},
+    });
+
+    expect(attempts).toBe(1);
+    expect(warnings.some((message) => message.includes(
+      'Retrying graph-scoped durable materialization',
+    ))).toBe(false);
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedTriples).toBe(0);
   });
 
   it('rejects a peer assertion version that does not match chain root history', async () => {

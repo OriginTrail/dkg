@@ -221,6 +221,17 @@ describe('error-tags: permanent-rejection classification', () => {
   });
 });
 
+describe('error-tags: retry classification', () => {
+  it('treats exhausted chain RPC reads as backoff-worthy', () => {
+    const error = new Error(
+      'cgStorage.kaToContextGraph read failed on all configured RPC endpoints: '
+      + 'RPC #3 timed out after 4000ms',
+    );
+    expect(isSyncBackoffWorthyError(error)).toBe(true);
+    expect(isSyncPermanentRejection(error)).toBe(false);
+  });
+});
+
 describe('runDurableSync — the poison-page retry-loop regression', () => {
   const bad = quad(lit(120_000)); // the incident shape: a ~118KB agents-graph literal
   const goodA = quad(lit(10), DATA_GRAPH, 'http://ex.org/a');

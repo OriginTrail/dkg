@@ -34,6 +34,16 @@ const BATCH_ID = `${DKG_NS}batchId`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
 const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const GRAPH_SCOPED_MATERIALIZATION_MAX_ATTEMPTS = 5;
+const GRAPH_SCOPED_MATERIALIZATION_RETRY_BASE_MS = 1_000;
+const GRAPH_SCOPED_MATERIALIZATION_RETRY_MAX_MS = 8_000;
+const RETRYABLE_CHAIN_MISMATCH_CODES = new Set([
+  // These checks can fail closed when an underlying RPC/name-hash read is
+  // temporarily unavailable. Every retry repeats the complete chain binding
+  // and provenance verification before any store write.
+  'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+  'VM_CHAIN_PROVENANCE_MISMATCH',
+]);
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
   `${DKG_NS}accessPolicy`,
@@ -166,6 +176,40 @@ export function filterExactAssetDurablePayload(
     descriptorCoverageComplete: returnedDescriptors.size === exactUals.size
       && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
   };
+}
+
+function isRetryableGraphScopedMaterializationError(error: unknown): boolean {
+  if (isSyncBackoffWorthyError(error)) return true;
+  const code = error && typeof error === 'object'
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return typeof code === 'string' && RETRYABLE_CHAIN_MISMATCH_CODES.has(code);
+}
+
+async function storeGraphScopedAssetWithRetry(
+  storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>,
+  asset: VerifiedGraphScopedAsset,
+  onRetry: (error: unknown, attempt: number) => void,
+): Promise<GraphScopedMaterializationOutcome> {
+  for (let attempt = 1; attempt <= GRAPH_SCOPED_MATERIALIZATION_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await storeGraphScopedAsset(asset);
+    } catch (error) {
+      if (
+        !isRetryableGraphScopedMaterializationError(error)
+        || attempt >= GRAPH_SCOPED_MATERIALIZATION_MAX_ATTEMPTS
+      ) {
+        throw error;
+      }
+      onRetry(error, attempt);
+      const delayMs = Math.min(
+        GRAPH_SCOPED_MATERIALIZATION_RETRY_MAX_MS,
+        GRAPH_SCOPED_MATERIALIZATION_RETRY_BASE_MS * (2 ** (attempt - 1)),
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error('Graph-scoped durable materialization retry loop exhausted unexpectedly');
 }
 
 export async function runDurableSync(
@@ -535,7 +579,19 @@ export async function runDurableSync(
         );
       }
       for (const asset of partitioned.assets) {
-        const outcome = await storeGraphScopedAsset!(asset);
+        const outcome = await storeGraphScopedAssetWithRetry(
+          storeGraphScopedAsset!,
+          asset,
+          (error, attempt) => {
+            logWarn(
+              ctx,
+              `Retrying graph-scoped durable materialization for ${asset.ual} `
+              + `after transient chain verification failure `
+              + `(${attempt}/${GRAPH_SCOPED_MATERIALIZATION_MAX_ATTEMPTS}): `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            );
+          },
+        );
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does
