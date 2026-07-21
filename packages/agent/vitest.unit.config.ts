@@ -26,6 +26,7 @@ export default defineConfig({
       "test/sync-envelope-cursor.test.ts",
       "test/exact-assets.test.ts",
       "test/exact-asset-responder.test.ts",
+      "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",
       "test/swm/host-mode-store.test.ts",

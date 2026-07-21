@@ -3729,6 +3729,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!isTargetCurrent() || remaining.length === 0) break;
       const connectedPeer = connectedByPeerId.get(peerId);
       if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) continue;
+      // Network boundary: a merely-connected peer is not necessarily admitted
+      // to this DKG network (curator hints and getConnections() both predate
+      // the identity probe). Never send an authenticated exact request to an
+      // unverified or rejected peer.
+      if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
 
       // The wire protocol rejects filters above MAX_EXACT_SYNC_ASSETS, so a
       // scan batch configured larger than the protocol cap is requested in

@@ -198,30 +198,45 @@ export async function reconcileContextGraph(
       : Math.max(1, Math.floor(configuredConcurrency));
     const outcomes = new Map<number, OrdinalOutcome>();
     let nextOrdinalIndex = 0;
+    let workerFailed = false;
+    let workerError: unknown;
 
     const runOrdinalWorker = async (): Promise<void> => {
-      while (!staleTarget) {
-        const index = nextOrdinalIndex;
-        nextOrdinalIndex += 1;
-        if (index >= ordinals.length) return;
+      // Contain failures instead of racing them: a thrown ordinal must not
+      // leave sibling workers running past this pass's lifetime (their network
+      // and store side effects would overlap the caller's retry). The first
+      // error stops dispatch across all workers, every in-flight ordinal is
+      // drained, and only then does the pass reject with that error.
+      try {
+        while (!staleTarget && !workerFailed) {
+          const index = nextOrdinalIndex;
+          nextOrdinalIndex += 1;
+          if (index >= ordinals.length) return;
 
-        if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
-          staleTarget = true;
-          return;
+          if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+            staleTarget = true;
+            return;
+          }
+          const ordinal = ordinals[index]!;
+          const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+          processed += 1;
+          if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+            staleTarget = true;
+            return;
+          }
+          outcomes.set(ordinal, outcome);
         }
-        const ordinal = ordinals[index]!;
-        const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
-        processed += 1;
-        if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
-          staleTarget = true;
-          return;
+      } catch (error) {
+        if (!workerFailed) {
+          workerFailed = true;
+          workerError = error;
         }
-        outcomes.set(ordinal, outcome);
       }
     };
 
     const workerCount = Math.min(ordinalConcurrency, ordinals.length);
     await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
+    if (workerFailed) throw workerError;
 
     const recoveryTargets = ordinals
       .map((ordinal) => outcomes.get(ordinal))
@@ -236,7 +251,15 @@ export async function reconcileContextGraph(
         recoveryTargets,
         headBlock,
       );
-      for (const [ordinal, outcome] of recovered) outcomes.set(ordinal, outcome);
+      // Recovery is the longest await in the pass; the binding can be repaired
+      // while it runs. Outcomes recovered under the old binding must never
+      // advance or persist cursor state for the rebound CG, so re-check before
+      // merging and treat staleness exactly like staleness during ordinal work.
+      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+        staleTarget = true;
+      } else {
+        for (const [ordinal, outcome] of recovered) outcomes.set(ordinal, outcome);
+      }
     }
 
     // Cursor state is deliberately updated in ordinal order even though chain
