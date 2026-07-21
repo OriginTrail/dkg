@@ -161,7 +161,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
-  it('preserves committed progress and returns 503 when a detailed durable phase fails', async () => {
+  it('preserves committed progress and returns 503 when a timed-out durable phase hard-fails', async () => {
     const syncFromPeer = vi.fn();
     const syncFromPeerDetailed = vi.fn(async () => detailedDurableResult({
       insertedTriples: 77_767,
@@ -170,6 +170,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       fetchedMetaTriples: 1_200,
       fetchedDataTriples: 159_744,
       completedPhases: 0,
+      timedOutPhases: 1,
       failedPhases: 1,
       backoffWorthyFailures: 1,
       complete: false,
@@ -222,6 +223,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
           durableDiagnostics: {
             insertedDataTriples: 77_197,
             insertedMetaTriples: 570,
+            timedOutPhases: 1,
             failedPhases: 1,
           },
         }],

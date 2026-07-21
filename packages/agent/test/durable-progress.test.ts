@@ -263,6 +263,28 @@ describe('durable terminal boundary model', () => {
       failedPhases: 3,
     });
   });
+
+  it('records diagnostic deltas additively while keeping peer failure idempotent', () => {
+    const accumulator = createDurableSyncAccumulator();
+    recordDurableSyncDiagnostics(accumulator, {
+      insertedTriples: 7,
+      failedPeers: 1,
+      failedPhases: 1,
+    });
+    recordDurableSyncDiagnostics(accumulator, {
+      insertedTriples: 5,
+      failedPeers: 1,
+      failedPhases: 2,
+    });
+    markDurableTerminalBoundary(accumulator, false);
+
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
+      complete: false,
+      insertedTriples: 12,
+      failedPeers: 1,
+      failedPhases: 3,
+    });
+  });
 });
 
 describe('durable result factories', () => {
