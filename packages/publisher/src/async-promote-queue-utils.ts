@@ -69,7 +69,7 @@ export const ACTIVE_PROMOTE_STATES: readonly PromoteJobState[] = [
 export const TERMINAL_PROMOTE_JOB_STATES: readonly PromoteJobState[] = ['succeeded', 'failed'];
 
 export function isTerminalPromoteJobState(state: PromoteJobState): boolean {
-  return state === 'succeeded' || state === 'failed';
+  return TERMINAL_PROMOTE_JOB_STATES.includes(state);
 }
 
 export function jobSubject(jobId: string): string {

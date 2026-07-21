@@ -22,6 +22,7 @@ export default defineConfig({
       "test/publish-foreign-author-resolution.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/promote-async-default-agent.test.ts",
+      "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/sync-envelope-cursor.test.ts",
       "test/exact-assets.test.ts",
