@@ -41,6 +41,7 @@ function fixture(): Record<string, unknown> {
       receiverPid: 101,
     },
     repository: { testedHeadCommit: 'a'.repeat(40), trackedSourceClean: true },
+    runtimeManifestDigest: digest('c'),
     schemaVersion: CP1_PUBLIC_SWM_PARITY_SCHEMA,
     status: 'PASS',
   };
@@ -64,5 +65,8 @@ test('rejects publish-axis, process-boundary, and byte-parity drift', () => {
   const changedBytes = structuredClone(fixture()) as { cells: Array<Record<string, unknown>> };
   changedBytes.cells[1]!.projectionNQuads = `${projection}# drift`;
   assert.throws(() => verifyCp1PublicSwmParity(changedBytes), /projectionNQuads/);
-});
 
+  const extraKey = structuredClone(fixture()) as Record<string, unknown>;
+  extraKey.unverified = true;
+  assert.throws(() => verifyCp1PublicSwmParity(extraKey), /keys differ/);
+});

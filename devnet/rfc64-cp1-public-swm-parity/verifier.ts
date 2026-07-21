@@ -12,19 +12,41 @@ export function semanticSha256(value: string): string {
 }
 
 export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown> {
-  const root = record(value, '$');
+  const root = closedRecord(value, '$', [
+    'cells',
+    'expectedProjectionNQuads',
+    'expectedSemanticSha256',
+    'peers',
+    'processBoundary',
+    'repository',
+    'runtimeManifestDigest',
+    'schemaVersion',
+    'status',
+  ]);
   exact(root.schemaVersion, CP1_PUBLIC_SWM_PARITY_SCHEMA, '$.schemaVersion');
   exact(root.status, 'PASS', '$.status');
-  const repository = record(root.repository, '$.repository');
-  string(repository.testedHeadCommit, '$.repository.testedHeadCommit');
+  digest(root.runtimeManifestDigest, '$.runtimeManifestDigest');
+  const repository = closedRecord(root.repository, '$.repository', [
+    'testedHeadCommit',
+    'trackedSourceClean',
+  ]);
+  const testedHeadCommit = string(repository.testedHeadCommit, '$.repository.testedHeadCommit');
+  if (!/^[0-9a-f]{40}$/u.test(testedHeadCommit)) {
+    fail('$.repository.testedHeadCommit', 'must be a full lowercase Git commit');
+  }
   exact(repository.trackedSourceClean, true, '$.repository.trackedSourceClean');
-  const boundary = record(root.processBoundary, '$.processBoundary');
+  const boundary = closedRecord(root.processBoundary, '$.processBoundary', [
+    'authorExitCode',
+    'authorPid',
+    'receiverExitCode',
+    'receiverPid',
+  ]);
   integer(boundary.authorPid, '$.processBoundary.authorPid');
   integer(boundary.receiverPid, '$.processBoundary.receiverPid');
   if (boundary.authorPid === boundary.receiverPid) fail('$.processBoundary', 'PIDs must differ');
   exact(boundary.authorExitCode, 0, '$.processBoundary.authorExitCode');
   exact(boundary.receiverExitCode, 0, '$.processBoundary.receiverExitCode');
-  const peers = record(root.peers, '$.peers');
+  const peers = closedRecord(root.peers, '$.peers', ['authorPeerId', 'receiverPeerId']);
   const authorPeerId = string(peers.authorPeerId, '$.peers.authorPeerId');
   const receiverPeerId = string(peers.receiverPeerId, '$.peers.receiverPeerId');
   if (authorPeerId === receiverPeerId) fail('$.peers', 'peer IDs must differ');
@@ -37,7 +59,23 @@ export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown
   }
   const cells = root.cells.map((entry, index) => {
     const path = `$.cells[${index}]`;
-    const cell = record(entry, path);
+    const cell = closedRecord(entry, path, [
+      'accessPolicy',
+      'activatedTripleCount',
+      'announcementPolicyDigest',
+      'announcedPeerId',
+      'appliedHeadStatus',
+      'authorPolicyDigest',
+      'bundleDigest',
+      'cell',
+      'contentDigest',
+      'contextGraphId',
+      'inventoryRowCount',
+      'projectionNQuads',
+      'publishPolicy',
+      'receiverPolicyDigest',
+      'semanticSha256',
+    ]);
     exact(cell.cell, CELLS[index], `${path}.cell`);
     exact(cell.accessPolicy, 0, `${path}.accessPolicy`);
     exact(cell.publishPolicy, index === 0 ? 1 : 0, `${path}.publishPolicy`);
@@ -70,6 +108,20 @@ function record(value: unknown, path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function closedRecord(
+  value: unknown,
+  path: string,
+  expectedKeys: readonly string[],
+): Record<string, unknown> {
+  const result = record(value, path);
+  const actual = Object.keys(result).sort();
+  const expected = [...expectedKeys].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail(path, `keys differ: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+  }
+  return result;
+}
+
 function string(value: unknown, path: string): string {
   if (typeof value !== 'string' || value.length === 0) fail(path, 'must be a non-empty string');
   return value;
@@ -99,4 +151,3 @@ function exact(actual: unknown, expected: unknown, path: string): void {
 function fail(path: string, message: string): never {
   throw new Error(`RFC64_CP1_PUBLIC_SWM_PARITY_INVALID at ${path}: ${message}`);
 }
-
