@@ -175,6 +175,42 @@ export interface DurableTerminalBoundaryOptions {
   readonly clearCompletedPhasesWhenIncomplete?: boolean;
 }
 
+export type DurableSyncCounterReducer = 'sum' | 'max';
+
+/**
+ * Canonical runtime metadata for every numeric field in DurableSyncResult.
+ * The satisfies clause makes a newly added counter a compile error until its
+ * aggregation policy is declared here. Consumers can also reuse this table for
+ * zero construction and normalized projections instead of duplicating fields.
+ */
+export const DURABLE_SYNC_COUNTER_REDUCERS = {
+  insertedTriples: 'sum',
+  fetchedMetaTriples: 'sum',
+  fetchedDataTriples: 'sum',
+  insertedMetaTriples: 'sum',
+  insertedDataTriples: 'sum',
+  bytesReceived: 'sum',
+  resumedPhases: 'sum',
+  timedOutPhases: 'sum',
+  completedPhases: 'sum',
+  checkpointAdvances: 'sum',
+  emptyResponses: 'sum',
+  metaOnlyResponses: 'sum',
+  verifiedPrivateOnlyResponses: 'sum',
+  dataRejectedMissingMeta: 'sum',
+  rejectedKcs: 'sum',
+  failedPeers: 'max',
+  failedPhases: 'sum',
+  deniedPhases: 'sum',
+  backoffWorthyFailures: 'sum',
+  deferredBackpressure: 'sum',
+} as const satisfies Readonly<Record<
+  Exclude<keyof DurableSyncResult, 'complete'>,
+  DurableSyncCounterReducer
+>>;
+
+export type DurableSyncCounterKey = keyof typeof DURABLE_SYNC_COUNTER_REDUCERS;
+
 /**
  * Internal durable aggregation state. The public `complete` verdict is absent
  * here by design: boundary aggregation and a finalized result must not share
@@ -214,45 +250,29 @@ function mergeDurableSyncDiagnostics(
   a: InitializedDurableSyncDiagnostics,
   b: InitializedDurableSyncDiagnostics,
 ): InitializedDurableSyncDiagnostics {
-  return {
-    insertedTriples: a.insertedTriples + b.insertedTriples,
-    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
-    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
-    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
-    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
-    bytesReceived: a.bytesReceived + b.bytesReceived,
-    resumedPhases: a.resumedPhases + b.resumedPhases,
-    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
-    completedPhases: a.completedPhases + b.completedPhases,
-    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
-    emptyResponses: a.emptyResponses + b.emptyResponses,
-    metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
-    verifiedPrivateOnlyResponses:
-      a.verifiedPrivateOnlyResponses + b.verifiedPrivateOnlyResponses,
-    dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
-    rejectedKcs: a.rejectedKcs + b.rejectedKcs,
-    // This is peer cardinality, not a per-CG failure count. All folded inputs
-    // belong to one remote peer, so several failed CGs still mean one peer.
-    failedPeers: Math.max(a.failedPeers, b.failedPeers),
-    failedPhases: a.failedPhases + b.failedPhases,
-    deniedPhases: a.deniedPhases + b.deniedPhases,
-    backoffWorthyFailures: a.backoffWorthyFailures + b.backoffWorthyFailures,
-    deferredBackpressure: a.deferredBackpressure + b.deferredBackpressure,
-  };
+  const merged = createDurableSyncDiagnosticsBase();
+  const counters = merged as Record<DurableSyncCounterKey, number>;
+  for (const key of Object.keys(DURABLE_SYNC_COUNTER_REDUCERS) as DurableSyncCounterKey[]) {
+    counters[key] = DURABLE_SYNC_COUNTER_REDUCERS[key] === 'max'
+      ? Math.max(a[key], b[key])
+      : a[key] + b[key];
+  }
+  return merged;
 }
 
-/** Fold two internal durable aggregates without manufacturing a public verdict. */
-export function mergeDurableSyncAccumulators(
-  a: DurableSyncAccumulator,
-  b: DurableSyncAccumulator,
+/** Mutate one internal aggregate with another; no public verdict is manufactured. */
+export function mergeDurableSyncAccumulatorInto(
+  target: DurableSyncAccumulator,
+  part: DurableSyncAccumulator,
 ): DurableSyncAccumulator {
-  return {
-    diagnostics: mergeDurableSyncDiagnostics(a.diagnostics, b.diagnostics),
-    allTerminalBoundariesReached:
-      a.allTerminalBoundariesReached && b.allTerminalBoundariesReached,
-    observedTerminalBoundaries:
-      a.observedTerminalBoundaries + b.observedTerminalBoundaries,
-  };
+  Object.assign(
+    target.diagnostics,
+    mergeDurableSyncDiagnostics(target.diagnostics, part.diagnostics),
+  );
+  target.allTerminalBoundariesReached =
+    target.allTerminalBoundariesReached && part.allTerminalBoundariesReached;
+  target.observedTerminalBoundaries += part.observedTerminalBoundaries;
+  return target;
 }
 
 /** Fold a finalized lane result into an existing internal aggregate. */
@@ -260,14 +280,10 @@ export function mergeDurableSyncResultIntoAccumulator(
   accumulator: DurableSyncAccumulator,
   result: DurableSyncResult,
 ): DurableSyncAccumulator {
-  const merged = mergeDurableSyncAccumulators(
+  return mergeDurableSyncAccumulatorInto(
     accumulator,
     durableSyncAccumulatorFromResult(result),
   );
-  Object.assign(accumulator.diagnostics, merged.diagnostics);
-  accumulator.allTerminalBoundariesReached = merged.allTerminalBoundariesReached;
-  accumulator.observedTerminalBoundaries = merged.observedTerminalBoundaries;
-  return accumulator;
 }
 
 /**
@@ -321,28 +337,9 @@ export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
 export type InitializedDurableSyncDiagnostics = Omit<InitializedDurableSyncResult, 'complete'>;
 
 function createDurableSyncDiagnosticsBase(): InitializedDurableSyncDiagnostics {
-  return {
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    verifiedPrivateOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-  };
+  return Object.fromEntries(
+    Object.keys(DURABLE_SYNC_COUNTER_REDUCERS).map((key) => [key, 0]),
+  ) as InitializedDurableSyncDiagnostics;
 }
 
 /** No work completed, but the caller must keep retrying. */

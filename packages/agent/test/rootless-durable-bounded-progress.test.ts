@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
+  computePrivateRootV10,
   generateGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -25,6 +26,7 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
 const ctx = { operationId: 'bounded-rootless', operationName: 'sync' } as OperationContext;
 
 interface AssetFixture {
+  ual: string;
   graph: string;
   payload: Quad[];
   meta: Quad[];
@@ -44,19 +46,30 @@ function asset(kaNumber: number, tripleCount = 4): AssetFixture {
     object: `"${index}"`,
     graph,
   }));
+  const privateQuads: Quad[] = tripleCount === 0 ? [{
+    subject: `urn:bounded:${kaNumber}:private`,
+    predicate: 'urn:bounded:value',
+    object: '"private"',
+    graph: '',
+  }] : [];
+  const privateMerkleRoot = computePrivateRootV10(privateQuads);
   const meta = generateGraphKnowledgeAssetMetadata({
     ual,
     contextGraphId: CONTEXT_GRAPH_ID,
-    merkleRoot: computeFlatKCRootV10(payload, []),
+    merkleRoot: computeFlatKCRootV10(
+      payload,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    ),
     publisherPeerId: 'publisher-peer',
     accessPolicy: 'public',
     timestamp: new Date(0),
     assertionVersion: '1',
     publicTripleCount: payload.length,
-    privateTripleCount: 0,
+    privateTripleCount: privateQuads.length,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
     assertionGraph: graph,
   }, 'tentative');
-  return { graph, payload, meta };
+  return { ual, graph, payload, meta };
 }
 
 function orderedAssets(): AssetFixture[] {
@@ -261,6 +274,89 @@ describe('bounded rootless durable progress', () => {
       materialized[0]!.dataQuads.length + materialized[0]!.metadataQuads.length,
     );
     expect(checkpoints).toEqual([]);
+  });
+
+  it('keeps a 20-asset exact request incomplete when the responder returns only 6 descriptors', async () => {
+    const requested = Array.from({ length: 20 }, (_, index) => asset(index + 1))
+      .sort((left, right) => left.graph.localeCompare(right.graph));
+    const returned = requested.slice(0, 6);
+    const meta = returned.flatMap((entry) => entry.meta);
+    const data = returned.flatMap((entry) => entry.payload);
+    const materialized: string[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-partial-host',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      exactAssetUalsFor: () => requested.map((entry) => entry.ual),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        _contextGraphId,
+        _includeSharedMemory,
+        phase,
+      ) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', { quads: data, nextOffset: data.length }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async (entry) => {
+        materialized.push(entry.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(materialized).toEqual(returned.map((entry) => entry.ual));
+    expect(summary.insertedDataTriples).toBe(data.length);
+    expect(summary.complete).toBe(false);
+  });
+
+  it('counts a verified zero-public descriptor toward exact-request coverage', async () => {
+    const requested = [asset(1, 4), asset(2, 0)]
+      .sort((left, right) => left.graph.localeCompare(right.graph));
+    const meta = requested.flatMap((entry) => entry.meta);
+    const data = requested.flatMap((entry) => entry.payload);
+    const materialized: Array<{ ual: string; dataCount: number }> = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-complete-host',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      exactAssetUalsFor: () => requested.map((entry) => entry.ual),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        _contextGraphId,
+        _includeSharedMemory,
+        phase,
+      ) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', { quads: data, nextOffset: data.length }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async (entry) => {
+        materialized.push({ ual: entry.ual, dataCount: entry.dataQuads.length });
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(materialized).toEqual(requested.map((entry) => ({
+      ual: entry.ual,
+      dataCount: entry.payload.length,
+    })));
+    expect(summary.complete).toBe(true);
   });
 
   it('checkpoints a cleanly-closed rootless prefix instead of replaying it from zero', async () => {

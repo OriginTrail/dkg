@@ -4,11 +4,12 @@ import {
   createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
+  DURABLE_SYNC_COUNTER_REDUCERS,
   durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
   isDurableSyncComplete,
   markDurableTerminalBoundary,
-  mergeDurableSyncAccumulators,
+  mergeDurableSyncAccumulatorInto,
 } from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
@@ -215,12 +216,29 @@ describe('durable terminal boundary model', () => {
     const neutral = createDurableSyncAccumulator();
 
     expect('complete' in neutral.diagnostics).toBe(false);
-    const merged = mergeDurableSyncAccumulators(
+    const merged = mergeDurableSyncAccumulatorInto(
       neutral,
       durableSyncAccumulatorFromResult(publicLane),
     );
     expect('complete' in merged.diagnostics).toBe(false);
     expect(finalizeDurableSyncCompletion(merged).complete).toBe(true);
+  });
+
+  it('uses the canonical reducer metadata when folding same-peer failures', () => {
+    const first = createFailedPeerDurableSyncResult();
+    first.failedPhases = 1;
+    const second = createFailedPeerDurableSyncResult();
+    second.failedPhases = 2;
+    const accumulator = durableSyncAccumulatorFromResult(first);
+
+    mergeDurableSyncAccumulatorInto(
+      accumulator,
+      durableSyncAccumulatorFromResult(second),
+    );
+
+    expect(DURABLE_SYNC_COUNTER_REDUCERS.failedPeers).toBe('max');
+    expect(accumulator.diagnostics.failedPeers).toBe(1);
+    expect(accumulator.diagnostics.failedPhases).toBe(3);
   });
 });
 

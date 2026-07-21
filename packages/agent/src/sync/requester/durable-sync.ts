@@ -14,6 +14,7 @@ import {
   createDurableSyncAccumulator,
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
+  type InitializedDurableSyncResult,
 } from '../durable-progress.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -52,32 +53,6 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
   `${DKG_NS}subGraphName`,
   TRANSACTION_HASH,
 ]);
-
-export interface DurableSyncSummary {
-  insertedTriples: number;
-  /** True only when every requested Context Graph completed cleanly. */
-  complete: boolean;
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples: number;
-  insertedDataTriples: number;
-  bytesReceived: number;
-  resumedPhases: number;
-  timedOutPhases: number;
-  completedPhases: number;
-  checkpointAdvances: number;
-  deniedPhases: number;
-  emptyResponses: number;
-  metaOnlyResponses: number;
-  verifiedPrivateOnlyResponses: number;
-  dataRejectedMissingMeta: number;
-  rejectedKcs: number;
-  failedPeers: number;
-  failedPhases: number;
-  backoffWorthyFailures: number;
-  /** Context Graph admissions deferred by local scheduler pressure. */
-  deferredBackpressure: number;
-}
 
 /** Graph inventory from one clean, complete legacy full snapshot. */
 export interface VerifiedFullSnapshot {
@@ -182,7 +157,33 @@ export function filterExactAssetDurablePayload(
   };
 }
 
-export async function runDurableSync(context: DurableSyncContext): Promise<DurableSyncSummary> {
+/**
+ * An exact VM request has a closed caller-owned inventory. A responder's
+ * completed page is not request completion unless it returned one self-bound
+ * descriptor for every requested UAL. Descriptor coverage, rather than data
+ * graph coverage, deliberately includes private-only/zero-public assets.
+ */
+function hasExactAssetDescriptorCoverage(
+  metaQuads: readonly Quad[],
+  assetUals: readonly string[],
+): boolean {
+  const requested = new Set(assetUals);
+  const returned = new Set(
+    metaQuads
+      .filter((quad) => (
+        quad.predicate === KA_UAL
+        && quad.subject === stripLiteral(quad.object)
+        && requested.has(quad.subject)
+      ))
+      .map((quad) => quad.subject),
+  );
+  return returned.size === requested.size
+    && [...requested].every((ual) => returned.has(ual));
+}
+
+export async function runDurableSync(
+  context: DurableSyncContext,
+): Promise<InitializedDurableSyncResult> {
   const {
     ctx,
     remotePeerId,
@@ -339,6 +340,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       let effectiveMetaResult = metaResult;
       let dataResult = rawDataResult;
+      let exactAssetDescriptorCoverageComplete = true;
       if (exactAssetUals !== undefined) {
         const exact = filterExactAssetDurablePayload(
           rawDataResult.quads,
@@ -350,6 +352,16 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           ...rawDataResult,
           quads: exact.dataQuads,
         };
+        exactAssetDescriptorCoverageComplete = hasExactAssetDescriptorCoverage(
+          exact.metaQuads,
+          exactAssetUals,
+        );
+        if (!exactAssetDescriptorCoverageComplete) {
+          logWarn(
+            ctx,
+            `Exact durable response for "${pid}" did not cover every requested asset descriptor`,
+          );
+        }
       }
 
       let effectiveDataResult = dataResult;
@@ -481,6 +493,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         && !metadataOnlyResponse;
       const reachedContextGraphTerminalBoundary = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
+        && exactAssetDescriptorCoverageComplete
         && updateMetaCheckpoint
         && updateDataCheckpoint
         && metaResult.completed

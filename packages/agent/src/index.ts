@@ -273,7 +273,10 @@ export { mapWithConcurrency } from './map-with-concurrency.js';
 export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
   classifyDurableProgress,
+  DURABLE_SYNC_COUNTER_REDUCERS,
   isDurableSyncComplete,
+  type DurableSyncCounterKey,
+  type DurableSyncCounterReducer,
   type DurableProgressClassification,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
