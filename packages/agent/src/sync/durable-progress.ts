@@ -6,8 +6,6 @@ import type { DurableSyncResult } from '../dkg-agent-types.js';
  * classified without first manufacturing a full requester result.
  */
 export interface DurableProgressSummary {
-  /** Finalized whole-run verdict when the caller has a public durable result. */
-  readonly complete?: boolean;
   readonly insertedTriples?: number;
   readonly insertedDataTriples?: number;
   readonly insertedMetaTriples?: number;
@@ -24,6 +22,11 @@ export interface DurableProgressSummary {
   readonly deniedPhases?: number;
   readonly backoffWorthyFailures?: number;
   readonly deferredBackpressure?: number;
+}
+
+/** Explicit durable-only lifecycle state; generic/shared-memory callers omit it. */
+export interface DurableProgressClassificationOptions {
+  readonly complete?: boolean;
 }
 
 /** Typed policy decisions shared by reconnect and explicit catch-up paths. */
@@ -56,6 +59,7 @@ export interface DurableProgressClassification {
  */
 export function classifyDurableProgress(
   progress: DurableProgressSummary | null | undefined,
+  options: DurableProgressClassificationOptions = {},
 ): DurableProgressClassification {
   const insertedTriples = progress?.insertedTriples ?? 0;
   const insertedMetaTriples = progress?.insertedMetaTriples ?? 0;
@@ -86,7 +90,7 @@ export function classifyDurableProgress(
   // handled separately by reconnect accounting, matching the pre-classifier
   // policy while keeping partial-deferral progress observable.
   const hasCleanVerifiedPrivateOnlyCompletion = hasVerifiedPrivateOnlyResponse
-    && progress?.complete !== false
+    && options.complete !== false
     && metaOnlyResponses === 0
     && completedPhases > 0
     && !timedOut
@@ -120,7 +124,7 @@ export function classifyDurableProgress(
     || (completedPhases > 0 && resumedPhases > 0);
 
   const completedWithoutFailure = progress != null
-    && progress.complete !== false
+    && options.complete !== false
     && completedPhases > 0
     && !hasBlockingFailure;
 

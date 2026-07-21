@@ -302,4 +302,22 @@ describe('route-level durable catchup orchestration', () => {
       errorBody: { errorCode: 'DURABLE_CATCHUP_INCOMPLETE', retryable: true },
     });
   });
+
+  it('keeps a CG complete when any redundant peer completed cleanly', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [
+        { durableComplete: true },
+        { durableComplete: false },
+      ],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
+      perContextGraphCompletion: [true],
+      complete: true,
+      allPeersFailed: false,
+      incomplete: false,
+      responseStatus: 200,
+    });
+    expect(outcome.errorBody).toBeUndefined();
+  });
 });

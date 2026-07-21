@@ -143,9 +143,17 @@ export function filterExactAssetDurablePayload(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
   assetUals: readonly string[],
-): { dataQuads: Quad[]; metaQuads: Quad[] } {
+): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
   const exactUals = new Set(assetUals);
   const exactMeta = metaQuads.filter((quad) => exactUals.has(quad.subject));
+  const returnedDescriptors = new Set(
+    exactMeta
+      .filter((quad) => (
+        quad.predicate === KA_UAL
+        && quad.subject === stripLiteral(quad.object)
+      ))
+      .map((quad) => quad.subject),
+  );
   const exactGraphs = new Set(
     exactMeta
       .filter((quad) => quad.predicate === ASSERTION_GRAPH)
@@ -154,31 +162,9 @@ export function filterExactAssetDurablePayload(
   return {
     metaQuads: exactMeta,
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
+    descriptorCoverageComplete: returnedDescriptors.size === exactUals.size
+      && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
   };
-}
-
-/**
- * An exact VM request has a closed caller-owned inventory. A responder's
- * completed page is not request completion unless it returned one self-bound
- * descriptor for every requested UAL. Descriptor coverage, rather than data
- * graph coverage, deliberately includes private-only/zero-public assets.
- */
-function hasExactAssetDescriptorCoverage(
-  metaQuads: readonly Quad[],
-  assetUals: readonly string[],
-): boolean {
-  const requested = new Set(assetUals);
-  const returned = new Set(
-    metaQuads
-      .filter((quad) => (
-        quad.predicate === KA_UAL
-        && quad.subject === stripLiteral(quad.object)
-        && requested.has(quad.subject)
-      ))
-      .map((quad) => quad.subject),
-  );
-  return returned.size === requested.size
-    && [...requested].every((ual) => returned.has(ual));
 }
 
 export async function runDurableSync(
@@ -352,10 +338,7 @@ export async function runDurableSync(
           ...rawDataResult,
           quads: exact.dataQuads,
         };
-        exactAssetDescriptorCoverageComplete = hasExactAssetDescriptorCoverage(
-          exact.metaQuads,
-          exactAssetUals,
-        );
+        exactAssetDescriptorCoverageComplete = exact.descriptorCoverageComplete;
         if (!exactAssetDescriptorCoverageComplete) {
           logWarn(
             ctx,

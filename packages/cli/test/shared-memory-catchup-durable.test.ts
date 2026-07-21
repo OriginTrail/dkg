@@ -481,6 +481,62 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
+  it('keeps one CG complete when a redundant peer returns an incomplete prefix', async () => {
+    const peers = ['peer-complete', 'peer-incomplete'];
+    const syncFromPeerDetailed = vi.fn(async (candidate: string) => (
+      candidate === 'peer-complete'
+        ? detailedDurableResult({
+            insertedTriples: 10,
+            insertedDataTriples: 8,
+            insertedMetaTriples: 2,
+            complete: true,
+          })
+        : detailedDurableResult({
+            insertedTriples: 5,
+            insertedDataTriples: 4,
+            insertedMetaTriples: 1,
+            completedPhases: 1,
+            checkpointAdvances: 1,
+            complete: false,
+          })
+    ));
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => peers.map((peerId) => ({
+            remotePeer: { toString: () => peerId },
+          })),
+        },
+      },
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'cg-redundant-peers',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(syncFromPeerDetailed).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      perContextGraph: [{
+        contextGraphId: 'cg-redundant-peers',
+        durableComplete: true,
+      }],
+    });
+  });
+
   it('awaits durable verification and store settlement after the fetch budget', async () => {
     vi.useFakeTimers();
     let resolveDurable!: (inserted: number) => void;

@@ -5414,7 +5414,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // or cleanly completed empty. Empty responses still count as a
       // legitimate host response, but a no-progress timeout must not make the
       // subscribe/VM catch-up path report a successful peer.
-      const durableProgress = classifyDurableProgress(r.durable);
+      const durableProgress = classifyDurableProgress(r.durable, {
+        complete: r.durable.complete,
+      });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
       const durableFailed = durableProgress.transportFailed;
       const sharedFailed = Boolean(sharedProgress?.transportFailed);

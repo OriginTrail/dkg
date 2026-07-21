@@ -131,16 +131,23 @@ describe('classifyDurableProgress', () => {
 
   it('does not classify an explicitly incomplete durable result as readiness complete', () => {
     const progress = classifyDurableProgress({
-      complete: false,
       insertedTriples: 40_000,
       insertedDataTriples: 40_000,
       completedPhases: 1,
       checkpointAdvances: 1,
-    });
+    }, { complete: false });
 
     expect(progress.madeReadinessProgress).toBe(true);
     expect(progress.completedWithoutFailure).toBe(false);
     expect(progress.completedReadinessCleanly).toBe(false);
+  });
+
+  it('keeps the generic classifier counters-only and accepts an explicit durable verdict', () => {
+    const counters = { completedPhases: 1 };
+
+    expect(classifyDurableProgress(counters).completedWithoutFailure).toBe(true);
+    expect(classifyDurableProgress(counters, { complete: true }).completedWithoutFailure).toBe(true);
+    expect(classifyDurableProgress(counters, { complete: false }).completedWithoutFailure).toBe(false);
   });
 });
 
@@ -150,7 +157,6 @@ describe('isDurableSyncComplete', () => {
 
     expect(isDurableSyncComplete(progress, true)).toBe(true);
     expect(isDurableSyncComplete(progress, false)).toBe(false);
-    expect(isDurableSyncComplete({ ...progress, complete: false }, true)).toBe(false);
   });
 
   it.each([

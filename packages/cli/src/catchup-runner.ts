@@ -251,8 +251,9 @@ export async function runDurableCatchupLeg(
 export function durableCatchupCompletionFor(
   attempts: readonly DurableCatchupAttempt[],
 ): boolean | undefined {
+  if (attempts.some((attempt) => attempt.durableComplete === true)) return true;
   return attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
-    ? attempts.every((attempt) => attempt.durableComplete === true)
+    ? false
     : undefined;
 }
 
@@ -306,16 +307,18 @@ export function classifyDurableCatchupRequest(
 
 export function catchupPlaneCompletedWithoutFailure(
   progress: CatchupPhaseProgress | null | undefined,
+  complete?: boolean,
 ): boolean {
-  return classifyDurableProgress(progress).completedWithoutFailure;
+  return classifyDurableProgress(progress, { complete }).completedWithoutFailure;
 }
 
 export function catchupPeerSucceeded(
   durable: CatchupPhaseProgress,
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
+  durableComplete?: boolean,
 ): boolean {
-  const durableProgress = classifyDurableProgress(durable);
+  const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
   const sharedProgress = shared ? classifyDurableProgress(shared) : null;
   if (
     !catchupPeerResponded(durable, shared)
