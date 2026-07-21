@@ -107,10 +107,12 @@ describe('#1837 promote queue clearTerminalJob', () => {
     expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' }); // repeat
   });
 
-  it('rejects a malformed (empty) jobId without mutation', async () => {
+  it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {
     const queue = createQueue();
     expect(await queue.clearTerminalJob('')).toEqual({ outcome: 'rejected', reason: 'malformed' });
     expect(await queue.clearTerminalJob('   ')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await queue.clearTerminalJob('bad id')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await queue.clearTerminalJob('bad>id')).toEqual({ outcome: 'rejected', reason: 'malformed' });
   });
 
   // #1883 review (🟡): a state triple present but not a recognized enum value must be a

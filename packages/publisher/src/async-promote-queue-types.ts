@@ -14,7 +14,7 @@
  * differences from `AsyncLiftPublisher`.
  */
 
-import type { TerminalJobClearOutcome } from './async-lift-publisher-types.js';
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export const PROMOTE_JOB_STATES = [
   'queued',

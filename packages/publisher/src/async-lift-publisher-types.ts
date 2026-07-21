@@ -17,6 +17,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -123,18 +124,6 @@ export interface VmPublishAdmissionJournalReader {
   /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
   readJournalByJob(jobId: string): Promise<JournalReadResult>;
 }
-
-/**
- * #1837 — bounded outcome of an atomic by-exact-jobId TERMINAL clear, shared by BOTH
- * the lift publisher and the SWM promote queue for symmetry. The control method owns
- * every reason INCLUDING `malformed` (a corrupt persisted payload is only detectable
- * inside the method, never at the HTTP route). Never throws and never mutates on a
- * reject. `already_absent` is a SUCCESS (idempotent repeat), distinct from a rejection.
- */
-export type TerminalJobClearOutcome =
-  | { readonly outcome: 'cleared' }
-  | { readonly outcome: 'already_absent' }
-  | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'unknown' | 'malformed' };
 
 /**
  * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the

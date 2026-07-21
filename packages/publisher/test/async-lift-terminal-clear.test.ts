@@ -133,10 +133,15 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     expect(await p.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' });
   });
 
-  it('rejects a malformed (empty) jobId without mutation', async () => {
+  it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {
     const p = createPublisher();
     expect(await p.clearTerminalJob('')).toEqual({ outcome: 'rejected', reason: 'malformed' });
     expect(await p.clearTerminalJob('  ')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    // #1883 review (🔴): a jobId that would break out of the <…> SPARQL IRI must be a
+    // bounded malformed reject, never a query error / injection.
+    expect(await p.clearTerminalJob('bad id')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await p.clearTerminalJob('bad>id')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await p.clearTerminalJob('a{ b')).toEqual({ outcome: 'rejected', reason: 'malformed' });
   });
 
   it('preserves the #1829 journal: clearing a terminal job leaves its journal lineage readable', async () => {

@@ -93,6 +93,17 @@ describe('#1837 POST /api/publisher/clear-job', () => {
     expect(responseBody(ctx)).toMatchObject({ outcome: 'rejected', reason: 'malformed' });
   });
 
+  // #1883 review (🔴): a SPARQL-unsafe jobId must be a bounded 400, never a query-error 500.
+  it('rejects a SPARQL-unsafe jobId → 400 malformed (no 500)', async () => {
+    const control = newControl();
+    for (const jobId of ['bad id', 'bad>id']) {
+      const ctx = postClearJob(control, { jobId });
+      await handlePublisherRoutes(ctx);
+      expect(responseStatus(ctx)).toBe(400);
+      expect(responseBody(ctx)).toMatchObject({ outcome: 'rejected', reason: 'malformed' });
+    }
+  });
+
   function postClearJob(publisherControl: RequestContext['publisherControl'], body: Record<string, unknown>): RequestContext {
     return postClearJobRaw(publisherControl, JSON.stringify(body));
   }

@@ -37,13 +37,13 @@ import type {
   IntentLookupResult,
   JournalReadInput,
   JournalReadResult,
-  TerminalJobClearOutcome,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
   VmPublishAdmissionJournalReader,
   VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
+import { isSafeClearJobId, type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
@@ -1040,7 +1040,11 @@ export class TripleStoreAsyncLiftPublisher
    * #1829 journal. Never throws / never mutates on a reject.
    */
   async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
-    if (!jobId || jobId.trim().length === 0) return { outcome: 'rejected', reason: 'malformed' };
+    // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
+    // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
+    // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
+    // instead of the bounded outcome.
+    if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       const rows = expectBindings(
