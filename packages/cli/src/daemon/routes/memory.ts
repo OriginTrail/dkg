@@ -114,7 +114,6 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import {
   classifyDurableCatchupRequest,
   createCatchupRunner,
-  durableCatchupCompletionFor,
   runDurableCatchupLeg,
   type CatchupJobResult,
   type CatchupRunner,
@@ -1099,15 +1098,16 @@ WHERE {
       totalDurableInsertedTriples: totalDurable,
       standardInsertedTriples: standardInserted,
       results,
-      perContextGraph: perCgLegs.map((cg) => ({
-        contextGraphId: cg.contextGraphId,
-        insertedTriples: cg.insertedTriples,
-        durableInsertedTriples: cg.durableInsertedTriples,
-        ...(durableCatchupCompletionFor(cg.perPeer) !== undefined
-          ? { durableComplete: durableCatchupCompletionFor(cg.perPeer) }
-          : {}),
-        perPeer: cg.perPeer,
-      })),
+      perContextGraph: perCgLegs.map((cg, index) => {
+        const durableComplete = durableOutcome.perContextGraphCompletion[index];
+        return {
+          contextGraphId: cg.contextGraphId,
+          insertedTriples: cg.insertedTriples,
+          durableInsertedTriples: cg.durableInsertedTriples,
+          ...(durableComplete !== undefined ? { durableComplete } : {}),
+          perPeer: cg.perPeer,
+        };
+      }),
       hostCatchup: hostCatchupOpted ? {
         ranFallback: hostCatchup.length > 0,
         triggeredForContextGraphIds: hostCatchup.map((h) => h.contextGraphId),
