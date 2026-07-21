@@ -14,6 +14,7 @@ import {
   type LiftJob,
   type LiftJobAccepted,
   type LiftJobBroadcast,
+  type LiftJobBroadcastMetadata,
   type LiftJobHex,
   type LiftJobIncluded,
   type LiftJobInclusionMetadata,
@@ -28,9 +29,12 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
-  AsyncLiftPublisher,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
+  IntentLookupInput,
+  IntentLookupResult,
+  VmPublishIntentRecoveryPublisher,
+  VmPublishIntentIndexBackfiller,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
@@ -53,6 +57,9 @@ import {
   DEFAULT_GRAPH_URI,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
+  CONTROL_LIFECYCLE_KEY,
+  knowledgeAssetVmPublishLifecycleKey,
+  serializeVmPublishIntentIndex,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
@@ -62,6 +69,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -149,7 +157,8 @@ function resolveKnowledgeAssetVmPublishHandler(
   };
 }
 
-export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
+export class TripleStoreAsyncLiftPublisher
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
@@ -314,6 +323,80 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
     return this.parseJobPayload(rows[0]?.['payload']);
+  }
+
+  async lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult> {
+    await this.ensureGraph();
+    const key = knowledgeAssetVmPublishLifecycleKey(facts);
+    // Object-bound triple pattern (not a FILTER) so the store resolves it via the
+    // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
+    //
+    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
+    // subject as delete-then-insert, so a lookup that races a state transition can
+    // transiently miss the index and return `none`. This window is pre-existing
+    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
+    // claim-locked findActive remains the authoritative dedup guard, so a transient
+    // false `none` cannot by itself create a duplicate active job. Making writeJob
+    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
+    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
+    const result = await this.store.query(
+      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+    );
+    const jobs = expectBindings(result)
+      .map((row) => this.parseJobPayload(row['payload']))
+      .filter((job): job is LiftJob => job !== null);
+    if (jobs.length === 0) return { kind: 'none' };
+    // Partition on lifecycle-subject occupancy via the SHARED predicate that
+    // admission dedup (findActiveKnowledgeAssetVmPublishJob) also uses, so the two
+    // partitions are identical by construction: an occupying job (non-terminal, or
+    // a retryable failed job with retries remaining that admission would reaccept)
+    // is the live job to bind; everything else is superseded.
+    const active = jobs.filter(isOccupyingLifecycleJob);
+    const superseded = jobs.filter((job) => !isOccupyingLifecycleJob(job));
+    const intentKeyOf = (job: LiftJob): string | undefined =>
+      isKnowledgeAssetVmPublishJobRequest(job.request)
+        ? job.request.knowledgeAssetVmPublish.intentKey
+        : undefined;
+    const exact = (candidates: LiftJob[]): { exactIntentMatch?: boolean } =>
+      facts.intentKey === undefined
+        ? {}
+        : { exactIntentMatch: candidates.some((job) => intentKeyOf(job) === facts.intentKey) };
+    if (active.length > 1) return { kind: 'conflict', jobs: active };
+    if (active.length === 1) {
+      return { kind: 'active', job: active[0]!, superseded, ...exact(active) };
+    }
+    return { kind: 'superseded', jobs: superseded, ...exact(superseded) };
+  }
+
+  /**
+   * #1828 — idempotently backfill the ephemeral lifecycle index for VM-publish
+   * jobs admitted before the index existed. Reads the subjects already carrying
+   * the index and inserts ONLY the missing ones (additive insert; never
+   * deletes/rewrites, so it cannot race the runner), returning the real number
+   * of jobs repaired rather than a full-reindex count. Run once at boot.
+   */
+  async ensureVmPublishIntentIndex(): Promise<number> {
+    await this.ensureGraph();
+    const vmPublishJobs = (await this.list()).filter((job) =>
+      isKnowledgeAssetVmPublishJobRequest(job.request),
+    );
+    if (vmPublishJobs.length === 0) return 0;
+    // Subjects that already carry the lifecycle index. Object-unbound read of the
+    // one predicate — no job-payload scan — so we diff in JS and insert only the
+    // jobs missing it (VM-publish filtered above, never via a SPARQL MINUS, which
+    // would over-select raw-lift jobs).
+    const indexed = await this.store.query(
+      `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
+    );
+    const alreadyIndexed = new Set(
+      expectBindings(indexed)
+        .map((row) => row['job'])
+        .filter((subject): subject is string => typeof subject === 'string'),
+    );
+    const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
+    const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
+    if (quads.length > 0) await this.store.insert(quads);
+    return missing.length;
   }
 
   async list(filter: { status?: LiftJobState } = {}): Promise<LiftJob[]> {
@@ -529,6 +612,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } catch (error) {
       const current = await this.getStatus(claimed.jobId);
       if (!executorReturned && current?.status === 'broadcast') {
+        // The tx send happens strictly AFTER the write-ahead durably records
+        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
+        // failure rolls the transition back). So a durable 'broadcast' here means
+        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend. A
+        // pre-send failure (fsync failed → rolled back to 'validated', or an error
+        // before the write-ahead) does NOT reach here and is recorded as 'failed'
+        // below; a failed KA VM job is never chain-recovery-chased
+        // (canRetryFailedRecovery === false), and its code comes from the publish
+        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
         return current;
       }
       const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
@@ -628,19 +721,27 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private async findActiveKnowledgeAssetVmPublishJob(
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<{ job: LiftJob; compatible: boolean } | null> {
+    // Build the INCOMING key up front so a delimiter in the incoming facts fails the
+    // admission closed. A malformed PERSISTED job (e.g. a legacy pre-guard admission
+    // whose name carries U+001F) must NOT abort this scan and block an unrelated
+    // admission, so each persisted job's key is built defensively.
+    const requestKey = knowledgeAssetVmPublishLifecycleKey(request);
     const jobs = await this.list();
     for (const job of jobs) {
-      if (job.status === 'finalized') continue;
-      if (isFailedJob(job)) {
-        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-      }
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
+      // #1828 — occupancy + lifecycle subject via the SHARED helpers so admission
+      // dedup and the intent-recovery lookup partition jobs identically (a job that
+      // still occupies the subject is the live one; finalized/exhausted/non-retryable
+      // are superseded).
+      if (!isOccupyingLifecycleJob(job)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      const sameLifecycleSubject = publish.contextGraphId === request.contextGraphId
-        && publish.name === request.name
-        && (publish.subGraphName ?? '') === (request.subGraphName ?? '')
-        && agentAddressScopeKey(publish.agentAddress) === agentAddressScopeKey(request.agentAddress);
-      if (!sameLifecycleSubject) continue;
+      let jobKey: string;
+      try {
+        jobKey = knowledgeAssetVmPublishLifecycleKey(publish);
+      } catch {
+        continue; // skip a malformed legacy job rather than failing this admission
+      }
+      if (jobKey !== requestKey) continue;
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;
@@ -1107,14 +1208,42 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
       );
     }
-    await this.update(params.jobId, 'broadcast', {
-      broadcast: {
-        txHash: params.txHash,
-        walletId: params.walletId,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      },
+    await this.recordDurableBroadcastBeforeSend(current, {
+      txHash: params.txHash,
+      walletId: params.walletId,
+      merkleRoot: params.merkleRoot,
+      publicByteSize: params.publicByteSize,
     });
+  }
+
+  /**
+   * The single pre-send write-ahead boundary for the KA VM publish path: record
+   * the 'broadcast' transition and make it fsync-durable BEFORE the caller sends
+   * the tx. Runs inside the adapter's `onBroadcast` hook, which is awaited
+   * strictly before `sendSignedTransactionAndWait` (fail-closed).
+   *
+   * Durability is scoped here — not in the generic `writeJob`/`update` — so the
+   * whole-store fsync only happens at this before-send boundary (raw-lift's
+   * post-send 'broadcast' write, and every other state change, stay flush-free).
+   *
+   * On a write-ahead failure (the fsync, or the transition itself) the tx was
+   * never sent, so restore the durable prior job: the store must never report a
+   * 'broadcast' that was not fsync-durable, or recovery would chase a tx that
+   * never landed. The prior job is 'validated' (asserted by the sole caller), so
+   * restoring it takes no fsync and cannot re-fail here. The caller then fails
+   * the job from its pre-broadcast state, off the chain-recovery track.
+   */
+  private async recordDurableBroadcastBeforeSend(
+    current: LiftJob,
+    broadcast: LiftJobBroadcastMetadata,
+  ): Promise<void> {
+    try {
+      await this.update(current.jobId, 'broadcast', { broadcast });
+      await this.store.flush?.();
+    } catch (error) {
+      await this.writeJob(current);
+      throw error;
+    }
   }
 
   private parseJobPayload(binding?: string): LiftJob | null {
@@ -1578,8 +1707,4 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
 function txHashFromSignedPhase(phase: string): LiftJobHex | null {
   const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
   return match ? (match[1] as LiftJobHex) : null;
-}
-
-function agentAddressScopeKey(agentAddress?: string): string {
-  return agentAddress?.trim().toLowerCase() ?? '';
 }

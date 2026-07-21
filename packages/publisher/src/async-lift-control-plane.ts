@@ -41,6 +41,14 @@ export const CONTROL_UPDATED_AT = 'urn:dkg:publisher:updatedAt';
 export const CONTROL_RETRY_COUNT = 'urn:dkg:publisher:retryCount';
 export const CONTROL_MAX_RETRIES = 'urn:dkg:publisher:maxRetries';
 export const CONTROL_LAST_RETRY_REASON = 'urn:dkg:publisher:lastRetryReason';
+// #1828 — ephemeral secondary index on the (mutable) job subject enabling O(1)
+// intent recovery. This triple lives on jobRef, so clear/cancel/deleteJob remove
+// it with the job. PR3 (#1829) append-only journal MUST key intent on its OWN
+// journal subjects — never rely on the job-subject index for durability.
+// `lifecycleKey` mirrors the promote queue's uniquenessKey (the dedup subject).
+// Intent exactness is derived from the parsed payload at lookup time, so no
+// separate intentKey triple is materialized.
+export const CONTROL_LIFECYCLE_KEY = 'urn:dkg:publisher:lifecycleKey';
 export const CONTROL_WALLET_ID = 'urn:dkg:publisher:walletId';
 export const CONTROL_CLAIMED_BY = 'urn:dkg:publisher:claimedBy';
 export const CONTROL_CLAIM_TOKEN = 'urn:dkg:publisher:claimToken';
@@ -204,7 +212,74 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
     pushOptional(quads, jobRef, CONTROL_TX_HASH_CHECKED, job.recovery.txHashChecked, graphUri, literal);
   }
 
+  // #1828 — materialize the ephemeral recovery index on the job subject.
+  quads.push(...serializeVmPublishIntentIndex(job, graphUri));
+
   return quads;
+}
+
+/** Canonical agent lane for a VM-publish lifecycle subject (case-insensitive, trimmed). */
+function agentAddressScopeKey(agentAddress?: string): string {
+  return agentAddress?.trim().toLowerCase() ?? '';
+}
+
+/**
+ * #1828 — the lifecycle subject a VM-publish job dedups on
+ * (contextGraphId, name, subGraphName, agent lane), joined by U+001F (a control
+ * char absent from every component) into one literal for indexed equality
+ * lookup, mirroring the promote queue's uniquenessKey. MUST stay identical to
+ * findActiveKnowledgeAssetVmPublishJob's tuple — both derive it from here.
+ */
+export function knowledgeAssetVmPublishLifecycleKey(publish: {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress?: string;
+}): string {
+  const separator = String.fromCharCode(0x1f);
+  const components = [
+    publish.contextGraphId,
+    publish.name,
+    publish.subGraphName ?? '',
+    agentAddressScopeKey(publish.agentAddress),
+  ];
+  // The components are joined with U+001F, so a component that itself contains the
+  // delimiter would shift the boundaries and collide two distinct intents onto one
+  // lifecycle subject. The recovery route rejects control chars, but the admission
+  // validators (validateAssertionName/validateSubGraphName) do NOT exclude U+001F —
+  // so fail closed HERE, the single point every path (admission dedup, index, and
+  // lookup) funnels through, rather than silently alias. #1828 review.
+  if (components.some((component) => component.includes(separator))) {
+    throw new Error(
+      'knowledgeAssetVmPublishLifecycleKey: components must not contain the U+001F delimiter',
+    );
+  }
+  return components.join(separator);
+}
+
+/**
+ * #1828 — the ephemeral lifecycle-key index triple on the job subject, for
+ * VM-publish jobs only. Single source used by both serializeJob and the boot
+ * backfill so the index is built identically everywhere. Intent exactness is
+ * derived from the parsed payload at lookup time (no separate intentKey triple).
+ */
+export function serializeVmPublishIntentIndex(job: LiftJob, graphUri: string): Quad[] {
+  if (job.request.jobType !== 'knowledge-asset-vm-publish') return [];
+  const jobRef = jobSubject(job.jobId);
+  const publish = job.request.knowledgeAssetVmPublish;
+  let lifecycleKey: string;
+  try {
+    lifecycleKey = knowledgeAssetVmPublishLifecycleKey(publish);
+  } catch {
+    // A malformed legacy job (a component carrying the U+001F delimiter, admitted
+    // before the key guard existed) is left un-indexed rather than throwing — never
+    // let one bad persisted job abort a writeJob or the whole boot backfill. New
+    // writes are still rejected upstream (the incoming key is built fail-closed).
+    return [];
+  }
+  return [
+    quad(jobRef, CONTROL_LIFECYCLE_KEY, literal(lifecycleKey), graphUri),
+  ];
 }
 
 export function serializeRequest(request: LiftJobRequest, subject: string, graphUri: string): Quad[] {

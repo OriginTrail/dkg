@@ -149,6 +149,7 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
@@ -1974,6 +1975,12 @@ export async function runDaemonInner(
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
     maxRetries: config.publisher?.maxRetries,
   });
+  // #1828 — one-time idempotent backfill of the durable-admission intent index
+  // for VM-publish jobs admitted before it existed. Additive-only (RDF set
+  // semantics), so it is safe here — before the runner starts — and fail-open so
+  // a backfill hiccup never blocks boot. Contract unit-tested in
+  // vm-publish-intent-backfill.test.ts.
+  await backfillVmPublishIntentIndexOnBoot(publisherControl, log);
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
     log(
