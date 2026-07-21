@@ -804,7 +804,11 @@ WHERE {
       }
     };
 
-    if (!peerIdParam && connectedPeerIds().length === 0) {
+    if (
+      !peerIdParam
+      && connectedPeerIds().length === 0
+      && !(includeDurable && !includeSharedMemory)
+    ) {
       return jsonResponse(res, 200, {
         contextGraphIds: cgIds,
         peersAttempted: 0,

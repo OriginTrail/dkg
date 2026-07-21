@@ -320,4 +320,49 @@ describe('route-level durable catchup orchestration', () => {
     });
     expect(outcome.errorBody).toBeUndefined();
   });
+
+  it('fails retryably when a durable-only request has no eligible attempt', () => {
+    const outcome = classifyDurableCatchupRequest([[]], true, false);
+
+    expect(outcome).toMatchObject({
+      perContextGraphCompletion: [undefined],
+      complete: false,
+      allPeersFailed: false,
+      noEligibleAttempts: true,
+      incomplete: true,
+      responseStatus: 503,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS', retryable: true },
+    });
+  });
+
+  it('keeps a complete subset retryable when another requested CG has no attempt', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [{ durableComplete: true }],
+      [],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
+      perContextGraphCompletion: [true, undefined],
+      complete: false,
+      allPeersFailed: false,
+      noEligibleAttempts: false,
+      incomplete: true,
+      responseStatus: 200,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_INCOMPLETE', retryable: true },
+    });
+  });
+
+  it('preserves unknown completion for a real legacy durable attempt', () => {
+    const outcome = classifyDurableCatchupRequest([[{}]], true, false);
+
+    expect(outcome).toMatchObject({
+      perContextGraphCompletion: [undefined],
+      allPeersFailed: false,
+      noEligibleAttempts: false,
+      incomplete: false,
+      responseStatus: 200,
+    });
+    expect(outcome.complete).toBeUndefined();
+    expect(outcome.errorBody).toBeUndefined();
+  });
 });

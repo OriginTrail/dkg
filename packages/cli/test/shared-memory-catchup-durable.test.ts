@@ -67,6 +67,38 @@ function detailedDurableResult(overrides: Partial<DurableSyncResult> = {}): Dura
 }
 
 describe('POST /api/shared-memory/catchup durable leg', () => {
+  it('returns a retryable 503 when no connected peer can attempt durable catchup', async () => {
+    const agent = {
+      peerId: 'self-peer',
+      node: { libp2p: { getConnections: vi.fn(() => []) } },
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'durable-no-peer-cg',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      retryable: true,
+      errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
+      durableComplete: false,
+      peersAttempted: 0,
+      totalDurableInsertedTriples: 0,
+      results: [],
+    });
+    expect(agent.getPeerProtocols).not.toHaveBeenCalled();
+  });
+
   it('supports durable-only recovery without starting either SWM catchup path', async () => {
     const cgId = 'private-durable-only-cg';
     const peerId = 'peer-curator';

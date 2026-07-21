@@ -146,10 +146,14 @@ export interface DurableCatchupRequestOutcome {
   perContextGraphCompletion: Array<boolean | undefined>;
   complete?: boolean;
   allPeersFailed: boolean;
+  noEligibleAttempts: boolean;
   incomplete: boolean;
   responseStatus: 200 | 503;
   errorBody: {
-    errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED' | 'DURABLE_CATCHUP_INCOMPLETE';
+    errorCode:
+      | 'DURABLE_CATCHUP_ALL_PEERS_FAILED'
+      | 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS'
+      | 'DURABLE_CATCHUP_INCOMPLETE';
     error: string;
     retryable: true;
   } | undefined;
@@ -268,15 +272,22 @@ export function classifyDurableCatchupRequest(
 ): DurableCatchupRequestOutcome {
   const attempts = includeDurable ? perContextGraphAttempts.flatMap((parts) => [...parts]) : [];
   const perContextGraphCompletion = perContextGraphAttempts.map(durableCatchupCompletionFor);
-  const complete = includeDurable
-    && perContextGraphCompletion.length > 0
-    && perContextGraphCompletion.every((value) => value !== undefined)
+  const missingContextGraphAttempt = includeDurable
+    && !includeSharedMemory
+    && perContextGraphAttempts.length > 0
+    && perContextGraphAttempts.some((parts) => parts.length === 0);
+  const everyContextGraphCompletionKnown = perContextGraphCompletion.length > 0
+    && perContextGraphCompletion.every((value) => value !== undefined);
+  const complete = missingContextGraphAttempt
+    ? false
+    : includeDurable && everyContextGraphCompletionKnown
       ? perContextGraphCompletion.every((value) => value === true)
       : undefined;
   const allPeersFailed = includeDurable
     && !includeSharedMemory
     && attempts.length > 0
     && attempts.every((attempt) => Boolean(attempt.durableError || attempt.error));
+  const noEligibleAttempts = missingContextGraphAttempt && attempts.length === 0;
   const incomplete = includeDurable
     && !includeSharedMemory
     && complete === false
@@ -287,14 +298,21 @@ export function classifyDurableCatchupRequest(
     perContextGraphCompletion,
     complete,
     allPeersFailed,
+    noEligibleAttempts,
     incomplete,
-    responseStatus: allPeersFailed ? 503 : 200,
+    responseStatus: allPeersFailed || noEligibleAttempts ? 503 : 200,
     errorBody: allPeersFailed
       ? {
         errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
         error: 'Durable catchup failed for every selected peer',
         retryable: true,
       }
+      : noEligibleAttempts
+        ? {
+          errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
+          error: 'Durable catchup had no eligible peer for any requested context graph',
+          retryable: true,
+        }
       : incomplete
         ? {
           errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
