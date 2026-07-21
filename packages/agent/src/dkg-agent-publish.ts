@@ -1491,6 +1491,10 @@ export class PublishMethods extends DKGAgentBase {
     );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(this.store, {
       publicSnapshotStore: this.publicSnapshotStore,
+      // #1836 — honor the operator's publisher.maxRetries on this admission path
+      // too (EPCIS / Kafka plugins publish through the agent, not the daemon
+      // control instance). Nullish → the publisher's built-in default.
+      maxRetries: this.config.publisherMaxRetries,
     });
     const captureID = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
     return { captureID };

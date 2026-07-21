@@ -15,6 +15,10 @@ export default defineConfig({
       : [
           'test/api-client.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
+          'test/publisher-job-by-intent-route.test.ts',
+          // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
+          'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
@@ -84,6 +88,15 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-ka-recovery.test.ts',
+          // #1836 — publisher.maxRetries must propagate through
+          // createPublisherControlFromStore (incl. a literal 0). Pure logic.
+          'test/publisher-maxretries-1836.test.ts',
+          // #1836 — config→construction wiring seam (runDaemonInner forwards
+          // config.publisher.maxRetries into both admission constructors).
+          'test/publisher-maxretries-wiring-1836.test.ts',
+          // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
+          // intent-index backfill with the admission publisher control).
+          'test/publisher-backfill-wiring-1828.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic

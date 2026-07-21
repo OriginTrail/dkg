@@ -29,6 +29,30 @@ export class AsyncLiftJobConflictError extends Error {
   }
 }
 
+/** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
+export interface IntentLookupInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional exactness qualifier; sets `exactIntentMatch` on the result. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1828 — deterministic result of an intent lookup. At most one ACTIVE job can
+ * exist per lifecycle subject (admission dedup invariant), so `active` is the
+ * live job to bind; `superseded` carries terminal jobs sharing the subject;
+ * `conflict` (>1 active) signals a broken invariant. `exactIntentMatch` (only
+ * when the caller passed `intentKey`) reports whether the returned job's stored
+ * intent equals it.
+ */
+export type IntentLookupResult =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'active'; readonly job: LiftJob; readonly superseded: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
+
 export interface AsyncLiftPublisher {
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
@@ -46,6 +70,31 @@ export interface AsyncLiftPublisher {
   cancel(jobId: string): Promise<void>;
   retry(filter?: { status?: 'failed' }): Promise<number>;
   clear(status: 'finalized' | 'failed'): Promise<number>;
+}
+
+/**
+ * #1828 — a publisher that also exposes the read-only durable-admission intent
+ * recovery lookup. Kept OFF the base {@link AsyncLiftPublisher} runtime queue
+ * contract so runner/adapter implementations that never serve recovery are not
+ * forced to implement it (the exported contract stays minimal). The daemon's
+ * `createPublisherControlFromStore` returns this; the recovery route depends on
+ * it. PR3/PR4 add their own feature reads on their own extended interfaces —
+ * the base contract does not grow.
+ */
+export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
+  /** #1828 — read-only recovery lookup by lifecycle facts (+ optional intentKey). */
+  lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
+}
+
+/**
+ * #1828 — one-shot storage maintenance: (re)build the ephemeral intent index for
+ * VM-publish jobs admitted before it existed. This is a boot-time repair, not a
+ * runtime publisher behaviour, so it lives on its OWN narrow interface — the
+ * daemon boot backfill depends only on this, never on the publisher contract.
+ */
+export interface VmPublishIntentIndexBackfiller {
+  /** Idempotent additive backfill; returns the number of jobs (re)indexed. */
+  ensureVmPublishIntentIndex(): Promise<number>;
 }
 
 export interface AsyncLiftPublisherRecoveryResult {
