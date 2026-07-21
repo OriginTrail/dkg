@@ -47,6 +47,7 @@ import {
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
   PROMOTE_UNIQUENESS_KEY,
+  classifyJobPayload,
   comparePromoteJobs,
   defaultBackoffMs,
   expectBindings,
@@ -55,7 +56,6 @@ import {
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
-  parseLiteral,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   serializeJob,
@@ -615,9 +615,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withMutationLock, which
    * already serializes EVERY transition (incl. the only terminal→active path, recover()
    * failed→queued), so a transitioning job cannot be swept and concurrent clears are
-   * deterministic — no new lock needed. Reads the denormalized state triple to split
-   * already_absent / unknown / malformed without a JSON.parse that collapses them. Never
-   * throws / never mutates on a reject.
+   * deterministic — no new lock needed. Classifies from a SINGLE canonical payload read
+   * (matching the lift sibling): `classifyJobPayload` splits already_absent / malformed /
+   * job without the enum drop that collapses them, and the enum + terminal checks run on
+   * the parsed job. Never throws / never mutates on a reject.
    */
   async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
     // Reject an empty OR SPARQL-unsafe jobId as malformed before building the jobSubject
@@ -626,28 +627,19 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
     return this.withMutationLock(async () => {
       await this.ensureGraph();
-      const stateRows = expectBindings(
+      const rows = expectBindings(
         await this.store.query(
-          `SELECT ?state WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_STATE}> ?state } }`,
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
         ),
       );
-      if (stateRows.length === 0) return { outcome: 'already_absent' };
-      const rawState = stateRows[0]?.['state'];
-      // parseLiteral is JSON.parse — a corrupt/non-JSON state literal must become a
-      // bounded reject, never throw out of the method (matches the lift sibling's guard).
-      let state: string | undefined;
-      try {
-        state = rawState === undefined ? undefined : String(parseLiteral(rawState));
-      } catch {
+      const parsed = classifyJobPayload(rows[0]?.['payload']);
+      if (parsed.kind === 'absent') return { outcome: 'already_absent' };
+      if (parsed.kind === 'malformed') return { outcome: 'rejected', reason: 'malformed' };
+      const { job } = parsed;
+      // Structurally-valid job, but its state is not a recognized enum value.
+      if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) {
         return { outcome: 'rejected', reason: 'unknown' };
       }
-      if (state === undefined || !(PROMOTE_JOB_STATES as readonly string[]).includes(state)) {
-        return { outcome: 'rejected', reason: 'unknown' };
-      }
-      // State literal is a known enum value; the full payload must also parse (a corrupt
-      // payload with a valid state triple is malformed, not unknown).
-      const job = await this.readJob(jobId);
-      if (job === null) return { outcome: 'rejected', reason: 'malformed' };
       if (!isTerminalPromoteJobState(job.state)) return { outcome: 'rejected', reason: 'nonterminal' };
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
