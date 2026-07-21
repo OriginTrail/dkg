@@ -63,7 +63,15 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(3); // already at head
     const result = await reconcileContextGraph(deps, state, 'cg', 1n);
 
-    expect(result).toEqual({ head: 3, watermark: 3, reconciled: 0, pending: 0 });
+    expect(result).toEqual({
+      head: 3,
+      watermark: 3,
+      reconciled: 0,
+      pending: 0,
+      processed: 0,
+      hasMore: false,
+      staleTarget: false,
+    });
     expect(headBlockReads).toBe(0);
     expect(attempted).toEqual([]);
     expect(persisted).toEqual([]);
@@ -165,9 +173,168 @@ describe('reconcileContextGraph — sweep', () => {
     expect(attempted).toEqual([0, 1]);
     expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
   });
+
+  it('processes a large head in bounded slices and yields between them', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        return { status: 'pending' };
+      },
+    });
+    const state = createCursorState(0);
+
+    const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const r3 = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      [20, 21, 22, 23, 24],
+    ]);
+    expect([r1.processed, r2.processed, r3.processed]).toEqual([10, 10, 5]);
+    expect([r1.hasMore, r2.hasMore, r3.hasMore]).toEqual([true, true, false]);
+    expect(state.scanOrdinal).toBe(0);
+  });
+
+  it('runs each bounded slice with capped ordinal concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 10,
+      maxOrdinalsPerPass: 10,
+      maxOrdinalConcurrency: 3,
+      reconcileOrdinal: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(maxActive).toBe(3);
+    expect(result).toMatchObject({ processed: 10, reconciled: 10, watermark: 10 });
+  });
+
+  it('batch-recovers only locally-missing ordinals and reuses their outcomes', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        if (ordinal === 0) return { status: 'already', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+            kaId: String(ordinal),
+            reason: 'no-swm',
+          },
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map((target) => target.ordinal));
+        return new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[1, 2]]);
+    expect(result).toMatchObject({ processed: 3, reconciled: 3, watermark: 3 });
+  });
+
+  it('keeps scanning later slices when an early ordinal remains pending', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 6,
+      maxOrdinalsPerPass: 2,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal === 0) return { status: 'pending' };
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([[0, 1], [2, 3], [4, 5]]);
+    expect(result.watermark).toBe(0);
+    expect(result.pending).toBe(1);
+    expect(result.hasMore).toBe(false);
+    expect(state.ahead.size).toBe(5);
+  });
+
+  it('stops a slice when its captured context-graph binding becomes stale', async () => {
+    let current = true;
+    const { deps, attempted } = makeDeps({
+      getKCCount: async () => 5,
+      maxOrdinalsPerPass: 5,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        current = false;
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 66n);
+
+    expect(attempted).toEqual([0]);
+    expect(result).toMatchObject({
+      processed: 1,
+      reconciled: 0,
+      staleTarget: true,
+      hasMore: false,
+    });
+    expect(state.watermark).toBe(0);
+    expect(state.scanOrdinal).toBe(0);
+  });
 });
 
 describe('VmReconcileDispatcher scheduling', () => {
+  it('places a self-scheduled next slice behind context graphs already waiting', async () => {
+    const observed: string[] = [];
+    let scheduler!: VmReconcileDispatcher<void>;
+    scheduler = new VmReconcileDispatcher(
+      async (key) => {
+        observed.push(key);
+        if (key === 'large-cg' && observed.filter((seen) => seen === key).length === 1) {
+          scheduler.triggerLive(key);
+        }
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerLive('large-cg');
+    scheduler.triggerLive('waiting-cg');
+    await scheduler.waitForIdle();
+
+    expect(observed).toEqual(['large-cg', 'waiting-cg', 'large-cg']);
+  });
+
   it('passes the trigger source to the scheduled run', async () => {
     const observed: string[] = [];
     const scheduler = new VmReconcileDispatcher(

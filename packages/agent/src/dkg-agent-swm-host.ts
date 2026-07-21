@@ -238,7 +238,9 @@ import {
   VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
+import { MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -407,6 +409,17 @@ type VmReconcileTarget = {
   onChainCgId: bigint;
   cursor: CursorState;
   watermarkBefore: number;
+};
+
+type VmReconcileOrdinalOptions = {
+  /** Shared by every ordinal in one bounded pass. */
+  acquireActiveFetchPermit?: () => boolean;
+  /** Cap peer rotations for the one batch fetch; omitted preserves legacy behavior. */
+  maxPeerAttempts?: number;
+  /** Re-check a captured local/on-chain binding around slow fetch work. */
+  isTargetCurrent?: () => boolean;
+  /** Collect the missing KA for one batch fetch instead of fetching inline. */
+  deferActiveFetch?: boolean;
 };
 
 /**
@@ -2708,7 +2721,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           );
         },
         {
-          concurrency: 1,
+          concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
         },
@@ -2736,6 +2749,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
     this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
+    // Queue one trailing slice while this key is still active. The dispatcher
+    // places it behind already-waiting live CGs, so a large graph makes steady
+    // progress without monopolising the only VM worker.
+    if (result.hasMore || result.staleTarget) {
+      this.vmReconcileDispatcher?.triggerLive(localCgId);
+    }
     return response;
   }
 
@@ -2773,6 +2792,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   createVmReconcileDeps(this: DKGAgent, localCgId: string): ChainReconcilerDeps {
+    const capturedSub = this.subscribedContextGraphs.get(localCgId);
+    const capturedOnChainId = capturedSub?.onChainId;
+    const capturedCursor = this.reconcileCursors.get(localCgId);
+    const isTargetCurrent = (): boolean => {
+      const current = this.subscribedContextGraphs.get(localCgId);
+      return current === capturedSub
+        && current?.onChainId === capturedOnChainId
+        && this.reconcileCursors.get(localCgId) === capturedCursor;
+    };
     return {
       getKCCount: async (cg) => {
         const head = Number(await this.chain.getContextGraphKCCount!(cg));
@@ -2788,7 +2816,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return await this.chain.getBlockNumber();
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
-        this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),
+        this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
+          isTargetCurrent,
+          deferActiveFetch: true,
+        }),
+      recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
+        this.recoverVmReconcileBatch(lcg, ocg, targets, headBlock, isTargetCurrent),
+      maxOrdinalsPerPass: DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
+      maxOrdinalConcurrency: DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
+      isTargetCurrent: () => isTargetCurrent(),
       persistWatermark: (lcg, watermark) => {
         const sub = this.subscribedContextGraphs.get(lcg);
         if (!sub) return;
@@ -3616,6 +3652,155 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Drain one exact missing-KA batch. The initial ordinal scan has already
+   * proven these UALs are not locally materialized, so no already-confirmed KA
+   * enters the wire request. After every peer response we re-run local chain
+   * verification and remove completed KAs before considering another peer.
+   */
+  async recoverVmReconcileBatch(this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    targets: readonly OrdinalRecoveryTarget[],
+    headBlock: number | undefined,
+    isTargetCurrent: () => boolean,
+  ): Promise<ReadonlyMap<number, OrdinalOutcome>> {
+    const ctx = createOperationContext('system');
+    if (!isTargetCurrent() || targets.length === 0) return new Map();
+
+    // Damping: the batched path deliberately skips the per-UAL negative cache
+    // (consulting it primes connections to every discovered agent — the walk
+    // this path exists to avoid), so the per-CG active-fetch cooldown is the
+    // only damper between this batch and the network. A wholly unproductive
+    // batch (e.g. the curator is offline) therefore costs one bounded exact
+    // fetch per sweep interval, not one per reconcile pass. Progress clears
+    // the cooldown below so a draining backlog proceeds slice after slice.
+    if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
+      this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
+      return new Map();
+    }
+
+    // Capture the authenticated join-approval hint before consulting metadata:
+    // older member snapshots can contain a legacy creator self-stamp that is
+    // unrelated to a wallet-scoped CG's structural curator. The structural
+    // registry resolver is authoritative for `0x…/slug` graphs and can return
+    // every node registered to that curator wallet.
+    const approvedCuratorPeerId = this.preferredSyncPeers.get(localCgId);
+    const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId)
+      .catch(() => ({ peerIds: [] as string[], curatorIsLocal: false, legacyTripleResolved: false }));
+    let legacyPreferredPeerId: string | undefined;
+    if (curatorResolution.peerIds.length === 0) {
+      legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
+    }
+    const curatorPeerIds = [...new Set([
+      approvedCuratorPeerId,
+      ...curatorResolution.peerIds,
+      legacyPreferredPeerId,
+    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
+      .slice(0, 3);
+    for (const peerId of curatorPeerIds) {
+      await this.ensurePeerConnected(peerId).catch((error) => {
+        this.log.info(
+          ctx,
+          `VM exact fetch could not connect curator peer ${peerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+
+    const connectedByPeerId = new Map(
+      this.node.libp2p.getConnections()
+        .map((connection) => [connection.remotePeer.toString(), connection.remotePeer]),
+    );
+    const connected = [...connectedByPeerId.values()];
+    const connectedPeerIds = new Set(connectedByPeerId.keys());
+    const orderedConnectedPeerIds = this.selectCatchupPeers(
+      connected,
+      approvedCuratorPeerId ?? curatorPeerIds[0],
+      false,
+    ).map((peer) => peer.toString());
+    const peerIds = [...new Set([
+      ...curatorPeerIds.filter((peerId) => connectedPeerIds.has(peerId)),
+      ...orderedConnectedPeerIds,
+    ])].slice(0, 3);
+    const outcomes = new Map<number, OrdinalOutcome>();
+    let remaining = [...targets];
+    let attemptedFetch = false;
+
+    for (const peerId of peerIds) {
+      if (!isTargetCurrent() || remaining.length === 0) break;
+      const connectedPeer = connectedByPeerId.get(peerId);
+      if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) continue;
+
+      // The wire protocol rejects filters above MAX_EXACT_SYNC_ASSETS, so a
+      // scan batch configured larger than the protocol cap is requested in
+      // protocol-sized slices; targets past the cap stay in `remaining` for a
+      // later peer or pass. Revalidation is likewise restricted to the
+      // requested slice — each revalidated ordinal costs chain reads, and an
+      // unrequested target cannot have changed state.
+      const requestedTargets = remaining.slice(0, MAX_EXACT_SYNC_ASSETS);
+      const deferredTargets = remaining.slice(MAX_EXACT_SYNC_ASSETS);
+      const requestedUals = [...new Set(requestedTargets.map((target) => target.ual))];
+      for (const target of requestedTargets) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'fetch',
+          ordinal: target.ordinal,
+          kaId: target.kaId,
+          ual: target.ual,
+          detail: `exact-batch:${requestedUals.length}`,
+        });
+      }
+
+      try {
+        attemptedFetch = true;
+        const result = await this.syncExactKnowledgeAssetsFromPeer(
+          peerId,
+          localCgId,
+          requestedUals,
+        );
+        this.log.info(
+          ctx,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${requestedUals.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
+        );
+      } catch (error) {
+        this.log.info(
+          ctx,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      const stillMissing: OrdinalRecoveryTarget[] = [];
+      for (const target of requestedTargets) {
+        if (!isTargetCurrent()) break;
+        const outcome = await this.reconcileChainOrdinal(
+          localCgId,
+          onChainCgId,
+          target.ordinal,
+          headBlock,
+          { isTargetCurrent, deferActiveFetch: true },
+        );
+        outcomes.set(target.ordinal, outcome);
+        if (outcome.status === 'pending' && outcome.recovery) {
+          stillMissing.push(outcome.recovery);
+        }
+      }
+      remaining = [...stillMissing, ...deferredTargets];
+    }
+
+    // Mirror the inline path's cooldown policy: an unreachable network must
+    // not consume the fetch budget, and completed work resets the damper so
+    // the trailing `hasMore` slice of a draining backlog fetches immediately.
+    // Only a batch that reached a peer and recovered nothing leaves the
+    // cooldown standing.
+    const recoveredAny = [...outcomes.values()]
+      .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
+    if (!attemptedFetch || recoveredAny) {
+      this.vmReconcileFetchCooldownAt.delete(localCgId);
+    }
+    return outcomes;
+  }
+
+  /**
    * Reconcile a single per-CG registration ordinal: resolve the kaId + its
    * latest on-chain merkle root + publisher, build the UAL, and ask the
    * finalization handler to promote the matching local SWM snapshot to VM
@@ -3629,10 +3814,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainCgId: bigint,
     ordinal: number,
     headBlock: number | undefined,
+    options: VmReconcileOrdinalOptions = {},
   ): Promise<OrdinalOutcome> {
     const ctx = createOperationContext('system');
     const versionBlock = headBlock ?? 0;
     this.pruneVmReconcileState();
+
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
 
     let kaId: bigint;
     let merkleRoot: Uint8Array;
@@ -3653,7 +3843,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // cursor advances without redoing chain reads + an SWM scan.
       if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
 
-      if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
+      if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -3675,6 +3865,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'pending' };
     }
 
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
     const fh = this.getOrCreateFinalizationHandler();
     const reconcileInput = {
       contextGraphId: localCgId,
@@ -3690,29 +3883,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
-    if (outcome === 'no-swm') {
-      swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+    if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
+      if (options.deferActiveFetch) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: outcome,
+        });
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual,
+            kaId: kaId.toString(),
+            reason: outcome,
+          },
+        };
+      }
+      if (outcome === 'no-swm') {
+        swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+      }
       // Active fetch: pull the missing snapshot core-first (selectCatchupPeers
       // already prioritises known cores + the preferred sync peer), then retry.
-      if (this.shouldRunVmReconcileActiveFetch(localCgId)) {
+      // Metadata-pending exact VM content needs the same recovery: a durable
+      // sync can supply the missing provenance-bearing assertion metadata even
+      // when no content triples need to move.
+      const batchAllowsFetch = options.acquireActiveFetchPermit?.() ?? true;
+      const cooldownAllowsFetch = batchAllowsFetch
+        && this.shouldRunVmReconcileActiveFetch(localCgId);
+      if (batchAllowsFetch && cooldownAllowsFetch) {
         activeFetchRan = true;
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'fetch', ordinal, kaId: kaId.toString(), ual,
         });
         let maxAttempts = 1;
-        for (let attempt = 0; attempt < maxAttempts && outcome === 'no-swm'; attempt += 1) {
+        const fixedMaxAttempts = options.maxPeerAttempts === undefined
+          ? undefined
+          : Math.max(1, Math.floor(options.maxPeerAttempts));
+        if (fixedMaxAttempts !== undefined) maxAttempts = fixedMaxAttempts;
+        for (
+          let attempt = 0;
+          attempt < maxAttempts
+            && (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending');
+          attempt += 1
+        ) {
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            break;
+          }
           try {
             const fetchResult = await this.syncContextGraphFromConnectedPeers(localCgId, {
               includeSharedMemory: true,
               maxPeers: 1,
               peerRotationKey: localCgId,
             });
-            maxAttempts = Math.max(
-              maxAttempts,
-              fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
-              this.vmReconcileConnectedPeerCount(),
-            );
+            if (fixedMaxAttempts === undefined) {
+              maxAttempts = Math.max(
+                maxAttempts,
+                fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
+                this.vmReconcileConnectedPeerCount(),
+              );
+            }
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }
@@ -3722,8 +3957,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
             activeFetchHadUsableResponse = true;
           } catch (err) {
             this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
-            maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
+            if (fixedMaxAttempts === undefined) {
+              maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
+            }
             continue;
+          }
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            break;
           }
           outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
         }
@@ -3731,8 +3971,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
         }
       } else {
-        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by per-CG cooldown`);
+        const reason = batchAllowsFetch ? 'per-CG cooldown' : 'per-batch fetch budget';
+        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by ${reason}`);
       }
+    }
+
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
     }
 
     switch (outcome) {

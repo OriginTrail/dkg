@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  filterExactAssetDurablePayload,
+  runDurableSync,
+} from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -12,6 +15,29 @@ interface FetchCall {
   snapshotRef: string | undefined;
   sinceBatchId: string | undefined;
 }
+
+describe('exact-asset rolling-upgrade filter', () => {
+  it('drops already-present KAs from an old responder full-CG response', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const existing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const wantedGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const existingGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/8';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: wantedGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: existing, predicate: 'http://dkg.io/ontology/assertionGraph', object: existingGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:wanted', predicate: 'urn:p', object: '"wanted"', graph: wantedGraph },
+      { subject: 'urn:existing', predicate: 'urn:p', object: '"existing"', graph: existingGraph },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(data, meta, [wanted]);
+
+    expect(filtered.metaQuads.map((quad) => quad.subject)).toEqual([wanted, wanted]);
+    expect(filtered.dataQuads.map((quad) => quad.graph)).toEqual([wantedGraph]);
+  });
+});
 
 function makeContext(options: {
   sinceBatchIdFor?: (cg: string) => string | undefined;

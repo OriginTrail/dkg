@@ -232,6 +232,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { requireExactAssetUals } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
@@ -543,6 +544,7 @@ function syncPageFetchCoalescingKey(params: {
   sinceBatchId?: string;
   recovery?: boolean;
   forceFreshSession?: boolean;
+  assetUals?: readonly string[];
 }): string {
   return JSON.stringify([
     params.remotePeerId,
@@ -554,6 +556,7 @@ function syncPageFetchCoalescingKey(params: {
     params.sinceBatchId ?? null,
     params.recovery === true,
     params.forceFreshSession === true,
+    params.assetUals ?? null,
   ]);
 }
 
@@ -622,6 +625,7 @@ function durableSyncSingleFlightKey(params: {
   hasPhaseCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
+  exactAssetUals?: readonly string[];
 }): string | null {
   if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
     return null;
@@ -632,6 +636,7 @@ function durableSyncSingleFlightKey(params: {
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
     totalTimeoutMs: params.totalTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
+    exactAssetUals: params.exactAssetUals ?? null,
   });
 }
 
@@ -756,6 +761,10 @@ export type DurableSyncOptions = {
    * independently so an API caller cannot create an unbounded sync operation.
    */
   totalTimeoutMs?: number;
+  /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
+  exactAssetUals?: string[];
+  /** Admission override for foreground VM recovery. */
+  priority?: number;
 };
 
 const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
@@ -910,8 +919,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     lane: SyncSchedulerLane,
     label: string,
     work: () => Promise<T>,
+    priorityOverride?: number,
   ): Promise<T> {
-    const priority = contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
+    const priority = priorityOverride
+      ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
     return withGlobalSyncBackpressure(
       {
         policy: resolveSyncGlobalBackpressure(this.config),
@@ -4089,6 +4100,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           stopOnBackoffWorthyFailure,
           undefined,
           totalTimeoutMs,
+          options?.exactAssetUals,
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
@@ -4103,6 +4115,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           work,
+          options?.priority,
         ),
       ),
       merge: mergeDurableSyncResults,
@@ -4128,8 +4141,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
+      exactAssetUals: options?.exactAssetUals,
     });
     return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
+  }
+
+  /**
+   * Foreground VM repair for one bounded set of locally-missing KAs.
+   * Upgraded peers serve only these descriptors/payload graphs. Responses from
+   * older peers are accepted for rolling compatibility, but runDurableSync
+   * filters them back to this exact set before verification or storage.
+   */
+  async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    requestedAssetUals: string[],
+  ): Promise<DurableSyncResult> {
+    const assetUals = requireExactAssetUals(requestedAssetUals);
+    const ctx = createOperationContext('sync');
+    return this.runLegacyDurableSync(
+      ctx,
+      remotePeerId,
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      {
+        exactAssetUals: assetUals,
+        stopOnBackoffWorthyFailure: true,
+        totalTimeoutMs: 60_000,
+        priority: 1_000,
+      },
+    );
   }
 
   /** Execute one legacy durable Context Graph after its caller owns admission. */
@@ -4144,6 +4187,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     stopOnBackoffWorthyFailure?: boolean,
     onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
     totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+    exactAssetUals?: string[],
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     return runDurableSync({
@@ -4180,8 +4224,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         undefined,
         undefined,
         onVerifiedFullSnapshot !== undefined,
+        exactAssetUals,
       ),
       sinceBatchIdFor,
+      exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
       storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
@@ -4506,6 +4552,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Authoritative snapshot callers must rotate the responder session even
     // when an unfinished offset-zero requester session is still cached.
     forceFreshSession?: boolean,
+    // Exact VM recovery filter. Kept in the checkpoint, coalescing, wire, and
+    // responder-session identities so offsets can never cross asset batches.
+    assetUals?: string[],
   ): Promise<SyncPageResult> {
     const coalescingKey = syncPageFetchCoalescingKey({
       remotePeerId,
@@ -4517,6 +4566,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sinceBatchId,
       recovery,
       forceFreshSession,
+      assetUals,
     });
     const inFlight = inFlightSyncPageFetchesFor(this);
     const existing = inFlight.get(coalescingKey);
@@ -4552,6 +4602,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       graphUri,
       snapshotRef,
       sinceBatchId,
+      assetUals,
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
