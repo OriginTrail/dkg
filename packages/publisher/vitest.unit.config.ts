@@ -38,6 +38,7 @@ export default defineConfig({
       'test/rootless-access.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
+      'test/publish-adopt-existing-mint.test.ts',
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
