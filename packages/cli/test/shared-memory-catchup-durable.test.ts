@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { DurableSyncResult } from '@origintrail-official/dkg-agent';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string>, writableEnded: false };
@@ -38,9 +39,10 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
   return { ctx, res };
 }
 
-function detailedDurableResult(overrides: Record<string, number> = {}) {
+function detailedDurableResult(overrides: Partial<DurableSyncResult> = {}): DurableSyncResult {
   return {
     insertedTriples: 0,
+    complete: true,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,
@@ -138,6 +140,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       completedPhases: 0,
       failedPhases: 1,
       backoffWorthyFailures: 1,
+      complete: false,
     }));
     const agent = {
       peerId: 'self-peer',
@@ -206,6 +209,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         timedOutPhases: 1,
         completedPhases: 1,
         checkpointAdvances: 1,
+        complete: false,
       })),
     };
     const { ctx, res } = buildCatchupCtx(
@@ -233,6 +237,102 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       }],
     });
     expect(JSON.parse(res.body).results[0].durableError).toBeUndefined();
+  });
+
+  it('keeps a clean bounded prefix incomplete until the explicit durable contract is terminal', async () => {
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed: vi.fn(async () => detailedDurableResult({
+        insertedTriples: 40_000,
+        insertedDataTriples: 39_500,
+        insertedMetaTriples: 500,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+        complete: false,
+      })),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'agent-blackbox-vm',
+        peerId: 'peer-core',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: false,
+      totalDurableInsertedTriples: 40_000,
+      results: [{
+        peerId: 'peer-core',
+        durableComplete: false,
+      }],
+      perContextGraph: [{
+        contextGraphId: 'agent-blackbox-vm',
+        durableComplete: false,
+      }],
+    });
+  });
+
+  it('reports a clean detailed durable result as complete at every response level', async () => {
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed: vi.fn(async () => detailedDurableResult({
+        insertedTriples: 42,
+        insertedDataTriples: 40,
+        insertedMetaTriples: 2,
+        completedPhases: 2,
+        checkpointAdvances: 2,
+        complete: true,
+      })),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'agent-blackbox-vm',
+        peerId: 'peer-core',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      totalDurableInsertedTriples: 42,
+      results: [{
+        peerId: 'peer-core',
+        durableInsertedTriples: 42,
+        durableComplete: true,
+      }],
+      perContextGraph: [{
+        contextGraphId: 'agent-blackbox-vm',
+        durableComplete: true,
+        perPeer: [{
+          durableComplete: true,
+          durableDiagnostics: {
+            insertedDataTriples: 40,
+            insertedMetaTriples: 2,
+            completedPhases: 2,
+            checkpointAdvances: 2,
+          },
+        }],
+      }],
+    });
   });
 
   it('awaits durable verification and store settlement after the fetch budget', async () => {

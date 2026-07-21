@@ -800,6 +800,7 @@ const CHANGELOG_MAX_SCAN_LIMIT = 2000;
 function emptyDurableSyncResult(): DurableSyncResult {
   return {
     insertedTriples: 0,
+    complete: true,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,
@@ -826,6 +827,7 @@ function emptyDurableSyncResult(): DurableSyncResult {
 function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): DurableSyncResult {
   return {
     insertedTriples: a.insertedTriples + b.insertedTriples,
+    complete: a.complete === true && b.complete === true,
     fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
     fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
     insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
@@ -4029,7 +4031,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
-      return emptyDurableSyncResult();
+      return { ...emptyDurableSyncResult(), complete: false };
     }
     // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
     // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
@@ -4121,6 +4123,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({
         ...summary,
+        complete: false,
         deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
       }),
       shouldStop: (part) => Boolean(
@@ -4357,6 +4360,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       merge: mergeDurableSyncResults,
       markDeferred: (summary) => ({
         ...summary,
+        complete: false,
         deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
       }),
       onDeferred: (item, error) => this.log.info(
@@ -4457,7 +4461,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           } : undefined,
         );
         result = mergeDurableSyncResults(result, r);
-        const complete = dropsReconciled
+        const complete = r.complete === true
+          && dropsReconciled
           && r.timedOutPhases === 0 && r.failedPhases === 0
           && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0
           && r.rejectedKcs === 0;
@@ -4563,6 +4568,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       result.completedPhases += 1;
     }
     if (outcome.kind === 'denied') result.deniedPhases += 1;
+    result.complete = result.complete === true
+      && changelogComplete
+      && result.timedOutPhases === 0
+      && result.failedPhases === 0
+      && result.failedPeers === 0
+      && result.deniedPhases === 0
+      && result.dataRejectedMissingMeta === 0
+      && result.rejectedKcs === 0
+      && (result.deferredBackpressure ?? 0) === 0;
     return result;
   }
 
@@ -5405,6 +5419,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyDurable = (): DurableSyncResult => ({
       insertedTriples: 0,
+      complete: false,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 0,
       insertedMetaTriples: 0,

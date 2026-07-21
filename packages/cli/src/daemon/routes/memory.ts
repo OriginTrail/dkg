@@ -111,7 +111,13 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  createCatchupRunner,
+  summarizeDurableLeg,
+  type CatchupJobResult,
+  type CatchupRunner,
+  type DurableLegDiagnostics,
+} from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -817,27 +823,6 @@ WHERE {
     // peers Ã— many CGs), select a narrowed per-CG peer set, and parallelize
     // only that set. Per-peer dial+request is 5-20s on devnet; serialising
     // the selected peers would compound to NÃ—20s.
-    type DurableLegDiagnostics = {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      deniedPhases: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      verifiedPrivateOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-      failedPhases: number;
-      backoffWorthyFailures: number;
-      deferredBackpressure: number;
-    };
     type PerPeerLeg = {
       peerId: string;
       insertedTriples: number;
@@ -855,45 +840,6 @@ WHERE {
       insertedTriples: number;
       durableInsertedTriples: number;
     };
-    const durableDiagnosticsFrom = (result: Record<string, unknown>): DurableLegDiagnostics => {
-      const count = (key: string): number => {
-        const value = Number(result[key] ?? 0);
-        return Number.isFinite(value) && value > 0 ? value : 0;
-      };
-      return {
-        fetchedMetaTriples: count('fetchedMetaTriples'),
-        fetchedDataTriples: count('fetchedDataTriples'),
-        insertedMetaTriples: count('insertedMetaTriples'),
-        insertedDataTriples: count('insertedDataTriples'),
-        bytesReceived: count('bytesReceived'),
-        resumedPhases: count('resumedPhases'),
-        timedOutPhases: count('timedOutPhases'),
-        completedPhases: count('completedPhases'),
-        checkpointAdvances: count('checkpointAdvances'),
-        deniedPhases: count('deniedPhases'),
-        emptyResponses: count('emptyResponses'),
-        metaOnlyResponses: count('metaOnlyResponses'),
-        verifiedPrivateOnlyResponses: count('verifiedPrivateOnlyResponses'),
-        dataRejectedMissingMeta: count('dataRejectedMissingMeta'),
-        rejectedKcs: count('rejectedKcs'),
-        failedPeers: count('failedPeers'),
-        failedPhases: count('failedPhases'),
-        backoffWorthyFailures: count('backoffWorthyFailures'),
-        deferredBackpressure: count('deferredBackpressure'),
-      };
-    };
-    const durableHardFailureDetails = (diagnostics: DurableLegDiagnostics): string[] => [
-      ['failedPeers', diagnostics.failedPeers],
-      ['failedPhases', diagnostics.failedPhases],
-      ['deniedPhases', diagnostics.deniedPhases],
-      ['rejectedKcs', diagnostics.rejectedKcs],
-      ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
-    ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
-    const durableLegComplete = (diagnostics: DurableLegDiagnostics): boolean =>
-      diagnostics.completedPhases > 0
-      && diagnostics.timedOutPhases === 0
-      && diagnostics.deferredBackpressure === 0
-      && durableHardFailureDetails(diagnostics).length === 0;
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
       const canUseSharedMemory = includeSharedMemory
@@ -975,13 +921,13 @@ WHERE {
                   undefined,
                   undefined,
                   { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                ) as Record<string, unknown>;
-                durable = Number(detailed.insertedTriples ?? 0);
-                durableDiagnostics = durableDiagnosticsFrom(detailed);
-                durableComplete = durableLegComplete(durableDiagnostics);
-                const hardFailures = durableHardFailureDetails(durableDiagnostics);
-                if (hardFailures.length > 0) {
-                  durableError = `Durable sync did not complete (${hardFailures.join(', ')})`;
+                );
+                const durableSummary = summarizeDurableLeg(detailed);
+                durable = durableSummary.insertedTriples;
+                durableDiagnostics = durableSummary.diagnostics;
+                durableComplete = durableSummary.complete;
+                if (durableSummary.hardFailureDetails.length > 0) {
+                  durableError = `Durable sync did not complete (${durableSummary.hardFailureDetails.join(', ')})`;
                 }
               } else {
                 durable = await (

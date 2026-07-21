@@ -5,6 +5,7 @@ import {
   classifyDurableProgress,
   type DKGAgent,
   type DurableProgressSummary,
+  type DurableSyncResult,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
@@ -106,6 +107,68 @@ export interface CatchupRunRequest {
 export interface CatchupPhaseProgress extends DurableProgressSummary {
   bytesReceived?: number;
   emptyResponses?: number;
+}
+
+export type DurableLegDiagnostics = Omit<
+  Required<DurableSyncResult>,
+  'insertedTriples' | 'complete'
+>;
+
+export interface DurableLegSummary {
+  insertedTriples: number;
+  diagnostics: DurableLegDiagnostics;
+  complete: boolean;
+  hardFailureDetails: string[];
+}
+
+/**
+ * Adapt the agent's typed durable result for operator-facing catch-up APIs.
+ * Whole-leg completion comes only from the explicit agent contract; phase
+ * counters remain diagnostics and can describe safely committed prefixes.
+ */
+export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummary {
+  const count = (value: number | undefined): number => {
+    if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
+    return value;
+  };
+  const diagnostics: DurableLegDiagnostics = {
+    fetchedMetaTriples: count(result.fetchedMetaTriples),
+    fetchedDataTriples: count(result.fetchedDataTriples),
+    insertedMetaTriples: count(result.insertedMetaTriples),
+    insertedDataTriples: count(result.insertedDataTriples),
+    bytesReceived: count(result.bytesReceived),
+    resumedPhases: count(result.resumedPhases),
+    timedOutPhases: count(result.timedOutPhases),
+    completedPhases: count(result.completedPhases),
+    checkpointAdvances: count(result.checkpointAdvances),
+    deniedPhases: count(result.deniedPhases),
+    emptyResponses: count(result.emptyResponses),
+    metaOnlyResponses: count(result.metaOnlyResponses),
+    verifiedPrivateOnlyResponses: count(result.verifiedPrivateOnlyResponses),
+    dataRejectedMissingMeta: count(result.dataRejectedMissingMeta),
+    rejectedKcs: count(result.rejectedKcs),
+    failedPeers: count(result.failedPeers),
+    failedPhases: count(result.failedPhases),
+    backoffWorthyFailures: count(result.backoffWorthyFailures),
+    deferredBackpressure: count(result.deferredBackpressure),
+  };
+  const hardFailureDetails = [
+    ['failedPeers', diagnostics.failedPeers],
+    ['failedPhases', diagnostics.failedPhases],
+    ['deniedPhases', diagnostics.deniedPhases],
+    ['rejectedKcs', diagnostics.rejectedKcs],
+    ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
+  ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
+  const progress = classifyDurableProgress(result);
+
+  return {
+    insertedTriples: count(result.insertedTriples),
+    diagnostics,
+    complete: result.complete === true
+      && progress.completedWithoutFailure
+      && hardFailureDetails.length === 0,
+    hardFailureDetails,
+  };
 }
 
 export function catchupPlaneCompletedWithoutFailure(

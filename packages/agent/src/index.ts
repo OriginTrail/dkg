@@ -186,6 +186,8 @@ export {
   type PendingSenderKeyEntry,
   type AssertionArtifactKind,
   type ImportedArtifactByteStore,
+  type DurableSyncDiagnostics,
+  type DurableSyncResult,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,

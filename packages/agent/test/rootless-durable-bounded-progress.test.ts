@@ -204,6 +204,7 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(summary.rejectedKcs).toBe(0);
+    expect(summary.complete).toBe(false);
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.insertedDataTriples).toBe(8);
     expect(checkpoints).toContainEqual([`${CONTEXT_GRAPH_ID}:data`, 8]);
@@ -253,6 +254,7 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(summary.failedPhases).toBe(1);
+    expect(summary.complete).toBe(false);
     expect(summary.insertedDataTriples).toBe(materialized[0]!.dataQuads.length);
     expect(summary.insertedMetaTriples).toBe(materialized[0]!.metadataQuads.length);
     expect(summary.insertedTriples).toBe(
@@ -305,6 +307,7 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(summary.rejectedKcs).toBe(0);
+    expect(summary.complete).toBe(false);
     expect(summary.timedOutPhases).toBe(0);
     expect(summary.insertedDataTriples).toBe(cleanPrefix.length);
     expect(summary.completedPhases).toBe(1);
@@ -358,6 +361,7 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(summary.rejectedKcs).toBe(0);
+    expect(summary.complete).toBe(true);
     expect(summary.timedOutPhases).toBe(0);
     expect(summary.insertedDataTriples).toBe(4);
     expect(summary.completedPhases).toBe(2);

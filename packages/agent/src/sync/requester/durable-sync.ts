@@ -50,6 +50,8 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
 
 export interface DurableSyncSummary {
   insertedTriples: number;
+  /** True only when every requested Context Graph completed cleanly. */
+  complete: boolean;
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
   insertedMetaTriples: number;
@@ -201,6 +203,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
   const summary: DurableSyncSummary = {
     insertedTriples: 0,
+    complete: true,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,
@@ -315,6 +318,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             );
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
+        summary.complete = false;
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
         endPhase();
         break;
@@ -491,6 +495,15 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const updateDataCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && !metadataOnlyResponse;
+      const contextGraphComplete = batchVerifiedCleanly
+        && processed.dataRejectedMissingMeta === 0
+        && updateMetaCheckpoint
+        && updateDataCheckpoint
+        && metaResult.completed
+        && !metaResult.timedOut
+        && effectiveDataResult.completed
+        && !effectiveDataResult.timedOut;
+      if (!contextGraphComplete) summary.complete = false;
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -577,6 +590,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
 
     } catch (pidErr) {
+      summary.complete = false;
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
