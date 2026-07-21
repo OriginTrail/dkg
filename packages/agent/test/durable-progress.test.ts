@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyDurableProgress,
-  createCleanEmptyDurableSyncResult,
+  createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
+  durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
   isDurableSyncComplete,
   markDurableTerminalBoundary,
+  mergeDurableSyncAccumulators,
 } from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
@@ -125,6 +127,20 @@ describe('classifyDurableProgress', () => {
     expect(progress.madeReconnectProgress).toBe(true);
     expect(progress.madeReadinessProgress).toBe(true);
   });
+
+  it('does not classify an explicitly incomplete durable result as readiness complete', () => {
+    const progress = classifyDurableProgress({
+      complete: false,
+      insertedTriples: 40_000,
+      insertedDataTriples: 40_000,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+    });
+
+    expect(progress.madeReadinessProgress).toBe(true);
+    expect(progress.completedWithoutFailure).toBe(false);
+    expect(progress.completedReadinessCleanly).toBe(false);
+  });
 });
 
 describe('isDurableSyncComplete', () => {
@@ -133,6 +149,7 @@ describe('isDurableSyncComplete', () => {
 
     expect(isDurableSyncComplete(progress, true)).toBe(true);
     expect(isDurableSyncComplete(progress, false)).toBe(false);
+    expect(isDurableSyncComplete({ ...progress, complete: false }, true)).toBe(false);
   });
 
   it.each([
@@ -150,25 +167,25 @@ describe('isDurableSyncComplete', () => {
 
 describe('durable terminal boundary model', () => {
   it('keeps an incomplete lane sticky across later clean boundaries', () => {
-    const result = createCleanEmptyDurableSyncResult();
-    result.completedPhases = 1;
+    const accumulator = createDurableSyncAccumulator();
+    accumulator.diagnostics.completedPhases = 1;
 
-    markDurableTerminalBoundary(result, false);
-    markDurableTerminalBoundary(result, true);
+    markDurableTerminalBoundary(accumulator, false);
+    markDurableTerminalBoundary(accumulator, true);
 
-    expect(finalizeDurableSyncCompletion(result).complete).toBe(false);
+    expect(finalizeDurableSyncCompletion(accumulator).complete).toBe(false);
   });
 
   it('owns clean phase synthesis and authoritative incomplete cleanup', () => {
-    const complete = createCleanEmptyDurableSyncResult();
+    const complete = createDurableSyncAccumulator();
     markDurableTerminalBoundary(complete, true, { countCompletedPhase: true });
     expect(finalizeDurableSyncCompletion(complete)).toMatchObject({
       complete: true,
       completedPhases: 1,
     });
 
-    const incomplete = createCleanEmptyDurableSyncResult();
-    incomplete.completedPhases = 2;
+    const incomplete = createDurableSyncAccumulator();
+    incomplete.diagnostics.completedPhases = 2;
     markDurableTerminalBoundary(incomplete, false, {
       countCompletedPhase: true,
       clearCompletedPhasesWhenIncomplete: true,
@@ -180,25 +197,35 @@ describe('durable terminal boundary model', () => {
   });
 
   it('does not synthesize a completed phase when a blocking counter is present', () => {
-    const result = createCleanEmptyDurableSyncResult();
-    result.rejectedKcs = 1;
+    const accumulator = createDurableSyncAccumulator();
+    accumulator.diagnostics.rejectedKcs = 1;
 
-    markDurableTerminalBoundary(result, true, { countCompletedPhase: true });
+    markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
 
-    expect(finalizeDurableSyncCompletion(result)).toMatchObject({
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
       complete: false,
       completedPhases: 0,
     });
   });
+
+  it('keeps the neutral merge identity internal and assigns complete only on finalization', () => {
+    const completedLane = createDurableSyncAccumulator();
+    markDurableTerminalBoundary(completedLane, true, { countCompletedPhase: true });
+    const publicLane = finalizeDurableSyncCompletion(completedLane);
+    const neutral = createDurableSyncAccumulator();
+
+    expect('complete' in neutral.diagnostics).toBe(false);
+    const merged = mergeDurableSyncAccumulators(
+      neutral,
+      durableSyncAccumulatorFromResult(publicLane),
+    );
+    expect('complete' in merged.diagnostics).toBe(false);
+    expect(finalizeDurableSyncCompletion(merged).complete).toBe(true);
+  });
 });
 
 describe('durable result factories', () => {
-  it('makes clean, incomplete, and failed-peer intent explicit', () => {
-    expect(createCleanEmptyDurableSyncResult()).toMatchObject({
-      complete: true,
-      insertedTriples: 0,
-      failedPeers: 0,
-    });
+  it('makes incomplete and failed-peer public results self-consistent', () => {
     expect(createIncompleteDurableSyncResult()).toMatchObject({
       complete: false,
       insertedTriples: 0,

@@ -6,6 +6,8 @@ import type { DurableSyncResult } from '../dkg-agent-types.js';
  * classified without first manufacturing a full requester result.
  */
 export interface DurableProgressSummary {
+  /** Finalized whole-run verdict when the caller has a public durable result. */
+  readonly complete?: boolean;
   readonly insertedTriples?: number;
   readonly insertedDataTriples?: number;
   readonly insertedMetaTriples?: number;
@@ -84,6 +86,7 @@ export function classifyDurableProgress(
   // handled separately by reconnect accounting, matching the pre-classifier
   // policy while keeping partial-deferral progress observable.
   const hasCleanVerifiedPrivateOnlyCompletion = hasVerifiedPrivateOnlyResponse
+    && progress?.complete !== false
     && metaOnlyResponses === 0
     && completedPhases > 0
     && !timedOut
@@ -117,6 +120,7 @@ export function classifyDurableProgress(
     || (completedPhases > 0 && resumedPhases > 0);
 
   const completedWithoutFailure = progress != null
+    && progress.complete !== false
     && completedPhases > 0
     && !hasBlockingFailure;
 
@@ -172,18 +176,113 @@ export interface DurableTerminalBoundaryOptions {
 }
 
 /**
- * Record one lane's terminal boundary on the result itself. `complete` acts as
- * a sticky boundary accumulator: once any requested lane is incomplete, later
- * clean lanes cannot accidentally make the whole run complete again.
+ * Internal durable aggregation state. The public `complete` verdict is absent
+ * here by design: boundary aggregation and a finalized result must not share
+ * one boolean whose meaning changes midway through a run.
+ */
+export interface DurableSyncAccumulator {
+  diagnostics: InitializedDurableSyncDiagnostics;
+  allTerminalBoundariesReached: boolean;
+  observedTerminalBoundaries: number;
+}
+
+/** Start a neutral internal fold. It is never exposed as a public result. */
+export function createDurableSyncAccumulator(): DurableSyncAccumulator {
+  return {
+    diagnostics: createDurableSyncDiagnosticsBase(),
+    allTerminalBoundariesReached: true,
+    observedTerminalBoundaries: 0,
+  };
+}
+
+/** Convert one finalized public result into an internal fold contribution. */
+export function durableSyncAccumulatorFromResult(
+  result: DurableSyncResult,
+): DurableSyncAccumulator {
+  const { complete, ...diagnostics } = result;
+  return {
+    diagnostics: {
+      ...createDurableSyncDiagnosticsBase(),
+      ...diagnostics,
+    },
+    allTerminalBoundariesReached: complete === true,
+    observedTerminalBoundaries: 1,
+  };
+}
+
+function mergeDurableSyncDiagnostics(
+  a: InitializedDurableSyncDiagnostics,
+  b: InitializedDurableSyncDiagnostics,
+): InitializedDurableSyncDiagnostics {
+  return {
+    insertedTriples: a.insertedTriples + b.insertedTriples,
+    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
+    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
+    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
+    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
+    bytesReceived: a.bytesReceived + b.bytesReceived,
+    resumedPhases: a.resumedPhases + b.resumedPhases,
+    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
+    completedPhases: a.completedPhases + b.completedPhases,
+    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
+    emptyResponses: a.emptyResponses + b.emptyResponses,
+    metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
+    verifiedPrivateOnlyResponses:
+      a.verifiedPrivateOnlyResponses + b.verifiedPrivateOnlyResponses,
+    dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
+    rejectedKcs: a.rejectedKcs + b.rejectedKcs,
+    // This is peer cardinality, not a per-CG failure count. All folded inputs
+    // belong to one remote peer, so several failed CGs still mean one peer.
+    failedPeers: Math.max(a.failedPeers, b.failedPeers),
+    failedPhases: a.failedPhases + b.failedPhases,
+    deniedPhases: a.deniedPhases + b.deniedPhases,
+    backoffWorthyFailures: a.backoffWorthyFailures + b.backoffWorthyFailures,
+    deferredBackpressure: a.deferredBackpressure + b.deferredBackpressure,
+  };
+}
+
+/** Fold two internal durable aggregates without manufacturing a public verdict. */
+export function mergeDurableSyncAccumulators(
+  a: DurableSyncAccumulator,
+  b: DurableSyncAccumulator,
+): DurableSyncAccumulator {
+  return {
+    diagnostics: mergeDurableSyncDiagnostics(a.diagnostics, b.diagnostics),
+    allTerminalBoundariesReached:
+      a.allTerminalBoundariesReached && b.allTerminalBoundariesReached,
+    observedTerminalBoundaries:
+      a.observedTerminalBoundaries + b.observedTerminalBoundaries,
+  };
+}
+
+/** Fold a finalized lane result into an existing internal aggregate. */
+export function mergeDurableSyncResultIntoAccumulator(
+  accumulator: DurableSyncAccumulator,
+  result: DurableSyncResult,
+): DurableSyncAccumulator {
+  const merged = mergeDurableSyncAccumulators(
+    accumulator,
+    durableSyncAccumulatorFromResult(result),
+  );
+  Object.assign(accumulator.diagnostics, merged.diagnostics);
+  accumulator.allTerminalBoundariesReached = merged.allTerminalBoundariesReached;
+  accumulator.observedTerminalBoundaries = merged.observedTerminalBoundaries;
+  return accumulator;
+}
+
+/**
+ * Record one lane's terminal boundary in internal state. Once any requested
+ * lane is incomplete, later clean lanes cannot make the whole run complete.
  *
  * Diagnostic phase synthesis also lives here so lanes never duplicate the
  * blocking-counter policy when reporting an authoritative completion.
  */
-export function markDurableTerminalBoundary<T extends DurableSyncResult>(
-  result: T,
+export function markDurableTerminalBoundary(
+  accumulator: DurableSyncAccumulator,
   reachedTerminalBoundary: boolean,
   options: DurableTerminalBoundaryOptions = {},
-): T {
+): DurableSyncAccumulator {
+  const result = accumulator.diagnostics;
   if (!reachedTerminalBoundary && options.clearCompletedPhasesWhenIncomplete) {
     result.completedPhases = 0;
   }
@@ -194,25 +293,36 @@ export function markDurableTerminalBoundary<T extends DurableSyncResult>(
   ) {
     result.completedPhases += 1;
   }
-  result.complete = result.complete && reachedTerminalBoundary;
-  return result;
+  accumulator.allTerminalBoundariesReached =
+    accumulator.allTerminalBoundariesReached && reachedTerminalBoundary;
+  accumulator.observedTerminalBoundaries += 1;
+  return accumulator;
 }
 
-/** Apply the shared counter policy to a result after all lanes are marked. */
-export function finalizeDurableSyncCompletion<T extends DurableSyncResult>(result: T): T {
-  result.complete = isDurableSyncComplete(result, result.complete);
-  return result;
+/** Assign the public completion verdict once, after every lane is folded. */
+export function finalizeDurableSyncCompletion(
+  accumulator: DurableSyncAccumulator,
+): InitializedDurableSyncResult {
+  return {
+    ...accumulator.diagnostics,
+    complete: accumulator.observedTerminalBoundaries > 0
+      && isDurableSyncComplete(
+        accumulator.diagnostics,
+        accumulator.allTerminalBoundariesReached,
+      ),
+  };
 }
 
-type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
+export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
   DurableSyncResult,
   'backoffWorthyFailures' | 'deferredBackpressure'
 >>;
 
-function createDurableSyncResultBase(): InitializedDurableSyncResult {
+export type InitializedDurableSyncDiagnostics = Omit<InitializedDurableSyncResult, 'complete'>;
+
+function createDurableSyncDiagnosticsBase(): InitializedDurableSyncDiagnostics {
   return {
     insertedTriples: 0,
-    complete: false,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
     insertedMetaTriples: 0,
@@ -235,17 +345,12 @@ function createDurableSyncResultBase(): InitializedDurableSyncResult {
   };
 }
 
-/** Neutral merge identity: no work was needed and no failure occurred. */
-export function createCleanEmptyDurableSyncResult(): InitializedDurableSyncResult {
-  return { ...createDurableSyncResultBase(), complete: true };
-}
-
 /** No work completed, but the caller must keep retrying. */
 export function createIncompleteDurableSyncResult(): InitializedDurableSyncResult {
-  return createDurableSyncResultBase();
+  return { ...createDurableSyncDiagnosticsBase(), complete: false };
 }
 
 /** A peer attempt failed before producing a usable durable result. */
 export function createFailedPeerDurableSyncResult(): InitializedDurableSyncResult {
-  return { ...createDurableSyncResultBase(), failedPeers: 1 };
+  return { ...createIncompleteDurableSyncResult(), failedPeers: 1 };
 }

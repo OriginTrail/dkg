@@ -259,11 +259,15 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   classifyDurableProgress,
-  createCleanEmptyDurableSyncResult,
+  createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
+  durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
+  mergeDurableSyncAccumulators,
+  mergeDurableSyncResultIntoAccumulator,
+  type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
 import {
   getSyncBackpressureSnapshot,
@@ -803,36 +807,6 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-/** Merge same-peer durable results across Context Graphs and requester lanes. */
-function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): DurableSyncResult {
-  return {
-    insertedTriples: a.insertedTriples + b.insertedTriples,
-    complete: a.complete === true && b.complete === true,
-    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
-    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
-    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
-    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
-    bytesReceived: a.bytesReceived + b.bytesReceived,
-    resumedPhases: a.resumedPhases + b.resumedPhases,
-    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
-    completedPhases: a.completedPhases + b.completedPhases,
-    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
-    emptyResponses: a.emptyResponses + b.emptyResponses,
-    metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
-    verifiedPrivateOnlyResponses:
-      a.verifiedPrivateOnlyResponses + b.verifiedPrivateOnlyResponses,
-    dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
-    rejectedKcs: a.rejectedKcs + b.rejectedKcs,
-    // This is peer cardinality, not a per-CG failure count. Both inputs belong
-    // to the same remote peer, so several failed CGs still mean one peer.
-    failedPeers: Math.max(a.failedPeers, b.failedPeers),
-    failedPhases: a.failedPhases + b.failedPhases,
-    deniedPhases: a.deniedPhases + b.deniedPhases,
-    backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
-    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
-  };
-}
 
 function emptySharedMemorySyncResult(): SharedMemorySyncResult {
   return {
@@ -4028,7 +4002,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const lane = await this.runChangelogLane(ctx, remotePeerId, contextGraphIds, onAccessDenied);
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
-        if ((changelogResult.deferredBackpressure ?? 0) > 0) return changelogResult;
+        if (changelogResult && (changelogResult.deferredBackpressure ?? 0) > 0) {
+          return changelogResult;
+        }
       } catch (err) {
         this.log.warn(ctx, `Changelog sync lane failed for ${remotePeerId.slice(-8)}; using legacy sync: ${String(err)}`);
         legacyContextGraphIds = contextGraphIds;
@@ -4036,12 +4012,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     if (legacyContextGraphIds.length === 0) {
-      return changelogResult ?? createCleanEmptyDurableSyncResult();
+      return changelogResult ?? createIncompleteDurableSyncResult();
     }
     const legacyResult = await this.runLegacyDurableSync(
       ctx, remotePeerId, legacyContextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options,
     );
-    return changelogResult ? mergeDurableSyncResults(changelogResult, legacyResult) : legacyResult;
+    if (!changelogResult) return legacyResult;
+    return finalizeDurableSyncCompletion(mergeDurableSyncAccumulators(
+      durableSyncAccumulatorFromResult(changelogResult),
+      durableSyncAccumulatorFromResult(legacyResult),
+    ));
   }
 
   /**
@@ -4066,28 +4046,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       this.config.syncContextGraphPriorities,
     );
-    const runSync = () => runOrderedContextGraphSyncs({
+    const runSync = async () => finalizeDurableSyncCompletion(await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
       work: orderedContextGraphIds.map((contextGraphId) => ({
         contextGraphId,
         lane: 'durable' as const,
         operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: (remainingContextGraphs) => LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
-          this,
-          ctx,
-          remotePeerId,
-          contextGraphId,
-          remainingContextGraphs,
-          onPhase,
-          onAccessDenied,
-          sinceBatchIdFor,
-          stopOnBackoffWorthyFailure,
-          undefined,
-          totalTimeoutMs,
-          options?.exactAssetUals,
+        run: async (remainingContextGraphs) => durableSyncAccumulatorFromResult(
+          await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+            this,
+            ctx,
+            remotePeerId,
+            contextGraphId,
+            remainingContextGraphs,
+            onPhase,
+            onAccessDenied,
+            sinceBatchIdFor,
+            stopOnBackoffWorthyFailure,
+            undefined,
+            totalTimeoutMs,
+            options?.exactAssetUals,
+          ),
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
-      emptyResult: createCleanEmptyDurableSyncResult,
+      emptyResult: createDurableSyncAccumulator,
       runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
         this,
         remotePeerId,
@@ -4101,20 +4083,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           options?.priority,
         ),
       ),
-      merge: mergeDurableSyncResults,
-      markDeferred: (summary) => ({
-        ...summary,
-        complete: false,
-        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
-      }),
+      merge: mergeDurableSyncAccumulators,
+      markDeferred: (summary) => {
+        summary.diagnostics.deferredBackpressure += 1;
+        return markDurableTerminalBoundary(summary, false);
+      },
       shouldStop: (part) => Boolean(
-        stopOnBackoffWorthyFailure && (part.backoffWorthyFailures ?? 0) > 0,
+        stopOnBackoffWorthyFailure && part.diagnostics.backoffWorthyFailures > 0,
       ),
       onDeferred: (item, error) => this.log.info(
         ctx,
         `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
       ),
-    });
+    }));
 
     const singleFlightKey = durableSyncSingleFlightKey({
       remotePeerId,
@@ -4297,10 +4278,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphIds: string[],
     onAccessDenied?: (contextGraphId: string) => void,
-  ): Promise<{ result: DurableSyncResult; remainingLegacyCgs: string[] }> {
+  ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
-      return { result: createCleanEmptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
+      return { remainingLegacyCgs: contextGraphIds };
     }
     const legacyCgs: string[] = [];
     const work = [];
@@ -4313,24 +4294,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
         lane: 'changelog' as const,
         operationId: `changelog:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: async (): Promise<DurableSyncResult> => {
+        run: async (): Promise<DurableSyncAccumulator> => {
           try {
             const result = await this.runChangelogSyncForCg(ctx, remotePeerId, contextGraphId);
             if (result.deniedPhases > 0) onAccessDenied?.(contextGraphId);
-            return result;
+            return durableSyncAccumulatorFromResult(result);
           } catch (error) {
             if (getSyncBackpressureBusyError(error)) throw error;
             this.log.warn(ctx, `Changelog sync failed for CG ${contextGraphId} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(error)}`);
             legacyCgs.push(contextGraphId);
-            return createCleanEmptyDurableSyncResult();
+            return createDurableSyncAccumulator();
           }
         },
       });
     }
-    const result = await runOrderedContextGraphSyncs({
+    const accumulator = await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
       work,
       priorities: this.config.syncContextGraphPriorities,
-      emptyResult: createCleanEmptyDurableSyncResult,
+      emptyResult: createDurableSyncAccumulator,
       runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
         ctx,
         item.contextGraphId,
@@ -4338,17 +4319,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         item.operationId,
         run,
       ),
-      merge: mergeDurableSyncResults,
-      markDeferred: (summary) => ({
-        ...summary,
-        complete: false,
-        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
-      }),
+      merge: mergeDurableSyncAccumulators,
+      markDeferred: (summary) => {
+        summary.diagnostics.deferredBackpressure += 1;
+        return markDurableTerminalBoundary(summary, false);
+      },
       onDeferred: (item, error) => this.log.info(
         ctx,
         `Deferring changelog sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
       ),
     });
+    const result = accumulator.observedTerminalBoundaries > 0
+      ? finalizeDurableSyncCompletion(accumulator)
+      : undefined;
     return { result, remainingLegacyCgs: legacyCgs };
   }
 
@@ -4369,7 +4352,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
-    let result: DurableSyncResult = createCleanEmptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
+    const accumulator = createDurableSyncAccumulator();
+    const result = accumulator.diagnostics; // folds every resync's legacy diagnostics
     const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
     const cgDataUri = contextGraphDataUri(contextGraphId);
     // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
@@ -4443,7 +4427,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             dropsReconciled = reconciled;
           } : undefined,
         );
-        result = mergeDurableSyncResults(result, r);
+        mergeDurableSyncResultIntoAccumulator(accumulator, r);
         const complete = r.complete && dropsReconciled;
         return { complete, insertedTriples: r.insertedTriples };
       },
@@ -4535,11 +4519,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // A legacy fallback may have completed its own fetch phases while the
     // changelog drop remains unauthoritative. Preserve inserted progress, but
     // do not surface those phase completions as CG readiness evidence.
-    markDurableTerminalBoundary(result, changelogComplete, {
+    markDurableTerminalBoundary(accumulator, changelogComplete, {
       countCompletedPhase: true,
       clearCompletedPhasesWhenIncomplete: true,
     });
-    return finalizeDurableSyncCompletion(result);
+    return finalizeDurableSyncCompletion(accumulator);
   }
 
   /**
