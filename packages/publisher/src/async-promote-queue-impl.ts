@@ -630,7 +630,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       );
       if (stateRows.length === 0) return { outcome: 'already_absent' };
       const rawState = stateRows[0]?.['state'];
-      const state = rawState === undefined ? undefined : String(parseLiteral(rawState));
+      // parseLiteral is JSON.parse — a corrupt/non-JSON state literal must become a
+      // bounded reject, never throw out of the method (matches the lift sibling's guard).
+      let state: string | undefined;
+      try {
+        state = rawState === undefined ? undefined : String(parseLiteral(rawState));
+      } catch {
+        return { outcome: 'rejected', reason: 'unknown' };
+      }
       if (state === undefined || !(PROMOTE_JOB_STATES as readonly string[]).includes(state)) {
         return { outcome: 'rejected', reason: 'unknown' };
       }

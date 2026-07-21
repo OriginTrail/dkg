@@ -7,6 +7,7 @@ import {
   type PromoteTerminalJobClearer,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_STATE, jobSubject, literal } from '../src/async-promote-queue-utils.js';
 
 // #1837 — atomic by-exact-jobId TERMINAL clear for the SWM promote queue.
 describe('#1837 promote queue clearTerminalJob', () => {
@@ -110,6 +111,16 @@ describe('#1837 promote queue clearTerminalJob', () => {
     const queue = createQueue();
     expect(await queue.clearTerminalJob('')).toEqual({ outcome: 'rejected', reason: 'malformed' });
     expect(await queue.clearTerminalJob('   ')).toEqual({ outcome: 'rejected', reason: 'malformed' });
+  });
+
+  // #1883 review (🟡): a state triple present but not a recognized enum value must be a
+  // bounded reject (unknown), never throw — and the parse itself is now try/catch-guarded.
+  it('rejects a subject whose state is not a known enum value as unknown, without throwing', async () => {
+    const queue = createQueue();
+    await store.insert([
+      { subject: jobSubject('bogus-1'), predicate: PROMOTE_STATE, object: literal('bogus_state'), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
+    ]);
+    await expect(queue.clearTerminalJob('bogus-1')).resolves.toEqual({ outcome: 'rejected', reason: 'unknown' });
   });
 
   it('concurrent clears of one terminal job are deterministic: one cleared, rest already_absent, no other job affected', async () => {

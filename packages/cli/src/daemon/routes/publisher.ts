@@ -189,6 +189,7 @@ import {
 import {
   resolveNameToPeerId,
   jsonResponse,
+  respondTerminalClearOutcome,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -559,16 +560,13 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     } catch {
       return jsonResponse(res, 400, { error: "Invalid JSON body" });
     }
-    const { jobId } = clearJobParsed;
+    // `JSON.parse("null")` etc. succeeds but yields a non-object; optional-chain so a
+    // `null`/primitive body falls through to the malformed guard (400), never a
+    // destructure TypeError → 500.
+    const jobId = clearJobParsed && typeof clearJobParsed === "object" ? clearJobParsed.jobId : undefined;
     if (typeof jobId !== "string" || jobId.trim().length === 0) {
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
-    const outcome = await publisherControl.clearTerminalJob(jobId);
-    if (outcome.outcome === "cleared" || outcome.outcome === "already_absent") {
-      return jsonResponse(res, 200, { ...outcome, jobId });
-    }
-    // rejected: malformed → 400 (bad input); nonterminal/unknown → 409 (server-side state)
-    const status = outcome.reason === "malformed" ? 400 : 409;
-    return jsonResponse(res, status, { ...outcome, jobId });
+    return respondTerminalClearOutcome(res, await publisherControl.clearTerminalJob(jobId), jobId);
   }
 }

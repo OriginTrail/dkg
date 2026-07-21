@@ -25,6 +25,7 @@
 import type { RequestContext } from "./context.js";
 import {
   jsonResponse,
+  respondTerminalClearOutcome,
   readBody,
   safeParseJson,
   validateEntities,
@@ -247,10 +248,5 @@ export async function handleKaShareJobRecover(ctx: RequestContext, jobId: string
 // (already_absent = 200, not 404). The caller passes the already url-decoded jobId.
 export async function handleKaShareJobClear(ctx: RequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;
-  const outcome = await agent.assertion.clearPromoteAsync(jobId);
-  if (outcome.outcome === "cleared" || outcome.outcome === "already_absent") {
-    return jsonResponse(res, 200, { ...outcome, jobId });
-  }
-  const status = outcome.reason === "malformed" ? 400 : 409;
-  return jsonResponse(res, status, { ...outcome, jobId });
+  return respondTerminalClearOutcome(res, await agent.assertion.clearPromoteAsync(jobId), jobId);
 }

@@ -83,7 +83,21 @@ describe('#1837 POST /api/publisher/clear-job', () => {
     expect(responseStatus(ctx)).toBe(400);
   });
 
+  // #1883 review (🔴): a literal `null` body parses fine but must not TypeError on
+  // destructure (→ 500). It falls through to the malformed guard as a bounded 400.
+  it('rejects a literal null body → 400 malformed (no 500)', async () => {
+    const control = newControl();
+    const ctx = postClearJobRaw(control, 'null');
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(400);
+    expect(responseBody(ctx)).toMatchObject({ outcome: 'rejected', reason: 'malformed' });
+  });
+
   function postClearJob(publisherControl: RequestContext['publisherControl'], body: Record<string, unknown>): RequestContext {
+    return postClearJobRaw(publisherControl, JSON.stringify(body));
+  }
+
+  function postClearJobRaw(publisherControl: RequestContext['publisherControl'], rawBody: string): RequestContext {
     const path = '/api/publisher/clear-job';
     const url = new URL(`http://127.0.0.1${path}`);
     const req = Readable.from([]);
@@ -91,7 +105,7 @@ describe('#1837 POST /api/publisher/clear-job', () => {
     // eager drain leaves it) — avoids driving a mock stream in the unit harness.
     Object.assign(req, {
       method: 'POST', url: path, headers: { host: '127.0.0.1' },
-      __dkgPrebufferedBody: Buffer.from(JSON.stringify(body), 'utf8'),
+      __dkgPrebufferedBody: Buffer.from(rawBody, 'utf8'),
     });
     return {
       req: req as RequestContext['req'],
