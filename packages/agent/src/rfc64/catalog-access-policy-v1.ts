@@ -33,6 +33,12 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
+import {
+  readVerifiedRfc64CatalogAccessCurrentSnapshotV1,
+  type Rfc64CatalogAccessCurrentSnapshotInputV1,
+  type Rfc64CatalogAccessCurrentSnapshotVerifierV1,
+  type Rfc64CatalogAccessCurrentSnapshotV1,
+} from './catalog-access-current-verifier-v1.js';
 
 export type Rfc64CatalogAccessOperationV1 =
   | 'announce-outbound'
@@ -57,16 +63,14 @@ export interface Rfc64CatalogAccessAuthorizationV1 {
   readonly policyDigest: Digest32V1;
 }
 
-export interface AcceptRfc64CatalogAccessSnapshotInputV1 {
-  readonly policy: ContextGraphPolicyV1;
-  readonly policyDigest: Digest32V1;
-  readonly roster?: MemberRosterV1 | null;
-}
+export type AcceptRfc64CatalogAccessSnapshotInputV1 =
+  Rfc64CatalogAccessCurrentSnapshotInputV1;
 
 export interface AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly policy: Readonly<ContextGraphPolicyV1>;
   readonly policyDigest: Digest32V1;
   readonly roster: Readonly<MemberRosterV1> | null;
+  readonly rosterDigest: Digest32V1 | null;
 }
 
 export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
@@ -75,10 +79,23 @@ export interface Rfc64CatalogAccessPolicyRegistryOptionsV1 {
   readonly resolveRemoteAgentAddress: (
     remotePeerId: string,
   ) => Promise<EvmAddressV1 | null>;
+  /** Deployment-owned signature/finality/currentness verifier for replacements. */
+  readonly currentSnapshotVerifier?: Rfc64CatalogAccessCurrentSnapshotVerifierV1;
 }
 
 interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
+  readonly rosterHighWater: RosterHighWaterV1 | null;
+}
+
+interface PreparedCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshotV1 {
+  readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
+}
+
+interface RosterHighWaterV1 {
+  readonly digest: Digest32V1;
+  readonly era: MemberRosterV1['era'];
+  readonly version: MemberRosterV1['version'];
 }
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
@@ -95,6 +112,7 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly #resolveRemoteAgentAddress: (
     remotePeerId: string,
   ) => Promise<EvmAddressV1 | null>;
+  readonly #currentSnapshotVerifier: Rfc64CatalogAccessCurrentSnapshotVerifierV1 | null;
   readonly #byKey = new Map<string, HeldCatalogAccessSnapshotV1>();
 
   constructor(options: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
@@ -106,41 +124,25 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       throw new TypeError('resolveRemoteAgentAddress must be a function');
     }
     this.#resolveRemoteAgentAddress = options.resolveRemoteAgentAddress;
+    if (
+      options.currentSnapshotVerifier !== undefined
+      && typeof options.currentSnapshotVerifier?.verifyCurrentSnapshot !== 'function'
+    ) {
+      throw new TypeError('currentSnapshotVerifier must expose verifyCurrentSnapshot');
+    }
+    this.#currentSnapshotVerifier = options.currentSnapshotVerifier ?? null;
   }
 
   /** Accept one already-authoritative current snapshot. Exact replay is idempotent. */
   accept(
     input: AcceptRfc64CatalogAccessSnapshotInputV1,
   ): AcceptedRfc64CatalogAccessSnapshotV1 {
-    const policy = snapshotPolicy(input?.policy);
-    const policyDigest = snapshotDigest(input?.policyDigest, 'policyDigest');
-    const descriptor = classifyRfc64PolicyCellV1(policy);
-    const rosterInput = input?.roster ?? null;
-    let roster: Readonly<MemberRosterV1> | null = null;
-    let members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null = null;
+    const prepared = prepareSnapshot(input);
 
-    if (descriptor.rosterMode === 'forbidden') {
-      if (rosterInput !== null) {
-        throw new Error('open RFC-64 catalog policy forbids an exhaustive member roster');
-      }
-    } else {
-      if (rosterInput === null) {
-        throw new Error('invite-only RFC-64 catalog policy requires a current member roster');
-      }
-      roster = snapshotRoster(rosterInput);
-      assertRosterMatchesPolicy(roster, policy, policyDigest);
-      members = new Map(roster.members.map((entry) => [entry.agentAddress, entry]));
-    }
-
-    const key = policyKey(policy.networkId, policy.contextGraphId);
+    const key = policyKey(prepared.policy.networkId, prepared.policy.contextGraphId);
     const current = this.#byKey.get(key);
     if (current !== undefined) {
-      if (
-        current.policyDigest !== policyDigest
-        || canonicalizeContextGraphPolicyPayloadV1(current.policy)
-          !== canonicalizeContextGraphPolicyPayloadV1(policy)
-        || canonicalRoster(current.roster) !== canonicalRoster(roster)
-      ) {
+      if (!isExactReplay(current, prepared)) {
         throw new Error(
           'RFC-64 current policy replacement requires the verified transition/high-water path',
         );
@@ -148,10 +150,28 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       return publicSnapshot(current);
     }
 
-    const held = Object.freeze({ policy, policyDigest, roster, members });
+    const held = holdSnapshot(
+      prepared,
+      prepared.roster === null ? null : rosterHighWater(prepared),
+    );
     this.#byKey.set(key, held);
     return publicSnapshot(held);
   }
+
+  /**
+   * Verify authority/currentness, then atomically advance the in-memory policy
+   * and roster high-water. Ordering is independently enforced here.
+   */
+  readonly activateVerifiedCurrent = async (
+    input: Rfc64CatalogAccessCurrentSnapshotInputV1,
+  ): Promise<AcceptedRfc64CatalogAccessSnapshotV1> => {
+    if (this.#currentSnapshotVerifier === null) {
+      throw new Error('RFC-64 current snapshot activation requires a configured verifier');
+    }
+    const capability = await this.#currentSnapshotVerifier.verifyCurrentSnapshot(input);
+    const verified = readVerifiedRfc64CatalogAccessCurrentSnapshotV1(capability);
+    return this.#activateVerifiedSnapshot(verified);
+  };
 
   lookup(
     networkId: NetworkIdV1,
@@ -238,6 +258,37 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
     } catch {
       return null;
     }
+  }
+
+  #activateVerifiedSnapshot(
+    verified: Rfc64CatalogAccessCurrentSnapshotV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    const prepared = prepareSnapshot(verified);
+    const key = policyKey(prepared.policy.networkId, prepared.policy.contextGraphId);
+    const current = this.#byKey.get(key);
+    if (current === undefined) {
+      throw new Error('RFC-64 verified activation requires an accepted genesis snapshot');
+    }
+    if (isExactReplay(current, prepared)) return publicSnapshot(current);
+
+    const policyChanged = current.policyDigest !== prepared.policyDigest
+      || canonicalizeContextGraphPolicyPayloadV1(current.policy)
+        !== canonicalizeContextGraphPolicyPayloadV1(prepared.policy);
+    if (policyChanged) assertForwardPolicyTransition(current, prepared);
+
+    let nextRosterHighWater = current.rosterHighWater;
+    if (prepared.roster !== null) {
+      const activeRosterChanged = current.rosterDigest !== prepared.rosterDigest
+        || canonicalRoster(current.roster) !== canonicalRoster(prepared.roster);
+      if (activeRosterChanged) {
+        assertForwardRosterTransition(current.rosterHighWater, prepared);
+        nextRosterHighWater = rosterHighWater(prepared);
+      }
+    }
+
+    const held = holdSnapshot(prepared, nextRosterHighWater);
+    this.#byKey.set(key, held);
+    return publicSnapshot(held);
   }
 }
 
