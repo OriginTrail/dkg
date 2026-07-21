@@ -2824,7 +2824,7 @@ export class EVMChainAdapterBase {
         knowledgeAssetsContract: storageAddress.toLowerCase(),
         txHash: found.transactionHash,
         blockNumber: found.blockNumber,
-        txIndex: found.index,
+        txIndex: found.transactionIndex,
         blockTimestamp: mintTs,
         publisherAddress: roots[0].publisher,
         authorAddress: String(parsedArgs.author),
