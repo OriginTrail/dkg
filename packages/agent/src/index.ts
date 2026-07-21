@@ -270,6 +270,12 @@ export {
 export { mapWithConcurrency } from './map-with-concurrency.js';
 export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
+  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  retryCatchupPlaneOnBackpressure,
+  type CatchupBackpressureResult,
+} from './sync/catchup-backpressure-retry.js';
+export {
   classifyDurableProgress,
   type DurableProgressClassification,
   type DurableProgressSummary,
