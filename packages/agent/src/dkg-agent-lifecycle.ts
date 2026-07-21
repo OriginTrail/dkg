@@ -4159,8 +4159,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const authenticatedAsset = await authenticateVerifiedGraphScopedAsset(
           this.chain,
           asset,
-          (cgId) => this.getContextGraphOnChainId(cgId),
         );
+        const verifiedOnChainId = authenticatedAsset.verifiedOnChainContextGraphId;
+        const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
+        if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
+          this.bindSubscriptionOnChainId(
+            asset.contextGraphId,
+            subscription,
+            verifiedOnChainId,
+          );
+          this.persistContextGraphSubscriptionState(asset.contextGraphId);
+        }
         const outcome = await materializeVerifiedGraphScopedAsset({
           store: this.store,
           asset: authenticatedAsset,

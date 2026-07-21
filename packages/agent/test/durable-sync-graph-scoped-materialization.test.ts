@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -125,7 +126,6 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       noChain,
       asset,
-      undefined,
       firstReceivedAt,
     );
 
@@ -144,7 +144,6 @@ describe('durable graph-scoped KA materialization', () => {
     const replayed = await authenticateVerifiedGraphScopedAsset(
       noChain,
       asset,
-      undefined,
       new Date('2026-07-16T09:00:00.000Z'),
     );
     await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed }))
@@ -152,6 +151,96 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'publishedAt')).toEqual([
       `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
     ]);
+  });
+
+  it('authenticates a cold-join CG directly from its chain-committed name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const nameHashReads: bigint[] = [];
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async (onChainId: bigint) => {
+        nameHashReads.push(onChainId);
+        return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
+      },
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      new Date('2026-07-16T08:30:00.000Z'),
+    );
+
+    expect(nameHashReads).toEqual([14n]);
+    expect(authenticated.verifiedOnChainContextGraphId).toBe('14');
+    expect(authenticated.metadataQuads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}status`,
+      object: '"confirmed"',
+    }));
+  });
+
+  it('fails closed when the bound CG commits a different name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    })).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+  });
+
+  it('fails closed when the bound CG has no committed name hash', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => null,
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    })).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
   });
 
   it('does not mistake a lifecycle assertionGraph pointer for a second UAL owner', async () => {
@@ -314,6 +403,7 @@ describe('durable graph-scoped KA materialization', () => {
       getLatestMerkleRoot: async () => v2Root,
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 1n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
       getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
       verifyKAUpdate: async () => ({
         verified: true,
@@ -332,7 +422,6 @@ describe('durable graph-scoped KA materialization', () => {
         asset: await authenticateVerifiedGraphScopedAsset(
           chain,
           asset,
-          async () => '1',
           new Date('2026-07-16T08:30:00.000Z'),
         ),
       }),
@@ -553,7 +642,6 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
-      async () => '1',
     )).rejects.toMatchObject({
       code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH',
     });
@@ -578,12 +666,14 @@ describe('durable graph-scoped KA materialization', () => {
       },
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 2n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
-      async () => '1',
     )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
   });
 
