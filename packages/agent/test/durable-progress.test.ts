@@ -4,7 +4,9 @@ import {
   createCleanEmptyDurableSyncResult,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
+  finalizeDurableSyncCompletion,
   isDurableSyncComplete,
+  markDurableTerminalBoundary,
 } from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
@@ -143,6 +145,50 @@ describe('isDurableSyncComplete', () => {
     ['missing metadata', { dataRejectedMissingMeta: 1 }],
   ])('centralizes %s as a non-complete durable result', (_label, failure) => {
     expect(isDurableSyncComplete({ completedPhases: 1, ...failure }, true)).toBe(false);
+  });
+});
+
+describe('durable terminal boundary model', () => {
+  it('keeps an incomplete lane sticky across later clean boundaries', () => {
+    const result = createCleanEmptyDurableSyncResult();
+    result.completedPhases = 1;
+
+    markDurableTerminalBoundary(result, false);
+    markDurableTerminalBoundary(result, true);
+
+    expect(finalizeDurableSyncCompletion(result).complete).toBe(false);
+  });
+
+  it('owns clean phase synthesis and authoritative incomplete cleanup', () => {
+    const complete = createCleanEmptyDurableSyncResult();
+    markDurableTerminalBoundary(complete, true, { countCompletedPhase: true });
+    expect(finalizeDurableSyncCompletion(complete)).toMatchObject({
+      complete: true,
+      completedPhases: 1,
+    });
+
+    const incomplete = createCleanEmptyDurableSyncResult();
+    incomplete.completedPhases = 2;
+    markDurableTerminalBoundary(incomplete, false, {
+      countCompletedPhase: true,
+      clearCompletedPhasesWhenIncomplete: true,
+    });
+    expect(finalizeDurableSyncCompletion(incomplete)).toMatchObject({
+      complete: false,
+      completedPhases: 0,
+    });
+  });
+
+  it('does not synthesize a completed phase when a blocking counter is present', () => {
+    const result = createCleanEmptyDurableSyncResult();
+    result.rejectedKcs = 1;
+
+    markDurableTerminalBoundary(result, true, { countCompletedPhase: true });
+
+    expect(finalizeDurableSyncCompletion(result)).toMatchObject({
+      complete: false,
+      completedPhases: 0,
+    });
   });
 });
 

@@ -11,8 +11,10 @@ import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
+  createCleanEmptyDurableSyncResult,
   createIncompleteDurableSyncResult,
-  isDurableSyncComplete,
+  finalizeDurableSyncCompletion,
+  markDurableTerminalBoundary,
 } from '../durable-progress.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
@@ -205,8 +207,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     logDebug,
   } = context;
 
-  const summary: DurableSyncSummary = createIncompleteDurableSyncResult();
-  let reachedEveryContextGraphTerminalBoundary = contextGraphIds.length > 0;
+  const summary: DurableSyncSummary = contextGraphIds.length > 0
+    ? createCleanEmptyDurableSyncResult()
+    : createIncompleteDurableSyncResult();
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -301,7 +304,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             );
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
-        reachedEveryContextGraphTerminalBoundary = false;
+        markDurableTerminalBoundary(summary, false);
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
         endPhase();
         break;
@@ -486,9 +489,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         && !metaResult.timedOut
         && effectiveDataResult.completed
         && !effectiveDataResult.timedOut;
-      if (!reachedContextGraphTerminalBoundary) {
-        reachedEveryContextGraphTerminalBoundary = false;
-      }
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -511,6 +511,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
         });
+        markDurableTerminalBoundary(summary, reachedContextGraphTerminalBoundary);
         if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
@@ -561,6 +562,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
+      markDurableTerminalBoundary(summary, reachedContextGraphTerminalBoundary);
       endPhase();
       if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -575,7 +577,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
 
     } catch (pidErr) {
-      reachedEveryContextGraphTerminalBoundary = false;
+      markDurableTerminalBoundary(summary, false);
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
@@ -613,12 +615,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
   }
 
-  summary.complete = isDurableSyncComplete(
-    summary,
-    reachedEveryContextGraphTerminalBoundary,
-  );
-
-  return summary;
+  return finalizeDurableSyncCompletion(summary);
 }
 
 function partitionVerifiedGraphScopedAssets(

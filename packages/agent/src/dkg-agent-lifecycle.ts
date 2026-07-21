@@ -262,7 +262,8 @@ import {
   createCleanEmptyDurableSyncResult,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
-  isDurableSyncComplete,
+  finalizeDurableSyncCompletion,
+  markDurableTerminalBoundary,
 } from './sync/durable-progress.js';
 import {
   getSyncBackpressureSnapshot,
@@ -4530,25 +4531,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const changelogComplete = outcome.kind === 'delta'
       || (outcome.kind === 'resync' && outcome.complete);
     if (outcome.kind === 'incomplete') result.failedPhases += 1;
-    if (!changelogComplete) {
-      // A legacy fallback may have completed its own fetch phases while the
-      // changelog drop remains unauthoritative. Preserve inserted progress,
-      // but do not surface those phase completions as CG readiness evidence.
-      result.completedPhases = 0;
-    }
-    if (
-      changelogComplete
-      && result.timedOutPhases === 0
-      && result.failedPhases === 0
-      && result.failedPeers === 0
-      && result.dataRejectedMissingMeta === 0
-      && result.rejectedKcs === 0
-    ) {
-      result.completedPhases += 1;
-    }
     if (outcome.kind === 'denied') result.deniedPhases += 1;
-    result.complete = isDurableSyncComplete(result, changelogComplete);
-    return result;
+    // A legacy fallback may have completed its own fetch phases while the
+    // changelog drop remains unauthoritative. Preserve inserted progress, but
+    // do not surface those phase completions as CG readiness evidence.
+    markDurableTerminalBoundary(result, changelogComplete, {
+      countCompletedPhase: true,
+      clearCompletedPhasesWhenIncomplete: true,
+    });
+    return finalizeDurableSyncCompletion(result);
   }
 
   /**

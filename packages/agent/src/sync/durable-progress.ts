@@ -38,6 +38,7 @@ export interface DurableProgressClassification {
   readonly phaseFailed: boolean;
   readonly denied: boolean;
   readonly deferredByBackpressure: boolean;
+  readonly hasBlockingFailure: boolean;
   readonly backoffWorthyFailure: boolean;
   readonly madeReconnectProgress: boolean;
   readonly madeReadinessProgress: boolean;
@@ -71,6 +72,12 @@ export function classifyDurableProgress(
     || (progress?.rejectedKcs ?? 0) > 0;
   const hasVerifiedPrivateOnlyResponse = verifiedPrivateOnlyResponses > 0;
   const hasMetadataEvidence = insertedMetaTriples > 0 || metaOnlyResponses > 0;
+  const hasBlockingFailure = timedOut
+    || transportFailed
+    || phaseFailed
+    || denied
+    || integrityRejected
+    || deferredByBackpressure;
 
   // Reconnect freshness treats the private-only signal as authoritative only
   // when the durable phase that produced it is itself clean. Backpressure is
@@ -111,12 +118,7 @@ export function classifyDurableProgress(
 
   const completedWithoutFailure = progress != null
     && completedPhases > 0
-    && !timedOut
-    && !transportFailed
-    && !phaseFailed
-    && !integrityRejected
-    && !deferredByBackpressure
-    && !denied;
+    && !hasBlockingFailure;
 
   return {
     insertedDataTriples,
@@ -131,6 +133,7 @@ export function classifyDurableProgress(
     phaseFailed,
     denied,
     deferredByBackpressure,
+    hasBlockingFailure,
     backoffWorthyFailure: (progress?.backoffWorthyFailures ?? 0) > 0
       || transportFailed
       || timedOut,
@@ -159,6 +162,46 @@ export function isDurableSyncComplete(
 ): boolean {
   return reachedTerminalBoundary
     && classifyDurableProgress(progress).completedWithoutFailure;
+}
+
+export interface DurableTerminalBoundaryOptions {
+  /** Count this clean lane boundary as a completed diagnostic phase. */
+  readonly countCompletedPhase?: boolean;
+  /** Hide fallback phase completions when the authoritative lane is incomplete. */
+  readonly clearCompletedPhasesWhenIncomplete?: boolean;
+}
+
+/**
+ * Record one lane's terminal boundary on the result itself. `complete` acts as
+ * a sticky boundary accumulator: once any requested lane is incomplete, later
+ * clean lanes cannot accidentally make the whole run complete again.
+ *
+ * Diagnostic phase synthesis also lives here so lanes never duplicate the
+ * blocking-counter policy when reporting an authoritative completion.
+ */
+export function markDurableTerminalBoundary<T extends DurableSyncResult>(
+  result: T,
+  reachedTerminalBoundary: boolean,
+  options: DurableTerminalBoundaryOptions = {},
+): T {
+  if (!reachedTerminalBoundary && options.clearCompletedPhasesWhenIncomplete) {
+    result.completedPhases = 0;
+  }
+  if (
+    reachedTerminalBoundary
+    && options.countCompletedPhase
+    && !classifyDurableProgress(result).hasBlockingFailure
+  ) {
+    result.completedPhases += 1;
+  }
+  result.complete = result.complete && reachedTerminalBoundary;
+  return result;
+}
+
+/** Apply the shared counter policy to a result after all lanes are marked. */
+export function finalizeDurableSyncCompletion<T extends DurableSyncResult>(result: T): T {
+  result.complete = isDurableSyncComplete(result, result.complete);
+  return result;
 }
 
 type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
