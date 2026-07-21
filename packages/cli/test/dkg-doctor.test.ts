@@ -400,6 +400,34 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'apiPort' && f.severity === 'error')).toBeDefined();
   });
 
+  it('rejects invalid local metrics collector toggle types', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          telemetry: { metrics: { collectionEnabled: 'yes' } },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.collectionEnabled' && f.severity === 'error',
+    )).toBeDefined();
+  });
+
+  it('accepts a boolean local metrics collector toggle', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          telemetry: { metrics: { collectionEnabled: false } },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) =>
+      f.subject === 'telemetry.metrics.collectionEnabled',
+    )).toBeUndefined();
+  });
+
   it('warns on deprecated autoUpdate fields set to non-empty values', async () => {
     const deps = makeDeps({
       fs: {

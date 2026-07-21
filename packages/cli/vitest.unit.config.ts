@@ -53,6 +53,7 @@ export default defineConfig({
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
