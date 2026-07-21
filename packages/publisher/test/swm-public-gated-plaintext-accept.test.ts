@@ -27,7 +27,21 @@
  * confidence for the exact regression it was meant to pin.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveWorkspaceEncryptionRequirement } from '../src/workspace-handler.js';
+import { ethers } from 'ethers';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  TypedEventBus,
+  computeGossipSigningPayload,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  DKG_ONTOLOGY,
+  encodeGossipEnvelope,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+} from '@origintrail-official/dkg-core';
+import { SharedMemoryHandler } from '../src/index.js';
+import { resolveWorkspaceEncryptionRequirement } from '../src/workspace-encryption-policy.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 const GATE = ['0x1111111111111111111111111111111111111111'];
 
@@ -121,5 +135,91 @@ describe('SWM encryption requirement', () => {
         }
       }
     });
+  });
+});
+
+/**
+ * Probe LAZINESS at the handler boundary.
+ *
+ * The helper only reads `provenPublicOnChain` behind `isAgentGated`, so for an
+ * ungated CG the on-chain probe's answer is irrelevant — but an earlier
+ * revision of the handler awaited `isContextGraphProvenPublicOnChain`
+ * UNCONDITIONALLY before calling the helper. That put a live chain RPC on the
+ * hot path of EVERY SWM gossip receive: measured on a 6-node devnet it took
+ * receive-apply from ~3ms to ~33ms, which slipped the author's next poll by a
+ * full cycle and made the public-CG sync gate's LIVE receiver miss the VM
+ * publish window (devnet gate regression, both public cells).
+ *
+ * These tests drive the REAL handler with a counting oracle:
+ *  - ungated CG  => the write applies and the probe is NEVER invoked
+ *    (mutation check: re-introducing the unconditional await fails this)
+ *  - gated CG    => the probe IS invoked (laziness must not become "never")
+ */
+describe('on-chain probe evaluation at the handler boundary', () => {
+  const CG = 'swm-plaintext-probe-laziness';
+  const DATA = contextGraphDataUri(CG);
+  const META = contextGraphMetaUri(CG);
+  const PEER = '12D3KooWProbeLazinessPeer';
+  const SUBJ = 'urn:test:swm-plaintext-probe';
+
+  const msg = (name: string, op: string): Uint8Array => encodeRootlessWorkspaceRequest({
+    contextGraphId: CG,
+    nquads: new TextEncoder().encode(
+      `<${SUBJ}> <http://schema.org/name> "${name}" <${DATA}> .`,
+    ),
+    publisherPeerId: PEER,
+    shareOperationId: op,
+    timestampMs: Date.now(),
+  });
+
+  it('ungated CG: plaintext applies WITHOUT consulting the on-chain probe', async () => {
+    const store = new OxigraphStore();
+    let probeCalls = 0;
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      publicAccessPolicyOnChainOracle: async () => { probeCalls += 1; return true; },
+    });
+
+    const outcome = await handler.handle(msg('Ungated Fast Path', 'ws-probe-ungated'), PEER);
+
+    expect(outcome.applied).toBe(true);
+    expect(probeCalls).toBe(0);
+  });
+
+  it('agent-gated CG: the probe IS consulted, and a public proof admits the plaintext write', async () => {
+    const store = new OxigraphStore();
+    let probeCalls = 0;
+    const writer = ethers.Wallet.createRandom();
+    await store.insert([{
+      subject: DATA,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${writer.address}"`,
+      graph: META,
+    }]);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      localAgentAddresses: () => [writer.address],
+      publicAccessPolicyOnChainOracle: async () => { probeCalls += 1; return true; },
+    });
+
+    const payload = msg('Gated Public Plaintext', 'ws-probe-gated');
+    const timestamp = new Date().toISOString();
+    const signature = await writer.signMessage(
+      computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, CG, timestamp, payload),
+    );
+    const wire = encodeGossipEnvelope({
+      version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId: CG,
+      agentAddress: writer.address,
+      timestamp,
+      signature: ethers.getBytes(signature),
+      payload,
+    });
+
+    const outcome = await handler.handle(wire, PEER);
+
+    expect(outcome.applied).toBe(true);
+    expect(probeCalls).toBeGreaterThan(0);
   });
 });

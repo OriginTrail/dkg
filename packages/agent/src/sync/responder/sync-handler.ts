@@ -33,6 +33,7 @@ import {
   serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
 import {
   createSyncResponderSnapshotBudget,
   SyncRowSnapshotBudgetError,
@@ -539,6 +540,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
+    const assetUals = request.assetUals;
+    const assetSelectionKey = assetUals === undefined
+      ? 'full'
+      : exactAssetFilterKey(assetUals);
     const hintedPageRows = typeof request.pageRowsHint === 'number' &&
       Number.isSafeInteger(request.pageRowsHint)
       ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
@@ -740,7 +745,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
             'Durable meta',
-            `${peerId}:durable-meta:${contextGraphId}`,
+            `${peerId}:durable-meta:${contextGraphId}:${assetSelectionKey}`,
             request.syncSessionId,
             offset,
           );
@@ -762,6 +767,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            assetUals,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -774,7 +780,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
-          `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
+          `${peerId}:durable-data:${contextGraphId}:${assetUals === undefined
+            ? (sinceBatchId == null ? 'full' : sinceBatchId.toString())
+            : assetSelectionKey}`,
           request.syncSessionId,
           offset,
         );
@@ -799,6 +807,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // loaded above. Do not release the immutable session snapshot merely
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
+          assetUals,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
