@@ -11,6 +11,7 @@ import {
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -69,55 +70,17 @@ interface SharedMemorySyncContext {
   storeInsert: (quads: Quad[]) => Promise<void>;
   /**
    * Everything needed to MATERIALIZE verified public SWM snapshots into the
-   * triple store, as ONE cohesive dependency.
-   *
-   * Why one object: these capabilities are only meaningful together. An
-   * earlier revision exposed them as independent optionals, which allowed a
-   * silent half-configured mode — a caller supplying the snapshot store but
-   * not the guard would compile fine and quietly skip materialization.
-   * Absent entirely => materialization is skipped (never half-applied).
+   * triple store, as ONE cohesive dependency — the contract (and the
+   * production implementation) live in `swm-snapshot-materializer.ts`.
    *
    * Why it exists at all: contentScopeVersion-2 KAs carry no dkg:rootEntity,
    * so the aggregate data phase legitimately returns 0 data quads for them —
    * their content travels as immutable snapshots. The catch-up lane fetched
    * and VERIFIED those snapshots and then never wrote them, so a node that
    * missed the live gossip stayed empty forever ("0 data + N meta triples").
+   * Absent entirely => materialization is skipped (never half-applied).
    */
-  snapshotMaterializer?: {
-    /**
-     * Serialize against the live-gossip write path for one KA. MUST take the
-     * same key on the same lock map SharedMemoryHandler uses (the agent owns
-     * the map; derive the key with swmKaWriteLockKey). Without it this
-     * interleaving destroys data: catch-up observes the graph absent → gossip
-     * commits a richer version → catch-up replaces it with the older snapshot.
-     */
-    withKaWriteLock: <T>(
-      contextGraphId: string,
-      subGraphName: string | undefined,
-      kaUal: string,
-      fn: () => Promise<T>,
-    ) => Promise<T>;
-    /**
-     * True only when the KA's assertion graph CONTENT is present and matches
-     * the descriptor's public quad count. A marker-only predicate re-reports
-     * the pre-fix broken state (head metadata written, graph never written) as
-     * materialized, so the repair would skip exactly the nodes that need it.
-     */
-    isGraphAssetMaterialized: (descriptor: GraphScopedSwmRecoveryDescriptor) => Promise<boolean>;
-    /**
-     * The assertionVersion currently recorded on the local head for this KA,
-     * or null when no head exists. Read INSIDE the lock: a lock prevents
-     * interleaving but not overwriting-with-older, and gossip may have
-     * committed a newer version while catch-up waited.
-     */
-    readStoredAssertionVersion: (descriptor: GraphScopedSwmRecoveryDescriptor) => Promise<string | null>;
-    /**
-     * Atomic whole-graph replace. Replace, not insert: a KA graph is
-     * all-or-nothing and digest-verified; union-insert risks partial or
-     * duplicated state across retries.
-     */
-    replaceGraph: (graphUri: string, quads: Quad[]) => Promise<void>;
-  };
+  snapshotMaterializer?: SharedMemorySnapshotMaterializer;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -356,19 +319,35 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // would be overwrite-with-older, byte-for-byte the regression
                 // this path once shipped (peer at 76 quads clobbered to 27).
                 // Unparseable versions count as newer: when we cannot reason
-                // about ordering we must not destroy.
-                const stored = await snapshotMaterializer.readStoredAssertionVersion(descriptor);
-                if (stored !== null && storedVersionOutranksDescriptor(stored, descriptor.assertionVersion)) {
+                // about ordering we must not destroy. Nor may we "repair" the
+                // head rows here — gossip owns a newer head and its
+                // delete-then-insert already wrote it unambiguously.
+                const storedHead = await snapshotMaterializer.readStoredHead(descriptor);
+                if (
+                  storedHead.version !== null
+                  && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
+                ) {
                   materializedKeys.add(graphKey);
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
-                    + `stored version ${stored} (descriptor ${descriptor.assertionVersion}); skipping`);
+                    + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
                   return;
                 }
-                // (b) Exact content already present (same version, complete
-                // graph). Equal-version-but-short means a partial write or the
-                // pre-fix marker-only state — those must be REPAIRED, which is
-                // why this check is content-count-based, not marker-based.
+                // (b) Exact content already present. Count AND digest: a
+                // marker-only or short graph is the pre-fix broken state and
+                // must be REPAIRED; an equal-count graph with a different
+                // digest is an OLDER version of the same size and must be
+                // replaced, not skipped.
                 if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
+                  if (storedHead.needsRepair) {
+                    // Content is already this descriptor's, but the head
+                    // subject still carries union-insert residue (several
+                    // version/operation rows) — e.g. a prior round replaced
+                    // the graph and then failed before finishing the metadata
+                    // swap. Collapse the head now; the fresh verified meta for
+                    // this descriptor is re-inserted after the snapshot phase,
+                    // exactly like the replace path below.
+                    await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                  }
                   materializedKeys.add(graphKey);
                   return;
                 }
@@ -379,6 +358,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 });
                 await ensureContextGraph(pid);
                 await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
+                // Graph first, THEN the head swap — a crash between the two
+                // leaves content newer than the head, which the next round
+                // repairs (digest matches → head collapsed above). The swap
+                // deletes the old head + its operations so the append-style
+                // `storeInsert(processed.verifiedMeta)` below lands on a clean
+                // subject instead of stacking a second version onto it
+                // (LIMIT-1 head readers would otherwise see an arbitrary mix).
+                await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
                 materializedKeys.add(graphKey);
                 materializedGraphs += 1;
                 materializedQuads += asset.quads.length;
