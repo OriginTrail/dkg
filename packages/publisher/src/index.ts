@@ -235,6 +235,9 @@ export {
   type LiftJobFailedFromBroadcast,
   type LiftJobFailedFromIncluded,
   type LiftJob,
+  type AdmissionJournalEntry,
+  type JournalKind,
+  type PersistedJournalKind,
   LIFT_JOB_ALLOWED_TRANSITIONS,
   getAllowedLiftJobTransitions,
   isTerminalLiftJobState,
@@ -263,8 +266,11 @@ export {
   type AsyncLiftPublisherRecoveryResolver,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
+  type VmPublishAdmissionJournalReader,
   type IntentLookupInput,
   type IntentLookupResult,
+  type JournalReadInput,
+  type JournalReadResult,
 } from './async-lift-publisher.js';
 export {
   TripleStoreAsyncPromoteQueue,

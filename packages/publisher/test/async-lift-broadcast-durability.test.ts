@@ -9,6 +9,25 @@ import {
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import { storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
+import {
+  DEFAULT_JOURNAL_GRAPH_URI,
+  JOURNAL_SEQ,
+  JOURNAL_KIND,
+  parseIntegerLiteral,
+  parseLiteral,
+} from '../src/async-lift-control-plane.js';
+
+// Read the journal kinds (seq-ordered) straight from the node-local journal graph.
+async function journalKinds(store: OxigraphStore): Promise<string[]> {
+  const result = await store.query(
+    `SELECT ?seq ?kind WHERE { GRAPH <${DEFAULT_JOURNAL_GRAPH_URI}> { ?e <${JOURNAL_SEQ}> ?seq ; <${JOURNAL_KIND}> ?kind } }`,
+  );
+  if (result.type !== 'bindings') return [];
+  return result.bindings
+    .map((r) => ({ seq: parseIntegerLiteral(r['seq'] as string), kind: parseLiteral(r['kind'] as string) as string }))
+    .sort((a, b) => a.seq - b.seq)
+    .map((r) => r.kind);
+}
 
 // Regression: the mutable 'broadcast' record must be fsync-durable BEFORE the
 // on-chain send. It is written inside the write-ahead hook (onBroadcast, awaited
@@ -299,5 +318,39 @@ describe('async lift publisher broadcast durability', () => {
     expect(processed?.failure?.resolution).not.toBe('retry_recovery');
     expect(await publisher.recover()).toBe(0);
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  // #1829 — the flush-fail rollback (recordDurableBroadcastBeforeSend → writeJob(current))
+  // must NOT append a duplicate 'validated' journal entry: that re-write passes the
+  // 'rollback-noop' sentinel so appendJournal no-ops. The journal records the pre-flush
+  // 'broadcast' attempt (an ATTEMPTED tx hash, to reconcile vs chain) and the terminal
+  // 'failed' entry — one 'validated', not two.
+  it('flush-fail rollback appends broadcast + failed but NO duplicate validated entry (#1829)', async () => {
+    const publisher = createPublisher(store, {
+      journalWrites: true,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          try {
+            await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          } catch (hookErr) {
+            throw new Error(`chain:writeahead hook failed before publish broadcast: ${(hookErr as Error).message}`);
+          }
+          throw new Error('unreachable: send after a failed write-ahead flush');
+        },
+      },
+    });
+    (store as unknown as { flush?: () => Promise<void> }).flush = async () => {
+      throw new Error('ENOSPC: no space left on device');
+    };
+
+    await stageShareSnapshot(store);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+
+    const kinds = await journalKinds(store);
+    // Exactly one of each; the rollback's writeJob(current='validated') did NOT add a 2nd 'validated'.
+    expect(kinds).toEqual(['admission', 'claimed', 'validated', 'broadcast', 'failed']);
+    expect(kinds.filter((k) => k === 'validated')).toHaveLength(1);
+    expect(kinds.filter((k) => k === 'broadcast')).toHaveLength(1);
   });
 });

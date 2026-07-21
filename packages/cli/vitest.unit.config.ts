@@ -17,6 +17,7 @@ export default defineConfig({
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
+          'test/publisher-journal-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
