@@ -61,6 +61,7 @@
 }
 .v10-tree-section-header:hover { background: var(--bg-hover); }
 .v10-tree-section-header.active { background: var(--bg-active); }
+.v10-tree-section-header.catalogue { cursor: default; gap: 6px; }
 .v10-tree-chevron {
   color: var(--text-tertiary);
   transition: transform 0.15s;
@@ -98,6 +99,25 @@
 .v10-tree-hide-btn:hover {
   background: rgba(239, 68, 68, 0.12);
   color: var(--accent-red, #ef4444);
+}
+.v10-tree-catalogue-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  padding: 2px 5px;
+  font-size: 10px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.v10-tree-catalogue-btn:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+.v10-tree-catalogue-btn.primary {
+  border-color: color-mix(in srgb, var(--accent-primary) 55%, transparent);
+  color: var(--accent-primary);
 }
 
 /* "My Projects" / "Participating Projects" group dividers. Token

@@ -42,7 +42,17 @@ export interface LiftRequestAuthorSeal {
 export interface KnowledgeAssetVmPublishRequest {
   readonly contextGraphId: string;
   readonly name: string;
+  /** Resolved assertion AUTHOR (may differ from the caller — GH#1778 curator publish). */
   readonly agentAddress?: string;
+  /**
+   * Enqueuing CALLER identity (token holder / operator), distinct from the
+   * resolved author (GH#1778). Used to stamp the CG curator on `CG_NOT_REGISTERED`
+   * auto-registration, matching the synchronous `vm/publish` lane — the async
+   * worker registers under the caller who requested the publish, not the KA
+   * author and not the node's default. Absent → registration falls back to the
+   * node default inside `stampAddressCurator`, exactly as the sync lane does.
+   */
+  readonly callerAgentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
@@ -441,3 +451,52 @@ export type LiftJob =
   | LiftJobFailedFromValidated
   | LiftJobFailedFromBroadcast
   | LiftJobFailedFromIncluded;
+
+// #1829 — append-only admission & transaction journal (named-KA lift-publish only).
+// The `kind` a writeJob call site stamps onto the transition it persists. Passed to
+// writeJob(job, kind) at all 21 sites so the compiler rejects a wrong literal.
+// `rollback-noop` is a SENTINEL: the #1851 recordDurableBroadcastBeforeSend rollback
+// re-writes the prior 'validated' job through writeJob, and that re-write must NOT
+// append a spurious entry — appendJournal no-ops on this kind. It therefore never
+// appears in a persisted AdmissionJournalEntry.
+export type JournalKind =
+  | 'admission'
+  | 'reaccept'
+  | 'recover-reset'
+  | 'claimed'
+  | 'validated'
+  | 'broadcast'
+  | 'included'
+  | 'finalized'
+  | 'noop-finalized'
+  | 'recovered-finalize'
+  | 'failed'
+  | 'rollback-noop';
+
+/** A persisted journal kind (every JournalKind except the no-op sentinel). */
+export type PersistedJournalKind = Exclude<JournalKind, 'rollback-noop'>;
+
+/**
+ * #1829 — one immutable, append-only journal entry. Node-local; seq is a per-lineageKey
+ * monotonic xsd:integer. `lineageKey` is the facts-derivable lifecycle tuple
+ * (knowledgeAssetVmPublishLifecycleKey), NOT intentKey. `intentKey` (when present) is a
+ * per-version disambiguator for filtering WITHIN a lineage, never the lineage key.
+ * txHashes recorded here are ATTEMPTED — reconcile against chain, never treat as sent.
+ * Bounded metadata + hashes only (no payloads).
+ */
+export interface AdmissionJournalEntry {
+  readonly seq: number;
+  readonly at: number;
+  readonly kind: PersistedJournalKind;
+  readonly jobId: string;
+  readonly lineageKey: string;
+  readonly intentKey?: string;
+  readonly txHash?: string;
+  readonly blockNumber?: number;
+  readonly merkleRoot?: string;
+  readonly ual?: string;
+  readonly failureCode?: string;
+  readonly recoveredFromStatus?: string;
+  readonly supersedesJobId?: string;
+  readonly successorJobId?: string;
+}

@@ -107,6 +107,7 @@ interface DurableSyncContext {
     deadline: number,
     snapshotRef?: string,
     sinceBatchId?: string,
+    assetUals?: string[],
   ) => Promise<SyncPageResult>;
   /**
    * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
@@ -115,6 +116,8 @@ interface DurableSyncContext {
    * backed by a CONTIGUOUS watermark. Undefined ⇒ full scan (default today).
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  /** Exact missing KAs for VM recovery; undefined retains normal full/delta sync. */
+  exactAssetUalsFor?: (contextGraphId: string) => string[] | undefined;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -149,6 +152,29 @@ interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
+/**
+ * Rolling-upgrade guard: an old responder may ignore the additive exact-asset
+ * filter and return the whole CG. Keep only requested descriptor subjects and
+ * their declared assertion graphs before any verification or store write.
+ */
+export function filterExactAssetDurablePayload(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+  assetUals: readonly string[],
+): { dataQuads: Quad[]; metaQuads: Quad[] } {
+  const exactUals = new Set(assetUals);
+  const exactMeta = metaQuads.filter((quad) => exactUals.has(quad.subject));
+  const exactGraphs = new Set(
+    exactMeta
+      .filter((quad) => quad.predicate === ASSERTION_GRAPH)
+      .map((quad) => quad.object),
+  );
+  return {
+    metaQuads: exactMeta,
+    dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
+  };
+}
+
 export async function runDurableSync(context: DurableSyncContext): Promise<DurableSyncSummary> {
   const {
     ctx,
@@ -160,6 +186,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     createContextGraphSyncDeadline,
     fetchSyncPages,
     sinceBatchIdFor,
+    exactAssetUalsFor,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -252,6 +279,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
+      const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
@@ -271,7 +299,20 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
             completed: true,
             timedOut: false,
           }
-        : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+        : exactAssetUals === undefined
+          ? await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline)
+          : await fetchSyncPages(
+              ctx,
+              remotePeerId,
+              pid,
+              false,
+              'meta',
+              metaGraph,
+              deadline,
+              undefined,
+              undefined,
+              exactAssetUals,
+            );
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
@@ -279,11 +320,49 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         break;
       }
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchId);
+      const rawDataResult = exactAssetUals === undefined
+        ? await fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            false,
+            'data',
+            dataGraph,
+            deadline,
+            undefined,
+            sinceBatchId,
+          )
+        : await fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            false,
+            'data',
+            dataGraph,
+            deadline,
+            undefined,
+            sinceBatchId,
+            exactAssetUals,
+          );
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
+
+      let effectiveMetaResult = metaResult;
+      let dataResult = rawDataResult;
+      if (exactAssetUals !== undefined) {
+        const exact = filterExactAssetDurablePayload(
+          rawDataResult.quads,
+          metaResult.quads,
+          exactAssetUals,
+        );
+        effectiveMetaResult = { ...metaResult, quads: exact.metaQuads };
+        dataResult = {
+          ...rawDataResult,
+          quads: exact.dataQuads,
+        };
+      }
 
       let effectiveDataResult = dataResult;
       let dataForVerification = dataResult.quads;
@@ -306,7 +385,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       ) {
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
-          metaResult.quads,
+          effectiveMetaResult.quads,
           dataResult.resumedFromOffset,
           dataResult.nextOffset,
           dataResult.completed,
@@ -338,7 +417,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const verifyStartedAt = Date.now();
       const processed = await processDurableBatchInWorker(
         dataForVerification,
-        metaResult.quads,
+        effectiveMetaResult.quads,
         ctx,
         isSystemContextGraph,
         verificationMode,
@@ -348,7 +427,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-      summary.bytesReceived += metaResult.bytesReceived + dataResult.bytesReceived;
+      summary.bytesReceived += metaResult.bytesReceived + rawDataResult.bytesReceived;
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
@@ -372,6 +451,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
         if (
           !onVerifiedFullSnapshot
+          || exactAssetUals !== undefined
           || sinceBatchId !== undefined
           || !batchVerifiedCleanly
           || processed.dataRejectedMissingMeta !== 0

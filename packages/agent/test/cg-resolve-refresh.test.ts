@@ -338,6 +338,119 @@ describe('refreshMetaFromCurator', () => {
     expect(dialSignals).toEqual([controller.signal, controller.signal]);
   });
 
+  it('accepts an authoritative public snapshot without a private member proof', async () => {
+    const contextGraphId = 'public/authoritative-curator-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let staged: Quad[] = [];
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'public-authoritative-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async (quads: Quad[]) => { staged = quads; },
+        update: async () => undefined,
+        dropGraph: async () => undefined,
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    );
+
+    expect(refreshed).toBe(true);
+    expect(staged).toHaveLength(2);
+  });
+
+  it('rejects a public-only snapshot when private member proof was required', async () => {
+    const contextGraphId = 'private/member-proof-cannot-use-public-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let targetMutated = false;
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'member-proof-public-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async () => { targetMutated = true; },
+        update: async () => { targetMutated = true; },
+        dropGraph: async () => { targetMutated = true; },
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      {
+        trustedCuratorPeerId: CURATOR_PEER_ID,
+        force: true,
+        memberProof: {
+          approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
+          expectedDelegateePeerId: 'local-peer',
+        },
+      },
+    );
+
+    expect(refreshed).toBe(false);
+    expect(targetMutated).toBe(false);
+  });
+
   it('uses a trusted join-approved curator directly and bypasses the auth-probe cooldown', async () => {
     const contextGraphId = 'private/trusted-curator-bootstrap';
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);

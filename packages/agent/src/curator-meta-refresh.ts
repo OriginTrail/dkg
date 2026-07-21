@@ -23,6 +23,7 @@ import {
   hasAuthoritativePrivateMetaDefinition,
   type AuthoritativePrivateMetaMemberProof,
 } from './context-graph-private-meta-proof.js';
+import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type { SyncPageResult } from './sync/requester/page-fetch.js';
@@ -354,16 +355,26 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  if (!hasAuthoritativePrivateMetaDefinition(
+  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
+    contextGraphId,
+    controlMetaQuads,
+  );
+  // Supplying memberProof selects the fail-closed private post-approval
+  // contract. A public-only snapshot must not satisfy that request: public
+  // subscriptions reach this refresh without a member proof.
+  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
+    && hasAuthoritativePublicDefinition;
+  const hasAuthoritativePrivateDefinition = hasAuthoritativePrivateMetaDefinition(
     contextGraphId,
     controlMetaQuads,
     options.memberProof,
-  )) {
+  );
+  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
       ctx,
-      `Rejected curator metadata snapshot for "${contextGraphId}": missing the complete private definition or approved-member delegation proof`,
+      `Rejected curator metadata snapshot for "${contextGraphId}": missing an unambiguous public definition or the complete private definition and approved-member delegation proof`,
     );
     return undefined;
   }
