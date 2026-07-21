@@ -1120,22 +1120,6 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].opts.method).toBe('POST');
   });
 
-  it('#1837 clear-job helpers POST the terminal-clear routes with correct encoding and body', async () => {
-    // SWM share-job clear: jobId is percent-encoded in the path, empty JSON body.
-    let calls = track({ outcome: 'cleared', jobId: 'share/job 1' });
-    await client.knowledgeAssetClearShareJob('share/job 1');
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201/clear`);
-    expect(calls[0].opts.method).toBe('POST');
-    expect(JSON.parse(calls[0].opts.body as string)).toEqual({});
-
-    // Publisher clear-job: jobId travels in the body, not the path.
-    calls = track({ outcome: 'already_absent', jobId: 'lift job 7' });
-    await client.publisherClearJob('lift job 7');
-    expect(calls[0].url).toBe(`${base}/api/publisher/clear-job`);
-    expect(calls[0].opts.method).toBe('POST');
-    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
-  });
-
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {

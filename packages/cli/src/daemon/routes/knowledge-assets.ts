@@ -62,7 +62,6 @@ import {
   handleKaShareJobsList,
   handleKaShareJobStatus,
   handleKaShareJobCancel,
-  handleKaShareJobClear,
   handleKaShareJobRecover,
 } from "./knowledge-assets-async-share.js";
 import {
@@ -667,21 +666,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       );
       if (jobId === null) return;
       return handleKaShareJobRecover(ctx, jobId);
-    }
-    // POST /api/knowledge-assets/swm/share-jobs/:jobId/clear — #1837 atomic terminal
-    // record removal (idempotent). DISTINCT from the DELETE cancellation below (which
-    // rewrites a queued job to failed+cancelled and RETAINS the row).
-    if (
-      method === "POST" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      path.endsWith("/clear")
-    ) {
-      const jobId = decodePromoteJobId(
-        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/clear".length),
-        res,
-      );
-      if (jobId === null) return;
-      return handleKaShareJobClear(ctx, jobId);
     }
     // GET /api/knowledge-assets/swm/share-jobs/:jobId — status (#3)
     if (
