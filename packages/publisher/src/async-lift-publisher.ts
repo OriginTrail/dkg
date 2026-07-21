@@ -15,6 +15,7 @@ export type {
   VmPublishIntentIndexBackfiller,
   VmPublishAdmissionJournalReader,
   VmPublishTerminalJobClearer,
+  VmPublisherControl,
   IntentLookupInput,
   IntentLookupResult,
   JournalReadInput,

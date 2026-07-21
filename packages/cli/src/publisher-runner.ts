@@ -30,10 +30,7 @@ import {
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
-  type VmPublishIntentRecoveryPublisher,
-  type VmPublishIntentIndexBackfiller,
-  type VmPublishAdmissionJournalReader,
-  type VmPublishTerminalJobClearer,
+  type VmPublisherControl,
   type LiftJobBroadcast,
   type LiftJobHex,
   type LiftJobIncluded,
@@ -375,7 +372,7 @@ export function createPublisherInspectorFromStore(
 export function createPublisherControlFromStore(
   store: TripleStore,
   options: { publicSnapshotStore?: WorkspacePublicSnapshotStore; maxRetries?: number } = {},
-): VmPublishIntentRecoveryPublisher & VmPublishIntentIndexBackfiller & VmPublishAdmissionJournalReader & VmPublishTerminalJobClearer {
+): VmPublisherControl {
   // The daemon admission instance also serves the #1828 recovery lookup (route)
   // and the boot index backfill — segregated capabilities the base
   // AsyncLiftPublisher runtime contract intentionally does NOT carry.

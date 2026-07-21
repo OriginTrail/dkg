@@ -18,7 +18,8 @@
  */
 
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { isSafeClearJobId, type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { isSafeJobId } from './job-id.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -624,7 +625,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     // Reject an empty OR SPARQL-unsafe jobId as malformed before building the jobSubject
     // IRI (defense-in-depth; the SWM route already pre-validates via decodePromoteJobId,
     // but a direct agent.assertion.clearPromoteAsync caller must be bounded too).
-    if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+    if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
     return this.withMutationLock(async () => {
       await this.ensureGraph();
       const rows = expectBindings(

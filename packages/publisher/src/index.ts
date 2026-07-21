@@ -268,6 +268,7 @@ export {
   type VmPublishIntentIndexBackfiller,
   type VmPublishAdmissionJournalReader,
   type VmPublishTerminalJobClearer,
+  type VmPublisherControl,
   type TerminalJobClearOutcome,
   type IntentLookupInput,
   type IntentLookupResult,
@@ -275,9 +276,10 @@ export {
   type JournalReadResult,
 } from './async-lift-publisher.js';
 export {
-  SAFE_CLEAR_JOB_ID_PATTERN,
-  SAFE_CLEAR_JOB_ID_MAX_LENGTH,
-} from './terminal-job-clear.js';
+  SAFE_JOB_ID_PATTERN,
+  SAFE_JOB_ID_MAX_LENGTH,
+  isSafeJobId,
+} from './job-id.js';
 export {
   TripleStoreAsyncPromoteQueue,
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,

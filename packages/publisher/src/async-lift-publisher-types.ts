@@ -148,6 +148,20 @@ export interface VmPublishIntentIndexBackfiller {
   ensureVmPublishIntentIndex(): Promise<number>;
 }
 
+/**
+ * #1889 — the composite VM-publisher control surface returned by the daemon factory
+ * (`createPublisherControlFromStore`) and held by `RequestContext.publisherControl`. Names
+ * the capability set the daemon depends on, so the factory return type and the context field
+ * are a single named contract instead of an ad-hoc intersection. The four base interfaces
+ * remain the narrow contracts for callers that need a smaller surface (e.g. the boot
+ * backfill depends only on `VmPublishIntentIndexBackfiller`).
+ */
+export interface VmPublisherControl
+  extends VmPublishIntentRecoveryPublisher,
+    VmPublishIntentIndexBackfiller,
+    VmPublishAdmissionJournalReader,
+    VmPublishTerminalJobClearer {}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
