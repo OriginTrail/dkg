@@ -185,6 +185,7 @@ export function getSyncCheckpointKey(
   snapshotRef?: string,
   sinceBatchId?: string,
   recovery?: boolean,
+  assetFilterKey?: string,
 ): string {
   const refSuffix = phase === 'snapshot' && snapshotRef ? `|${snapshotRef}` : '';
   // Phase C: `sinceBatchId` changes the responder's result set, so a delta
@@ -201,5 +202,6 @@ export function getSyncCheckpointKey(
   // shared incremental-sync cursor. The flag is additive (only set on the
   // recovery path), so normal sync keeps its unscoped key.
   const recoverySuffix = recovery ? '|recovery' : '';
-  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}`;
+  const assetsSuffix = assetFilterKey ? `|assets:${encodeURIComponent(assetFilterKey)}` : '';
+  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}${assetsSuffix}`;
 }

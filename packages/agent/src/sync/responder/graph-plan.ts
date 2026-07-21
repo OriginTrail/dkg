@@ -27,6 +27,7 @@ import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -599,7 +600,28 @@ export async function readDurableMetaPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
   refreshGeneration?: string;
+  assetUals?: readonly string[];
 }): Promise<SyncRow[]> {
+  if (params.assetUals !== undefined) {
+    if (params.assetUals.length === 0) return [];
+    const manifest = await readGraphScopedVmManifest(
+      params.store,
+      params.contextGraphId,
+      params.signal,
+    );
+    const requested = new Set(params.assetUals);
+    const confirmedUals = manifest.confirmedEntries
+      .map((entry) => entry.ual)
+      .filter((ual) => requested.has(ual));
+    return readExactDurableMetaRowsPage(
+      params.store,
+      params.contextGraphId,
+      confirmedUals,
+      params.offset,
+      params.limit,
+      params.signal,
+    );
+  }
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -1104,6 +1126,7 @@ export async function readDurableDataPage(params: {
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
+  assetUals?: readonly string[];
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1112,12 +1135,41 @@ export async function readDurableDataPage(params: {
         params.rowListCacheScope ?? 'default',
         params.contextGraphId,
         params.sinceBatchId,
+        params.assetUals,
       ),
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
       releaseOnShortPage: params.releaseCacheOnShortPage,
     }
     : undefined;
+
+  if (params.assetUals !== undefined) {
+    if (params.assetUals.length === 0) return [];
+    const requested = new Set(params.assetUals);
+    return readPagedRowsFromExactGraphPlanLoader(
+      params.store,
+      params.offset,
+      params.limit,
+      cache,
+      params.signal,
+      params.exactGraphPlanMemo,
+      async (planSignal) => {
+        const manifest = await readGraphScopedVmManifest(
+          params.store,
+          params.contextGraphId,
+          planSignal,
+        );
+        const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
+        return buildExactGraphPagePlan(
+          params.store,
+          entries.map((entry) => entry.graph),
+          () => Promise.resolve(true),
+          planSignal,
+          new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
+        );
+      },
+    );
+  }
 
   if (params.sinceBatchId == null) {
     return readPagedRowsFromExactGraphPlanLoader(
@@ -2749,6 +2801,41 @@ async function readDurableMetaRowsPage(
   );
 }
 
+/**
+ * Serve only the immutable V2 descriptors for an explicitly requested KA set.
+ * The caller intersects the request with the confirmed manifest first, so this
+ * query cannot expose tentative workspace descriptors. Ten descriptors fit in
+ * one ordinary sync page, but OFFSET/LIMIT remains deterministic for protocol
+ * compatibility and future descriptor growth.
+ */
+async function readExactDurableMetaRowsPage(
+  store: TripleStore,
+  contextGraphId: string,
+  assetUals: readonly string[],
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0 || assetUals.length === 0) return [];
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const values = assetUals.map((ual) => `<${assertSafeIri(ual)}>`).join(' ');
+  const result = await store.query(`
+    SELECT ?s ?p ?o WHERE {
+      VALUES ?s { ${values} }
+      GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `, syncResponderStoreOptions(signal, 'sync.responder.readExactDurableMetaRowsPage'));
+  if (result.type !== 'bindings') return [];
+  return result.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: metaGraph }))
+    .filter((row): row is SyncRow => Boolean(row.s && row.p && row.o));
+}
+
 async function readDurableDeltaRowsPageAcrossGraphs(
   store: TripleStore,
   graphs: readonly string[],
@@ -2870,8 +2957,16 @@ function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
 }
 
-function durableDataRowListCacheKey(scope: string, contextGraphId: string, sinceBatchId: bigint | null): string {
-  return `durable-data:${scope}:${contextGraphId}:${sinceBatchId == null ? 'full' : `since:${sinceBatchId.toString()}`}`;
+function durableDataRowListCacheKey(
+  scope: string,
+  contextGraphId: string,
+  sinceBatchId: bigint | null,
+  assetUals?: readonly string[],
+): string {
+  const selection = assetUals === undefined
+    ? (sinceBatchId == null ? 'full' : `since:${sinceBatchId.toString()}`)
+    : exactAssetFilterKey(assetUals);
+  return `durable-data:${scope}:${contextGraphId}:${selection}`;
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

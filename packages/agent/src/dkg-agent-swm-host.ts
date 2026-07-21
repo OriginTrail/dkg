@@ -238,6 +238,7 @@ import {
   VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
@@ -416,6 +417,8 @@ type VmReconcileOrdinalOptions = {
   maxPeerAttempts?: number;
   /** Re-check a captured local/on-chain binding around slow fetch work. */
   isTargetCurrent?: () => boolean;
+  /** Collect the missing KA for one batch fetch instead of fetching inline. */
+  deferActiveFetch?: boolean;
 };
 
 /**
@@ -2791,7 +2794,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const capturedSub = this.subscribedContextGraphs.get(localCgId);
     const capturedOnChainId = capturedSub?.onChainId;
     const capturedCursor = this.reconcileCursors.get(localCgId);
-    let remainingFetches = DKGAgentBase.VM_RECONCILE_FETCHES_PER_BATCH;
     const isTargetCurrent = (): boolean => {
       const current = this.subscribedContextGraphs.get(localCgId);
       return current === capturedSub
@@ -2814,14 +2816,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
-          acquireActiveFetchPermit: () => {
-            if (remainingFetches <= 0) return false;
-            remainingFetches -= 1;
-            return true;
-          },
-          maxPeerAttempts: 1,
           isTargetCurrent,
+          deferActiveFetch: true,
         }),
+      recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
+        this.recoverVmReconcileBatch(lcg, ocg, targets, headBlock, isTargetCurrent),
       maxOrdinalsPerPass: DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
       maxOrdinalConcurrency: DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
       isTargetCurrent: () => isTargetCurrent(),
@@ -3652,6 +3651,122 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Drain one exact missing-KA batch. The initial ordinal scan has already
+   * proven these UALs are not locally materialized, so no already-confirmed KA
+   * enters the wire request. After every peer response we re-run local chain
+   * verification and remove completed KAs before considering another peer.
+   */
+  async recoverVmReconcileBatch(this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    targets: readonly OrdinalRecoveryTarget[],
+    headBlock: number | undefined,
+    isTargetCurrent: () => boolean,
+  ): Promise<ReadonlyMap<number, OrdinalOutcome>> {
+    const ctx = createOperationContext('system');
+    if (!isTargetCurrent() || targets.length === 0) return new Map();
+
+    // Capture the authenticated join-approval hint before consulting metadata:
+    // older member snapshots can contain a legacy creator self-stamp that is
+    // unrelated to a wallet-scoped CG's structural curator. The structural
+    // registry resolver is authoritative for `0x…/slug` graphs and can return
+    // every node registered to that curator wallet.
+    const approvedCuratorPeerId = this.preferredSyncPeers.get(localCgId);
+    const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId)
+      .catch(() => ({ peerIds: [] as string[], curatorIsLocal: false, legacyTripleResolved: false }));
+    let legacyPreferredPeerId: string | undefined;
+    if (curatorResolution.peerIds.length === 0) {
+      legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
+    }
+    const curatorPeerIds = [...new Set([
+      approvedCuratorPeerId,
+      ...curatorResolution.peerIds,
+      legacyPreferredPeerId,
+    ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
+      .slice(0, 3);
+    for (const peerId of curatorPeerIds) {
+      await this.ensurePeerConnected(peerId).catch((error) => {
+        this.log.info(
+          ctx,
+          `VM exact fetch could not connect curator peer ${peerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+
+    const connectedByPeerId = new Map(
+      this.node.libp2p.getConnections()
+        .map((connection) => [connection.remotePeer.toString(), connection.remotePeer]),
+    );
+    const connected = [...connectedByPeerId.values()];
+    const connectedPeerIds = new Set(connectedByPeerId.keys());
+    const orderedConnectedPeerIds = this.selectCatchupPeers(
+      connected,
+      approvedCuratorPeerId ?? curatorPeerIds[0],
+      false,
+    ).map((peer) => peer.toString());
+    const peerIds = [...new Set([
+      ...curatorPeerIds.filter((peerId) => connectedPeerIds.has(peerId)),
+      ...orderedConnectedPeerIds,
+    ])].slice(0, 3);
+    const outcomes = new Map<number, OrdinalOutcome>();
+    let remaining = [...targets];
+
+    for (const peerId of peerIds) {
+      if (!isTargetCurrent() || remaining.length === 0) break;
+      const connectedPeer = connectedByPeerId.get(peerId);
+      if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) continue;
+
+      const requestedUals = [...new Set(remaining.map((target) => target.ual))];
+      for (const target of remaining) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'fetch',
+          ordinal: target.ordinal,
+          kaId: target.kaId,
+          ual: target.ual,
+          detail: `exact-batch:${requestedUals.length}`,
+        });
+      }
+
+      try {
+        const result = await this.syncExactKnowledgeAssetsFromPeer(
+          peerId,
+          localCgId,
+          requestedUals,
+        );
+        this.log.info(
+          ctx,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${requestedUals.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
+        );
+      } catch (error) {
+        this.log.info(
+          ctx,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      const stillMissing: OrdinalRecoveryTarget[] = [];
+      for (const target of remaining) {
+        if (!isTargetCurrent()) break;
+        const outcome = await this.reconcileChainOrdinal(
+          localCgId,
+          onChainCgId,
+          target.ordinal,
+          headBlock,
+          { isTargetCurrent, deferActiveFetch: true },
+        );
+        outcomes.set(target.ordinal, outcome);
+        if (outcome.status === 'pending' && outcome.recovery) {
+          stillMissing.push(outcome.recovery);
+        }
+      }
+      remaining = stillMissing;
+    }
+    return outcomes;
+  }
+
+  /**
    * Reconcile a single per-CG registration ordinal: resolve the kaId + its
    * latest on-chain merkle root + publisher, build the UAL, and ask the
    * finalization handler to promote the matching local SWM snapshot to VM
@@ -3694,7 +3809,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // cursor advances without redoing chain reads + an SWM scan.
       if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
 
-      if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
+      if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -3735,6 +3850,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let activeFetchHadUsableResponse = false;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
+      if (options.deferActiveFetch) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: outcome,
+        });
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual,
+            kaId: kaId.toString(),
+            reason: outcome,
+          },
+        };
+      }
       if (outcome === 'no-swm') {
         swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
       }

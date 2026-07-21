@@ -33,6 +33,20 @@ describe('getSyncCheckpointKey', () => {
     expect(delta7).not.toBe(delta9);
   });
 
+  it('isolates exact VM batches from full sync and from each other', () => {
+    const full = getSyncCheckpointKey('peerA', 'mfacts', false, 'data');
+    const exactA = getSyncCheckpointKey(
+      'peerA', 'mfacts', false, 'data', undefined, undefined, undefined, 'exact:a',
+    );
+    const exactB = getSyncCheckpointKey(
+      'peerA', 'mfacts', false, 'data', undefined, undefined, undefined, 'exact:b',
+    );
+
+    expect(exactA).not.toBe(full);
+    expect(exactB).not.toBe(full);
+    expect(exactA).not.toBe(exactB);
+  });
+
   // R10 — member SWM recovery must get its OWN cursor namespace so it never
   // overwrites or deletes the shared incremental-sync cursor.
   it('scopes the key with a |recovery segment distinct from the normal SWM key', () => {

@@ -209,6 +209,11 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import {
+  decodeExactAssetUals,
+  normalizeExactAssetUals,
+  requireExactAssetUals,
+} from './sync/exact-assets.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -962,6 +967,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         syncSessionId: typeof parsed.syncSessionId === 'string' ? parsed.syncSessionId : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
+        // Exact-asset filter is narrowing-only. Present-but-invalid must remain
+        // an empty filter so the responder serves nothing instead of silently
+        // expanding the request into a full Context Graph scan.
+        assetUals: normalizeExactAssetUals(parsed.assetUals),
         // R9 (SECURITY): the unsigned member-recovery marker. This is a STRICT
         // FIELD ALLOWLIST — anything not copied here is dropped. If `recovery`
         // were omitted, the responder would never see it, silently fall through
@@ -987,7 +996,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // "since" or "session" as control tokens. Old encoders never emit them.
     let sinceBatchId: string | undefined;
     let syncSessionId: string | undefined;
+    let assetUals: string[] | undefined;
     let tail = parts.length;
+    if (tail >= 2 && parts[tail - 2] === 'assets') {
+      assetUals = decodeExactAssetUals(parts[tail - 1]);
+      tail -= 2;
+    }
     if (
       tail >= 2 &&
       parts[tail - 2] === 'since' &&
@@ -1012,6 +1026,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
       syncSessionId,
       sinceBatchId,
+      assetUals,
     };
   }
 
@@ -1089,6 +1104,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     sinceBatchId?: string,
     syncSessionId?: string,
     recovery?: boolean,
+    assetUals?: string[],
   ): Promise<Uint8Array> {
     // Policy-read uncertainty must not abort bootstrap or downgrade it to the
     // public pipe encoding. Treat an unreadable policy as private; catalog is
@@ -1124,6 +1140,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
+    const exactAssetUals = assetUals === undefined ? undefined : requireExactAssetUals(assetUals);
     return buildSyncRequestEnvelope({
       contextGraphId,
       offset,
@@ -1138,6 +1155,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // is gap-safe only when it comes from a CONTIGUOUS watermark, so it is
       // supplied explicitly by callers, never auto-derived from local MAX().
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
+      assetUals: !includeSharedMemory && phase !== 'catalog' ? exactAssetUals : undefined,
       syncSessionId: phase === 'snapshot' ? undefined : syncSessionId,
       needsAuth,
       // R9: forces the EDGE (member-agent-key) signing path so the responder

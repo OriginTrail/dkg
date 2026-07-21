@@ -36,6 +36,8 @@ const baseParams = (sinceBatchId?: string, syncSessionId?: string) => {
   };
 };
 
+const EXACT_UAL = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+
 describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
   it('does not feed sinceBatchId or syncSessionId into the signed digest', async () => {
     const without = baseParams(undefined);
@@ -81,6 +83,16 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     expect(parsed.requesterSignatureR).toBeTruthy();
   });
 
+  it('carries an exact-KA filter outside the authenticated digest', async () => {
+    const { params, digestCalls } = baseParams(undefined);
+    const bytes = await buildSyncRequestEnvelope({ ...params, assetUals: [EXACT_UAL] });
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as SyncRequestEnvelope;
+
+    expect(parsed.assetUals).toEqual([EXACT_UAL]);
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0]).not.toContain(EXACT_UAL);
+  });
+
   it('omits sinceBatchId from the envelope when unset (no key leakage)', async () => {
     const { params } = baseParams(undefined);
     const bytes = await buildSyncRequestEnvelope(params);
@@ -117,6 +129,18 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
     const text = new TextDecoder().decode(bytes);
     expect(text).toBe('mfacts|0|100|session|session-1|since|42');
+  });
+
+  it('appends the exact-KA token after legacy session/delta tokens', async () => {
+    const { params } = baseParams('42', 'session-1');
+    const bytes = await buildSyncRequestEnvelope({
+      ...params,
+      needsAuth: false,
+      assetUals: [EXACT_UAL],
+    });
+    const text = new TextDecoder().decode(bytes);
+    expect(text).toContain('mfacts|0|100|session|session-1|since|42|assets|');
+    expect(decodeURIComponent(text.split('|assets|')[1]!)).toBe(JSON.stringify([EXACT_UAL]));
   });
 
   it('omits the pipe |since| token when the hint is unset', async () => {

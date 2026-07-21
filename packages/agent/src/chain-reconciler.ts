@@ -48,8 +48,15 @@ import {
 export type OrdinalOutcome =
   | { status: 'reconciled'; blockNumber: number }
   | { status: 'already'; blockNumber: number }
-  | { status: 'pending' }
+  | { status: 'pending'; recovery?: OrdinalRecoveryTarget }
   | { status: 'skip' };
+
+export interface OrdinalRecoveryTarget {
+  ordinal: number;
+  ual: string;
+  kaId: string;
+  reason: 'no-swm' | 'verified-vm-metadata-pending';
+}
 
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
@@ -78,6 +85,17 @@ export interface ChainReconcilerDeps {
   maxOrdinalsPerPass?: number;
   /** Maximum ordinal reconciliations allowed to run concurrently in one pass. */
   maxOrdinalConcurrency?: number;
+  /**
+   * Fetch one exact batch containing only locally-missing KAs, then re-run
+   * local verification for those ordinals. Undefined preserves scan-only
+   * behavior for callers/tests that do not provide network recovery.
+   */
+  recoverPendingOrdinals?: (
+    localCgId: string,
+    onChainCgId: bigint,
+    targets: readonly OrdinalRecoveryTarget[],
+    headBlock: number | undefined,
+  ) => Promise<ReadonlyMap<number, OrdinalOutcome>>;
   /**
    * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
    * pass must stop when discovery repairs a stale/reused chain id.
@@ -204,6 +222,22 @@ export async function reconcileContextGraph(
 
     const workerCount = Math.min(ordinalConcurrency, ordinals.length);
     await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
+
+    const recoveryTargets = ordinals
+      .map((ordinal) => outcomes.get(ordinal))
+      .filter((outcome): outcome is Extract<OrdinalOutcome, { status: 'pending' }> =>
+        outcome?.status === 'pending' && outcome.recovery !== undefined,
+      )
+      .map((outcome) => outcome.recovery!);
+    if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
+      const recovered = await deps.recoverPendingOrdinals(
+        localCgId,
+        onChainCgId,
+        recoveryTargets,
+        headBlock,
+      );
+      for (const [ordinal, outcome] of recovered) outcomes.set(ordinal, outcome);
+    }
 
     // Cursor state is deliberately updated in ordinal order even though chain
     // reads, store verification, and independent per-KA materializations ran in

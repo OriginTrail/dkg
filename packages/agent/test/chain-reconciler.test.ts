@@ -226,6 +226,39 @@ describe('reconcileContextGraph — sweep', () => {
     expect(result).toMatchObject({ processed: 10, reconciled: 10, watermark: 10 });
   });
 
+  it('batch-recovers only locally-missing ordinals and reuses their outcomes', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        if (ordinal === 0) return { status: 'already', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+            kaId: String(ordinal),
+            reason: 'no-swm',
+          },
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map((target) => target.ordinal));
+        return new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
+      },
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[1, 2]]);
+    expect(result).toMatchObject({ processed: 3, reconciled: 3, watermark: 3 });
+  });
+
   it('keeps scanning later slices when an early ordinal remains pending', async () => {
     const attempts: number[][] = [[], [], []];
     let pass = 0;
