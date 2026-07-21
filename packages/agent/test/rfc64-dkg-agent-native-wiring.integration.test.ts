@@ -4,14 +4,17 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
+  type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
+  type MemberRosterV1,
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -20,7 +23,11 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
-import { snapshotRfc64CatalogDeploymentProfileV1 } from '../src/dkg-agent-rfc64-catalog.js';
+import {
+  snapshotRfc64CatalogAccessPolicyAuthorityV1,
+  snapshotRfc64CatalogDeploymentProfileV1,
+} from '../src/dkg-agent-rfc64-catalog.js';
+import type { Rfc64CatalogAccessPolicyAuthorityConfigV1 } from '../src/dkg-agent-types.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -60,6 +67,7 @@ async function startNativeAgent(
   name: string,
   deployment: CatalogSealDeploymentProfileV1 = NATIVE_DEPLOYMENT,
   existingDataDir?: string,
+  accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1,
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -78,6 +86,7 @@ async function startNativeAgent(
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: deployment,
+    rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
   });
   agents.push(agent);
   await agent.start();
@@ -109,6 +118,50 @@ function catalogScopeDigest() {
   });
 }
 
+function privateCatalogPolicy(): ContextGraphPolicyV1 {
+  return {
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    era: '7',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy: 1,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: {
+      kind: 'owner-signed-unregistered',
+      ownerAddress: AUTHOR,
+      ownerAuthorityEra: '0',
+    },
+    effectiveAt: '0',
+    issuedAt: '0',
+  };
+}
+
+function privateCatalogRoster(
+  policy: ContextGraphPolicyV1,
+  policyDigest: Digest32V1,
+): MemberRosterV1 {
+  return {
+    networkId: policy.networkId,
+    contextGraphId: policy.contextGraphId,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
+    era: policy.era,
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest,
+    administrativeDelegationDigest: policy.administrativeDelegationDigest,
+    members: [{ agentAddress: AUTHOR, roles: ['holder', 'provider'] }],
+    issuedAt: '0',
+  };
+}
+
 describe('RFC-64 DKGAgent production native catalog wiring', () => {
   it('snapshots and canonicalizes the deterministic local deployment override', () => {
     const callerOwned = {
@@ -127,6 +180,103 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       assertedAtKav10Address: `0x${'00'.repeat(20)}` as never,
     })).toThrow(/non-zero EVM address/);
   });
+
+  it('snapshots the explicit access authority and fails closed before private activation', async () => {
+    const resolver = async () => AUTHOR;
+    const callerOwned = {
+      localAgentAddress: ethers.getAddress(AUTHOR) as EvmAddressV1,
+      resolveRemoteAgentAddress: resolver,
+    };
+    const snapshot = snapshotRfc64CatalogAccessPolicyAuthorityV1(callerOwned)!;
+    callerOwned.localAgentAddress = ethers.ZeroAddress as EvmAddressV1;
+    expect(snapshot).toEqual({
+      localAgentAddress: AUTHOR,
+      resolveRemoteAgentAddress: resolver,
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(() => snapshotRfc64CatalogAccessPolicyAuthorityV1({
+      localAgentAddress: ethers.ZeroAddress as EvmAddressV1,
+      resolveRemoteAgentAddress: resolver,
+    })).toThrow(/localAgentAddress is invalid/);
+
+    const policy = privateCatalogPolicy();
+    const policyDigest = `0x${'ab'.repeat(32)}` as Digest32V1;
+    const roster = privateCatalogRoster(policy, policyDigest);
+    const legacyOpenOnly = await startNativeAgent('private-denied');
+    expect(() => legacyOpenOnly.acceptRfc64CatalogAccessSnapshotV1({
+      policy,
+      policyDigest,
+      roster,
+    })).toThrow(/requires explicit access-policy authority/);
+
+    const configured = await startNativeAgent(
+      'private-configured',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: resolver,
+      },
+    );
+    expect(configured.acceptRfc64CatalogAccessSnapshotV1({
+      policy,
+      policyDigest,
+      roster,
+    })).toMatchObject({ policyDigest, roster: { policyDigest } });
+
+    const published = await configured.publishAuthorCatalogGenesisV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: 'service-lane',
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      },
+      author: AUTHOR_WALLET,
+      peers: [],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    expect(published.announcement).toMatchObject({
+      policyDigest,
+      subGraphName: 'service-lane',
+      catalogEra: '0',
+    });
+
+    const successor = await configured.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: published.headObjectDigest,
+        signatureVariantDigest: published.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: published.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'private-subgraph-object' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(7n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [],
+    });
+    expect(successor).toMatchObject({
+      announcement: {
+        policyDigest,
+        subGraphName: 'service-lane',
+        catalogEra: '0',
+      },
+      catalogScope: {
+        subGraphName: 'service-lane',
+        era: '0',
+      },
+      inventoryRowCount: '1',
+    });
+  }, 60_000);
 
   it('uses the trusted override to fetch provider content and durably apply native genesis', async () => {
     const [author, receiver] = await Promise.all([
@@ -244,7 +394,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
 
-    const successor = await author.publishOpenAuthorCatalogExactSetSuccessorV1({
+    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: {
         objectDigest: firstSuccessor.headObjectDigest,
         signatureVariantDigest: firstSuccessor.signatureVariantDigest,

@@ -31,6 +31,7 @@ import type {
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
   CatalogSealDeploymentProfileV1,
+  EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -1041,6 +1042,14 @@ export interface ReplicationEvent {
 
 export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
+export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
+  readonly localAgentAddress: EvmAddressV1;
+  /** Exact authenticated libp2p-peer to agent-wallet binding. */
+  readonly resolveRemoteAgentAddress: (
+    remotePeerId: string,
+  ) => Promise<EvmAddressV1 | null>;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1055,6 +1064,11 @@ export interface DKGAgentConfig {
    * announcement wire data.
    */
   rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
+  /**
+   * Explicit agent-identity authority required before accepting a private
+   * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
+   */
+  rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

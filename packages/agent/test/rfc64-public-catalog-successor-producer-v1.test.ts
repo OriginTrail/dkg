@@ -131,6 +131,22 @@ describe('RFC-64 public/open one-row successor producer', () => {
     });
   });
 
+  it('preserves an exact non-root subgraph lane across a bounded successor', async () => {
+    const subGraphName = 'service-lane' as AuthorCatalogScopeV1['subGraphName'];
+    const { genesis, authorization } = await producerHistory(subGraphName);
+    const result = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+
+    expect(result.publication.head.payload).toMatchObject({
+      subGraphName,
+      version: '1',
+      previousHeadDigest: genesis.head.objectDigest,
+    });
+    expect(result.publication.bucket?.payload.rows).toHaveLength(1);
+  });
+
   it('canonicalizes an unordered two-row exact set and produces the same signed head', async () => {
     const { genesis, authorization } = await producerHistory();
     const stageKaBundle = vi.fn(durableBundleReceipt);
@@ -622,8 +638,14 @@ type BundleStageInput = {
   readonly bundleBytes: Uint8Array;
 };
 
-async function producerHistory() {
-  const authorization = await directCatalogAuthorization(AUTHOR_WALLET, CONTEXT_GRAPH_ID);
+async function producerHistory(
+  subGraphName: AuthorCatalogScopeV1['subGraphName'] = null,
+) {
+  const authorization = await directCatalogAuthorization(
+    AUTHOR_WALLET,
+    CONTEXT_GRAPH_ID,
+    subGraphName,
+  );
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope: {
       networkId: NETWORK_ID,
@@ -631,7 +653,7 @@ async function producerHistory() {
       governanceChainId: '20430',
       governanceContractAddress: GOVERNANCE,
       ownershipTransitionDigest: null,
-      subGraphName: null,
+      subGraphName,
       authorAddress: AUTHOR,
       era: '0',
       bucketCount: '1',
@@ -685,6 +707,7 @@ async function stageOne(
 async function directCatalogAuthorization(
   wallet: ethers.Wallet,
   contextGraphId: ContextGraphIdV1,
+  subGraphName: AuthorCatalogScopeV1['subGraphName'] = null,
 ) {
   const authorAddress = wallet.address.toLowerCase() as EvmAddressV1;
   const produced = await produceDirectAuthorCatalogIssuerDelegationV1({
@@ -694,7 +717,7 @@ async function directCatalogAuthorization(
       governanceChainId: '20430',
       governanceContractAddress: GOVERNANCE,
       ownershipTransitionDigest: null,
-      subGraphName: null,
+      subGraphName,
       authorAddress,
       era: '0',
       bucketCount: '1',

@@ -357,6 +357,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -402,6 +403,7 @@ import { CclPolicyMethods } from './dkg-agent-ccl.js';
 import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
 import {
   Rfc64CatalogMethods,
+  snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
@@ -457,6 +459,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  Rfc64CatalogAccessPolicyAuthorityConfigV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -698,6 +701,9 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
       config.rfc64CatalogDeploymentProfile,
     );
+    const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
+      config.rfc64CatalogAccessPolicyAuthority,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -802,6 +808,7 @@ export class DKGAgent extends DKGAgentBase {
       ...config,
       genesisId,
       networkIdentity,
+      rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
     };
 

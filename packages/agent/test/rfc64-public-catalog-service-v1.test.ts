@@ -2,11 +2,14 @@ import {
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
   computeControlSignatureVariantDigestHex,
   type AuthorCatalogScopeV1,
   type Digest32V1,
+  type ContextGraphPolicyV1,
   type EvmAddressV1,
+  type MemberRosterV1,
   type ProtocolRouter,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -14,6 +17,10 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import {
+  buildOpenOwnerContextGraphPolicyV1,
+  computeOpenContextGraphPolicyDigestV1,
+} from '../src/rfc64/open-catalog-policy-v1.js';
 import type { Rfc64ControlObjectOperationsV1 } from '../src/rfc64/control-object-store-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
@@ -145,6 +152,79 @@ function nativeOptions(
   } as const;
 }
 
+function accessPolicyAuthority() {
+  return {
+    localAgentAddress: AUTHOR,
+    resolveRemoteAgentAddress: async () => null,
+  } as const;
+}
+
+function catalogPolicy(
+  contextGraphId: string,
+  accessPolicy: 0 | 1,
+  publishPolicy: 0 | 1,
+): ContextGraphPolicyV1 {
+  return {
+    networkId: NETWORK_ID,
+    contextGraphId: contextGraphId as ContextGraphPolicyV1['contextGraphId'],
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    era: '0',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy,
+    publishPolicy,
+    publishAuthority: publishPolicy === 0
+      ? OTHER_WALLET.address.toLowerCase() as EvmAddressV1
+      : null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: { kind: 'owner-signed-unregistered', ownerAddress: AUTHOR, ownerAuthorityEra: '0' },
+    effectiveAt: '0',
+    issuedAt: '0',
+  };
+}
+
+function memberRoster(
+  policy: ContextGraphPolicyV1,
+  policyDigest: Digest32V1,
+): MemberRosterV1 {
+  const members = [AUTHOR, OTHER_WALLET.address.toLowerCase() as EvmAddressV1]
+    .sort()
+    .map((agentAddress) => ({ agentAddress, roles: ['holder', 'provider'] as const }));
+  return {
+    networkId: policy.networkId,
+    contextGraphId: policy.contextGraphId,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
+    era: policy.era,
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest,
+    administrativeDelegationDigest: policy.administrativeDelegationDigest,
+    members,
+    issuedAt: '0',
+  };
+}
+
+/**
+ * `memberRoster` enrols every wallet these tests author with, which makes the private branch of
+ * `isSwmAuthorAuthorized` unfalsifiable. This builds the same roster minus one address so the
+ * off-roster author case can actually be asserted.
+ */
+function rosterExcluding(
+  policy: ContextGraphPolicyV1,
+  policyDigest: Digest32V1,
+  excluded: EvmAddressV1,
+): MemberRosterV1 {
+  const base = memberRoster(policy, policyDigest);
+  return {
+    ...base,
+    members: base.members.filter((member) => member.agentAddress !== excluded),
+  };
+}
+
 function acceptPolicy(service: Rfc64PublicCatalogServiceV1) {
   return service.acceptOpenPolicy({
     networkId: NETWORK_ID,
@@ -208,6 +288,176 @@ function countEvent(router: RecordingRouter, event: string): number {
 }
 
 describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
+  it('accepts all four policy cells and requires a roster only for private access', async () => {
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    let index = 0;
+    for (const accessPolicy of [0, 1] as const) {
+      for (const publishPolicy of [0, 1] as const) {
+        index += 1;
+        const policy = catalogPolicy(
+          `${CONTEXT_GRAPH_ID}-${accessPolicy}-${publishPolicy}`,
+          accessPolicy,
+          publishPolicy,
+        );
+        const policyDigest = `0x${index.toString(16).padStart(64, '0')}` as Digest32V1;
+        const accepted = service.acceptPolicySnapshot({
+          policy,
+          policyDigest,
+          roster: accessPolicy === 1 ? memberRoster(policy, policyDigest) : undefined,
+        });
+        expect(accepted.policy.accessPolicy).toBe(accessPolicy);
+        expect(accepted.policy.publishPolicy).toBe(publishPolicy);
+        expect(accepted.roster === null).toBe(accessPolicy === 0);
+        expect(service.acceptedPolicyDigestForCatalogScope({
+          networkId: policy.networkId,
+          contextGraphId: policy.contextGraphId,
+          governanceChainId: policy.governanceChainId,
+          governanceContractAddress: policy.governanceContractAddress,
+          ownershipTransitionDigest: policy.ownershipTransitionDigest,
+          subGraphName: 'service-lane',
+          authorAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
+          era: '7',
+          bucketCount: '1',
+        })).toBe(policyDigest);
+      }
+    }
+    expect(service.stats().acceptedPolicies).toBe(4);
+
+    const privatePolicy = catalogPolicy(`${CONTEXT_GRAPH_ID}-missing-roster`, 1, 1);
+    await expect(Promise.resolve().then(() => service.acceptPolicySnapshot({
+      policy: privatePolicy,
+      policyDigest: `0x${'f'.repeat(64)}` as Digest32V1,
+    }))).rejects.toThrow(/requires a current member roster/);
+    await service.close();
+  });
+
+  it('denies a private-cell author that is absent from the current member roster', async () => {
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new RecordingRouter().asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    service.start();
+    const outsider = OTHER_WALLET.address.toLowerCase() as EvmAddressV1;
+
+    const closedPolicy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-closed`, 1, 1);
+    const closedDigest = `0x${'2c'.repeat(32)}` as Digest32V1;
+    service.acceptPolicySnapshot({
+      policy: closedPolicy,
+      policyDigest: closedDigest,
+      roster: rosterExcluding(closedPolicy, closedDigest, outsider),
+    });
+
+    // Author side (assertAcceptedPolicyMatchesCatalogScope): an accepted private snapshot must not
+    // bind a catalog scope whose author is off-roster.
+    await expect(service.publishAuthorCatalogGenesis({
+      scope: {
+        networkId: closedPolicy.networkId,
+        contextGraphId: closedPolicy.contextGraphId,
+        governanceChainId: closedPolicy.governanceChainId,
+        governanceContractAddress: closedPolicy.governanceContractAddress,
+        ownershipTransitionDigest: closedPolicy.ownershipTransitionDigest,
+        subGraphName: 'service-lane',
+        authorAddress: outsider,
+        era: '0',
+        bucketCount: '1',
+      } as AuthorCatalogScopeV1,
+      signer: {
+        issuer: outsider,
+        signDigest: (digest: Uint8Array) => OTHER_WALLET.signMessage(digest),
+      },
+      issuedAt: HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+      peers: [],
+    })).rejects.toThrow(/not bound to the exact catalog network, CG, governance scope, and author/);
+
+    // Receive side (#assertAcceptedCatalogAnnouncement): an announcement naming an off-roster author
+    // must not resolve a trusted catalog scope.
+    await expect(service.announceCatalogHead({
+      announcement: {
+        ...announcement(closedDigest),
+        contextGraphId: closedPolicy.contextGraphId,
+        authorAddress: outsider,
+      } as Rfc64PublicCatalogHeadAnnouncementV1,
+      peers: [],
+    })).rejects.toThrow(/not bound to the locally accepted policy snapshot/);
+
+    // Control: the identical announcement is accepted for a private cell whose roster DOES enrol the
+    // same author, proving both denials above come from the roster check rather than from an
+    // unrelated scope mismatch.
+    const openRosterPolicy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-enrolled`, 1, 1);
+    const openRosterDigest = `0x${'2d'.repeat(32)}` as Digest32V1;
+    service.acceptPolicySnapshot({
+      policy: openRosterPolicy,
+      policyDigest: openRosterDigest,
+      roster: memberRoster(openRosterPolicy, openRosterDigest),
+    });
+    await expect(service.announceCatalogHead({
+      announcement: {
+        ...announcement(openRosterDigest),
+        contextGraphId: openRosterPolicy.contextGraphId,
+        authorAddress: outsider,
+      } as Rfc64PublicCatalogHeadAnnouncementV1,
+      peers: [],
+    })).resolves.toMatchObject({ announcedPeers: [] });
+
+    await service.close();
+  });
+
+  it('publishes exact subgraph genesis under both public policy cells', async () => {
+    for (const publishPolicy of [0, 1] as const) {
+      const service = new Rfc64PublicCatalogServiceV1({
+        router: new RecordingRouter().asProtocolRouter(),
+        controlObjects: controlObjects(),
+        accessPolicyAuthority: accessPolicyAuthority(),
+      });
+      service.start();
+      const policy = catalogPolicy(
+        `${CONTEXT_GRAPH_ID}-public-${publishPolicy}`,
+        0,
+        publishPolicy,
+      );
+      const policyDigest = (
+        `0x${(10 + publishPolicy).toString(16).padStart(64, '0')}`
+      ) as Digest32V1;
+      service.acceptPolicySnapshot({ policy, policyDigest });
+
+      const authorAddress = OTHER_WALLET.address.toLowerCase() as EvmAddressV1;
+      const result = await service.publishAuthorCatalogGenesis({
+        scope: {
+          networkId: policy.networkId,
+          contextGraphId: policy.contextGraphId,
+          governanceChainId: null,
+          governanceContractAddress: null,
+          ownershipTransitionDigest: null,
+          subGraphName: 'service-lane',
+          authorAddress,
+          era: '0',
+          bucketCount: '1',
+        },
+        signer: {
+          issuer: authorAddress,
+          signDigest: (digest) => OTHER_WALLET.signMessage(digest),
+        },
+        issuedAt: HEAD_ISSUED_AT,
+        catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+        catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+        peers: [],
+      });
+      expect(result.announcement).toMatchObject({
+        policyDigest,
+        subGraphName: 'service-lane',
+        authorAddress,
+      });
+      await service.close();
+    }
+  });
+
   it('durably stages the exact signed delegation before genesis and only then announces', async () => {
     const router = new RecordingRouter();
     const store = controlObjects();
@@ -219,6 +469,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     service.start();
 
@@ -259,6 +510,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     service.start();
 
@@ -269,11 +521,15 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       },
     }) as never)).rejects.toThrow(/signer must equal the exact catalog author/);
 
-    const wrongPolicy = service.acceptOpenPolicy({
+    const wrongPolicyPayload = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       ownerAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
     });
+    const wrongPolicy = {
+      policy: wrongPolicyPayload,
+      policyDigest: computeOpenContextGraphPolicyDigestV1(wrongPolicyPayload),
+    };
     await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, {
       policy: wrongPolicy,
     }) as never)).rejects.toThrow(/not bound to the exact catalog/);
@@ -289,6 +545,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     service.start();
 
@@ -311,6 +568,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     service.start();
 
@@ -330,6 +588,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     service.start();
 
@@ -345,6 +604,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
     });
     const policy = acceptPolicy(service);
     const head = announcement(policy.policyDigest);
@@ -405,6 +665,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
       transportTimeoutMs: 4_321,
       native: nativeOptions(createReconciler),
     });
@@ -445,13 +706,24 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       era: '0',
       bucketCount: '1',
     });
+    expect(clients!.resolveTrustedCatalogScope({
+      ...announcement(policy.policyDigest),
+      subGraphName: 'service-lane',
+      catalogEra: '7',
+    } as Rfc64PublicCatalogHeadAnnouncementV1)).toMatchObject({
+      subGraphName: 'service-lane',
+      authorAddress: AUTHOR,
+      era: '7',
+    });
     expect(() => clients!.resolveTrustedCatalogScope(announcement(
       `0x${'cc'.repeat(32)}` as Digest32V1,
-    ))).toThrow('no matching accepted open policy generation');
-    expect(() => clients!.resolveTrustedCatalogScope({
+    ))).toThrow('no matching accepted policy generation');
+    expect(clients!.resolveTrustedCatalogScope({
       ...announcement(policy.policyDigest),
       authorAddress: OTHER_WALLET.address.toLowerCase() as EvmAddressV1,
-    })).toThrow('accepted null-governance owner policy');
+    })).toMatchObject({
+      authorAddress: OTHER_WALLET.address.toLowerCase(),
+    });
 
     service.start();
     service.start();
@@ -464,6 +736,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
       native: nativeOptions(() => inertReconciler()),
     });
 
@@ -483,6 +756,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
       native: nativeOptions(() => inertReconciler()),
     });
 
@@ -508,6 +782,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { retryBackoffMs: 0 },
       native: nativeOptions((input) => {
         clients = input;
@@ -582,6 +857,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
       onHeadStaged,
     });
     const policy = acceptPolicy(service);
@@ -651,6 +927,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: store,
+      accessPolicyAuthority: accessPolicyAuthority(),
       receiver: { maxAttempts: 1, retryBackoffMs: 0, onError },
     });
     const policy = acceptPolicy(service);

@@ -54,8 +54,13 @@ import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { Rfc64CatalogAccessPolicyAuthorityConfigV1 } from './dkg-agent-types.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
+import type {
+  AcceptRfc64CatalogAccessSnapshotInputV1,
+  AcceptedRfc64CatalogAccessSnapshotV1,
+} from './rfc64/catalog-access-policy-v1.js';
 import type { Rfc64PublicCatalogReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
@@ -97,6 +102,12 @@ export interface Rfc64OpenCatalogAuthorSignerV1 {
   signMessage(message: Uint8Array): Promise<string>;
 }
 
+const LEGACY_OPEN_ONLY_LOCAL_AGENT_ADDRESS =
+  '0x0000000000000000000000000000000000000001' as EvmAddressV1;
+
+/** Policy-neutral catalog author signer; legacy open APIs use the same shape. */
+export type Rfc64CatalogAuthorSignerV1 = Rfc64OpenCatalogAuthorSignerV1;
+
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -105,6 +116,10 @@ export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly issuedAt?: TimestampMsV1;
   readonly effectiveAt?: TimestampMsV1;
 }
+
+/** Already-authoritative current policy snapshot supplied to the catalog plane. */
+export type AcceptRfc64CatalogAccessSnapshotParamsV1 =
+  AcceptRfc64CatalogAccessSnapshotInputV1;
 
 export interface PublishOpenAuthorCatalogGenesisParamsV1 {
   readonly networkId: NetworkIdV1;
@@ -123,6 +138,16 @@ export interface PublishOpenAuthorCatalogGenesisParamsV1 {
   readonly policyIssuedAt?: TimestampMsV1;
   readonly policyEffectiveAt?: TimestampMsV1;
   readonly ownerAuthorityEra?: DecimalU64V1;
+}
+
+export interface PublishAuthorCatalogGenesisParamsV1 {
+  /** Exact accepted policy-bound author catalog scope. */
+  readonly scope: AuthorCatalogScopeV1;
+  readonly author: Rfc64CatalogAuthorSignerV1;
+  readonly peers: readonly string[];
+  readonly issuedAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
 
 export interface Rfc64StagedAuthorCatalogHeadRefV1 {
@@ -193,6 +218,44 @@ export function snapshotRfc64CatalogDeploymentProfileV1(
   });
 }
 
+/** Snapshot the function-bearing create-time authority without trusting caller mutation. */
+export function snapshotRfc64CatalogAccessPolicyAuthorityV1(
+  input: Rfc64CatalogAccessPolicyAuthorityConfigV1 | undefined,
+): Readonly<Rfc64CatalogAccessPolicyAuthorityConfigV1> | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('rfc64CatalogAccessPolicyAuthority must be a plain object');
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('rfc64CatalogAccessPolicyAuthority must be a plain object');
+  }
+  const keys = Object.keys(input).sort();
+  if (
+    keys.length !== 2
+    || keys[0] !== 'localAgentAddress'
+    || keys[1] !== 'resolveRemoteAgentAddress'
+  ) {
+    throw new TypeError('rfc64CatalogAccessPolicyAuthority has unknown or missing fields');
+  }
+  if (
+    typeof input.localAgentAddress !== 'string'
+    || !ethers.isAddress(input.localAgentAddress)
+    || input.localAgentAddress === ethers.ZeroAddress
+  ) {
+    throw new TypeError('rfc64CatalogAccessPolicyAuthority.localAgentAddress is invalid');
+  }
+  if (typeof input.resolveRemoteAgentAddress !== 'function') {
+    throw new TypeError(
+      'rfc64CatalogAccessPolicyAuthority.resolveRemoteAgentAddress must be a function',
+    );
+  }
+  return Object.freeze({
+    localAgentAddress: input.localAgentAddress.toLowerCase() as EvmAddressV1,
+    resolveRemoteAgentAddress: input.resolveRemoteAgentAddress,
+  });
+}
+
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
   readonly previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
@@ -225,6 +288,12 @@ export interface PublishOpenAuthorCatalogExactSetSuccessorParamsV1 {
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
 }
+
+export type PublishAuthorCatalogExactSetSuccessorParamsV1 =
+  PublishOpenAuthorCatalogExactSetSuccessorParamsV1;
+
+export type PublishAuthorCatalogGenesisResultV1 =
+  PublishOpenAuthorCatalogGenesisResultV1;
 
 export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -272,6 +341,9 @@ export interface PublishOpenAuthorCatalogExactSetSuccessorResultV1 {
   readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
 }
 
+export type PublishAuthorCatalogExactSetSuccessorResultV1 =
+  PublishOpenAuthorCatalogExactSetSuccessorResultV1;
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /**
    * Construct + start the public catalog service on the production router.
@@ -281,9 +353,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.rfc64PublicCatalogServiceV1 !== undefined) return;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) return;
+    const configuredAuthority = this.config.rfc64CatalogAccessPolicyAuthority;
+    const defaultAgentAddress = this.defaultAgentAddress?.toLowerCase();
+    const fallbackLocalAgentAddress = defaultAgentAddress !== undefined
+      && ethers.isAddress(defaultAgentAddress)
+      && defaultAgentAddress !== ethers.ZeroAddress
+      ? defaultAgentAddress as EvmAddressV1
+      : LEGACY_OPEN_ONLY_LOCAL_AGENT_ADDRESS;
+    const accessPolicyAuthority = configuredAuthority ?? Object.freeze({
+      localAgentAddress: fallbackLocalAgentAddress,
+      // Legacy-open compatibility only. Private snapshot acceptance is denied
+      // below unless the caller supplied an explicit authenticated resolver.
+      resolveRemoteAgentAddress: async () => null,
+    });
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
+      accessPolicyAuthority,
+      privatePolicyAuthorityConfigured: configuredAuthority !== undefined,
       native: this.createRfc64PublicCatalogNativeOptionsV1(),
       receiver: {
         onError: (announcement, error) => {
@@ -321,6 +408,40 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     input: AcceptOpenContextGraphPolicyInputV1,
   ): AcceptedOpenCatalogPolicyV1 {
     return this.requireRfc64PublicCatalogServiceV1().acceptOpenPolicy(input);
+  }
+
+  /**
+   * Accept an independently verified current ContextGraphPolicyV1 snapshot and
+   * its conditional MemberRosterV1 into the catalog data-plane authorizer.
+   * This method does not verify administrative/finality authority itself.
+   */
+  acceptRfc64CatalogAccessSnapshotV1(
+    this: DKGAgent,
+    input: AcceptRfc64CatalogAccessSnapshotParamsV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.requireRfc64PublicCatalogServiceV1().acceptPolicySnapshot(input);
+  }
+
+  /** Author path for a previously accepted policy snapshot in any V1 cell. */
+  async publishAuthorCatalogGenesisV1(
+    this: DKGAgent,
+    params: PublishAuthorCatalogGenesisParamsV1,
+  ): Promise<PublishAuthorCatalogGenesisResultV1> {
+    const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
+    if (authorAddress !== params.scope.authorAddress) {
+      throw new Error('RFC-64 genesis author must equal the exact catalog scope author');
+    }
+    return this.requireRfc64PublicCatalogServiceV1().publishAuthorCatalogGenesis({
+      scope: params.scope,
+      signer: {
+        issuer: authorAddress,
+        signDigest: (objectDigest) => params.author.signMessage(objectDigest),
+      },
+      issuedAt: params.issuedAt ?? (Date.now().toString() as TimestampMsV1),
+      catalogIssuerDelegationEffectiveAt: params.catalogIssuerDelegationEffectiveAt,
+      catalogIssuerDelegationExpiresAt: params.catalogIssuerDelegationExpiresAt,
+      peers: params.peers,
+    });
   }
 
   /**
@@ -430,14 +551,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     params: PublishOpenAuthorCatalogExactSetSuccessorParamsV1,
   ): Promise<PublishOpenAuthorCatalogExactSetSuccessorResultV1> {
     const service = this.requireRfc64PublicCatalogServiceV1();
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) {
+      throw new Error('RFC-64 persistence is not available');
+    }
+    const history = await loadBoundedAuthorCatalogHistoryV1(
+      persistence,
+      params.previousHead,
+    );
+    const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
+    if (scope.subGraphName !== null) {
+      throw new Error('RFC-64 public/open compatibility successor requires the root lane');
+    }
+    service.acceptedOpenPolicyDigestForCatalogScope(scope);
+    return this.publishAuthorCatalogExactSetSuccessorV1(params);
+  }
+
+  /** Exact-set successor path for any locally accepted policy cell. */
+  async publishAuthorCatalogExactSetSuccessorV1(
+    this: DKGAgent,
+    params: PublishAuthorCatalogExactSetSuccessorParamsV1,
+  ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
+    const service = this.requireRfc64PublicCatalogServiceV1();
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
     }
-    const history = await loadPublicOpenRootLaneHistoryV1(persistence, params.previousHead);
+    const history = await loadBoundedAuthorCatalogHistoryV1(persistence, params.previousHead);
     const scope = deriveAuthorCatalogScopeFromHeadV1(history.previousHead.payload);
-    const policyDigest = service.acceptedOpenPolicyDigestForCatalogScope(scope);
+    const policyDigest = service.acceptedPolicyDigestForCatalogScope(scope);
     const authorAddress = params.author.address.toLowerCase() as EvmAddressV1;
     if (authorAddress !== scope.authorAddress) {
       throw new Error('RFC-64 successor author must equal the exact predecessor author');
@@ -806,16 +949,16 @@ function countToSafeInteger(value: CountV1, label: string): number {
   return parsed;
 }
 
-interface PublicOpenRootLaneHistoryV1 {
+interface BoundedAuthorCatalogHistoryV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
 }
 
-async function loadPublicOpenRootLaneHistoryV1(
+async function loadBoundedAuthorCatalogHistoryV1(
   persistence: Rfc64PersistenceV1,
   ref: Rfc64StagedAuthorCatalogHeadRefV1,
-): Promise<PublicOpenRootLaneHistoryV1> {
+): Promise<BoundedAuthorCatalogHistoryV1> {
   const storedHead = await persistence.controlObjects.getVerifiedObject({
     objectDigest: ref.objectDigest,
     signatureVariantDigest: ref.signatureVariantDigest,
@@ -825,12 +968,11 @@ async function loadPublicOpenRootLaneHistoryV1(
   assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
   const previousHead = storedHead.envelope;
   if (
-    previousHead.payload.subGraphName !== null
-    || previousHead.payload.bucketCount !== '1'
+    previousHead.payload.bucketCount !== '1'
     || previousHead.payload.directoryHeight !== '0'
     || BigInt(previousHead.payload.totalRows) > BigInt(MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1)
   ) {
-    throw new Error('RFC-64 predecessor is outside the public/open root-lane slice');
+    throw new Error('RFC-64 predecessor is outside the bounded one-bucket successor slice');
   }
 
   const storedRoot = await persistence.controlObjects.getVerifiedObjectByDigest({

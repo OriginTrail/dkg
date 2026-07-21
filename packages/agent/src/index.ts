@@ -110,6 +110,17 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export type {
+  AcceptRfc64CatalogAccessSnapshotParamsV1,
+  PublishAuthorCatalogExactSetSuccessorParamsV1,
+  PublishAuthorCatalogExactSetSuccessorResultV1,
+  PublishAuthorCatalogGenesisParamsV1,
+  PublishAuthorCatalogGenesisResultV1,
+  Rfc64CatalogAuthorSignerV1,
+} from './dkg-agent-rfc64-catalog.js';
+export type {
+  AcceptedRfc64CatalogAccessSnapshotV1,
+} from './rfc64/catalog-access-policy-v1.js';
 export {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -175,6 +186,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphDiscoveryMetadata,
