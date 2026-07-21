@@ -16,9 +16,11 @@ import {
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 import {
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  type VerifyContextGraphBinding,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -109,6 +111,34 @@ async function graphQuads(store: OxigraphStore, graph: string): Promise<Quad[]> 
   }));
 }
 
+function strictContextGraphBindingVerifier(
+  chain: ChainAdapter,
+  wireKeyedLocalIds: string[] = [],
+): VerifyContextGraphBinding {
+  const subscribedContextGraphs = new Map<string, { onChainHash: string }>();
+  const wireIdToLocalCgId = new Map<string, string>();
+  for (const localId of wireKeyedLocalIds) {
+    const lower = localId.toLowerCase();
+    subscribedContextGraphs.set(localId, { onChainHash: lower });
+    wireIdToLocalCgId.set(lower, localId);
+  }
+  const agentLike: any = {
+    chain,
+    subscribedContextGraphs,
+    wireIdToLocalCgId,
+    log: { info: () => {}, warn: () => {}, debug: () => {} },
+  };
+  agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+  agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+  return (localId, onChainId) => (DKGAgent.prototype as any).localCgMatchesOnChainSlot.call(
+    agentLike,
+    localId,
+    onChainId.toString(),
+    ctx,
+    { requireCommittedNameHash: true },
+  );
+}
+
 describe('durable graph-scoped KA materialization', () => {
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
@@ -126,10 +156,11 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       noChain,
       asset,
+      undefined,
       firstReceivedAt,
     );
 
-    await expect(materializeVerifiedGraphScopedAsset({ store, asset: authenticated }))
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: authenticated.asset }))
       .resolves.toBe('applied');
     expect(await values(store, 'status')).toEqual(['"tentative"']);
     expect(await values(store, 'publishedAt')).toEqual([
@@ -144,9 +175,10 @@ describe('durable graph-scoped KA materialization', () => {
     const replayed = await authenticateVerifiedGraphScopedAsset(
       noChain,
       asset,
+      undefined,
       new Date('2026-07-16T09:00:00.000Z'),
     );
-    await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed }))
+    await expect(materializeVerifiedGraphScopedAsset({ store, asset: replayed.asset }))
       .resolves.toBe('applied');
     expect(await values(store, 'publishedAt')).toEqual([
       `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
@@ -186,12 +218,13 @@ describe('durable graph-scoped KA materialization', () => {
         dataQuads: [dataQuad(2)],
         metadataQuads: metadata(2),
       },
+      strictContextGraphBindingVerifier(chain),
       new Date('2026-07-16T08:30:00.000Z'),
     );
 
     expect(nameHashReads).toEqual([14n]);
-    expect(authenticated.verifiedOnChainContextGraphId).toBe('14');
-    expect(authenticated.metadataQuads).toContainEqual(expect.objectContaining({
+    expect(authenticated.onChainContextGraphId).toBe('14');
+    expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
       predicate: `${DKG}status`,
       object: '"confirmed"',
     }));
@@ -218,7 +251,9 @@ describe('durable graph-scoped KA materialization', () => {
       metaGraph,
       dataQuads: [dataQuad(2)],
       metadataQuads: metadata(2),
-    })).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
   });
 
   it('fails closed when the bound CG has no committed name hash', async () => {
@@ -240,7 +275,99 @@ describe('durable graph-scoped KA materialization', () => {
       metaGraph,
       dataQuads: [dataQuad(2)],
       metadataQuads: metadata(2),
-    })).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
+  });
+
+  it('does not treat a zero-padded numeric local id as a direct slot address', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(
+        ethers.toUtf8Bytes('different-context-graph'),
+      ),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: '0014',
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain))).rejects.toMatchObject({
+      code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
+    });
+  });
+
+  it('accepts a locally proven wire-id keyed subscription without double hashing it', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const wireId = `0x${'ab'.repeat(32)}`;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => wireId,
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: wireId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain, [wireId]));
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
+  });
+
+  it('accepts only the canonical decimal spelling as a direct slot address', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      contextGraphId: '14',
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2),
+    }, strictContextGraphBindingVerifier(chain));
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
   });
 
   it('does not mistake a lifecycle assertionGraph pointer for a second UAL owner', async () => {
@@ -419,11 +546,12 @@ describe('durable graph-scoped KA materialization', () => {
         asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'],
       ) => materializeVerifiedGraphScopedAsset({
         store,
-        asset: await authenticateVerifiedGraphScopedAsset(
+        asset: (await authenticateVerifiedGraphScopedAsset(
           chain,
           asset,
+          strictContextGraphBindingVerifier(chain),
           new Date('2026-07-16T08:30:00.000Z'),
-        ),
+        )).asset,
       }),
     };
 
@@ -642,6 +770,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
+      strictContextGraphBindingVerifier(chain),
     )).rejects.toMatchObject({
       code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH',
     });
@@ -674,6 +803,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       asset,
+      strictContextGraphBindingVerifier(chain),
     )).rejects.toMatchObject({ code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' });
   });
 

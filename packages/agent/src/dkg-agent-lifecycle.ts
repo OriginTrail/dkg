@@ -4156,11 +4156,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         source: 'agent.durableSync.storeInsert',
       }),
       storeGraphScopedAsset: async (asset) => {
-        const authenticatedAsset = await authenticateVerifiedGraphScopedAsset(
+        const authentication = await authenticateVerifiedGraphScopedAsset(
           this.chain,
           asset,
+          (localContextGraphId, onChainContextGraphId) => this.localCgMatchesOnChainSlot(
+            localContextGraphId,
+            onChainContextGraphId.toString(),
+            ctx,
+            { requireCommittedNameHash: true },
+          ),
         );
-        const verifiedOnChainId = authenticatedAsset.verifiedOnChainContextGraphId;
+        const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
           this.bindSubscriptionOnChainId(
@@ -4172,7 +4178,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         const outcome = await materializeVerifiedGraphScopedAsset({
           store: this.store,
-          asset: authenticatedAsset,
+          asset: authentication.asset,
           options: {
             priority: 'background',
             source: 'agent.durableSync.graphScopedMaterialization',
@@ -4183,7 +4189,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
         if (outcome === 'applied') {
           this.invalidateListContextGraphsCache();
-          this.contextGraphMetaProjection.markDirtyFromQuads(authenticatedAsset.metadataQuads);
+          this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
         }
         return outcome;
       },
