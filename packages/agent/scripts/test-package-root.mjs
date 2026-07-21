@@ -65,6 +65,7 @@ const publicRfc64Modules = [
   'inventory-v1/statements.js',
 ];
 const blockedRfc64Modules = [
+  'catalog-access-policy-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
