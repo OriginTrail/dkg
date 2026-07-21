@@ -13,6 +13,7 @@ import {
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
   computeControlSignatureVariantDigestHex,
+  parseDeterministicKnowledgeAssetUal,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -169,6 +170,13 @@ async function handle(command: Command): Promise<void> {
       });
       return;
     }
+    case 'acceptPolicySnapshot': {
+      const accepted = currentAgent.acceptRfc64CatalogAccessSnapshotV1(
+        plainRecord(command.input, 'acceptPolicySnapshot input') as never,
+      );
+      emitOperationResult(command, accepted);
+      return;
+    }
     case 'publishGenesis': {
       requireRole('author');
       const input = plainRecord(command.input, 'publishGenesis input');
@@ -180,6 +188,23 @@ async function handle(command: Command): Promise<void> {
       const forwarded: Record<string, unknown> = { ...input, author, peers: [] };
       delete forwarded.authorPrivateKey;
       const output = await currentAgent.publishOpenAuthorCatalogGenesisV1(forwarded as never);
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'publishCatalogGenesis': {
+      requireRole('author');
+      const input = plainRecord(command.input, 'publishCatalogGenesis input');
+      const authorPrivateKey = requiredString(
+        input.authorPrivateKey,
+        'publishCatalogGenesis.authorPrivateKey',
+      );
+      const forwarded: Record<string, unknown> = {
+        ...input,
+        author: new ethers.Wallet(authorPrivateKey),
+        peers: [],
+      };
+      delete forwarded.authorPrivateKey;
+      const output = await currentAgent.publishAuthorCatalogGenesisV1(forwarded as never);
       emitOperationResult(command, output);
       return;
     }
@@ -226,6 +251,65 @@ async function handle(command: Command): Promise<void> {
         const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
         if (stagedBundle === null) {
           throw new Error(`published exact-set bundle ${bundleDigest} is absent from durable storage`);
+        }
+        return Object.freeze({
+          ...asset,
+          stagedBundleByteLength: stagedBundle.byteLength,
+        });
+      }));
+      emitOperationResult(command, { ...result, assets: Object.freeze(assetsWithReceipts) });
+      return;
+    }
+    case 'publishCatalogExactSetSuccessor': {
+      requireRole('author');
+      const input = plainRecord(command.input, 'publishCatalogExactSetSuccessor input');
+      const authorPrivateKey = requiredString(
+        input.authorPrivateKey,
+        'publishCatalogExactSetSuccessor.authorPrivateKey',
+      );
+      const assets = plainArray(
+        input.assets,
+        'publishCatalogExactSetSuccessor.assets',
+      ).map((value, index) => {
+        const asset = plainRecord(value, `publishCatalogExactSetSuccessor.assets[${index}]`);
+        const projectionNQuads = requiredString(
+          asset.projectionNQuads,
+          `publishCatalogExactSetSuccessor.assets[${index}].projectionNQuads`,
+        );
+        const forwarded: Record<string, unknown> = {
+          ...asset,
+          projectionBytes: new TextEncoder().encode(projectionNQuads),
+        };
+        delete forwarded.projectionNQuads;
+        return forwarded;
+      });
+      const forwarded: Record<string, unknown> = {
+        ...input,
+        author: new ethers.Wallet(authorPrivateKey),
+        assets,
+        peers: [],
+      };
+      delete forwarded.authorPrivateKey;
+      const output = await currentAgent.publishAuthorCatalogExactSetSuccessorV1(
+        forwarded as never,
+      );
+      const result = plainRecord(output, 'publishCatalogExactSetSuccessor output');
+      const outputAssets = plainArray(
+        result.assets,
+        'publishCatalogExactSetSuccessor.output.assets',
+      );
+      const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
+        const asset = plainRecord(
+          value,
+          `publishCatalogExactSetSuccessor.output.assets[${index}]`,
+        );
+        const bundleDigest = requiredDigest(
+          asset.bundleDigest,
+          `publishCatalogExactSetSuccessor.output.assets[${index}].bundleDigest`,
+        );
+        const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
+        if (stagedBundle === null) {
+          throw new Error(`published catalog bundle ${bundleDigest} is absent from durable storage`);
         }
         return Object.freeze({
           ...asset,
@@ -388,13 +472,20 @@ function wireSynchronizationEvidence(output: unknown): unknown {
       throw new Error('synchronization rows disagree on the verified control-object closure');
     }
     verifiedControlObjectCount = rowControlObjectCount;
+    const kaUal = requiredString(row.kaUal, `synchronization.rows[${index}].kaUal`);
     return Object.freeze({
-      kaId: canonicalDecimalWire(row.kaId, `synchronization.rows[${index}].kaId`),
+      kaId: canonicalDecimalWire(
+        row.kaId ?? packedKaIdFromUal(kaUal),
+        `synchronization.rows[${index}].kaId`,
+      ),
       catalogRowDigest: row.catalogRowDigest,
       contentDigest: row.contentDigest,
-      sealDigest: row.sealDigest,
+      // Legacy one-row evidence predates sealDigest on this readback surface.
+      // Multi-row evidence always carries it; keep the absence explicit on the
+      // adapter wire instead of emitting `undefined` or inventing a digest.
+      sealDigest: row.sealDigest ?? null,
       bundleDigest: row.bundleDigest,
-      kaUal: row.kaUal,
+      kaUal,
       activatedTripleCount: row.activatedTripleCount,
       swmGraph: row.swmGraph,
     });
@@ -413,6 +504,11 @@ function wireSynchronizationEvidence(output: unknown): unknown {
   });
 }
 
+function packedKaIdFromUal(kaUal: string): string {
+  const parsed = parseDeterministicKnowledgeAssetUal(kaUal);
+  return ((BigInt(parsed.agentAddress) << 96n) | BigInt(parsed.kaNumber)).toString();
+}
+
 function canonicalDecimalWire(value: unknown, label: string): string {
   if (typeof value === 'bigint' && value >= 0n) return value.toString();
   if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/u.test(value)) return value;
@@ -422,6 +518,8 @@ function canonicalDecimalWire(value: unknown, label: string): string {
 function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string, boolean> {
   const surface = currentAgent as unknown as Record<string, unknown>;
   return Object.freeze({
+    acceptPolicySnapshot:
+      typeof surface.acceptRfc64CatalogAccessSnapshotV1 === 'function',
     acceptOpenPolicy: typeof surface.acceptOpenContextGraphPolicyV1 === 'function',
     announce: typeof surface.announceRfc64PublicCatalogHeadV1 === 'function',
     appliedHeadReadback: typeof surface.readRfc64AppliedCatalogHeadV1 === 'function',
@@ -430,6 +528,10 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
     publishExactSetSuccessor:
       typeof surface.publishOpenAuthorCatalogExactSetSuccessorV1 === 'function',
     publishGenesis: typeof surface.publishOpenAuthorCatalogGenesisV1 === 'function',
+    publishPolicyBoundExactSetSuccessor:
+      typeof surface.publishAuthorCatalogExactSetSuccessorV1 === 'function',
+    publishPolicyBoundGenesis:
+      typeof surface.publishAuthorCatalogGenesisV1 === 'function',
     terminalFailureReadback:
       typeof surface.readRfc64PublicCatalogReconciliationFailureV1 === 'function',
   });
