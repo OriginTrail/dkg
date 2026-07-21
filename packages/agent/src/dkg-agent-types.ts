@@ -179,6 +179,8 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+  /** Additive exact-KA response filter; present-but-invalid parses fail closed. */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — UNSIGNED member-recovery marker. When set, the responder
    * authorizes via the strict members-only `isMemberRecoveryAuthorized`

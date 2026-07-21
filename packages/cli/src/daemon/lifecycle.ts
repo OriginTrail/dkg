@@ -145,6 +145,10 @@ import {
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  formatMetricsCollectorStartupLog,
+  resolveMetricsCollectorConfig,
+} from '../metrics-collector-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
@@ -887,9 +891,19 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      // GH#1778 — auto-register the CG under the ENQUEUING CALLER (the token
+      // holder / operator who requested the publish), stamped as the CG curator by
+      // `stampAddressCurator`. This matches the synchronous `vm/publish` lane
+      // (`knowledge-assets.ts` passes `callerAgentAddress: requestAgentAddress`), so
+      // the same CG gets the same curator regardless of which lane registers it.
+      // NOT `request.agentAddress` (the resolved KA author — a member the curator
+      // is publishing for). When the caller was not captured (tokenless enqueue /
+      // pre-#1778 job), `stampAddressCurator` falls back to the node's default
+      // identity — again exactly as the sync lane does when `requestAgentAddress`
+      // is undefined. Deduped jobs stamp under the first enqueuer's caller, which
+      // is the same first-writer-wins the sync lane already has.
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
-        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+        ...(request.callerAgentAddress ? { callerAgentAddress: request.callerAgentAddress } : {}),
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,
@@ -1123,6 +1137,9 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  // Resolve the local collector toggle before constructing daemon resources.
+  // This is independent from OTLP metrics export configuration.
+  const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
   const logFile = logPath();
   // Rotate before installing the in-process stdout/stderr tee so startup does
   // not race the truncation with fresh log appends. Existing logs survive
@@ -2632,14 +2649,17 @@ export async function runDaemonInner(
     alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
   });
 
-  const metricsCollector = new MetricsCollector(
-    dashDb,
-    metricsSource,
-    dkgDir(),
-    () => metricsPresence.hasRecentConsumer(),
-  );
-  metricsCollector.start();
-  log("Metrics collector started (30s interval)");
+  let metricsCollector: MetricsCollector | undefined;
+  if (metricsCollectorConfig.enabled) {
+    metricsCollector = new MetricsCollector(
+      dashDb,
+      metricsSource,
+      dkgDir(),
+      () => metricsPresence.hasRecentConsumer(),
+    );
+    metricsCollector.start();
+  }
+  log(formatMetricsCollectorStartupLog(metricsCollectorConfig));
 
   // --- Telemetry: syslog log streaming (opt-in) ---
   const networkKey = network?.networkName?.toLowerCase().includes("testnet")
@@ -3719,7 +3739,7 @@ export async function runDaemonInner(
         // log-derived request totals exact across process lifecycles.
         rpcUsageTelemetry.stop();
         rateLimiter.destroy();
-        metricsCollector.stop();
+        metricsCollector?.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.
         await stopTelemetry();
         natStatusWatcherStop?.();

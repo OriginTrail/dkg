@@ -299,6 +299,14 @@ describe('implicit SWM context graph metadata', () => {
       synced: true,
       metaSynced: true,
     });
+    const publicMetaProof = await result.store.query(`ASK WHERE {
+      GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+        <${contextGraphDataGraphUri(contextGraphId)}>
+          <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
+          <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "public" .
+      }
+    }`);
+    expect(publicMetaProof).toEqual({ type: 'boolean', value: true });
   }, 15000);
 
   it('does not overwrite an explicitly created context graph on later SWM writes', async () => {

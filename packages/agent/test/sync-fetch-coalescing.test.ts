@@ -21,7 +21,11 @@ type FetchArgs = {
   sinceBatchId?: string;
   signal?: AbortSignal;
   recovery?: boolean;
+  assetUals?: string[];
 };
+
+const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+const EXACT_UAL_8 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -133,6 +137,8 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
     args.sinceBatchId,
     args.signal,
     args.recovery,
+    undefined,
+    args.assetUals,
   );
 }
 
@@ -175,6 +181,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       },
       { name: 'sinceBatchId', base: { sinceBatchId: '10' }, variant: { sinceBatchId: '11' } },
       { name: 'recovery', base: { includeSharedMemory: true, recovery: false }, variant: { includeSharedMemory: true, recovery: true } },
+      // Exact VM batches: different asset filters must never share a page
+      // sequence, and an exact batch must never join a full sync.
+      { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },
+      { name: 'assetUals-vs-full', base: {}, variant: { assetUals: [EXACT_UAL_7] } },
     ];
 
     for (const testCase of cases) {
@@ -356,6 +366,44 @@ describe('DKGAgent sync fetch coalescing', () => {
       const third = (agent as any).syncFromPeerDetailed(PEER_A, ['coalesced-cg']);
       await expect(third).resolves.toMatchObject({ failedPeers: 0 });
       expect(fetchCalls).toBe(4);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not single-flight exact VM syncs with different asset batches', async () => {
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+      fetchCalls++;
+      return emptySyncPage(String(args[4]));
+    };
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      // Different exact batches: two separate runs (2 phases each).
+      const first = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
+      const second = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_8]);
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult).not.toBe(secondResult);
+      expect(fetchCalls).toBe(4);
+
+      // The identical exact batch single-flights onto one run.
+      fetchCalls = 0;
+      const third = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
+      const fourth = (agent as any).syncExactKnowledgeAssetsFromPeer(PEER_A, 'coalesced-cg', [EXACT_UAL_7]);
+      const [thirdResult, fourthResult] = await Promise.all([third, fourth]);
+      expect(thirdResult).toBe(fourthResult);
+      expect(fetchCalls).toBe(2);
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -47,6 +47,12 @@ dkg ka publish-async notes -c my-project
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
+## Node UI metrics collection
+
+Operators can disable local dashboard snapshots independently from
+OpenTelemetry metric export; see the
+[Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2

@@ -32,6 +32,7 @@ import {
   type AsyncLiftPublisherRecoveryResult,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
+  type VmPublishAdmissionJournalReader,
   type LiftJobBroadcast,
   type LiftJobHex,
   type LiftJobIncluded,
@@ -307,6 +308,8 @@ interface PublisherRuntimeBaseArgs {
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
+  // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
+  journalWrites?: boolean;
 }
 
 export async function createPublisherRuntime(args: {
@@ -371,13 +374,17 @@ export function createPublisherInspectorFromStore(
 export function createPublisherControlFromStore(
   store: TripleStore,
   options: { publicSnapshotStore?: WorkspacePublicSnapshotStore; maxRetries?: number } = {},
-): VmPublishIntentRecoveryPublisher & VmPublishIntentIndexBackfiller {
+): VmPublishIntentRecoveryPublisher & VmPublishIntentIndexBackfiller & VmPublishAdmissionJournalReader {
   // The daemon admission instance also serves the #1828 recovery lookup (route)
   // and the boot index backfill — segregated capabilities the base
   // AsyncLiftPublisher runtime contract intentionally does NOT carry.
   return new TripleStoreAsyncLiftPublisher(store, {
     publicSnapshotStore: options.publicSnapshotStore,
     maxRetries: options.maxRetries,
+    // #1829 — daemon admission instance: enable append-only journal writes. Left OFF
+    // for the CLI inspector + standalone runner so a second OS process never races the
+    // node-local per-lineageKey seq allocation.
+    journalWrites: true,
   });
 }
 
@@ -409,6 +416,9 @@ export async function createPublisherRuntimeFromAgent(args: {
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
+    // #1829 — this is the daemon publisher runtime (processes named-KA jobs), so it
+    // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
+    journalWrites: true,
   });
 }
 
@@ -485,6 +495,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    journalWrites: args.journalWrites ?? false,
     knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
