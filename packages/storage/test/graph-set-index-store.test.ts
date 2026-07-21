@@ -9,8 +9,8 @@ import {
   StorePriorityScheduler,
   createTripleStore,
   registerTripleStoreAdapter,
+  type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
-  type GraphSetDiagnosticEvent,
   type QueryOptions,
   type StoreWorkPriority,
 } from '../src/index.js';
@@ -59,6 +59,26 @@ class ScheduledGraphListStore extends CountingStore {
       options?.signal,
     );
   }
+}
+
+async function exhaustTouchedGraphProbeRetries(
+  store: GraphSetIndexStore,
+  controlled: ControlledProbeStore,
+  probed: string,
+): Promise<string[]> {
+  controlled.enableProbeGates();
+  const mutation = store.delete([q(probed)]);
+  const expectedGraphs: string[] = [];
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await controlled.waitForProbe();
+    const graph = `did:dkg:context-graph:churn-${attempt}`;
+    expectedGraphs.push(graph);
+    await store.insert([q(graph)]);
+    controlled.releaseProbe();
+  }
+  await mutation;
+  controlled.disableProbeGates();
+  return expectedGraphs;
 }
 
 describe('GraphSetIndexStore', () => {
@@ -195,36 +215,23 @@ describe('GraphSetIndexStore', () => {
     const inner = new OxigraphStore();
     await inner.insert([q(probed)]);
     const stepped = new ControlledProbeStore(inner);
-    const diagnostics: GraphSetDiagnosticEvent[] = [];
+    const diagnostics: unknown[] = [];
     const store = new GraphSetIndexStore(stepped, {
       onDiagnostic: (event) => diagnostics.push(event),
-    });
+    } as GraphSetIndexStoreOptions);
     await expect(store.listGraphs()).resolves.toEqual([probed]);
     expect(stepped.listGraphsCalls).toBe(1);
 
-    stepped.enableProbeGates();
-    const churnedDelete = store.delete([q(probed)]);
     // MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4: bump the generation during every
     // in-flight probe so each attempt observes drift and the retry cap exhausts.
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await stepped.waitForProbe();
-      await store.insert([q(`did:dkg:context-graph:churn-${attempt}`)]);
-      stepped.releaseProbe();
-    }
-    await churnedDelete;
-    stepped.disableProbeGates();
+    const expectedGraphs = await exhaustTouchedGraphProbeRetries(store, stepped, probed);
 
     // Exactly the capped number of probes ran, then the maintenance demoted to
     // a deferred dirty rebuild realized by the next read — on the background lane.
     expect(stepped.hasGraphOptions).toHaveLength(4);
     const graphs = await store.listGraphs();
     expect(graphs).not.toContain(probed);
-    expect(new Set(graphs)).toEqual(new Set([
-      'did:dkg:context-graph:churn-0',
-      'did:dkg:context-graph:churn-1',
-      'did:dkg:context-graph:churn-2',
-      'did:dkg:context-graph:churn-3',
-    ]));
+    expect(new Set(graphs)).toEqual(new Set(expectedGraphs));
     expect(stepped.listGraphsCalls).toBe(2);
     expect(stepped.listGraphsOptions.at(-1)).toMatchObject({
       priority: 'background',
@@ -234,6 +241,27 @@ describe('GraphSetIndexStore', () => {
       { type: 'probe-retry-exhausted', source: 'delete', probeCount: 4 },
       { type: 'dirty-rebuild', source: 'delete', graphCount: 4 },
     ]);
+  });
+
+  it('ignores an internal diagnostic observer failure and still schedules the fallback rebuild', async () => {
+    const probed = 'did:dkg:context-graph:throwing-diagnostic-victim';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const controlled = new ControlledProbeStore(inner);
+    const store = new GraphSetIndexStore(controlled, {
+      onDiagnostic: () => { throw new Error('diagnostic observer failed'); },
+    } as GraphSetIndexStoreOptions);
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+
+    await expect(
+      exhaustTouchedGraphProbeRetries(store, controlled, probed),
+    ).resolves.toHaveLength(4);
+    await expect(store.listGraphs()).resolves.not.toContain(probed);
+    expect(controlled.listGraphsCalls).toBe(2);
+    expect(controlled.listGraphsOptions.at(-1)).toMatchObject({
+      priority: 'background',
+      source: 'graph-set-index.rebuild',
+    });
   });
 
   it('refreshes the full index after graph-wide deleteByPattern without a graph constraint', async () => {

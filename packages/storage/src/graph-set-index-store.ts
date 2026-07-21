@@ -37,15 +37,15 @@ export type GraphSetMutationSource =
   | 'query'
   | 'update';
 
-export type GraphSetTouchedMutationSource =
+type TouchedGraphMutationSource =
   | 'delete'
   | 'deleteByPattern'
   | 'deleteBySubjectPrefix'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | GraphSetTouchedMutationSource | 'query';
-export type GraphSetPendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
+type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
+type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
   | {
@@ -65,15 +65,15 @@ export type GraphSetMutationEvent =
       source: GraphSetRefreshSource;
     };
 
-export type GraphSetDiagnosticEvent =
+type GraphSetDiagnosticEvent =
   | {
       type: 'dirty-rebuild';
-      source: GraphSetPendingFullRefreshSource;
+      source: PendingFullRefreshSource;
       graphCount: number;
     }
   | {
       type: 'probe-retry-exhausted';
-      source: GraphSetTouchedMutationSource;
+      source: TouchedGraphMutationSource;
       probeCount: number;
     };
 
@@ -93,9 +93,12 @@ export interface GraphSetIndexStoreOptions {
   revalidateFailureMaxBackoffMs?: number;
   now?: () => number;
   onMutation?: (event: GraphSetMutationEvent) => void;
-  /** Instance-scoped operational diagnostics; failures are ignored. */
-  onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 }
+
+/** Internal/test-only observation seam; intentionally absent from the package API. */
+type GraphSetIndexStoreInternalOptions = GraphSetIndexStoreOptions & {
+  onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
+};
 
 interface RefreshFlight<T> {
   readonly priority: StoreWorkPriority;
@@ -209,7 +212,7 @@ export class GraphSetIndexStore implements TripleStore {
    * be applied incrementally. The stored source preserves the observer contract
    * while deferring expensive full-store scans until the next graph read.
    */
-  private pendingFullRefresh: GraphSetPendingFullRefreshSource | null = null;
+  private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -228,7 +231,7 @@ export class GraphSetIndexStore implements TripleStore {
     );
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
-    this.onDiagnostic = options.onDiagnostic;
+    this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -576,14 +579,14 @@ export class GraphSetIndexStore implements TripleStore {
     this.mutationGeneration++;
   }
 
-  private scheduleFullRefresh(source: GraphSetPendingFullRefreshSource): void {
+  private scheduleFullRefresh(source: PendingFullRefreshSource): void {
     this.bumpMutation();
     this.pendingFullRefresh ??= source;
   }
 
   private async maintainStableGraphPresence(
     graphs: string[],
-    source: GraphSetTouchedMutationSource,
+    source: TouchedGraphMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     // hasGraph is the only operation inside this retry boundary. Applying the
@@ -682,7 +685,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async maintainTouchedGraphs(
     graphs: string[],
-    source: GraphSetTouchedMutationSource,
+    source: TouchedGraphMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     if (!this.graphs) return;

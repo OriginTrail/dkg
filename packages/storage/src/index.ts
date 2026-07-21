@@ -60,11 +60,8 @@ export {
   DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS,
   GraphSetIndexStore,
   type GraphSetIndexStoreOptions,
-  type GraphSetDiagnosticEvent,
   type GraphSetMutationEvent,
   type GraphSetMutationSource,
-  type GraphSetPendingFullRefreshSource,
-  type GraphSetTouchedMutationSource,
 } from './graph-set-index-store.js';
 export {
   CHANGELOG_GRAPH,
