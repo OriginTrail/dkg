@@ -581,14 +581,14 @@ export class GraphSetIndexStore implements TripleStore {
     this.pendingFullRefresh ??= source;
   }
 
-  private async probeStableGraphPresence(
+  private async maintainStableGraphPresence(
     graphs: string[],
     source: TouchedGraphMutationSource,
     options?: QueryOptions,
-  ): Promise<Array<{ graph: string; present: boolean }> | null> {
+  ): Promise<void> {
     // hasGraph is the only operation inside this retry boundary. Applying the
-    // stable result below is synchronous, so a write cannot interleave between
-    // the generation check and the graph-set update.
+    // stable result in this same continuation leaves no await/microtask boundary
+    // where a concurrent mutation could invalidate it after the generation check.
     for (let attempt = 0; attempt < MAINTAIN_INDEX_MAX_PROBE_RETRIES; attempt++) {
       const generation = this.mutationGeneration;
       try {
@@ -598,14 +598,21 @@ export class GraphSetIndexStore implements TripleStore {
             present: await this.inner.hasGraph(graph, options),
           })),
         );
-        if (!this.graphs) return null;
+        if (!this.graphs) return;
         if (generation !== this.mutationGeneration) {
           continue;
         }
-        return graphPresence;
+        for (const { graph, present } of graphPresence) {
+          if (present) {
+            this.addGraphs([graph], source);
+          } else {
+            this.removeGraphs([graph], source);
+          }
+        }
+        return;
       } catch {
         this.clearIndex();
-        return null;
+        return;
       }
     }
     this.emitDiagnostic({
@@ -614,7 +621,6 @@ export class GraphSetIndexStore implements TripleStore {
       probeCount: MAINTAIN_INDEX_MAX_PROBE_RETRIES,
     });
     this.scheduleFullRefresh(source);
-    return null;
   }
 
   private clearIndex(): void {
@@ -681,15 +687,7 @@ export class GraphSetIndexStore implements TripleStore {
   ): Promise<void> {
     if (!this.graphs) return;
     const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
-    const graphPresence = await this.probeStableGraphPresence(uniqueGraphs, source, options);
-    if (!graphPresence) return;
-    for (const { graph, present } of graphPresence) {
-      if (present) {
-        this.addGraphs([graph], source);
-      } else {
-        this.removeGraphs([graph], source);
-      }
-    }
+    await this.maintainStableGraphPresence(uniqueGraphs, source, options);
   }
 
   private emit(event: GraphSetMutationEvent): void {
