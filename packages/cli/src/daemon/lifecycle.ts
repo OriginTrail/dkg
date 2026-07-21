@@ -145,6 +145,10 @@ import {
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  formatMetricsCollectorStartupLog,
+  resolveMetricsCollectorConfig,
+} from '../metrics-collector-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
@@ -1133,6 +1137,9 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  // Resolve the local collector toggle before constructing daemon resources.
+  // This is independent from OTLP metrics export configuration.
+  const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
   const logFile = logPath();
   // Rotate before installing the in-process stdout/stderr tee so startup does
   // not race the truncation with fresh log appends. Existing logs survive
@@ -2642,14 +2649,17 @@ export async function runDaemonInner(
     alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
   });
 
-  const metricsCollector = new MetricsCollector(
-    dashDb,
-    metricsSource,
-    dkgDir(),
-    () => metricsPresence.hasRecentConsumer(),
-  );
-  metricsCollector.start();
-  log("Metrics collector started (30s interval)");
+  let metricsCollector: MetricsCollector | undefined;
+  if (metricsCollectorConfig.enabled) {
+    metricsCollector = new MetricsCollector(
+      dashDb,
+      metricsSource,
+      dkgDir(),
+      () => metricsPresence.hasRecentConsumer(),
+    );
+    metricsCollector.start();
+  }
+  log(formatMetricsCollectorStartupLog(metricsCollectorConfig));
 
   // --- Telemetry: syslog log streaming (opt-in) ---
   const networkKey = network?.networkName?.toLowerCase().includes("testnet")
@@ -3729,7 +3739,7 @@ export async function runDaemonInner(
         // log-derived request totals exact across process lifecycles.
         rpcUsageTelemetry.stop();
         rateLimiter.destroy();
-        metricsCollector.stop();
+        metricsCollector?.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.
         await stopTelemetry();
         natStatusWatcherStop?.();
