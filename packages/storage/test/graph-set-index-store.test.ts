@@ -34,6 +34,19 @@ class GatedMaintenanceStore extends CountingStore {
   }
 }
 
+class SteppedMaintenanceStore extends CountingStore {
+  gateProbes = false;
+  readonly pendingProbes: Array<() => void> = [];
+
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const present = await super.hasGraph(graphUri, options);
+    if (this.gateProbes) {
+      await new Promise<void>((resolve) => { this.pendingProbes.push(resolve); });
+    }
+    return present;
+  }
+}
+
 class ScheduledGraphListStore extends CountingStore {
   readonly listGraphsGates: Partial<Record<StoreWorkPriority, Promise<void>>> = {};
   readonly listGraphsResults: Partial<Record<StoreWorkPriority, string[]>> = {};
@@ -147,13 +160,95 @@ describe('GraphSetIndexStore', () => {
     release();
     await staleDelete;
 
+    // The stale probe observed the graph absent mid-race; that result is
+    // discarded and the maintenance re-probes, observing the concurrent
+    // insert's re-created graph — the index stays warm with no rebuild scan.
     await expect(store.listGraphs()).resolves.toEqual([graph]);
-    expect(gated.listGraphsCalls).toBe(2);
-    expect(events).toContainEqual({
-      type: 'graph-set-revalidated',
-      added: [],
-      removed: [],
+    expect(gated.listGraphsCalls).toBe(1);
+    expect(gated.hasGraphOptions).toHaveLength(2);
+    expect(events).not.toContainEqual({
+      type: 'graph-removed',
+      graph,
       source: 'delete',
+    });
+  });
+
+  it('concurrent mutation during an in-flight touched-graph probe re-probes instead of scheduling a full rebuild', async () => {
+    const probed = 'did:dkg:context-graph:probe-under-race';
+    const concurrent = 'did:dkg:context-graph:concurrent-writer';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const gated = new GatedMaintenanceStore(inner);
+    const events: GraphSetMutationEvent[] = [];
+    let release!: () => void;
+    gated.hasGraphGate = new Promise<void>((resolve) => { release = resolve; });
+    const store = new GraphSetIndexStore(gated, { onMutation: (event) => events.push(event) });
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+    expect(gated.listGraphsCalls).toBe(1);
+
+    // A graph-scoped delete whose incremental maintenance probes
+    // hasGraph(probed) and parks on the gate mid-flight.
+    const racedDelete = store.delete([q(probed)]);
+    for (let i = 0; i < 10 && gated.hasGraphOptions.length === 0; i++) {
+      await Promise.resolve();
+    }
+    expect(gated.hasGraphOptions).toHaveLength(1);
+
+    // A DIFFERENT-graph write lands while that probe is in flight, bumping the
+    // mutation generation (insert maintains synchronously — no probe of its own).
+    await store.insert([q(concurrent)]);
+    release();
+    await racedDelete;
+
+    // The maintenance RE-PROBED (second hasGraph call) and applied the result
+    // incrementally. Pre-fix this race demoted to scheduleFullRefresh and the
+    // read below would re-scan (listGraphsCalls = 2).
+    expect(gated.hasGraphOptions).toHaveLength(2);
+    await expect(store.listGraphs()).resolves.toEqual([concurrent]);
+    expect(gated.listGraphsCalls).toBe(1);
+    expect(events).toContainEqual({ type: 'graph-removed', graph: probed, source: 'delete' });
+    expect(events).toContainEqual({ type: 'graph-added', graph: concurrent, source: 'insert' });
+  });
+
+  it('falls back to one background full rebuild when the generation stays unstable past the probe-retry cap', async () => {
+    const probed = 'did:dkg:context-graph:churn-victim';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const stepped = new SteppedMaintenanceStore(inner);
+    const store = new GraphSetIndexStore(stepped);
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+    expect(stepped.listGraphsCalls).toBe(1);
+
+    stepped.gateProbes = true;
+    const churnedDelete = store.delete([q(probed)]);
+    // MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4: bump the generation during every
+    // in-flight probe so each attempt observes drift and the retry cap exhausts.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      for (let i = 0; i < 50 && stepped.pendingProbes.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(stepped.pendingProbes).toHaveLength(1);
+      await store.insert([q(`did:dkg:context-graph:churn-${attempt}`)]);
+      stepped.pendingProbes.shift()!();
+    }
+    await churnedDelete;
+    stepped.gateProbes = false;
+
+    // Exactly the capped number of probes ran, then the maintenance demoted to
+    // a deferred dirty rebuild realized by the next read — on the background lane.
+    expect(stepped.hasGraphOptions).toHaveLength(4);
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([
+        'did:dkg:context-graph:churn-0',
+        'did:dkg:context-graph:churn-1',
+        'did:dkg:context-graph:churn-2',
+        'did:dkg:context-graph:churn-3',
+      ]),
+    );
+    expect(stepped.listGraphsCalls).toBe(2);
+    expect(stepped.listGraphsOptions.at(-1)).toMatchObject({
+      priority: 'background',
+      source: 'graph-set-index.rebuild',
     });
   });
 
