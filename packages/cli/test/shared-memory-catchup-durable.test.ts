@@ -38,6 +38,32 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
   return { ctx, res };
 }
 
+function detailedDurableResult(overrides: Record<string, number> = {}) {
+  return {
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 2,
+    checkpointAdvances: 0,
+    deniedPhases: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    verifiedPrivateOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    backoffWorthyFailures: 0,
+    deferredBackpressure: 0,
+    ...overrides,
+  };
+}
+
 describe('POST /api/shared-memory/catchup durable leg', () => {
   it('supports durable-only recovery without starting either SWM catchup path', async () => {
     const cgId = 'private-durable-only-cg';
@@ -99,6 +125,114 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       appliedEnvelopes: 0,
       perContextGraph: [],
     });
+  });
+
+  it('preserves committed progress and returns 503 when a detailed durable phase fails', async () => {
+    const syncFromPeer = vi.fn();
+    const syncFromPeerDetailed = vi.fn(async () => detailedDurableResult({
+      insertedTriples: 77_767,
+      insertedMetaTriples: 570,
+      insertedDataTriples: 77_197,
+      fetchedMetaTriples: 1_200,
+      fetchedDataTriples: 159_744,
+      completedPhases: 0,
+      failedPhases: 1,
+      backoffWorthyFailures: 1,
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeer,
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'agent-blackbox-vm',
+        peerId: 'peer-core',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(syncFromPeer).not.toHaveBeenCalled();
+    expect(syncFromPeerDetailed).toHaveBeenCalledWith(
+      'peer-core',
+      ['agent-blackbox-vm'],
+      undefined,
+      undefined,
+      undefined,
+      { totalTimeoutMs: 109_000 },
+    );
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      durableComplete: false,
+      totalDurableInsertedTriples: 77_767,
+      results: [{
+        peerId: 'peer-core',
+        durableInsertedTriples: 77_767,
+        durableComplete: false,
+        durableError: 'Durable sync did not complete (failedPhases=1)',
+      }],
+      perContextGraph: [{
+        contextGraphId: 'agent-blackbox-vm',
+        durableComplete: false,
+        perPeer: [{
+          durableComplete: false,
+          durableDiagnostics: {
+            insertedDataTriples: 77_197,
+            insertedMetaTriples: 570,
+            failedPhases: 1,
+          },
+        }],
+      }],
+    });
+  });
+
+  it('reports a safely checkpointed timeout as retryable incomplete progress', async () => {
+    const agent = {
+      peerId: 'self-peer',
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed: vi.fn(async () => detailedDurableResult({
+        insertedTriples: 155_858,
+        insertedDataTriples: 155_000,
+        insertedMetaTriples: 858,
+        timedOutPhases: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+      })),
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: 'agent-blackbox-vm',
+        peerId: 'peer-core',
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: false,
+      totalDurableInsertedTriples: 155_858,
+      results: [{
+        peerId: 'peer-core',
+        durableInsertedTriples: 155_858,
+        durableComplete: false,
+      }],
+    });
+    expect(JSON.parse(res.body).results[0].durableError).toBeUndefined();
   });
 
   it('awaits durable verification and store settlement after the fetch budget', async () => {

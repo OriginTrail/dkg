@@ -4190,6 +4190,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     exactAssetUals?: string[],
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
+    // The CG name commitment is immutable for an on-chain slot. Prove a
+    // local/on-chain binding once per durable-sync invocation, then reuse the
+    // successful proof for every KA in that batch. Without this operation-
+    // scoped cache, a large CG performs one RPC name-hash read per KA and a
+    // single transient timeout aborts the rest of an otherwise verified page.
+    // Rejections remain fail-closed and are never reused by a later operation.
+    const contextGraphBindingProofs = new Map<string, Promise<boolean>>();
+    const verifyContextGraphBinding = (
+      localContextGraphId: string,
+      onChainContextGraphId: bigint,
+    ): Promise<boolean> => {
+      const onChainId = onChainContextGraphId.toString();
+      const key = `${localContextGraphId}\0${onChainId}`;
+      let proof = contextGraphBindingProofs.get(key);
+      if (!proof) {
+        proof = this.localCgMatchesOnChainSlot(
+          localContextGraphId,
+          onChainId,
+          ctx,
+          { requireCommittedNameHash: true },
+        );
+        contextGraphBindingProofs.set(key, proof);
+      }
+      return proof;
+    };
     return runDurableSync({
       ctx,
       remotePeerId,
@@ -4238,12 +4263,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const authentication = await authenticateVerifiedGraphScopedAsset(
           this.chain,
           asset,
-          (localContextGraphId, onChainContextGraphId) => this.localCgMatchesOnChainSlot(
-            localContextGraphId,
-            onChainContextGraphId.toString(),
-            ctx,
-            { requireCommittedNameHash: true },
-          ),
+          verifyContextGraphBinding,
         );
         const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);

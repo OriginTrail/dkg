@@ -46,14 +46,15 @@ describe('durable sync lifecycle chain binding', () => {
     const root = new Uint8Array(32);
     root[31] = 2;
     const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const getContextGraphNameHash = vi.fn(async () => ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ));
     const chain = {
       chainId: 'otp:2043',
       getLatestMerkleRoot: async () => root,
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 14n,
-      getContextGraphNameHash: async () => ethers.keccak256(
-        ethers.toUtf8Bytes(contextGraphId),
-      ),
+      getContextGraphNameHash,
       getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
       verifyKAUpdate: async () => ({
         verified: true,
@@ -124,6 +125,9 @@ describe('durable sync lifecycle chain binding', () => {
       ],
     };
     await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
+    await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
+
+    expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
 
     expect(bindSubscriptionOnChainId).toHaveBeenCalledWith(
       contextGraphId,

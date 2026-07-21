@@ -817,10 +817,34 @@ WHERE {
     // peers Ã— many CGs), select a narrowed per-CG peer set, and parallelize
     // only that set. Per-peer dial+request is 5-20s on devnet; serialising
     // the selected peers would compound to NÃ—20s.
+    type DurableLegDiagnostics = {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      bytesReceived: number;
+      resumedPhases: number;
+      timedOutPhases: number;
+      completedPhases: number;
+      checkpointAdvances: number;
+      deniedPhases: number;
+      emptyResponses: number;
+      metaOnlyResponses: number;
+      verifiedPrivateOnlyResponses: number;
+      dataRejectedMissingMeta: number;
+      rejectedKcs: number;
+      failedPeers: number;
+      failedPhases: number;
+      backoffWorthyFailures: number;
+      deferredBackpressure: number;
+    };
     type PerPeerLeg = {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      /** Present when the agent supports detailed durable-sync outcomes. */
+      durableComplete?: boolean;
+      durableDiagnostics?: DurableLegDiagnostics;
       swmError?: string;
       durableError?: string;
       error?: string;
@@ -831,6 +855,45 @@ WHERE {
       insertedTriples: number;
       durableInsertedTriples: number;
     };
+    const durableDiagnosticsFrom = (result: Record<string, unknown>): DurableLegDiagnostics => {
+      const count = (key: string): number => {
+        const value = Number(result[key] ?? 0);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+      };
+      return {
+        fetchedMetaTriples: count('fetchedMetaTriples'),
+        fetchedDataTriples: count('fetchedDataTriples'),
+        insertedMetaTriples: count('insertedMetaTriples'),
+        insertedDataTriples: count('insertedDataTriples'),
+        bytesReceived: count('bytesReceived'),
+        resumedPhases: count('resumedPhases'),
+        timedOutPhases: count('timedOutPhases'),
+        completedPhases: count('completedPhases'),
+        checkpointAdvances: count('checkpointAdvances'),
+        deniedPhases: count('deniedPhases'),
+        emptyResponses: count('emptyResponses'),
+        metaOnlyResponses: count('metaOnlyResponses'),
+        verifiedPrivateOnlyResponses: count('verifiedPrivateOnlyResponses'),
+        dataRejectedMissingMeta: count('dataRejectedMissingMeta'),
+        rejectedKcs: count('rejectedKcs'),
+        failedPeers: count('failedPeers'),
+        failedPhases: count('failedPhases'),
+        backoffWorthyFailures: count('backoffWorthyFailures'),
+        deferredBackpressure: count('deferredBackpressure'),
+      };
+    };
+    const durableHardFailureDetails = (diagnostics: DurableLegDiagnostics): string[] => [
+      ['failedPeers', diagnostics.failedPeers],
+      ['failedPhases', diagnostics.failedPhases],
+      ['deniedPhases', diagnostics.deniedPhases],
+      ['rejectedKcs', diagnostics.rejectedKcs],
+      ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
+    ].flatMap(([name, value]) => Number(value) > 0 ? [`${name}=${value}`] : []);
+    const durableLegComplete = (diagnostics: DurableLegDiagnostics): boolean =>
+      diagnostics.completedPhases > 0
+      && diagnostics.timedOutPhases === 0
+      && diagnostics.deferredBackpressure === 0
+      && durableHardFailureDetails(diagnostics).length === 0;
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
       const canUseSharedMemory = includeSharedMemory
@@ -865,6 +928,8 @@ WHERE {
         selectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
+          let durableComplete: boolean | undefined;
+          let durableDiagnostics: DurableLegDiagnostics | undefined;
           let swmError: string | undefined;
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
@@ -902,20 +967,47 @@ WHERE {
               // settlement and report its real inserted count. The serialized
               // peer+CG durable lane prevents automatic recovery from racing
               // this tail.
-              durable = await (
-                (agent as any).syncFromPeer?.(
+              if (typeof (agent as any).syncFromPeerDetailed === 'function') {
+                const detailed = await (agent as any).syncFromPeerDetailed(
                   candidate,
                   [cgId],
                   undefined,
                   undefined,
+                  undefined,
                   { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
-                ) ?? Promise.resolve(0)
-              );
+                ) as Record<string, unknown>;
+                durable = Number(detailed.insertedTriples ?? 0);
+                durableDiagnostics = durableDiagnosticsFrom(detailed);
+                durableComplete = durableLegComplete(durableDiagnostics);
+                const hardFailures = durableHardFailureDetails(durableDiagnostics);
+                if (hardFailures.length > 0) {
+                  durableError = `Durable sync did not complete (${hardFailures.join(', ')})`;
+                }
+              } else {
+                durable = await (
+                  (agent as any).syncFromPeer?.(
+                    candidate,
+                    [cgId],
+                    undefined,
+                    undefined,
+                    { totalTimeoutMs: INTERNAL_DURABLE_BUDGET_MS },
+                  ) ?? Promise.resolve(0)
+                );
+              }
             } catch (err: any) {
+              durableComplete = false;
               durableError = err?.message ?? String(err);
             }
           }
-          return { peerId: candidate, insertedTriples: swm, durableInsertedTriples: durable, swmError, durableError } as PerPeerLeg;
+          return {
+            peerId: candidate,
+            insertedTriples: swm,
+            durableInsertedTriples: durable,
+            durableComplete,
+            durableDiagnostics,
+            swmError,
+            durableError,
+          } as PerPeerLeg;
         }),
       );
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
@@ -924,6 +1016,8 @@ WHERE {
             peerId: selectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
+            ...(s.value.durableComplete !== undefined ? { durableComplete: s.value.durableComplete } : {}),
+            ...(s.value.durableDiagnostics ? { durableDiagnostics: s.value.durableDiagnostics } : {}),
             ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
             ...(s.value.durableError ? { durableError: s.value.durableError } : {}),
           };
@@ -1028,6 +1122,7 @@ WHERE {
       peerId: string;
       insertedTriples: number;
       durableInsertedTriples: number;
+      durableComplete?: boolean;
       swmError?: string;
       durableError?: string;
       otherErrors?: string[];
@@ -1037,6 +1132,11 @@ WHERE {
         const entry = perPeerAggregate.get(p.peerId) ?? { peerId: p.peerId, insertedTriples: 0, durableInsertedTriples: 0 };
         entry.insertedTriples += p.insertedTriples;
         entry.durableInsertedTriples += p.durableInsertedTriples;
+        if (p.durableComplete !== undefined) {
+          entry.durableComplete = entry.durableComplete === undefined
+            ? p.durableComplete
+            : entry.durableComplete && p.durableComplete;
+        }
         if (p.swmError && !entry.swmError) entry.swmError = p.swmError;
         if (p.durableError && !entry.durableError) entry.durableError = p.durableError;
         if (p.error) entry.otherErrors = [...(entry.otherErrors ?? []), p.error];
@@ -1047,6 +1147,7 @@ WHERE {
       peerId: r.peerId,
       insertedTriples: r.insertedTriples,
       durableInsertedTriples: r.durableInsertedTriples,
+      ...(r.durableComplete !== undefined ? { durableComplete: r.durableComplete } : {}),
       ...(r.swmError ? { swmError: r.swmError } : {}),
       ...(r.durableError ? { durableError: r.durableError } : {}),
       ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
@@ -1062,6 +1163,11 @@ WHERE {
     const durableAttempts = includeDurable
       ? perCgLegs.flatMap((cg) => cg.perPeer)
       : [];
+    const completionFor = (attempts: PerPeerLeg[]): boolean | undefined =>
+      attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
+        ? attempts.every((attempt) => attempt.durableComplete === true)
+        : undefined;
+    const durableComplete = completionFor(durableAttempts);
     const durableOnlyAllPeersFailed = includeDurable
       && !includeSharedMemory
       && durableAttempts.length > 0
@@ -1079,6 +1185,7 @@ WHERE {
       peersAttempted: perPeerAggregate.size,
       includeSharedMemory,
       includeDurable,
+      ...(durableComplete !== undefined ? { durableComplete } : {}),
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,
       standardInsertedTriples: standardInserted,
@@ -1087,6 +1194,7 @@ WHERE {
         contextGraphId: cg.contextGraphId,
         insertedTriples: cg.insertedTriples,
         durableInsertedTriples: cg.durableInsertedTriples,
+        ...(completionFor(cg.perPeer) !== undefined ? { durableComplete: completionFor(cg.perPeer) } : {}),
         perPeer: cg.perPeer,
       })),
       hostCatchup: hostCatchupOpted ? {

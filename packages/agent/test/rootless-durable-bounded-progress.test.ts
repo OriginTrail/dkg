@@ -216,6 +216,51 @@ describe('bounded rootless durable progress', () => {
     expect(inserted.flat().some((quad) => fixtures.some((entry) => entry.graph === quad.graph))).toBe(false);
   });
 
+  it('reports assets committed before a later materialization failure without advancing the page checkpoint', async () => {
+    const fixtures = orderedAssets();
+    const selected = fixtures.slice(0, 2);
+    const meta = selected.flatMap((entry) => entry.meta);
+    const data = selected.flatMap((entry) => entry.payload);
+    const materialized: Array<{ dataQuads: Quad[]; metadataQuads: Quad[] }> = [];
+    const checkpoints: Array<[string, number]> = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        _contextGraphId,
+        _includeSharedMemory,
+        phase,
+      ) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', { quads: data, nextOffset: data.length }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async (entry) => {
+        if (materialized.length === 1) throw new Error('transient chain lookup timeout');
+        materialized.push(entry);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedDataTriples).toBe(materialized[0]!.dataQuads.length);
+    expect(summary.insertedMetaTriples).toBe(materialized[0]!.metadataQuads.length);
+    expect(summary.insertedTriples).toBe(
+      materialized[0]!.dataQuads.length + materialized[0]!.metadataQuads.length,
+    );
+    expect(checkpoints).toEqual([]);
+  });
+
   it('checkpoints a cleanly-closed rootless prefix instead of replaying it from zero', async () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);

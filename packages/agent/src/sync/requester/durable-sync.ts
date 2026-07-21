@@ -533,11 +533,18 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }
-      const appliedGraphScopedAssets: VerifiedGraphScopedAsset[] = [];
       for (const asset of partitioned.assets) {
         const outcome = await storeGraphScopedAsset!(asset);
-        if (outcome === 'applied') appliedGraphScopedAssets.push(asset);
-        else if (outcome === 'stale') {
+        if (outcome === 'applied') {
+          // Materialization is atomic per asset, not per fetched page. Account
+          // for each committed asset immediately so a later asset failure does
+          // not erase truthful progress from the returned summary. The phase
+          // checkpoint still advances only after the whole verified page
+          // settles, preserving safe replay semantics.
+          summary.insertedDataTriples += asset.dataQuads.length;
+          summary.insertedMetaTriples += asset.metadataQuads.length;
+          summary.insertedTriples += asset.dataQuads.length + asset.metadataQuads.length;
+        } else if (outcome === 'stale') {
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {
           logWarn(ctx, `Quarantined oversized graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
@@ -552,19 +559,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         await storeInsert(partitioned.remainingMeta);
         summary.insertedTriples += partitioned.remainingMeta.length;
         summary.insertedMetaTriples += partitioned.remainingMeta.length;
-      }
-      if (appliedGraphScopedAssets.length > 0) {
-        const graphScopedDataCount = appliedGraphScopedAssets.reduce(
-          (total, asset) => total + asset.dataQuads.length,
-          0,
-        );
-        const graphScopedMetaCount = appliedGraphScopedAssets.reduce(
-          (total, asset) => total + asset.metadataQuads.length,
-          0,
-        );
-        summary.insertedTriples += graphScopedDataCount + graphScopedMetaCount;
-        summary.insertedDataTriples += graphScopedDataCount;
-        summary.insertedMetaTriples += graphScopedMetaCount;
       }
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
