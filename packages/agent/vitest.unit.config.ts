@@ -41,6 +41,7 @@ export default defineConfig({
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
+      "test/durable-sync-lifecycle-binding.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",
