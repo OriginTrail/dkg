@@ -70,6 +70,7 @@ describe('RFC-64 evidence Vitest discovery', () => {
     expect(config.root).toBe(resolve(import.meta.dirname, '../..'));
     expect(config.test?.include).toEqual([
       'devnet/_bootstrap/rfc64-evidence.test.ts',
+      'devnet/_bootstrap/rfc64-v2-swm-policy-matrix.test.ts',
     ]);
     expect(include).toBeDefined();
     expect(isAbsolute(include!)).toBe(false);
