@@ -23,9 +23,9 @@
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
 import type { RequestContext } from "./context.js";
+import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
 import {
   jsonResponse,
-  respondTerminalClearOutcome,
   readBody,
   safeParseJson,
   validateEntities,

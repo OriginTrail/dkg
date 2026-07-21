@@ -275,6 +275,10 @@ export {
   type JournalReadResult,
 } from './async-lift-publisher.js';
 export {
+  SAFE_CLEAR_JOB_ID_PATTERN,
+  SAFE_CLEAR_JOB_ID_MAX_LENGTH,
+} from './terminal-job-clear.js';
+export {
   TripleStoreAsyncPromoteQueue,
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_COMMIT_MARKER_STEPS,

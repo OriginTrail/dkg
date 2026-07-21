@@ -15,10 +15,13 @@ export type TerminalJobClearOutcome =
   | { readonly outcome: 'rejected'; readonly reason: 'nonterminal' | 'unknown' | 'malformed' };
 
 // Producer grammar for a queue jobId (crypto.randomUUID(), or test 'job-N'): starts
-// alphanumeric, then alnum/'.'/'_'/':'/'-', max 256. This is IRI-safe — it excludes every
-// character that could break out of the `<…>` IRI in a control-plane SPARQL query (spaces,
-// '<' '>' '"' '{' '}' '|' '^' '`', control chars). Mirrors the CLI's validatePromoteJobId.
-const SAFE_CLEAR_JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+// alphanumeric, then alnum/'.'/'_'/':'/'-'. This is IRI-safe — it excludes every character
+// that could break out of the `<…>` IRI in a control-plane SPARQL query (spaces, '<' '>'
+// '"' '{' '}' '|' '^' '`', control chars). This is the SINGLE authoritative job-id grammar:
+// the CLI route validator (`validatePromoteJobId`) imports it rather than re-declaring the
+// regex, so route-level and control-plane job-id acceptance cannot drift.
+export const SAFE_CLEAR_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+export const SAFE_CLEAR_JOB_ID_MAX_LENGTH = 256;
 
 /**
  * True iff `jobId` is safe to interpolate into a control-plane SPARQL IRI. A by-id clear
@@ -27,5 +30,7 @@ const SAFE_CLEAR_JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
  * than a query syntax error / injection / 500.
  */
 export function isSafeClearJobId(jobId: string): boolean {
-  return jobId.length > 0 && jobId.length <= 256 && SAFE_CLEAR_JOB_ID.test(jobId);
+  return (
+    jobId.length > 0 && jobId.length <= SAFE_CLEAR_JOB_ID_MAX_LENGTH && SAFE_CLEAR_JOB_ID_PATTERN.test(jobId)
+  );
 }

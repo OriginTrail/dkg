@@ -2993,9 +2993,7 @@ export class DKGAgent extends DKGAgentBase {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }
-    // The instance is always a TripleStoreAsyncPromoteQueue, which implements both the
-    // base queue and the #1837 terminal-clear capability.
-    return this._promoteQueue as AsyncPromoteQueue & PromoteTerminalJobClearer;
+    return this._promoteQueue;
   }
 
   /**

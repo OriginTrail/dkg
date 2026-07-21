@@ -186,10 +186,10 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
+import { respondTerminalClearOutcome } from './terminal-clear-response.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
-  respondTerminalClearOutcome,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
