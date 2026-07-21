@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import type { WalRuntimeStatus } from '@origintrail-official/dkg-wal';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -341,6 +342,8 @@ export interface DaemonStatusResponse {
   storeUrl?: string | null;
   storeQuads?: number | null;
   storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
+  /** OT-RFC-65 runtime authority/isolation status. Older daemons omit it. */
+  wal?: WalRuntimeStatus;
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.

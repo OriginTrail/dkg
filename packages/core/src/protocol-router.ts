@@ -165,6 +165,12 @@ export interface ProtocolRegistrationOptions {
    * Defaults to the router-wide {@link ProtocolRouter.maxReadBytes} value.
    */
   maxReadBytes?: number;
+  /**
+   * Maximum wall-clock time allowed to receive the complete inbound request.
+   * Undefined preserves the legacy no-read-deadline behavior. WAL protocols
+   * set this explicitly so a slowloris cannot retain a stream indefinitely.
+   */
+  readTimeoutMs?: number;
 }
 
 export class QuietRetryableHandlerError extends Error {
@@ -440,6 +446,13 @@ export class ProtocolRouter {
     const libp2p = this.node.libp2p;
 
     const limit = options?.maxReadBytes ?? this.maxReadBytes;
+    const readTimeoutMs = options?.readTimeoutMs;
+    if (
+      readTimeoutMs !== undefined &&
+      (!Number.isSafeInteger(readTimeoutMs) || readTimeoutMs <= 0)
+    ) {
+      throw new Error('ProtocolRegistrationOptions.readTimeoutMs must be a positive safe integer');
+    }
     libp2p.handle(protocolId, async (stream: Stream, connection) => {
       // Codex (#669#discussion_r3302188320): cache the stopSignal once at
       // handler entry and reuse it for every step of the inbound lifecycle.
@@ -459,11 +472,16 @@ export class ProtocolRouter {
         }
       };
       stream.addEventListener('close', onStreamClose as EventListener, { once: true });
+      const readDeadline = readTimeoutMs === undefined
+        ? undefined
+        : AbortSignal.timeout(readTimeoutMs);
+      const readSignalScope = composeAbortSignalsScoped(streamController.signal, readDeadline);
       const handlerSignalScope = composeAbortSignalsScoped(streamController.signal, stopSignal);
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
-        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
+        const requestData = await readAllWithSignal(stream, limit, readSignalScope.signal);
+        readSignalScope.dispose();
         await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
           signal: handlerSignal,
         });
@@ -478,7 +496,10 @@ export class ProtocolRouter {
         stream.send(responseData);
         await stream.close(stopSignal ? { signal: stopSignal } : undefined);
       } catch (err) {
-        if ((stopSignal?.aborted || handlerSignal?.aborted) && isAbortRelatedError(err, handlerSignal, stopSignal)) {
+        if (
+          (stopSignal?.aborted || handlerSignal?.aborted || readDeadline?.aborted) &&
+          isAbortRelatedError(err, readSignalScope.signal, stopSignal)
+        ) {
           try {
             const abortReason = stopSignal?.aborted ? stopSignal.reason : handlerSignal?.reason;
             stream.abort(asAbortError(abortReason));
@@ -510,6 +531,7 @@ export class ProtocolRouter {
         }
       } finally {
         handlerSignalScope.dispose();
+        readSignalScope.dispose();
         stream.removeEventListener('close', onStreamClose as EventListener);
       }
     }, { runOnLimitedConnection: true });

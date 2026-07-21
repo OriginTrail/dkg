@@ -74,6 +74,13 @@ export const tornadoAgentCoverage: CoverageThresholds = {
   statements: 66,
 };
 
+export const tornadoWalCoverage: CoverageThresholds = {
+  lines: 100,
+  functions: 100,
+  branches: 100,
+  statements: 100,
+};
+
 export const buraQueryCoverage: CoverageThresholds = {
   lines: 63,
   functions: 62,

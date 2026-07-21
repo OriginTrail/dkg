@@ -1,0 +1,152 @@
+{
+  "schema": "dkg-wal-000-scenario-matrix-v1",
+  "baselineId": "legacy-swm-vm-v1",
+  "baseRef": "origin/main",
+  "baseCommit": "a6f33e408335930f009c49781684bc79dd322b7b",
+  "syncEvidencePolicy": "Legacy sync observations are non-normative characterization only and MUST NOT define WAL correctness or parity.",
+  "profiles": {
+    "semantic": {
+      "defaultRepetitions": 1,
+      "scenarios": [
+        {
+          "id": "memory-layer-lifecycle",
+          "category": "swm-vm-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/e2e-memory-layers.test.ts"],
+          "timeoutMs": 900000,
+          "covers": ["working-memory", "shared-working-memory", "verifiable-memory", "publish", "share", "update", "private-publish", "restart-repair"]
+        },
+        {
+          "id": "swm-conflict-expiry",
+          "category": "swm-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/swm-first-writer-wins-extra.test.ts", "test/swm-ttl-v2-cleanup.test.ts"],
+          "timeoutMs": 180000,
+          "covers": ["conflict", "concurrent-writers", "expiry", "no-resurrection"]
+        },
+        {
+          "id": "private-authorization-and-keys",
+          "category": "crypto-authorization",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/swm-agent-gate-access.test.ts", "test/swm-sender-key-stale-target.test.ts", "test/request-authorize.test.ts", "test/member-attestation.test.ts"],
+          "timeoutMs": 240000,
+          "covers": ["private-access", "membership", "removed-member", "sender-key", "authorization-denial"]
+        },
+        {
+          "id": "sync-reconnect-and-recovery",
+          "category": "legacy-sync",
+          "role": "sync-characterization",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/swm-snapshot-sync.test.ts", "test/swm-recovery.test.ts", "test/sync-on-connect-churn.test.ts", "test/sync-on-connect-retry.test.ts"],
+          "timeoutMs": 300000,
+          "covers": ["equal-peer", "reconnect-delta", "late-join", "full-recovery", "interrupted-sync", "retry"]
+        },
+        {
+          "id": "durable-materialization-failures",
+          "category": "crash-safety",
+          "role": "sync-characterization",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/durable-sync-graph-scoped-materialization.test.ts", "test/swm-recovery-apply.test.ts", "test/ka-graph-finalization-recovery.test.ts"],
+          "timeoutMs": 300000,
+          "covers": ["atomic-materialization", "stale-replay", "store-failure", "quarantine", "restart"]
+        },
+        {
+          "id": "vm-chain-finality-and-reorg",
+          "category": "vm-chain-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-agent",
+          "files": ["test/chain-reconciler.test.ts", "test/chain-reconcile-e2e.test.ts", "test/vm-reconcile-self-prime.test.ts", "test/finalization-handler-chain-truth.test.ts"],
+          "timeoutMs": 300000,
+          "covers": ["vm-activation", "chain-finality", "reorg-depth", "periodic-reconcile", "chain-truth"]
+        },
+        {
+          "id": "publish-update-and-merkle",
+          "category": "publish-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-publisher",
+          "files": ["test/publish-lifecycle.test.ts", "test/ka-update.test.ts", "test/shared-memory-publish-boundary.test.ts"],
+          "timeoutMs": 600000,
+          "covers": ["publish", "update", "delete-old-version", "merkle-root", "author-signature", "receipt", "swm-boundary"]
+        },
+        {
+          "id": "private-publisher-boundary",
+          "category": "private-publish-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-publisher",
+          "files": ["test/ka-graph-private-access.test.ts", "test/async-lift-canonicalization-and-encryption.test.ts", "test/access-verification.test.ts"],
+          "timeoutMs": 300000,
+          "covers": ["private-content", "encryption", "access-policy", "canonical-rdf", "signature-verification"]
+        },
+        {
+          "id": "chain-crypto-contract",
+          "category": "chain-crypto-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-chain",
+          "files": ["test/mock-adapter-parity.test.ts", "test/evm-event-decode.test.ts", "test/v10-update-ack-digest-parity.unit.test.ts"],
+          "timeoutMs": 180000,
+          "covers": ["chain-adapter", "event-schema", "ack-digest", "invalid-policy"]
+        },
+        {
+          "id": "storage-restart-and-durability",
+          "category": "storage-semantics",
+          "role": "normative-oracle",
+          "kind": "vitest",
+          "package": "@origintrail-official/dkg-storage",
+          "files": ["test/changelog.integration.test.ts", "test/oxigraph-worker-respawn.test.ts"],
+          "timeoutMs": 240000,
+          "covers": ["restart", "durable-marker", "monotonic-sequence", "worker-crash", "fail-closed"]
+        }
+      ]
+    },
+    "performance": {
+      "defaultRepetitions": 3,
+      "scenarios": [
+        {
+          "id": "legacy-sync-responder-pages",
+          "category": "legacy-sync-performance",
+          "role": "sync-characterization",
+          "kind": "command",
+          "command": "node",
+          "args": ["--expose-gc", "packages/agent/scripts/sync-responder-page-benchmark.cjs", "--sizes=10000,100000,1000000", "--trials=1", "--page-size=500"],
+          "parser": "sync-responder-json",
+          "timeoutMs": 900000,
+          "covers": ["sync-page-latency", "sync-page-rss", "10k", "100k", "1m"]
+        },
+        {
+          "id": "legacy-sync-worker-throughput",
+          "category": "legacy-sync-performance",
+          "role": "sync-characterization",
+          "kind": "command",
+          "command": "node",
+          "args": ["packages/agent/scripts/sync-worker-benchmark.cjs"],
+          "parser": "json-stdout",
+          "timeoutMs": 180000,
+          "covers": ["parse-filter-latency", "worker-throughput"]
+        },
+        {
+          "id": "legacy-sync-worker-responsiveness",
+          "category": "legacy-sync-performance",
+          "role": "sync-characterization",
+          "kind": "command",
+          "command": "node",
+          "args": ["packages/agent/scripts/sync-worker-responsiveness-benchmark.cjs"],
+          "parser": "json-stdout",
+          "timeoutMs": 180000,
+          "covers": ["event-loop-delay", "worker-responsiveness"]
+        }
+      ]
+    }
+  }
+}

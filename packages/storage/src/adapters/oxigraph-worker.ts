@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import {
+  buildWalProjectionCommitPlanV1,
+  type WalProjectionCommitInputV1,
+  type WalProjectionCommitResultV1,
+} from '../wal-projection.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -146,6 +151,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
+  readonly walProjectionTransactions = 'v1' as const;
 
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
@@ -671,6 +677,21 @@ export class OxigraphWorkerStore implements TripleStore {
       metadataQuads,
     );
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+  async commitWalProjectionV1(
+    input: WalProjectionCommitInputV1,
+  ): Promise<WalProjectionCommitResultV1> {
+    // Validate before the mutation RPC. Unsupported or malformed input must
+    // fail deterministically without creating an indeterminate worker write.
+    const plan = buildWalProjectionCommitPlanV1(input);
+    const result = await this.call<WalProjectionCommitResultV1>(
+      'commitWalProjectionV1',
+      input,
+    );
+    if (result.status === 'COMMITTED') {
+      this.writeGen.recordGraphWrites(plan.touchedGraphs);
+    }
+    return result;
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

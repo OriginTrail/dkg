@@ -36,6 +36,11 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_SYNC_MODE=parallel
+#                 Start every node with the WAL shadow runtime and raw WAL
+#                 protocols enabled, and provision an explicit signed local-
+#                 authoring bundle for the two built-in devnet graphs. Omit
+#                 (or set legacy) for the unchanged authoritative legacy path.
 #
 set -euo pipefail
 
@@ -617,6 +622,19 @@ create_node_config() {
       ;;
   esac
 
+  local wal_sync_block=""
+  case "${DEVNET_SYNC_MODE:-legacy}" in
+    legacy)
+      ;;
+    parallel)
+      wal_sync_block='"sync": { "mode": "parallel" },'
+      ;;
+    *)
+      log "ERROR: DEVNET_SYNC_MODE must be legacy or parallel"
+      return 1
+      ;;
+  esac
+
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
   # trail) and a fast tick (5s) so the e2e test sees a submitted
@@ -631,6 +649,7 @@ create_node_config() {
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
+  "networkConfig": "testnet",
   "apiPort": ${api_port},
   "listenPort": ${libp2p_port},
   "nodeRole": "${node_role}",
@@ -639,6 +658,7 @@ create_node_config() {
   "contextGraphs": ["devnet-test", "devnet-isolation"],
   "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
+  ${wal_sync_block}
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,
@@ -709,6 +729,15 @@ EOCONF
       " 2>/dev/null
     fi
   done <<< "$extra_addrs"
+
+  if [ "${DEVNET_SYNC_MODE:-legacy}" = "parallel" ]; then
+    node --import tsx \
+      "$REPO_ROOT/scripts/wal-devnet-authoring-bundle.ts" \
+      --node-dir "$node_dir" \
+      --genesis-id base-testnet \
+      --context-graphs devnet-test,devnet-isolation \
+      >/dev/null
+  fi
 
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }

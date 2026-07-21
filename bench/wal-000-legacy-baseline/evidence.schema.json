@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dkg.origintrail.io/schemas/wal-000-evidence-v1.json",
+  "title": "WAL-000 legacy baseline evidence",
+  "type": "object",
+  "required": ["schema", "runId", "profile", "source", "environment", "safety", "sourceRestorations", "preparation", "scenarios", "summaryDigest", "startedAt", "finishedAt"],
+  "properties": {
+    "schema": { "const": "dkg-wal-000-evidence-v1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "profile": { "enum": ["semantic", "performance", "all"] },
+    "source": {
+      "type": "object",
+      "required": ["commit", "baseCommit", "dirty", "matrixDigest"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "dirty": { "type": "boolean" },
+        "matrixDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": true
+    },
+    "environment": { "type": "object" },
+    "preparation": {
+      "type": "object",
+      "required": ["command", "durationMs", "resourceUsage", "stdoutDigest", "stderrDigest", "rawDirectory"]
+    },
+    "safety": {
+      "type": "object",
+      "required": ["isolatedDkgHome", "receiptsOutsideRepository", "credentialsStripped", "sourceCleanAtScenarioBoundaries", "knownGeneratedFilesRestored", "unexpectedSourceChangesRejected"],
+      "properties": {
+        "isolatedDkgHome": { "const": true },
+        "receiptsOutsideRepository": { "const": true },
+        "credentialsStripped": { "const": true },
+        "sourceCleanAtScenarioBoundaries": { "const": true },
+        "knownGeneratedFilesRestored": { "const": true },
+        "unexpectedSourceChangesRejected": { "const": true }
+      },
+      "additionalProperties": true
+    },
+    "sourceRestorations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phase", "path", "generatedDigest", "restoredDigest"]
+      }
+    },
+    "scenarios": { "type": "array", "minItems": 1 },
+    "summaryDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": true
+}

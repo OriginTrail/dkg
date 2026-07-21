@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import type { WalRuntimeStatus } from '@origintrail-official/dkg-wal';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
@@ -6,6 +7,7 @@ import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
 async function renderStatus(store: {
   storeQuads: number | null;
   storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
+  wal?: WalRuntimeStatus;
 }): Promise<string> {
   const lines: string[] = [];
   const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
@@ -54,5 +56,27 @@ describe('dkg status external-store rendering', () => {
 
     expect(output).toContain('UNREACHABLE');
     expect(output).not.toContain('CHECKING');
+  });
+
+  it('renders the live WAL mode, lifecycle, and authority', async () => {
+    const output = await renderStatus({
+      storeQuads: 10,
+      wal: {
+        mode: 'parallel',
+        lifecycle: 'ready',
+        ready: true,
+        synchronizationAuthority: 'legacy',
+        shadowEnabled: true,
+        runtimeRegistered: true,
+        protocolsRegistered: false,
+        workersActive: 0,
+        protocolVersion: 1,
+        adapterVersion: 1,
+        paths: null,
+        blockedReason: null,
+      },
+    });
+
+    expect(output).toContain('WAL:       parallel (ready; legacy sync authoritative)');
   });
 });

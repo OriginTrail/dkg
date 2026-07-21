@@ -14,6 +14,10 @@ import {
   isReplaceGraphCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import type {
+  WalProjectionCommitInputV1,
+  WalProjectionCommitResultV1,
+} from './wal-projection.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -199,6 +203,10 @@ export interface ChangelogStoreOptions {
 export class ChangelogStore implements TripleStore, ChangelogReader {
   get queryCancellation() {
     return this.inner.queryCancellation;
+  }
+
+  get walProjectionTransactions(): 'v1' | undefined {
+    return this.inner.walProjectionTransactions;
   }
 
   private readonly inner: TripleStore;
@@ -404,6 +412,25 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       }
       await this.markPostMutation([graphUri, metaGraphUri], options);
     });
+  }
+
+  async commitWalProjectionV1(
+    input: WalProjectionCommitInputV1,
+    options?: QueryOptions,
+  ): Promise<WalProjectionCommitResultV1> {
+    if (
+      this.inner.walProjectionTransactions !== 'v1'
+      || typeof this.inner.commitWalProjectionV1 !== 'function'
+    ) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'commitWalProjectionV1',
+        'ChangelogStore',
+      );
+    }
+    // WAL projection is a derived local view, not legacy-sync input. Serialize
+    // it with other mutations but emit no legacy changelog record.
+    if (!this.enabled) return this.inner.commitWalProjectionV1(input, options);
+    return this.runExclusive(() => this.inner.commitWalProjectionV1!(input, options));
   }
 
   async createGraph(graphUri: string): Promise<void> {

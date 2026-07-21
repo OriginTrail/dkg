@@ -1,0 +1,131 @@
+{
+  "name": "@origintrail-official/dkg-wal",
+  "version": "10.0.8",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./reconciliation": {
+      "types": "./dist/reconciliation/index.d.ts",
+      "import": "./dist/reconciliation/index.js",
+      "default": "./dist/reconciliation/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js",
+      "default": "./dist/protocol/index.js"
+    },
+    "./store": {
+      "types": "./dist/store/index.d.ts",
+      "import": "./dist/store/index.js",
+      "default": "./dist/store/index.js"
+    },
+    "./control": {
+      "types": "./dist/control/index.d.ts",
+      "import": "./dist/control/index.js",
+      "default": "./dist/control/index.js"
+    },
+    "./authority": {
+      "types": "./dist/authority/index.d.ts",
+      "import": "./dist/authority/index.js",
+      "default": "./dist/authority/index.js"
+    },
+    "./privacy": {
+      "types": "./dist/privacy/index.d.ts",
+      "import": "./dist/privacy/index.js",
+      "default": "./dist/privacy/index.js"
+    },
+    "./discovery": {
+      "types": "./dist/discovery/index.d.ts",
+      "import": "./dist/discovery/index.js",
+      "default": "./dist/discovery/index.js"
+    },
+    "./admission": {
+      "types": "./dist/admission/index.d.ts",
+      "import": "./dist/admission/index.js",
+      "default": "./dist/admission/index.js"
+    },
+    "./rdf": {
+      "types": "./dist/rdf/index.d.ts",
+      "import": "./dist/rdf/index.js",
+      "default": "./dist/rdf/index.js"
+    },
+    "./replay": {
+      "types": "./dist/replay/index.d.ts",
+      "import": "./dist/replay/index.js",
+      "default": "./dist/replay/index.js"
+    },
+    "./vm": {
+      "types": "./dist/vm/index.d.ts",
+      "import": "./dist/vm/index.js",
+      "default": "./dist/vm/index.js"
+    },
+    "./retention": {
+      "types": "./dist/retention/index.d.ts",
+      "import": "./dist/retention/index.js",
+      "default": "./dist/retention/index.js"
+    },
+    "./migration": {
+      "types": "./dist/migration/index.d.ts",
+      "import": "./dist/migration/index.js",
+      "default": "./dist/migration/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc -p tsconfig.test.json --noEmit",
+    "test:types": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:fixtures": "pnpm --filter @origintrail-official/dkg-wal-v1-conformance run generate -- --check",
+    "test:conformance": "pnpm --filter @origintrail-official/dkg-wal-v1-conformance verify",
+    "test:e2e": "vitest run test/e2e",
+    "test:stress": "NODE_OPTIONS=--max-old-space-size=8192 WAL_RECONCILIATION_STRESS=1 WAL_RECONCILIATION_FULL_SCALE=1 vitest run test/reconciliation/scale.test.ts",
+    "test:stress:quick": "WAL_RECONCILIATION_STRESS=1 vitest run test/reconciliation/scale.test.ts",
+    "benchmark:reconciliation": "node --import tsx scripts/benchmark.ts",
+    "benchmark:reconciliation:matrix": "node --import tsx scripts/benchmark.ts --matrix",
+    "benchmark:reconciliation:rotated": "node --import tsx scripts/benchmark.ts --matrix --repetitions=3",
+    "benchmark:reconciliation:full": "node --import tsx scripts/benchmark.ts --matrix",
+    "benchmark:reconciliation:check": "node --import tsx scripts/benchmark.ts --matrix --check",
+    "benchmark:reconciliation:check:quick": "node --import tsx scripts/benchmark.ts --check",
+    "benchmark:store": "node --import tsx scripts/store-benchmark.ts",
+    "benchmark:store:matrix": "node --import tsx scripts/store-benchmark.ts --matrix",
+    "benchmark:store:rotated": "node --import tsx scripts/store-benchmark.ts --matrix --repetitions=3",
+    "benchmark:store:check": "node --import tsx scripts/store-benchmark.ts --matrix --check",
+    "benchmark:store:check:quick": "node --import tsx scripts/store-benchmark.ts --check",
+    "vectors": "node --import tsx scripts/generate-vectors.ts",
+    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "better-sqlite3": "12.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/better-sqlite3": "^7",
+    "@vitest/coverage-v8": "^4.0.18",
+    "tsx": "^4.21.0",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/wal"
+  }
+}

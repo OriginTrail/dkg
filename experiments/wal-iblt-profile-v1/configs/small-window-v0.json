@@ -1,0 +1,10 @@
+{
+  "candidateName": "small-window-v0",
+  "status": "experimental-not-wire-stable",
+  "extends": "paper-baseline-v0",
+  "stream": {
+    "initialWindowSymbols": 4,
+    "windowGrowthNumerator": 2,
+    "windowGrowthDenominator": 1
+  }
+}

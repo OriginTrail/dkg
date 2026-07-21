@@ -9,6 +9,7 @@
     "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
+    "benchmark:wal-shadow-write": "node --import tsx scripts/wal-shadow-write-benchmark.ts",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:types": "tsc --project tsconfig.type-tests.json",
@@ -28,6 +29,7 @@
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-random-sampling": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@origintrail-official/dkg-wal": "workspace:*",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "jsonld": "^8.3.3"

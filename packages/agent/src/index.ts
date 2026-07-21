@@ -34,6 +34,75 @@ export {
   type SignAgentDelegationParams,
   type VerifyAgentDelegationOptions,
 } from './auth/agent-delegation.js';
+export {
+  CurrentDkgWalAuthorityAdapter,
+  createCurrentDkgWalAuthorityAdapter,
+  type CurrentDkgWalAuthorityChecks,
+} from './wal/authority-adapter.js';
+export {
+  DkgWalSenderKeyEpochUnavailableError,
+  dkgWalSenderKeyEpoch,
+  encryptDkgWalPrivatePayload,
+  decryptDkgWalPrivatePayload,
+  type DkgWalSenderKeyEpoch,
+  type DkgWalSenderKeyState,
+} from './wal/private-payload-adapter.js';
+export { asWalRawProtocolRouter, registerWalWireProtocols } from './wal/wire-protocol.js';
+export {
+  DkgWalWireRuntime,
+  createDkgWalWireRuntime,
+  type DkgWalWireRuntimeOptions,
+} from './wal/wire-runtime.js';
+export {
+  createDkgWalProviderResolutionAdapter,
+  type DkgWalProviderResolutionAdapterOptions,
+} from './wal/provider-resolution-adapter.js';
+export {
+  DkgWalPublisherShadowWriter,
+  createDkgWalPublisherShadowWriter,
+  type DkgWalPublisherCommitContextV1,
+  type DkgWalPublisherCommitContextResolverV1,
+  type DkgWalPrivatePayloadResolutionInputV1,
+  type DkgWalPrivatePayloadResolverV1,
+  type DkgWalPublisherShadowWriterOptions,
+} from './wal/local-commit.js';
+export {
+  DkgWalReplayCoreAdapterV1,
+  replayAdmittedWalSetWithDkgCoreV1,
+  type DkgWalReplayCoreAdapterOptionsV1,
+  type ReplayAdmittedWalSetWithDkgCoreOptionsV1,
+} from './wal/replay-conflict-adapter.js';
+export {
+  DkgWalRetentionSemanticAdapterV1,
+  createDkgWalRetentionSemanticAdapterV1,
+  createDkgWalEpochSnapshotValidatorV1,
+  type DkgWalRetentionSemanticAdapterOptionsV1,
+  type DkgWalEpochSnapshotValidatorOptionsV1,
+} from './wal/retention-semantic-adapter.js';
+export {
+  DkgWalMigrationSemanticAdapterV1,
+  createDkgWalMigrationSemanticAdapterV1,
+  type DkgWalMigrationSemanticAdapterOptionsV1,
+} from './wal/genesis-migration-adapter.js';
+export {
+  DkgWalProjectionMaterializerError,
+  DkgWalProjectionMaterializerV1,
+  type DkgWalProjectionApplyResultV1,
+  type DkgWalProjectionMaterializerErrorCode,
+  type DkgWalProjectionMaterializerOptionsV1,
+  type DkgWalProjectionRecoveryAuditV1,
+  type DkgWalProjectionRecalculateV1,
+  type DkgWalSemanticProjectionOutcomeV1,
+  type LocalWalProjectionRebuildSourceV1,
+  type WalProjectionScopeV1,
+} from './wal/projection-materializer.js';
+export {
+  DkgWalLocalAuthoringBundleError,
+  SignedDkgWalLocalAuthoringResolverV1,
+  loadSignedDkgWalLocalAuthoringResolverV1,
+  type DkgWalLocalAuthoringBundleErrorCode,
+  type LoadDkgWalLocalAuthoringBundleOptionsV1,
+} from './wal/local-authoring-bundle.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {

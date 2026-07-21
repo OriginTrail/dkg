@@ -1,0 +1,1567 @@
+{
+  "schema": "dkg-wal-iblt-mapping-comparison-v1",
+  "recordedAt": "2026-07-19T10:47:16.497Z",
+  "revision": "working-tree",
+  "runtime": {
+    "node": "v25.2.1",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "host": {
+    "cpuModel": "Apple M3",
+    "logicalCpuCount": 8,
+    "totalMemoryBytes": 17179869184
+  },
+  "executionModel": "fresh-process-per-candidate-and-size",
+  "rotation": "size order rotates by repetition; candidate order reverses on each repetition",
+  "sizes": [
+    10000,
+    100000,
+    1000000,
+    10000000
+  ],
+  "repetitions": 3,
+  "eachSideDifference": 16,
+  "summaries": [
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 145.79049999999998,
+        "median": 148.28720800000002,
+        "p95": 149.66566699999998,
+        "maximum": 149.66566699999998
+      },
+      "streamMs": {
+        "minimum": 45.23537500000003,
+        "median": 47.56587499999995,
+        "p95": 49.02516600000001,
+        "maximum": 49.02516600000001
+      },
+      "totalMs": {
+        "minimum": 191.025875,
+        "median": 195.85308299999997,
+        "p95": 198.690833,
+        "maximum": 198.690833
+      },
+      "symbols": {
+        "minimum": 47,
+        "median": 47,
+        "p95": 47,
+        "maximum": 47
+      },
+      "canonicalWireBytes": {
+        "minimum": 3454,
+        "median": 3454,
+        "p95": 3454,
+        "maximum": 3454
+      },
+      "maxRssBytes": {
+        "minimum": 115523584,
+        "median": 115523584,
+        "p95": 116473856,
+        "maximum": 116473856
+      }
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 100000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 1276.1992500000001,
+        "median": 1293.710375,
+        "p95": 1311.753125,
+        "maximum": 1311.753125
+      },
+      "streamMs": {
+        "minimum": 449.3991249999999,
+        "median": 473.66824999999994,
+        "p95": 481.631042,
+        "maximum": 481.631042
+      },
+      "totalMs": {
+        "minimum": 1725.598375,
+        "median": 1775.341417,
+        "p95": 1785.421375,
+        "maximum": 1785.421375
+      },
+      "symbols": {
+        "minimum": 65,
+        "median": 65,
+        "p95": 65,
+        "maximum": 65
+      },
+      "canonicalWireBytes": {
+        "minimum": 4788,
+        "median": 4788,
+        "p95": 4788,
+        "maximum": 4788
+      },
+      "maxRssBytes": {
+        "minimum": 124518400,
+        "median": 127926272,
+        "p95": 131629056,
+        "maximum": 131629056
+      }
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 1000000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 12426.242166,
+        "median": 12526.836167,
+        "p95": 12634.113042,
+        "maximum": 12634.113042
+      },
+      "streamMs": {
+        "minimum": 4434.813957999999,
+        "median": 4445.5376670000005,
+        "p95": 4502.199332999999,
+        "maximum": 4502.199332999999
+      },
+      "totalMs": {
+        "minimum": 16871.779833,
+        "median": 16961.650125,
+        "p95": 17136.312374999998,
+        "maximum": 17136.312374999998
+      },
+      "symbols": {
+        "minimum": 52,
+        "median": 52,
+        "p95": 52,
+        "maximum": 52
+      },
+      "canonicalWireBytes": {
+        "minimum": 3882,
+        "median": 3882,
+        "p95": 3882,
+        "maximum": 3882
+      },
+      "maxRssBytes": {
+        "minimum": 306872320,
+        "median": 307462144,
+        "p95": 314785792,
+        "maximum": 314785792
+      }
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 120388.600625,
+        "median": 120816.012375,
+        "p95": 122315.912667,
+        "maximum": 122315.912667
+      },
+      "streamMs": {
+        "minimum": 50449.672125,
+        "median": 50511.545625,
+        "p95": 53160.676250000004,
+        "maximum": 53160.676250000004
+      },
+      "totalMs": {
+        "minimum": 170900.14625,
+        "median": 171265.6845,
+        "p95": 175476.58891700002,
+        "maximum": 175476.58891700002
+      },
+      "symbols": {
+        "minimum": 56,
+        "median": 56,
+        "p95": 56,
+        "maximum": 56
+      },
+      "canonicalWireBytes": {
+        "minimum": 4232,
+        "median": 4232,
+        "p95": 4232,
+        "maximum": 4232
+      },
+      "maxRssBytes": {
+        "minimum": 1804943360,
+        "median": 1812807680,
+        "p95": 1814724608,
+        "maximum": 1814724608
+      }
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 145.626625,
+        "median": 150.129666,
+        "p95": 152.51708399999998,
+        "maximum": 152.51708399999998
+      },
+      "streamMs": {
+        "minimum": 83.95654200000001,
+        "median": 85.29137500000002,
+        "p95": 86.91933300000005,
+        "maximum": 86.91933300000005
+      },
+      "totalMs": {
+        "minimum": 229.583167,
+        "median": 235.421041,
+        "p95": 239.43641700000003,
+        "maximum": 239.43641700000003
+      },
+      "symbols": {
+        "minimum": 47,
+        "median": 47,
+        "p95": 47,
+        "maximum": 47
+      },
+      "canonicalWireBytes": {
+        "minimum": 3454,
+        "median": 3454,
+        "p95": 3454,
+        "maximum": 3454
+      },
+      "maxRssBytes": {
+        "minimum": 114147328,
+        "median": 115408896,
+        "p95": 117407744,
+        "maximum": 117407744
+      }
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 100000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 1269.261125,
+        "median": 1304.858958,
+        "p95": 1314.358084,
+        "maximum": 1314.358084
+      },
+      "streamMs": {
+        "minimum": 856.1947500000001,
+        "median": 874.7161669999998,
+        "p95": 916.9807079999998,
+        "maximum": 916.9807079999998
+      },
+      "totalMs": {
+        "minimum": 2125.455875,
+        "median": 2179.575125,
+        "p95": 2231.3387919999996,
+        "maximum": 2231.3387919999996
+      },
+      "symbols": {
+        "minimum": 65,
+        "median": 65,
+        "p95": 65,
+        "maximum": 65
+      },
+      "canonicalWireBytes": {
+        "minimum": 4788,
+        "median": 4788,
+        "p95": 4788,
+        "maximum": 4788
+      },
+      "maxRssBytes": {
+        "minimum": 127025152,
+        "median": 131465216,
+        "p95": 132284416,
+        "maximum": 132284416
+      }
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 1000000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 12493.589333,
+        "median": 12674.544292,
+        "p95": 12688.125667,
+        "maximum": 12688.125667
+      },
+      "streamMs": {
+        "minimum": 8140.594999999999,
+        "median": 8327.105542000001,
+        "p95": 8489.721083,
+        "maximum": 8489.721083
+      },
+      "totalMs": {
+        "minimum": 20815.139292,
+        "median": 20820.694875,
+        "p95": 21177.84675,
+        "maximum": 21177.84675
+      },
+      "symbols": {
+        "minimum": 52,
+        "median": 52,
+        "p95": 52,
+        "maximum": 52
+      },
+      "canonicalWireBytes": {
+        "minimum": 3882,
+        "median": 3882,
+        "p95": 3882,
+        "maximum": 3882
+      },
+      "maxRssBytes": {
+        "minimum": 308576256,
+        "median": 309346304,
+        "p95": 313393152,
+        "maximum": 313393152
+      }
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000000,
+      "samples": 3,
+      "setupMs": {
+        "minimum": 120149.320375,
+        "median": 120571.34991599999,
+        "p95": 121516.596083,
+        "maximum": 121516.596083
+      },
+      "streamMs": {
+        "minimum": 86785.51554200001,
+        "median": 86956.61074999999,
+        "p95": 91140.147583,
+        "maximum": 91140.147583
+      },
+      "totalMs": {
+        "minimum": 207105.93112499997,
+        "median": 207356.86545800001,
+        "p95": 212656.743666,
+        "maximum": 212656.743666
+      },
+      "symbols": {
+        "minimum": 56,
+        "median": 56,
+        "p95": 56,
+        "maximum": 56
+      },
+      "canonicalWireBytes": {
+        "minimum": 4232,
+        "median": 4232,
+        "p95": 4232,
+        "maximum": 4232
+      },
+      "maxRssBytes": {
+        "minimum": 1804648448,
+        "median": 1815953408,
+        "p95": 1816985600,
+        "maximum": 1816985600
+      }
+    }
+  ],
+  "ratios": [
+    {
+      "setSize": 10000,
+      "integerToFloatingSetupRatio": 1.0124249287908904,
+      "integerToFloatingStreamRatio": 1.7931211188693599,
+      "integerToFloatingTotalRatio": 1.2020287727612644,
+      "integerToFloatingSymbolRatio": 1,
+      "integerToFloatingWireByteRatio": 1
+    },
+    {
+      "setSize": 100000,
+      "integerToFloatingSetupRatio": 1.00861752615998,
+      "integerToFloatingStreamRatio": 1.8466852422555236,
+      "integerToFloatingTotalRatio": 1.2276935039813808,
+      "integerToFloatingSymbolRatio": 1,
+      "integerToFloatingWireByteRatio": 1
+    },
+    {
+      "setSize": 1000000,
+      "integerToFloatingSetupRatio": 1.0117913352606236,
+      "integerToFloatingStreamRatio": 1.8731380016895491,
+      "integerToFloatingTotalRatio": 1.2275158797381456,
+      "integerToFloatingSymbolRatio": 1,
+      "integerToFloatingWireByteRatio": 1
+    },
+    {
+      "setSize": 10000000,
+      "integerToFloatingSetupRatio": 0.9979749169485862,
+      "integerToFloatingStreamRatio": 1.721519499632219,
+      "integerToFloatingTotalRatio": 1.2107321210513715,
+      "integerToFloatingSymbolRatio": 1,
+      "integerToFloatingWireByteRatio": 1
+    }
+  ],
+  "samples": [
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.037333000000018046,
+      "encoderSetupMs": 80.78483400000002,
+      "decoderSetupMs": 68.84349999999995,
+      "setupMs": 149.66566699999998,
+      "streamMs": 49.02516600000001,
+      "totalMs": 198.690833,
+      "setupIdsPerSecond": 133631,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 115523584,
+        "heapUsedBytes": 10321640,
+        "externalBytes": 4133869,
+        "arrayBuffersBytes": 1746432,
+        "maxRssBytes": 115523584
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 198.78162499999996
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 118.01908299999997
+      },
+      "repetition": 0,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.05433400000001143,
+      "encoderSetupMs": 83.03787499999999,
+      "decoderSetupMs": 69.42487499999999,
+      "setupMs": 152.51708399999998,
+      "streamMs": 86.91933300000005,
+      "totalMs": 239.43641700000003,
+      "setupIdsPerSecond": 131133,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 117407744,
+        "heapUsedBytes": 12188264,
+        "externalBytes": 4150010,
+        "arrayBuffersBytes": 1762573,
+        "maxRssBytes": 117407744
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 239.47104199999998
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 156.47600000000003
+      },
+      "repetition": 0,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.03470900000002075,
+      "encoderSetupMs": 665.9177910000001,
+      "decoderSetupMs": 645.800625,
+      "setupMs": 1311.753125,
+      "streamMs": 473.66824999999994,
+      "totalMs": 1785.421375,
+      "setupIdsPerSecond": 152468,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 124502016,
+        "heapUsedBytes": 12648872,
+        "externalBytes": 19346502,
+        "arrayBuffersBytes": 16959065,
+        "maxRssBytes": 124518400
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 1785.5412919999999
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1119.643917
+      },
+      "repetition": 0,
+      "heapLimitMiB": 2048
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.03362500000000068,
+      "encoderSetupMs": 666.74825,
+      "decoderSetupMs": 647.576209,
+      "setupMs": 1314.358084,
+      "streamMs": 916.9807079999998,
+      "totalMs": 2231.3387919999996,
+      "setupIdsPerSecond": 152166,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 131465216,
+        "heapUsedBytes": 9136168,
+        "externalBytes": 19342462,
+        "arrayBuffersBytes": 16928735,
+        "maxRssBytes": 131465216
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 2231.5762499999996
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1564.8595
+      },
+      "repetition": 0,
+      "heapLimitMiB": 2048
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.05150000000000432,
+      "encoderSetupMs": 6356.519,
+      "decoderSetupMs": 6277.542542,
+      "setupMs": 12634.113042,
+      "streamMs": 4502.199332999999,
+      "totalMs": 17136.312374999998,
+      "setupIdsPerSecond": 158302,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 286932992,
+        "heapUsedBytes": 21695840,
+        "externalBytes": 170444280,
+        "arrayBuffersBytes": 168056843,
+        "maxRssBytes": 307462144
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 17136.360459
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 10779.891042
+      },
+      "repetition": 0,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.11966700000002106,
+      "encoderSetupMs": 6405.399915999999,
+      "decoderSetupMs": 6282.606084000001,
+      "setupMs": 12688.125667,
+      "streamMs": 8489.721083,
+      "totalMs": 21177.84675,
+      "setupIdsPerSecond": 157628,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 275038208,
+        "heapUsedBytes": 19655176,
+        "externalBytes": 170444268,
+        "arrayBuffersBytes": 168056831,
+        "maxRssBytes": 313393152
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 21177.738875
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 14772.442041
+      },
+      "repetition": 0,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.028500000000008185,
+      "encoderSetupMs": 62454.430708,
+      "decoderSetupMs": 59861.453459000004,
+      "setupMs": 122315.912667,
+      "streamMs": 53160.676250000004,
+      "totalMs": 175476.58891700002,
+      "setupIdsPerSecond": 163511,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1803927552,
+        "heapUsedBytes": 12629184,
+        "externalBytes": 1682452974,
+        "arrayBuffersBytes": 1680065537,
+        "maxRssBytes": 1804943360
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 175476.765208
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 113022.25604100002
+      },
+      "repetition": 0,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.0402909999999963,
+      "encoderSetupMs": 61939.26091700001,
+      "decoderSetupMs": 58632.048707999995,
+      "setupMs": 120571.34991599999,
+      "streamMs": 86785.51554200001,
+      "totalMs": 207356.86545800001,
+      "setupIdsPerSecond": 165877,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1807974400,
+        "heapUsedBytes": 16331832,
+        "externalBytes": 1682453932,
+        "arrayBuffersBytes": 1680066495,
+        "maxRssBytes": 1816985600
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 207357.046209
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 145417.787125
+      },
+      "repetition": 0,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.030458000000010088,
+      "encoderSetupMs": 643.635375,
+      "decoderSetupMs": 625.5952920000001,
+      "setupMs": 1269.261125,
+      "streamMs": 856.1947500000001,
+      "totalMs": 2125.455875,
+      "setupIdsPerSecond": 157572,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 127025152,
+        "heapUsedBytes": 11740424,
+        "externalBytes": 19366112,
+        "arrayBuffersBytes": 16978675,
+        "maxRssBytes": 127025152
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 2125.513333
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1481.9444170000002
+      },
+      "repetition": 1,
+      "heapLimitMiB": 2048
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.26208299999998985,
+      "encoderSetupMs": 646.5695420000001,
+      "decoderSetupMs": 629.367625,
+      "setupMs": 1276.1992500000001,
+      "streamMs": 449.3991249999999,
+      "totalMs": 1725.598375,
+      "setupIdsPerSecond": 156715,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 127926272,
+        "heapUsedBytes": 9354496,
+        "externalBytes": 19316065,
+        "arrayBuffersBytes": 16902256,
+        "maxRssBytes": 127926272
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 1725.420167
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1078.9395
+      },
+      "repetition": 1,
+      "heapLimitMiB": 2048
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.02779100000000767,
+      "encoderSetupMs": 6253.5885419999995,
+      "decoderSetupMs": 6239.973,
+      "setupMs": 12493.589333,
+      "streamMs": 8327.105542000001,
+      "totalMs": 20820.694875,
+      "setupIdsPerSecond": 160082,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 308576256,
+        "heapUsedBytes": 11488760,
+        "externalBytes": 170443990,
+        "arrayBuffersBytes": 168056553,
+        "maxRssBytes": 308576256
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 20820.798333
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 14567.2245
+      },
+      "repetition": 1,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.09458300000000008,
+      "encoderSetupMs": 6204.8361669999995,
+      "decoderSetupMs": 6221.3114160000005,
+      "setupMs": 12426.242166,
+      "streamMs": 4445.5376670000005,
+      "totalMs": 16871.779833,
+      "setupIdsPerSecond": 160950,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 314785792,
+        "heapUsedBytes": 21798336,
+        "externalBytes": 170444120,
+        "arrayBuffersBytes": 168056683,
+        "maxRssBytes": 314785792
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 16871.752291999997
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 10667.011292
+      },
+      "repetition": 1,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.033375000000006594,
+      "encoderSetupMs": 60988.182417,
+      "decoderSetupMs": 59161.10458299999,
+      "setupMs": 120149.320375,
+      "streamMs": 86956.61074999999,
+      "totalMs": 207105.93112499997,
+      "setupIdsPerSecond": 166460,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1806794752,
+        "heapUsedBytes": 18090320,
+        "externalBytes": 1682453656,
+        "arrayBuffersBytes": 1680066219,
+        "maxRssBytes": 1815953408
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 207106.099959
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 146117.928125
+      },
+      "repetition": 1,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.032958000000007814,
+      "encoderSetupMs": 61179.438334,
+      "decoderSetupMs": 59209.129333000004,
+      "setupMs": 120388.600625,
+      "streamMs": 50511.545625,
+      "totalMs": 170900.14625,
+      "setupIdsPerSecond": 166129,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1807269888,
+        "heapUsedBytes": 13387360,
+        "externalBytes": 1682454146,
+        "arrayBuffersBytes": 1680066709,
+        "maxRssBytes": 1814724608
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 170900.284792
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 109720.81562499999
+      },
+      "repetition": 1,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.031166000000013128,
+      "encoderSetupMs": 82.09820899999997,
+      "decoderSetupMs": 68.000291,
+      "setupMs": 150.129666,
+      "streamMs": 85.29137500000002,
+      "totalMs": 235.421041,
+      "setupIdsPerSecond": 133218,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 114147328,
+        "heapUsedBytes": 11652672,
+        "externalBytes": 4143622,
+        "arrayBuffersBytes": 1756185,
+        "maxRssBytes": 114147328
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 235.495959
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 153.42983299999997
+      },
+      "repetition": 1,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.08916700000000333,
+      "encoderSetupMs": 81.02166600000001,
+      "decoderSetupMs": 67.17637500000001,
+      "setupMs": 148.28720800000002,
+      "streamMs": 47.56587499999995,
+      "totalMs": 195.85308299999997,
+      "setupIdsPerSecond": 134873,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 115523584,
+        "heapUsedBytes": 10391584,
+        "externalBytes": 4134883,
+        "arrayBuffersBytes": 1747446,
+        "maxRssBytes": 115523584
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 195.84587500000004
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 114.88233300000002
+      },
+      "repetition": 1,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.043958000000003494,
+      "encoderSetupMs": 6320.277749999999,
+      "decoderSetupMs": 6206.514459,
+      "setupMs": 12526.836167,
+      "streamMs": 4434.813957999999,
+      "totalMs": 16961.650125,
+      "setupIdsPerSecond": 159657,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 306872320,
+        "heapUsedBytes": 13838856,
+        "externalBytes": 170444002,
+        "arrayBuffersBytes": 168056565,
+        "maxRssBytes": 306872320
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 16961.696208
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 10641.473666
+      },
+      "repetition": 2,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 1000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.028750000000002274,
+      "encoderSetupMs": 6285.73125,
+      "decoderSetupMs": 6388.784292,
+      "setupMs": 12674.544292,
+      "streamMs": 8140.594999999999,
+      "totalMs": 20815.139292,
+      "setupIdsPerSecond": 157797,
+      "symbols": 52,
+      "canonicalWireBytes": 3882,
+      "symbolsPerDifference": 1.625,
+      "bytesPerDifference": 121.3125,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 309346304,
+        "heapUsedBytes": 19701544,
+        "externalBytes": 170443352,
+        "arrayBuffersBytes": 168055915,
+        "maxRssBytes": 309346304
+      },
+      "encoderUsage": {
+        "symbols": 52,
+        "decodedIds": 0,
+        "operations": 7062320,
+        "accountedMemoryBytes": 128000000,
+        "peakAccountedMemoryBytes": 128000000,
+        "elapsedMs": 20815.247625
+      },
+      "decoderUsage": {
+        "symbols": 52,
+        "decodedIds": 32,
+        "operations": 7062604,
+        "accountedMemoryBytes": 128010752,
+        "peakAccountedMemoryBytes": 128010752,
+        "elapsedMs": 14529.537208999998
+      },
+      "repetition": 2,
+      "heapLimitMiB": 4096
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.09287499999999227,
+      "encoderSetupMs": 61401.683249999995,
+      "decoderSetupMs": 59414.23625,
+      "setupMs": 120816.012375,
+      "streamMs": 50449.672125,
+      "totalMs": 171265.6845,
+      "setupIdsPerSecond": 165541,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1806467072,
+        "heapUsedBytes": 13625936,
+        "externalBytes": 1682453378,
+        "arrayBuffersBytes": 1680065941,
+        "maxRssBytes": 1812807680
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 171265.703292
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 109864.057833
+      },
+      "repetition": 2,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.03162499999999113,
+      "encoderSetupMs": 61424.9125,
+      "decoderSetupMs": 60091.651957999995,
+      "setupMs": 121516.596083,
+      "streamMs": 91140.147583,
+      "totalMs": 212656.743666,
+      "setupIdsPerSecond": 164587,
+      "symbols": 56,
+      "canonicalWireBytes": 4232,
+      "symbolsPerDifference": 1.75,
+      "bytesPerDifference": 132.25,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 1280526336,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 1804632064,
+        "heapUsedBytes": 18284656,
+        "externalBytes": 1682453868,
+        "arrayBuffersBytes": 1680066431,
+        "maxRssBytes": 1804648448
+      },
+      "encoderUsage": {
+        "symbols": 56,
+        "decodedIds": 0,
+        "operations": 72067780,
+        "accountedMemoryBytes": 1280000000,
+        "peakAccountedMemoryBytes": 1280000000,
+        "elapsedMs": 212656.891833
+      },
+      "decoderUsage": {
+        "symbols": 56,
+        "decodedIds": 32,
+        "operations": 72068094,
+        "accountedMemoryBytes": 1280011264,
+        "peakAccountedMemoryBytes": 1280011264,
+        "elapsedMs": 151231.893542
+      },
+      "repetition": 2,
+      "heapLimitMiB": 12288
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.030499999999989313,
+      "encoderSetupMs": 78.809958,
+      "decoderSetupMs": 66.950042,
+      "setupMs": 145.79049999999998,
+      "streamMs": 45.23537500000003,
+      "totalMs": 191.025875,
+      "setupIdsPerSecond": 137183,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 116473856,
+        "heapUsedBytes": 10143632,
+        "externalBytes": 4129211,
+        "arrayBuffersBytes": 1741774,
+        "maxRssBytes": 116473856
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 191.101708
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 112.30975000000001
+      },
+      "repetition": 2,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 10000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.038374999999973625,
+      "encoderSetupMs": 78.02633400000002,
+      "decoderSetupMs": 67.561916,
+      "setupMs": 145.626625,
+      "streamMs": 83.95654200000001,
+      "totalMs": 229.583167,
+      "setupIdsPerSecond": 137338,
+      "symbols": 47,
+      "canonicalWireBytes": 3454,
+      "symbolsPerDifference": 1.46875,
+      "bytesPerDifference": 107.9375,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 115408896,
+        "heapUsedBytes": 11903608,
+        "externalBytes": 4145620,
+        "arrayBuffersBytes": 1758183,
+        "maxRssBytes": 115408896
+      },
+      "encoderUsage": {
+        "symbols": 47,
+        "decodedIds": 0,
+        "operations": 68981,
+        "accountedMemoryBytes": 1280000,
+        "peakAccountedMemoryBytes": 1280000,
+        "elapsedMs": 229.49437500000002
+      },
+      "decoderUsage": {
+        "symbols": 47,
+        "decodedIds": 32,
+        "operations": 69222,
+        "accountedMemoryBytes": 1290112,
+        "peakAccountedMemoryBytes": 1290112,
+        "elapsedMs": 151.65224999999998
+      },
+      "repetition": 2,
+      "heapLimitMiB": 1024
+    },
+    {
+      "mappingCandidate": "floating-point",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.029208000000011225,
+      "encoderSetupMs": 648.409167,
+      "decoderSetupMs": 645.272,
+      "setupMs": 1293.710375,
+      "streamMs": 481.631042,
+      "totalMs": 1775.341417,
+      "setupIdsPerSecond": 154594,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 131629056,
+        "heapUsedBytes": 9039920,
+        "externalBytes": 19336212,
+        "arrayBuffersBytes": 16922403,
+        "maxRssBytes": 131629056
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 1775.551166
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1127.164667
+      },
+      "repetition": 2,
+      "heapLimitMiB": 2048
+    },
+    {
+      "mappingCandidate": "integer-only",
+      "setSize": 100000,
+      "differenceSize": 32,
+      "inputMode": "sorted-stream",
+      "scenarioBuildMs": 0.050332999999994854,
+      "encoderSetupMs": 671.372292,
+      "decoderSetupMs": 633.4363330000001,
+      "setupMs": 1304.858958,
+      "streamMs": 874.7161669999998,
+      "totalMs": 2179.575125,
+      "setupIdsPerSecond": 153273,
+      "symbols": 65,
+      "canonicalWireBytes": 4788,
+      "symbolsPerDifference": 2.03125,
+      "bytesPerDifference": 149.625,
+      "limits": {
+        "maximumSymbols": 1048576,
+        "maximumDecodedDifference": 250000,
+        "maximumOperations": 1000000000,
+        "maximumMemoryBytes": 536870912,
+        "maximumElapsedMs": 1800000
+      },
+      "memory": {
+        "rssBytes": 132284416,
+        "heapUsedBytes": 13040512,
+        "externalBytes": 19347470,
+        "arrayBuffersBytes": 16960033,
+        "maxRssBytes": 132284416
+      },
+      "encoderUsage": {
+        "symbols": 65,
+        "decodedIds": 0,
+        "operations": 748333,
+        "accountedMemoryBytes": 12800000,
+        "peakAccountedMemoryBytes": 12800000,
+        "elapsedMs": 2179.63625
+      },
+      "decoderUsage": {
+        "symbols": 65,
+        "decodedIds": 32,
+        "operations": 748650,
+        "accountedMemoryBytes": 12812416,
+        "peakAccountedMemoryBytes": 12812416,
+        "elapsedMs": 1508.301667
+      },
+      "repetition": 2,
+      "heapLimitMiB": 2048
+    }
+  ]
+}

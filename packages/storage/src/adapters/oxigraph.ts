@@ -26,6 +26,14 @@ import {
 } from '../atomic-graph-replace.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import {
+  buildWalProjectionCommitPlanV1,
+  isWalProjectionInternalGraph,
+  readWalProjectionMarkerV1,
+  walProjectionMarkerEqualsV1,
+  type WalProjectionCommitInputV1,
+  type WalProjectionCommitResultV1,
+} from '../wal-projection.js';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -37,6 +45,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly queryCancellation = 'pre-dispatch' as const;
+  readonly walProjectionTransactions = 'v1' as const;
 
   private store: OxStore;
   private persistPath: string | undefined;
@@ -387,6 +396,45 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
   }
 
+  async commitWalProjectionV1(
+    input: WalProjectionCommitInputV1,
+    options?: TripleStoreQueryOptions,
+  ): Promise<WalProjectionCommitResultV1> {
+    throwIfAborted(options?.signal);
+    const plan = buildWalProjectionCommitPlanV1(input);
+    const payload = [
+      ...input.replaceGraphs.flatMap(value => value.quads),
+      ...input.replaceSubjects.flatMap(value => value.quads),
+      ...input.deleteQuads,
+      ...input.insertQuads,
+      ...input.conflictGraphs.flatMap(value => value.quads),
+    ];
+    assertQuadLiteralsMutf8Safe(payload, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'OxigraphStore.commitWalProjectionV1',
+    });
+
+    // Validate the complete current marker before mutation. A partial marker
+    // is corruption and must force rebuild instead of being silently replaced.
+    if (input.mode === 'CAS') {
+      await readWalProjectionMarkerV1(this, input.namespaceId, input.logicalKey, options);
+    }
+    throwIfAborted(options?.signal);
+    this.store.update(plan.update);
+    this.scheduleFlush();
+    this.writeGen.recordGraphWrites(plan.touchedGraphs);
+    throwIfAborted(options?.signal);
+    const marker = await readWalProjectionMarkerV1(
+      this,
+      input.namespaceId,
+      input.logicalKey,
+      options,
+    );
+    return walProjectionMarkerEqualsV1(marker, plan.marker)
+      ? { status: 'COMMITTED', marker: plan.marker }
+      : { status: 'GUARD_FAILED', marker };
+  }
+
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     // Index-read enumeration shared with SparqlHttpStore — see the rationale on
@@ -401,7 +449,9 @@ export class OxigraphStore implements TripleStore {
         const g = row.get('g');
         return g ? g.value : '';
       })
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter((graph) => Boolean(graph)
+        && !isAtomicGraphReplaceStagingGraph(graph)
+        && !isWalProjectionInternalGraph(graph));
   }
 
   async deleteBySubjectPrefix(

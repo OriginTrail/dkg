@@ -36,6 +36,7 @@ import type {
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
   CursorPersistence as ChainEventCursorPersistence,
+  PublisherWalShadowWriter,
 } from '@origintrail-official/dkg-publisher';
 import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -88,6 +89,8 @@ export type LocalSwmSenderKeySendState = {
   epochId: string;
   membershipHash: string;
   chainKey: Uint8Array;
+  /** Stable copy of this epoch's initial Sender Key for WAL object-key HKDF. */
+  walEpochKey?: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
   senderSigningPublicKey: Uint8Array;
@@ -101,6 +104,8 @@ export type LocalSwmSenderKeyReceiveState = {
   epochId: string;
   membershipHash: string;
   chainKey: Uint8Array;
+  /** Stable copy of the received initial Sender Key for WAL object-key HKDF. */
+  walEpochKey?: Uint8Array;
   nextMessageIndex: number;
   senderSigningPublicKey: Uint8Array;
   createdAtMs: number;
@@ -1042,6 +1047,8 @@ export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
 export interface DKGAgentConfig {
   name: string;
+  /** Internal daemon injection for OT-RFC-65 parallel shadow authoring. */
+  walShadowWriter?: PublisherWalShadowWriter;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */

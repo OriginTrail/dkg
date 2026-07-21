@@ -12,6 +12,10 @@ import type {
   TripleStore,
 } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type {
+  WalProjectionCommitInputV1,
+  WalProjectionCommitResultV1,
+} from './wal-projection.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -38,6 +42,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
 
   getPressureSnapshot(): StorePressureSnapshot | undefined {
     return this.inner.getPressureSnapshot?.();
+  }
+
+  get walProjectionTransactions(): 'v1' | undefined {
+    return this.inner.walProjectionTransactions;
   }
 
   readonly innerStore: TripleStore;
@@ -128,6 +136,24 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
       externalizedMetadata,
       options,
     );
+  }
+
+  async commitWalProjectionV1(
+    input: WalProjectionCommitInputV1,
+    options?: QueryOptions,
+  ): Promise<WalProjectionCommitResultV1> {
+    if (
+      this.inner.walProjectionTransactions !== 'v1'
+      || typeof this.inner.commitWalProjectionV1 !== 'function'
+    ) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'commitWalProjectionV1',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    // Projection plans target isolated WAL shadow graphs, never the existing
+    // SWM segment. Forward unchanged so blob I/O cannot sit outside the commit.
+    return this.inner.commitWalProjectionV1(input, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

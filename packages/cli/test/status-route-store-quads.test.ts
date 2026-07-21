@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { WalRuntimeStatus } from '@origintrail-official/dkg-wal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   handleStatusRoutes,
@@ -87,6 +88,7 @@ async function fetchStatus(baseUrl: string, includeStoreQuads = false): Promise<
   body: {
     storeQuads: number | null;
     storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
+    wal: WalRuntimeStatus;
   };
 }> {
   const suffix = includeStoreQuads ? '?includeStoreQuads=true' : '';
@@ -96,6 +98,7 @@ async function fetchStatus(baseUrl: string, includeStoreQuads = false): Promise<
     body: await response.json() as {
       storeQuads: number | null;
       storeQuadsStatus?: 'pending' | 'ready' | 'unreachable';
+      wal: WalRuntimeStatus;
     },
   };
 }
@@ -118,7 +121,17 @@ describe('/api/status external-store quad count', () => {
       const second = await fetchStatus(baseUrl);
       expect(first).toMatchObject({
         status: 200,
-        body: { storeQuads: null },
+        body: {
+          storeQuads: null,
+          wal: {
+            mode: 'legacy',
+            lifecycle: 'disabled',
+            synchronizationAuthority: 'legacy',
+            runtimeRegistered: false,
+            protocolsRegistered: false,
+            workersActive: 0,
+          },
+        },
       });
       expect(first.body.storeQuadsStatus).toBeUndefined();
       expect(second.body.storeQuadsStatus).toBeUndefined();

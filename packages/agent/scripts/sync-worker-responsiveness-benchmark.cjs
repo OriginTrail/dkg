@@ -109,7 +109,8 @@ async function run() {
     });
 
     console.log(JSON.stringify({
-      dataset: { lines: nquads.split('\n').length },
+      dataset: { lines: nquads.split('\n').length, bytes: Buffer.byteLength(nquads) },
+      operations: { workerRequests: 1, triplestoreOperations: 0 },
       mainThread,
       workerThread,
     }, null, 2));

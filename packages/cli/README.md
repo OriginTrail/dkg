@@ -47,6 +47,48 @@ dkg ka publish-async notes -c my-project
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
+## WAL parallel-protocol modes
+
+WAL synchronization is opt-in. An omitted `sync` block, or an explicit
+`"mode": "legacy"`, preserves the existing daemon exactly: no WAL runtime,
+directory, worker, timer, port, or protocol is created.
+
+To prepare the isolated shadow runtime while keeping the current synchronization
+mechanism authoritative and using the same existing DKG/SWM/VM semantic core
+for both mechanisms, add this
+to `<DKG_HOME>/config.json`:
+
+```json
+{
+  "sync": {
+    "mode": "parallel",
+    "wal": {
+      "protocolVersion": 1,
+      "adapterVersion": 1
+    }
+  }
+}
+```
+
+`parallel` creates only `<DKG_HOME>/wal-v1/{objects,range-staging,quarantine,
+shadow-rdf,control}` and reports the runtime through `dkg status` and
+`GET /api/status`. WAL-002 registers zero network protocols and starts zero
+background workers; later tasks add those capabilities without changing the
+authority boundary.
+
+For a single run, the configuration can be overridden with:
+
+```bash
+dkg start --sync-mode parallel
+```
+
+The override is passed only to the child daemon and does not rewrite
+`config.json`. The accepted values are `legacy`, `parallel`, and `wal`.
+`wal` is reserved for signed cutover: the daemon currently fails closed with
+`WAL_CUTOVER_VERIFIER_UNAVAILABLE`, even when a syntactically valid
+`sync.wal.cutoverId` is configured. A text flag or cutover identifier alone
+cannot make the shadow projection authoritative.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -237,7 +279,7 @@ modes auto-renewal can't recover from:
 | Command | Description |
 |---------|-------------|
 | `dkg init` | Interactive setup — node name, role, relay |
-| `dkg start [-f]` | Start the node daemon (HTTP API + P2P); `-f` runs in foreground |
+| `dkg start [-f] [--sync-mode <mode>]` | Start the node daemon; `-f` runs in foreground and the optional WAL mode override applies to this run only |
 | `dkg stop` | Graceful daemon shutdown |
 | `dkg status` | Node health, peer count, identity |
 | `dkg logs` | Tail the daemon log |

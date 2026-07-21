@@ -59,6 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { daemonWalRuntimeStatus } from '../../wal-runtime.js';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -732,6 +733,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // (e.g. after a failed revive) instead of it always looking healthy.
       storeQuads: storeQuadsSnapshot?.value ?? null,
       storeQuadsStatus: storeQuadsSnapshot?.status,
+      wal: daemonWalRuntimeStatus(daemonState.walRuntime),
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =

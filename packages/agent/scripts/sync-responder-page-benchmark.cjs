@@ -11,12 +11,18 @@ function parsePositiveInteger(value, fallback) {
 }
 
 function makeRows(count) {
-  return Array.from({ length: count }, (_, index) => ({
-    s: `did:dkg:entity:${index.toString().padStart(8, '0')}`,
-    p: 'http://schema.org/name',
-    o: `"Synthetic sync responder row ${index}"`,
-    g: `did:dkg:context-graph:benchmark/data/${Math.floor(index / 10_000)}`,
-  }));
+  let encodedRowBytes = 0;
+  const rows = Array.from({ length: count }, (_, index) => {
+    const row = {
+      s: `did:dkg:entity:${index.toString().padStart(8, '0')}`,
+      p: 'http://schema.org/name',
+      o: `"Synthetic sync responder row ${index}"`,
+      g: `did:dkg:context-graph:benchmark/data/${Math.floor(index / 10_000)}`,
+    };
+    encodedRowBytes += Buffer.byteLength(JSON.stringify(row));
+    return row;
+  });
+  return { rows, encodedRowBytes };
 }
 
 function serveOld(snapshot, offset, limit) {
@@ -36,7 +42,7 @@ function runWorker(mode, rowCount, pageSize) {
   if (typeof global.gc !== 'function') {
     throw new Error('Run with --expose-gc so trials start from a comparable heap baseline');
   }
-  const snapshot = makeRows(rowCount);
+  const { rows: snapshot, encodedRowBytes } = makeRows(rowCount);
   const serve = mode === 'old' ? serveOld : serveNew;
 
   // Warm the function and array element shapes outside the measured pass.
@@ -62,6 +68,7 @@ function runWorker(mode, rowCount, pageSize) {
 
   const durationMs = performance.now() - startedAt;
   const pages = Math.ceil(rowCount / pageSize);
+  const transferBytes = encodedRowBytes + (rowCount - pages) + (2 * pages);
   const copiedArraySlots = mode === 'old'
     ? pages * rowCount * 2 + returnedRows
     : returnedRows;
@@ -72,6 +79,10 @@ function runWorker(mode, rowCount, pageSize) {
     pageSize,
     pages,
     returnedRows,
+    requestCount: pages,
+    transferBytes,
+    triplestoreOperations: 0,
+    snapshotReadOperations: 1,
     durationMs,
     peakHeapDeltaBytes: Math.max(0, peakHeapUsed - baseline.heapUsed),
     peakRssDeltaBytes: Math.max(0, peakRss - baseline.rss),
@@ -128,6 +139,10 @@ function summarizeTrials(trials) {
     copiedArraySlots: trials[0].copiedArraySlots,
     pages: trials[0].pages,
     returnedRows: trials[0].returnedRows,
+    requestCount: trials[0].requestCount,
+    transferBytes: trials[0].transferBytes,
+    triplestoreOperations: trials[0].triplestoreOperations,
+    snapshotReadOperations: trials[0].snapshotReadOperations,
     checksum: trials[0].checksum,
   };
 }

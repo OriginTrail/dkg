@@ -723,6 +723,36 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
+  // GET /api/wal/capabilities?peerId=<id>
+  //
+  // Authenticated localhost operator probe used by the cumulative WAL devnet
+  // lane. It performs the real raw GET_CAPABILITIES request; it does not infer
+  // support from identify protocol advertisement.
+  if (req.method === "GET" && path === "/api/wal/capabilities") {
+    const peerId = url.searchParams.get("peerId");
+    if (!peerId) {
+      return jsonResponse(res, 400, { error: 'Missing "peerId" query param' });
+    }
+    if (!daemonState.walWireRuntime || !daemonState.walRuntime?.status().protocolsRegistered) {
+      return jsonResponse(res, 503, {
+        error: 'WAL raw protocols are not active',
+        code: 'WAL_PROTOCOLS_NOT_ACTIVE',
+      });
+    }
+    const capabilities = await daemonState.walWireRuntime.getCapabilities(peerId);
+    return jsonResponse(res, 200, {
+      peerId,
+      protocolVersions: capabilities[0].map(String),
+      adapterVersions: capabilities[1].map(String),
+      maximumControlFrameBytes: capabilities[2].toString(),
+      maximumSymbolsPerResponse: capabilities[3].toString(),
+      maximumFallbackIdsPerPage: capabilities[4].toString(),
+      maximumObjectRangeBytes: capabilities[5].toString(),
+      maximumWalObjectBytes: capabilities[6].toString(),
+      maximumConcurrentRanges: capabilities[7].toString(),
+    });
+  }
+
   // GET /api/slo
   //
   // rc.9 PR-12. Per-protocol Universal Messenger SLO snapshot:

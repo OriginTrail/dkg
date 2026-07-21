@@ -13,6 +13,7 @@
     { "path": "../okf" },
     { "path": "../node-ui" },
     { "path": "../adapter-openclaw" },
-    { "path": "../mcp-dkg" }
+    { "path": "../mcp-dkg" },
+    { "path": "../wal" }
   ]
 }

@@ -1,0 +1,1345 @@
+{
+  "schema": "dkg-wal-protocol-v1-schema-v1",
+  "protocolVersion": 1,
+  "atom": {
+    "tuple": "WalObjectV1",
+    "id": "WalObjectId",
+    "setElement": "WalObjectId",
+    "forbiddenIndependentIdentities": [
+      "PayloadId",
+      "BlobId",
+      "ChunkId",
+      "RangeId",
+      "IbltSymbolId"
+    ]
+  },
+  "canonicalCbor": {
+    "profile": "RFC 8949 deterministic encoding",
+    "exactArityArrays": true,
+    "definiteLengthsOnly": true,
+    "shortestIntegersAndLengths": true,
+    "nfcText": true,
+    "maps": false,
+    "floats": false,
+    "tags": false,
+    "undefined": false
+  },
+  "domains": {
+    "namespaceId": "dkg-wal-namespace-v1\u0000",
+    "collectionId": "dkg-wal-collection-v1\u0000",
+    "walObjectSignature": "dkg-wal-object-sign-v1\u0000",
+    "walObjectId": "dkg-wal-object-v1\u0000",
+    "checkpointSignature": "dkg-wal-checkpoint-sign-v1\u0000",
+    "checkpointId": "dkg-wal-checkpoint-v1\u0000",
+    "membershipSignature": "dkg-wal-membership-sign-v1\u0000",
+    "membershipId": "dkg-wal-membership-v1\u0000",
+    "vectorSignature": "dkg-wal-vector-sign-v1\u0000",
+    "vectorId": "dkg-wal-vector-v1\u0000",
+    "cutoverSignature": "dkg-wal-cutover-sign-v1\u0000",
+    "cutoverId": "dkg-wal-cutover-v1\u0000",
+    "authoritySignature": "dkg-wal-authority-sign-v1\u0000",
+    "authorityId": "dkg-wal-authority-v1\u0000",
+    "receiptSignature": "dkg-wal-receipt-sign-v1\u0000",
+    "receiptId": "dkg-wal-receipt-v1\u0000",
+    "bootstrapSignature": "dkg-wal-bootstrap-sign-v1\u0000",
+    "bootstrapId": "dkg-wal-bootstrap-v1\u0000",
+    "rollbackRecoverySignature": "dkg-wal-rollback-recovery-sign-v1\u0000",
+    "rollbackRecoveryId": "dkg-wal-rollback-recovery-v1\u0000",
+    "logicalKey": "dkg-rdf-logical-key-v1\u0000",
+    "touchedKey": "dkg-rdf-touched-key-v1\u0000",
+    "rdfState": "dkg-rdf-state-v1\u0000",
+    "replayHeads": "dkg-rdf-head-set-v1\u0000",
+    "replayConflict": "dkg-rdf-conflict-v1\u0000",
+    "payloadAssociatedData": "dkg-wal-payload-ad-v1\u0000",
+    "moveTierCommitment": "dkg-wal-move-tier-v1\u0000",
+    "moveTierTargetMutation": "dkg-wal-move-tier-target-mutation-v1\u0000",
+    "setEmpty": "dkg-wal-set-empty-v1\u0000",
+    "setLeaf": "dkg-wal-set-leaf-v1\u0000",
+    "setBranch": "dkg-wal-set-branch-v1\u0000",
+    "ibltSeed": "dkg-wal-iblt-seed-v1\u0000",
+    "ibltMap": "dkg-wal-iblt-map-v1\u0000",
+    "ibltChecksum": "dkg-wal-iblt-check-v1\u0000"
+  },
+  "enums": {
+    "tier": {
+      "SWM": 0,
+      "VM": 1
+    },
+    "visibility": {
+      "PUBLIC": 0,
+      "PRIVATE": 1
+    },
+    "publishMode": {
+      "OPEN": 0,
+      "CURATED": 1
+    },
+    "payloadKind": {
+      "DKG_MUTATION": 0,
+      "RDF_POLICY": 1,
+      "SNAPSHOT_MANIFEST": 2,
+      "LEGACY_GENESIS": 3,
+      "COLLECTION_VECTOR_MANIFEST": 4,
+      "CUTOVER_COHORT_MANIFEST": 5,
+      "MOVE_TIER_SOURCE": 6,
+      "MOVE_TIER_TARGET": 7
+    },
+    "codec": {
+      "DETERMINISTIC_CBOR": 0,
+      "CANONICAL_NQUADS": 1,
+      "OPAQUE_BYTES": 2
+    },
+    "encryptionAlgorithm": {
+      "AES_256_GCM": 0
+    },
+    "mutationOperation": {
+      "PUT": 0,
+      "PATCH": 1,
+      "DELETE": 2,
+      "RESOLVE": 3,
+      "SNAPSHOT": 4,
+      "MOVE_TIER_SOURCE": 5,
+      "MOVE_TIER_TARGET": 6,
+      "LEGACY_GENESIS": 7
+    },
+    "mutationMode": {
+      "REPLACE": 0,
+      "PATCH": 1
+    },
+    "snapshotEntryState": {
+      "LIVE": 0,
+      "TOMBSTONE": 1
+    },
+    "chainEventType": {
+      "PUBLISH": 0,
+      "UPDATE": 1
+    },
+    "authorityScope": {
+      "CURATOR": 0,
+      "NETWORK": 1
+    },
+    "errorCode": {
+      "UNSUPPORTED_VERSION": 0,
+      "UNAUTHORIZED": 1,
+      "STALE_HEAD": 2,
+      "INVALID_RANGE": 3,
+      "RESOURCE_LIMIT": 4,
+      "CANCELLED": 5,
+      "INTERNAL_UNAVAILABLE": 6,
+      "NON_CANONICAL": 7,
+      "INVALID_PROOF": 8
+    }
+  },
+  "limits": {
+    "controlFrameBytes": 1048576,
+    "reconciliationSymbolsPerResponse": 4096,
+    "reconciliationSymbolsPerAttempt": 4194304,
+    "reconciliationDecodedIds": 1000000,
+    "reconciliationPeelingOperations": 67108864,
+    "fallbackIdsPerPage": 4096,
+    "fallbackPagesPerAttempt": 1048576,
+    "walObjectRangeBytes": 1048576,
+    "concurrentStagedRangesPerPeer": 16,
+    "stagedRangePartsPerObject": 65536,
+    "concurrentReconciliationsPerPeer": 4,
+    "concurrentObjectStreamsPerNamespacePeer": 2,
+    "outstandingRequestsPerPeer": 128,
+    "outstandingRequestsGlobal": 1024,
+    "replayEntriesPerPeer": 16384,
+    "replayEntriesGlobal": 131072,
+    "queuedRequestsPerSchedulerKey": 16,
+    "inboundReadTimeoutMs": 20000,
+    "requestHandlerTimeoutMs": 20000,
+    "decodedCborArrayEntries": 65536,
+    "decodedCborNestingDepth": 16,
+    "walObjectPolicyDefaultBytes": 1073741824,
+    "walObjectHardBytes": 8589934592,
+    "temporaryStagingBytesPerPeer": 17179869184,
+    "parentsPerMutation": 64,
+    "baseHeadsPerMutation": 64,
+    "touchedKeysPerMutation": 4096,
+    "replaceGraphsPerMutation": 64,
+    "replaceSubjectsPerMutation": 4096,
+    "quadsPerMutation": 1000000,
+    "conflictHeadsPerLogicalKey": 32,
+    "authorsPerVector": 65536,
+    "activeViewsPerNode": 4096,
+    "causalClosureDepth": 1000000,
+    "snapshotEntries": 1000000,
+    "snapshotConflictEntries": 100000,
+    "quarantinedBytesPerPeer": 268435456,
+    "quarantineRetentionMs": 86400000,
+    "requestFreshnessMs": 90000,
+    "vectorValidityMs": 60000,
+    "acceptedClockSkewMs": 5000,
+    "peerIdBytes": 128,
+    "networkIdUtf8Bytes": 128,
+    "contextGraphIdUtf8Bytes": 512,
+    "subgraphNameUtf8Bytes": 128,
+    "mediaTypeUtf8Bytes": 128
+  },
+  "protocolIds": {
+    "walControl": "/dkg/10.1.0/wal-control",
+    "walReconcile": "/dkg/10.1.0/wal-reconcile",
+    "walObject": "/dkg/10.1.0/wal-object"
+  },
+  "messageTypes": {
+    "walControl": {
+      "GET_CAPABILITIES": 0,
+      "CAPABILITIES": 1,
+      "GET_HEAD": 2,
+      "HEAD": 3,
+      "GET_VECTOR": 4,
+      "VECTOR": 5,
+      "GET_CHECKPOINT": 6,
+      "CHECKPOINT": 7,
+      "ANNOUNCE_HEAD": 8,
+      "ACK": 9,
+      "CANCEL": 10,
+      "ERROR": 255
+    },
+    "walReconcile": {
+      "GET_RECONCILIATION_SYMBOLS": 0,
+      "RECONCILIATION_SYMBOLS": 1,
+      "GET_OBJECT_IDS": 2,
+      "OBJECT_IDS_PAGE": 3,
+      "CANCEL": 10,
+      "ERROR": 255
+    },
+    "walObject": {
+      "GET_OBJECT_RANGE": 0,
+      "OBJECT_RANGE": 1,
+      "CANCEL": 10,
+      "ERROR": 255
+    }
+  },
+  "iblt": {
+    "name": "ProtocolV1IbltReconciliationAlgorithm",
+    "version": 1,
+    "multiplierHex": "da942042e4dd58b5",
+    "initialSymbolIndex": 0,
+    "arithmetic": "IEEE-754 binary64",
+    "uint64Conversion": "roundTiesToEven",
+    "operationRounding": "roundTiesToEven-after-each-operation",
+    "squareRoot": "correctly-rounded-roundTiesToEven",
+    "inverseSquareRootNumerator": "4294967296",
+    "indexOffset": 1.5,
+    "reassociation": false,
+    "extendedPrecisionIntermediates": false,
+    "mappingSeedEndian": "little",
+    "countEncoding": "signed-i64",
+    "peelOrder": "lowest-symbol-index-first"
+  },
+  "tuples": {
+    "ReplicationCollectionKeyV1": {
+      "fields": [
+        "networkId",
+        "contextGraphId",
+        "subGraphNameOrNull",
+        "visibility"
+      ],
+      "fieldTypes": [
+        "nfc-tstr",
+        "nfc-tstr",
+        "nfc-tstr|null",
+        "u8-enum"
+      ]
+    },
+    "ReplicationViewKeyV1": {
+      "fields": [
+        "networkId",
+        "contextGraphId",
+        "subGraphNameOrNull",
+        "tier",
+        "visibility",
+        "policyEpoch",
+        "keyEpochOrNull"
+      ],
+      "fieldTypes": [
+        "nfc-tstr",
+        "nfc-tstr",
+        "nfc-tstr|null",
+        "u8-enum",
+        "u8-enum",
+        "u64",
+        "u64|null"
+      ]
+    },
+    "WalObjectV1": {
+      "fields": [
+        "version",
+        "namespaceId",
+        "writerId",
+        "writerEpoch",
+        "sequence",
+        "previousObjectIdOrNull",
+        "payloadBytes",
+        "signature"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "address20",
+        "u64",
+        "u64",
+        "bytes32|null",
+        "bstr",
+        "signature65"
+      ],
+      "signed": true,
+      "identityDomain": "walObjectId",
+      "signatureDomain": "walObjectSignature",
+      "notes": [
+        "The first seven fields form the signed tuple.",
+        "This complete eight-field value is the sole durable content-addressed synchronization atom.",
+        "payloadBytes is inline and opaque; it has no generic payload or blob identity."
+      ]
+    },
+    "DkgPayloadEnvelopeV1": {
+      "fields": [
+        "version",
+        "payloadKind",
+        "codec",
+        "mediaType",
+        "encryptionOrNull",
+        "contentBytes"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16-enum",
+        "u16-enum",
+        "nfc-tstr",
+        "EncryptionDescriptorV1|null",
+        "bstr"
+      ]
+    },
+    "EncryptionDescriptorV1": {
+      "fields": [
+        "algorithm",
+        "keyEpoch",
+        "nonce",
+        "associatedDataDigest"
+      ],
+      "fieldTypes": [
+        "u16-enum",
+        "u64",
+        "bytes12",
+        "bytes32"
+      ]
+    },
+    "DkgMutationV1": {
+      "fields": [
+        "version",
+        "operation",
+        "logicalKey",
+        "parents",
+        "baseHeads",
+        "policyObjectId",
+        "rdfMutationOrNull",
+        "chainBindingOrNull",
+        "deleteBasisOrNull",
+        "nonConsensusTimestampMsOrNull"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16-enum",
+        "bytes32",
+        "sorted-unique<bytes32>",
+        "sorted-unique<bytes32>",
+        "bytes32",
+        "RdfMutationV1|null",
+        "ChainBindingV1|null",
+        "DeleteBasisV1|null",
+        "u64|null"
+      ]
+    },
+    "DeleteBasisV1": {
+      "fields": [
+        "expiresAtMs",
+        "curatorVectorIdOrNull",
+        "finalizedChainFrontierOrNull"
+      ],
+      "fieldTypes": [
+        "u64",
+        "bytes32|null",
+        "ChainFrontierV1|null"
+      ]
+    },
+    "RdfMutationV1": {
+      "fields": [
+        "version",
+        "mode",
+        "baseStateDigest",
+        "resultStateDigest",
+        "replaceGraphs",
+        "replaceSubjects",
+        "deleteNQuadsBytes",
+        "insertNQuadsBytes",
+        "touchedKeys",
+        "sourceSemanticAuditBytesOrNull"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u8-enum",
+        "bytes32",
+        "bytes32",
+        "sorted-unique<GraphReplacementV1>",
+        "sorted-unique<SubjectReplacementV1>",
+        "bstr",
+        "bstr",
+        "sorted-unique<bytes32>",
+        "bstr|null"
+      ]
+    },
+    "GraphReplacementV1": {
+      "fields": [
+        "graphIri",
+        "canonicalNQuadsBytes",
+        "quadCount"
+      ],
+      "fieldTypes": [
+        "nfc-tstr",
+        "bstr",
+        "u64"
+      ]
+    },
+    "SubjectReplacementV1": {
+      "fields": [
+        "graphIri",
+        "subjectIri",
+        "canonicalNQuadsBytes",
+        "quadCount"
+      ],
+      "fieldTypes": [
+        "nfc-tstr",
+        "nfc-tstr",
+        "bstr",
+        "u64"
+      ]
+    },
+    "RdfPolicyV1": {
+      "fields": [
+        "version",
+        "adapterVersion",
+        "allowedGraphPrefixes",
+        "maxQuadsPerMutation",
+        "maxWalObjectBytes",
+        "singleValuedPredicates",
+        "multiValuedPredicates",
+        "sharedWriteLogicalKeys",
+        "resolverAddresses",
+        "expiryAuthorityAddresses",
+        "allowedPayloadKinds"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16",
+        "sorted-unique<nfc-tstr>",
+        "u64",
+        "u64",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<bytes32>",
+        "sorted-unique<address20>",
+        "sorted-unique<address20>",
+        "sorted-unique<u16>"
+      ]
+    },
+    "ChainBindingV1": {
+      "fields": [
+        "chainId",
+        "knowledgeAssetsContract",
+        "contextGraphOnChainId",
+        "kaId",
+        "authorAddress",
+        "assertionVersion",
+        "merkleRoot",
+        "transactionHash",
+        "blockNumber",
+        "blockHash",
+        "transactionIndex",
+        "logIndex",
+        "eventType",
+        "requiredFinalityBlocks"
+      ],
+      "fieldTypes": [
+        "u64",
+        "address20",
+        "bytes32",
+        "bytes32",
+        "address20",
+        "u64",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "bytes32",
+        "u64",
+        "u64",
+        "u16-enum",
+        "u32"
+      ],
+      "enumFields": {
+        "12": "chainEventType"
+      }
+    },
+    "AuthorCheckpointV1": {
+      "fields": [
+        "version",
+        "namespaceId",
+        "writerId",
+        "writerEpoch",
+        "checkpointNumber",
+        "setCommitmentVersion",
+        "objectSetRoot",
+        "objectCount",
+        "maxSequence",
+        "previousCheckpointIdOrNull",
+        "baselineSnapshotObjectIdOrNull",
+        "compactionFloor",
+        "signature"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "address20",
+        "u64",
+        "u64",
+        "literal-1",
+        "bytes32",
+        "u64",
+        "u64",
+        "bytes32|null",
+        "bytes32|null",
+        "u64",
+        "signature65"
+      ],
+      "signed": true,
+      "identityDomain": "checkpointId",
+      "signatureDomain": "checkpointSignature"
+    },
+    "SignatureEntryV1": {
+      "fields": [
+        "signerAddress",
+        "signature"
+      ],
+      "fieldTypes": [
+        "address20",
+        "signature65"
+      ]
+    },
+    "AuthoritySetV1": {
+      "fields": [
+        "version",
+        "scope",
+        "networkId",
+        "authorityEpoch",
+        "threshold",
+        "signerAddresses",
+        "notBeforeMs",
+        "expiresAtMs",
+        "previousAuthoritySetIdOrNull",
+        "emergencyRevocationIds",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u8-enum",
+        "nfc-tstr",
+        "u64",
+        "u16",
+        "sorted-unique<address20>",
+        "u64",
+        "u64",
+        "bytes32|null",
+        "sorted-unique<bytes32>",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "authorityId",
+      "signatureDomain": "authoritySignature"
+    },
+    "MembershipCheckpointV1": {
+      "fields": [
+        "version",
+        "collectionId",
+        "checkpointNumber",
+        "policyEpoch",
+        "publishMode",
+        "writerIds",
+        "memberAgentAddresses",
+        "allowedPeerIds",
+        "activeNamespaceIds",
+        "rdfPolicyObjectId",
+        "previousMembershipCheckpointIdOrNull",
+        "issuedAtMs",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "u64",
+        "u64",
+        "u8-enum",
+        "sorted-unique<address20>",
+        "sorted-unique<address20>",
+        "sorted-unique<bstr>",
+        "sorted-unique<bytes32>",
+        "bytes32",
+        "bytes32|null",
+        "u64",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "membershipId",
+      "signatureDomain": "membershipSignature"
+    },
+    "ExpectedNamespaceV1": {
+      "fields": [
+        "namespaceId",
+        "writerCheckpoints"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "sorted-unique<WriterCheckpointV1>"
+      ]
+    },
+    "WriterCheckpointV1": {
+      "fields": [
+        "writerId",
+        "checkpointId"
+      ],
+      "fieldTypes": [
+        "address20",
+        "bytes32"
+      ]
+    },
+    "CollectionHeadVectorV1": {
+      "fields": [
+        "version",
+        "collectionId",
+        "membershipCheckpointId",
+        "expectedNamespaces",
+        "vectorEpoch",
+        "vectorNumber",
+        "previousVectorIdOrNull",
+        "issuedAtMs",
+        "expiresAtMs",
+        "finalizedChainFrontierOrNull",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "bytes32",
+        "sorted-unique<ExpectedNamespaceV1>",
+        "u64",
+        "u64",
+        "bytes32|null",
+        "u64",
+        "u64",
+        "ChainFrontierV1|null",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "vectorId",
+      "signatureDomain": "vectorSignature"
+    },
+    "ChainFrontierV1": {
+      "fields": [
+        "chainId",
+        "blockNumber",
+        "blockHash"
+      ],
+      "fieldTypes": [
+        "u64",
+        "u64",
+        "bytes32"
+      ]
+    },
+    "NetworkWalCutoverV1": {
+      "fields": [
+        "version",
+        "networkId",
+        "walProtocolVersion",
+        "rdfAdapterVersion",
+        "requiredNodeVersion",
+        "collectionVectorManifestObjectId",
+        "cohortManifestObjectId",
+        "cutoverEpoch",
+        "activation",
+        "legacySyncDisabled",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "nfc-tstr",
+        "u16",
+        "u16",
+        "nfc-tstr",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "ActivationFrontierV1",
+        "true",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "cutoverId",
+      "signatureDomain": "cutoverSignature"
+    },
+    "ActivationFrontierV1": {
+      "fields": [
+        "minimumBlockByChain",
+        "notBeforeMs"
+      ],
+      "fieldTypes": [
+        "sorted-unique<ChainFrontierV1>",
+        "u64"
+      ]
+    },
+    "RequestContextV1": {
+      "fields": [
+        "issuedAtMs",
+        "requesterPeerId",
+        "targetPeerId",
+        "namespaceId",
+        "requesterAgentAddressOrNull",
+        "identityProofOrNull",
+        "privateViewProofOrNull"
+      ],
+      "fieldTypes": [
+        "u64",
+        "bstr",
+        "bstr",
+        "bytes32",
+        "address20|null",
+        "IdentityProofV1|null",
+        "PrivateViewProofV1|null"
+      ]
+    },
+    "IdentityProofV1": {
+      "fields": [
+        "agentAddress",
+        "peerId",
+        "notBeforeMs",
+        "expiresAtMs",
+        "nonce",
+        "signature"
+      ],
+      "fieldTypes": [
+        "address20",
+        "bstr",
+        "u64",
+        "u64",
+        "bytes16",
+        "signature65"
+      ]
+    },
+    "PrivateViewProofV1": {
+      "fields": [
+        "membershipCheckpointId",
+        "memberAgentAddress",
+        "transportPeerId",
+        "delegationOrNull"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "address20",
+        "bstr",
+        "PeerDelegationV1|null"
+      ]
+    },
+    "PeerDelegationV1": {
+      "fields": [
+        "collectionId",
+        "memberAgentAddress",
+        "delegatePeerId",
+        "notBeforeMs",
+        "expiresAtMs",
+        "nonce",
+        "signature"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "address20",
+        "bstr",
+        "u64",
+        "u64",
+        "bytes16",
+        "signature65"
+      ]
+    },
+    "FrameV1": {
+      "fields": [
+        "protocolVersion",
+        "messageType",
+        "requestId",
+        "body"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "u16",
+        "bytes16",
+        "tuple"
+      ]
+    },
+    "AuthenticatedRequestV1": {
+      "fields": [
+        "context",
+        "request"
+      ],
+      "fieldTypes": [
+        "RequestContextV1",
+        "tuple"
+      ]
+    },
+    "GetCapabilitiesV1": {
+      "fields": [],
+      "fieldTypes": []
+    },
+    "AckV1": {
+      "fields": [],
+      "fieldTypes": []
+    },
+    "CapabilitiesV1": {
+      "fields": [
+        "protocolVersions",
+        "adapterVersions",
+        "maximumControlFrameBytes",
+        "maximumSymbolsPerResponse",
+        "maximumFallbackIdsPerPage",
+        "maximumObjectRangeBytes",
+        "maximumWalObjectBytes",
+        "maximumConcurrentRanges"
+      ],
+      "fieldTypes": [
+        "sorted-unique<u16>",
+        "sorted-unique<u16>",
+        "u64",
+        "u64",
+        "u64",
+        "u64",
+        "u64",
+        "u64"
+      ]
+    },
+    "GetHeadV1": {
+      "fields": [
+        "writerId",
+        "writerEpochOrNull"
+      ],
+      "fieldTypes": [
+        "address20",
+        "u64|null"
+      ]
+    },
+    "GetVectorV1": {
+      "fields": [
+        "collectionId"
+      ],
+      "fieldTypes": [
+        "bytes32"
+      ]
+    },
+    "GetCheckpointV1": {
+      "fields": [
+        "checkpointId"
+      ],
+      "fieldTypes": [
+        "bytes32"
+      ]
+    },
+    "AnnounceHeadV1": {
+      "fields": [
+        "checkpointId"
+      ],
+      "fieldTypes": [
+        "bytes32"
+      ]
+    },
+    "CancelV1": {
+      "fields": [
+        "cancelledRequestId"
+      ],
+      "fieldTypes": [
+        "bytes16"
+      ]
+    },
+    "GetReconciliationSymbolsV1": {
+      "fields": [
+        "headId",
+        "reconciliationSeed",
+        "firstSymbolIndex",
+        "symbolCount"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "bytes32",
+        "u64",
+        "u32"
+      ]
+    },
+    "ReconciliationSymbolsV1": {
+      "fields": [
+        "headId",
+        "reconciliationSeed",
+        "firstSymbolIndex",
+        "symbols"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "bytes32",
+        "u64",
+        "array<ReconciliationSymbolV1>"
+      ]
+    },
+    "ReconciliationSymbolV1": {
+      "fields": [
+        "symbolIndex",
+        "count",
+        "idXor",
+        "checksumXor"
+      ],
+      "fieldTypes": [
+        "u64",
+        "i64",
+        "bytes32",
+        "bytes32"
+      ]
+    },
+    "GetObjectIdsV1": {
+      "fields": [
+        "headId",
+        "startAfterOrNull",
+        "limit"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "bytes32|null",
+        "u32"
+      ]
+    },
+    "ObjectIdsPageV1": {
+      "fields": [
+        "headId",
+        "startAfterOrNull",
+        "ids",
+        "nextStartAfterOrNull",
+        "done"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "bytes32|null",
+        "strictly-sorted-unique<bytes32>",
+        "bytes32|null",
+        "bool"
+      ]
+    },
+    "GetWalObjectRangeV1": {
+      "fields": [
+        "walObjectId",
+        "offset",
+        "maximumLength"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "u64",
+        "u32"
+      ]
+    },
+    "WalObjectRangeV1": {
+      "fields": [
+        "walObjectId",
+        "totalObjectLength",
+        "offset",
+        "bytes"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "u64",
+        "u64",
+        "bstr"
+      ]
+    },
+    "ErrorV1": {
+      "fields": [
+        "code",
+        "retryAfterMsOrNull",
+        "detailCodeOrNull"
+      ],
+      "fieldTypes": [
+        "u16-enum",
+        "u64|null",
+        "u16|null"
+      ]
+    },
+    "SnapshotManifestV1": {
+      "fields": [
+        "version",
+        "namespaceId",
+        "writerId",
+        "newWriterEpoch",
+        "coveredWriterEpoch",
+        "coveredCheckpointId",
+        "coveredObjectSetRoot",
+        "coveredObjectCount",
+        "compactionFloor",
+        "entries",
+        "conflicts",
+        "policyObjectId",
+        "adapterVersion",
+        "chainFrontierOrNull"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "address20",
+        "u64",
+        "u64",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "u64",
+        "sorted-unique<SnapshotEntryV1>",
+        "sorted-unique<SnapshotConflictV1>",
+        "bytes32",
+        "u16",
+        "ChainFrontierV1|null"
+      ]
+    },
+    "SnapshotEntryV1": {
+      "fields": [
+        "logicalKey",
+        "stateKind",
+        "activeHeadIds",
+        "stateDigest",
+        "canonicalGraphBytes"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "u8-enum",
+        "sorted-unique<bytes32>",
+        "bytes32",
+        "bstr"
+      ],
+      "enumFields": {
+        "1": "snapshotEntryState"
+      }
+    },
+    "SnapshotConflictV1": {
+      "fields": [
+        "logicalKey",
+        "externalHeadIds",
+        "commonBaseHeadIds",
+        "conflictDigest"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "sorted-unique<bytes32>",
+        "sorted-unique<bytes32>",
+        "bytes32"
+      ]
+    },
+    "SnapshotCustodyReceiptV1": {
+      "fields": [
+        "version",
+        "snapshotObjectId",
+        "custodianAgentAddress",
+        "custodianPeerId",
+        "membershipCheckpointId",
+        "notBeforeMs",
+        "expiresAtMs",
+        "nonce",
+        "signature"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "address20",
+        "bstr",
+        "bytes32",
+        "u64",
+        "u64",
+        "bytes16",
+        "signature65"
+      ],
+      "signed": true,
+      "identityDomain": "receiptId",
+      "signatureDomain": "receiptSignature"
+    },
+    "LegacyGenesisV1": {
+      "fields": [
+        "version",
+        "collectionId",
+        "namespaceId",
+        "sourceStateDigest",
+        "canonicalGraphBytes",
+        "provenanceStatus",
+        "migrationPolicyObjectId",
+        "barrierVectorId",
+        "createdAtMs"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bstr",
+        "literal-0",
+        "bytes32",
+        "bytes32",
+        "u64"
+      ]
+    },
+    "SetMembershipProofV1": {
+      "fields": [
+        "version",
+        "walObjectId",
+        "leafPrefixNibbleLength",
+        "leafIds",
+        "path"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "u8",
+        "strictly-sorted-unique<bytes32>",
+        "array<SetProofLevelV1>"
+      ]
+    },
+    "SetProofLevelV1": {
+      "fields": [
+        "parentPrefixNibbleLength",
+        "childBitmap",
+        "childNibble",
+        "siblings"
+      ],
+      "fieldTypes": [
+        "u8",
+        "u16",
+        "u8",
+        "strictly-sorted-unique<SetProofSiblingV1>"
+      ]
+    },
+    "SetProofSiblingV1": {
+      "fields": [
+        "nibble",
+        "childCount",
+        "childHash"
+      ],
+      "fieldTypes": [
+        "u8",
+        "u64",
+        "bytes32"
+      ]
+    },
+    "MoveTierSourceV1": {
+      "fields": [
+        "version",
+        "transitionNonce",
+        "transitionCommitment",
+        "targetNamespaceId",
+        "targetWalObjectId",
+        "sourceHeads",
+        "sourceStateDigest",
+        "sourceResultDigest"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "sorted-unique<bytes32>",
+        "bytes32",
+        "bytes32"
+      ]
+    },
+    "MoveTierTargetV1": {
+      "fields": [
+        "version",
+        "transitionCommitment",
+        "targetMutation"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "DkgMutationV1"
+      ]
+    },
+    "TierTransitionReceiptV1": {
+      "fields": [
+        "version",
+        "transitionCommitment",
+        "targetNamespaceId",
+        "targetWalObjectId",
+        "policyObjectId",
+        "curatorVectorId",
+        "expiresAtMs",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "receiptId",
+      "signatureDomain": "receiptSignature"
+    },
+    "ProviderEntryV1": {
+      "fields": [
+        "peerId",
+        "agentAddress",
+        "endpoints",
+        "namespaceIds"
+      ],
+      "fieldTypes": [
+        "bstr",
+        "address20",
+        "sorted-unique<nfc-tstr>",
+        "sorted-unique<bytes32>"
+      ]
+    },
+    "ProviderBootstrapManifestV1": {
+      "fields": [
+        "version",
+        "networkId",
+        "collectionId",
+        "authorityEpoch",
+        "providers",
+        "notBeforeMs",
+        "expiresAtMs",
+        "previousManifestIdOrNull",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "nfc-tstr",
+        "bytes32",
+        "u64",
+        "sorted-unique<ProviderEntryV1>",
+        "u64",
+        "u64",
+        "bytes32|null",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "bootstrapId",
+      "signatureDomain": "bootstrapSignature"
+    },
+    "PrivateBootstrapTicketV1": {
+      "fields": [
+        "version",
+        "collectionId",
+        "memberAgentAddress",
+        "membershipCheckpointId",
+        "providerManifestId",
+        "notBeforeMs",
+        "expiresAtMs",
+        "nonce",
+        "ciphertext"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "bytes32",
+        "address20",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "u64",
+        "bytes12",
+        "bstr"
+      ]
+    },
+    "RollbackRecoveryV1": {
+      "fields": [
+        "version",
+        "networkId",
+        "collectionId",
+        "minimumVectorEpoch",
+        "minimumVectorNumber",
+        "minimumVectorId",
+        "recoveryNonce",
+        "issuedAtMs",
+        "authoritySetId",
+        "signatures"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "nfc-tstr",
+        "bytes32",
+        "u64",
+        "u64",
+        "bytes32",
+        "bytes32",
+        "u64",
+        "bytes32",
+        "sorted-unique<SignatureEntryV1>"
+      ],
+      "signed": true,
+      "identityDomain": "rollbackRecoveryId",
+      "signatureDomain": "rollbackRecoverySignature"
+    },
+    "CutoverCohortManifestV1": {
+      "fields": [
+        "version",
+        "networkId",
+        "cutoverEpoch",
+        "requiredNodes",
+        "activeAuthors",
+        "decommissionedPeerIds",
+        "minimumBootstrapVectorIds",
+        "createdAtMs"
+      ],
+      "fieldTypes": [
+        "literal-1",
+        "nfc-tstr",
+        "u64",
+        "sorted-unique<RequiredNodeV1>",
+        "sorted-unique<ActiveAuthorV1>",
+        "sorted-unique<bstr>",
+        "sorted-unique<bytes32>",
+        "u64"
+      ]
+    },
+    "RequiredNodeV1": {
+      "fields": [
+        "peerId",
+        "agentAddress"
+      ],
+      "fieldTypes": [
+        "bstr",
+        "address20"
+      ]
+    },
+    "ActiveAuthorV1": {
+      "fields": [
+        "namespaceId",
+        "writerId",
+        "writerEpoch",
+        "checkpointId"
+      ],
+      "fieldTypes": [
+        "bytes32",
+        "address20",
+        "u64",
+        "bytes32"
+      ]
+    }
+  }
+}

@@ -5,7 +5,8 @@
 export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
-  | 'replaceGraphAndSubject';
+  | 'replaceGraphAndSubject'
+  | 'commitWalProjectionV1';
 
 /**
  * Typed signal that an optional store capability is unavailable.
