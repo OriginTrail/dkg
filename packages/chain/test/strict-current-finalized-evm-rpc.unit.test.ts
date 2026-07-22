@@ -109,11 +109,9 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
           return;
         case 'eth_call': {
           const callObject = call.params[0] as { readonly data?: unknown };
-          sendResult(
-            response,
-            call,
-            callObject.data === FIRST_READ_DATA ? '0xaaaa' : '0xbbbbcc',
-          );
+          if (callObject.data === FIRST_READ_DATA) sendResult(response, call, '0xaaaa');
+          else if (callObject.data === SECOND_READ_DATA) sendResult(response, call, '0xbbbbcc');
+          else sendError(response, call, -32602, 'unexpected call payload');
           return;
         }
         default:
@@ -152,8 +150,24 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     ]);
     const hashReference = { blockHash: BLOCK_HASH, requireCanonical: true };
     expect(server.calls[2]!.params).toEqual([TO, hashReference]);
-    expect(server.calls[3]!.params[1]).toEqual(hashReference);
-    expect(server.calls[4]!.params[1]).toEqual(hashReference);
+    const ethCallParams = server.calls
+      .filter(({ method }) => method === 'eth_call')
+      .map(({ params }) => params);
+    expect(ethCallParams).toHaveLength(2);
+    expect(ethCallParams).toEqual(expect.arrayContaining([
+      [{
+        from: CONTROL_EIP1271_CALL_FROM_V1,
+        to: TO,
+        data: FIRST_READ_DATA,
+        gas: '0xf4240',
+      }, hashReference],
+      [{
+        from: CONTROL_EIP1271_CALL_FROM_V1,
+        to: TO,
+        data: SECOND_READ_DATA,
+        gas: '0xf4240',
+      }, hashReference],
+    ]));
   });
 
   it('closes one hash sandwich after every call in a multi-read fallback', async () => {
@@ -616,7 +630,8 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toMatchObject({ code: 'revert' });
+    expect(caught).toMatchObject({ code: 'revert', revertData });
+    expect(Object.isFrozen(caught)).toBe(true);
     expect(readStrictCurrentFinalizedEvmRevertDataV1(caught)).toBe(revertData);
     expect(readStrictCurrentFinalizedEvmRevertDataV1(
       new CurrentFinalizedEvmCallErrorV1('revert', 'forged'),
@@ -905,17 +920,8 @@ function fixedRequest(
   return {
     chainId: CHAIN_ID,
     to: TO,
-    from: CONTROL_EIP1271_CALL_FROM_V1,
     data: CANONICAL_CALL_DATA,
-    gasLimit: CONTROL_EIP1271_GAS_LIMIT_V1,
     maxReturnBytes: CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
-    maxRpcResponseBytes: CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
-    attemptTimeoutMs: CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
-    maxAttempts: CONTROL_EIP1271_MAX_ATTEMPTS_V1,
-    endpointAttemptPolicy: CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
-    maxConcurrentCallsPerChain: CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
-    totalDeadlineMs: CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
-    ccipReadEnabled: false,
     signal: new AbortController().signal,
     ...overrides,
   };

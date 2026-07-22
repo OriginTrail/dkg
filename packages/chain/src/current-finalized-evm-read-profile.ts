@@ -50,6 +50,7 @@ export class CurrentFinalizedEvmCallErrorV1 extends Error {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'CurrentFinalizedEvmCallErrorV1';
     this.code = code;
-    Object.freeze(this);
+    // Package-internal typed failures finish their own fields before freezing.
+    if (new.target === CurrentFinalizedEvmCallErrorV1) Object.freeze(this);
   }
 }

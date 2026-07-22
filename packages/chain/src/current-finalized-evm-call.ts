@@ -9,15 +9,8 @@ import {
   type CurrentFinalizedEvmCallV1,
 } from './current-finalized-evm-call-model.js';
 import {
-  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
-  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
-  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
-  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
-  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
-  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
   CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
@@ -30,20 +23,11 @@ import {
 } from './strict-local-data.js';
 
 const REQUEST_KEYS = Object.freeze([
-  'attemptTimeoutMs',
-  'ccipReadEnabled',
   'chainId',
   'data',
-  'endpointAttemptPolicy',
-  'from',
-  'gasLimit',
-  'maxAttempts',
-  'maxConcurrentCallsPerChain',
   'maxReturnBytes',
-  'maxRpcResponseBytes',
   'signal',
   'to',
-  'totalDeadlineMs',
 ] as const);
 
 /**
@@ -164,12 +148,8 @@ export function snapshotCurrentFinalizedEvmCallRequestV1(
     const record = snapshotExactDataRecord(input, REQUEST_KEYS);
     assertCanonicalChainId(record.chainId, 'current-finalized request chainId');
     assertCanonicalNonzeroEvmAddress(record.to, 'current-finalized request to');
-    if (record.from !== CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1) throw new Error('wrong from');
     if (typeof record.data !== 'string') throw new Error('call data is not a string');
     assertCanonicalAbiCallData(record.data);
-    if (record.gasLimit !== CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1) {
-      throw new Error('wrong gas limit');
-    }
     if (
       typeof record.maxReturnBytes !== 'number'
       || !Number.isSafeInteger(record.maxReturnBytes)
@@ -178,44 +158,13 @@ export function snapshotCurrentFinalizedEvmCallRequestV1(
     ) {
       throw new Error('wrong return cap');
     }
-    if (record.maxRpcResponseBytes !== CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1) {
-      throw new Error('wrong RPC response cap');
-    }
-    if (record.attemptTimeoutMs !== CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1) {
-      throw new Error('wrong attempt timeout');
-    }
-    if (record.maxAttempts !== CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1) {
-      throw new Error('wrong attempt count');
-    }
-    if (record.endpointAttemptPolicy !== CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1) {
-      throw new Error('wrong endpoint policy');
-    }
-    if (
-      record.maxConcurrentCallsPerChain
-      !== CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1
-    ) {
-      throw new Error('wrong concurrency ceiling');
-    }
-    if (record.totalDeadlineMs !== CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1) {
-      throw new Error('wrong total deadline');
-    }
-    if (record.ccipReadEnabled !== false) throw new Error('CCIP Read must be disabled');
     if (!isAbortSignal(record.signal)) throw new Error('signal is not an AbortSignal');
 
     return Object.freeze({
       chainId: record.chainId,
       to: record.to,
-      from: record.from,
       data: record.data,
-      gasLimit: record.gasLimit,
       maxReturnBytes: record.maxReturnBytes,
-      maxRpcResponseBytes: record.maxRpcResponseBytes,
-      attemptTimeoutMs: record.attemptTimeoutMs,
-      maxAttempts: record.maxAttempts,
-      endpointAttemptPolicy: record.endpointAttemptPolicy,
-      maxConcurrentCallsPerChain: record.maxConcurrentCallsPerChain,
-      totalDeadlineMs: record.totalDeadlineMs,
-      ccipReadEnabled: record.ccipReadEnabled,
       signal: record.signal,
     }) as CurrentFinalizedEvmCallRequestV1;
   } catch {

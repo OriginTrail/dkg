@@ -109,16 +109,21 @@ const MAX_U256 =
   115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
 const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
 const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
-const AUTHENTICATED_REVERT_DATA_V1 = new WeakMap<object, string>();
 const READ_REQUEST_KEYS = Object.freeze(['calls', 'chainId', 'signal'] as const);
 const READ_CALL_KEYS = Object.freeze(['data', 'maxReturnBytes', 'to'] as const);
 
+class AuthenticatedFinalizedEvmRevertErrorV1 extends CurrentFinalizedEvmCallErrorV1 {
+  constructor(readonly revertData: string) {
+    super('revert', 'Contract call reverted at the resolved finalized anchor');
+    Object.freeze(this);
+  }
+}
+
 /** Package-internal evidence available only for errors minted by this transport. */
 export function readStrictCurrentFinalizedEvmRevertDataV1(error: unknown): string | undefined {
-  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-    return undefined;
-  }
-  return AUTHENTICATED_REVERT_DATA_V1.get(error);
+  return error instanceof AuthenticatedFinalizedEvmRevertErrorV1
+    ? error.revertData
+    : undefined;
 }
 
 /**
@@ -859,12 +864,12 @@ function anchorDependentResourceLimited(message: string): CurrentFinalizedEvmCal
 }
 
 function revertedAtFinalizedAnchor(data?: string): CurrentFinalizedEvmCallErrorV1 {
-  const error = new CurrentFinalizedEvmCallErrorV1(
+  return data === undefined
+    ? new CurrentFinalizedEvmCallErrorV1(
     'revert',
     'Contract call reverted at the resolved finalized anchor',
-  );
-  if (data !== undefined) AUTHENTICATED_REVERT_DATA_V1.set(error, data);
-  return error;
+    )
+    : new AuthenticatedFinalizedEvmRevertErrorV1(data);
 }
 
 function isAnchorDependentResourceLimit(
