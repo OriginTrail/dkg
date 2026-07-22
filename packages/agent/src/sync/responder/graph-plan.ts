@@ -614,6 +614,16 @@ type MetaOversizedSubjectPolicy = 'byte-fit' | 'fail-loud';
  * than silent loss here: a byte-budget-negotiating requester never hits this (it
  * uses empty=EOF pagination), and the oversized `_meta` subject itself is only
  * reachable via unverified peer-ingest, fixed at the root by #1921.
+ *
+ * Contract: this is a HARD, NON-RETRYABLE failure. The sync responder surfaces it
+ * as `outcome:'error'` and re-throws it (it is deliberately NOT wrapped in a
+ * retryable error, and NEVER converted to an empty — EOF — body), because a retry
+ * cannot make an oversized subject servable to a legacy requester; the only
+ * resolutions are a requester upgrade or the #1921 ingest fix. The budget it is
+ * checked against is `SYNC_BYTE_BUDGET_RESPONSE_BYTES` (the router read cap minus
+ * the frame headroom) — the largest response body guaranteed to fit one transport
+ * frame — so a page within it is always sendable and only a genuinely oversized
+ * one throws.
  */
 export class DurableMetaPageFrameError extends Error {
   readonly contextGraphId: string;
