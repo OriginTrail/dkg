@@ -48,6 +48,13 @@ export interface PrecomputedAttestation {
   authorAddress: string;
   signature: { r: Uint8Array; vs: Uint8Array };
   schemeVersion: number;
+  /**
+   * §F2 — packed `(author << 96) | number` kaId the seal's typed data binds.
+   * `buildSeal` has always returned it (the publisher mints exactly this id);
+   * it was just missing from this declared type, which made sealed publish
+   * option bags fail tsc against `PublishOptions.precomputedAttestation`.
+   */
+  reservedKaId: bigint;
 }
 
 export interface PrecomputedUpdateAttestation {

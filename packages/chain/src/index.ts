@@ -29,6 +29,7 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  getKaIdAlreadyMintedKaId,
   isRetryableRpcError,
   isKnownTransactionError,
   resolveRpcUrls,
