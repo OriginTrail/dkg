@@ -236,6 +236,7 @@ export function createFinalizedVmRuntimeV1(
 
         const composed = composeFinalizedVmSetV1({
           catalogLane: request.catalogLane,
+          finalizedContextGraph,
           inventory,
           placements: request.placements,
         });

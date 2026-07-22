@@ -1,8 +1,10 @@
 import {
+  AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  buildAuthorAttestationTypedData,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogScopeDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -59,10 +61,15 @@ export function rfc64VmUal(kaNumber: bigint): string {
 export async function createRfc64FinalizedVmPlacementFixture(options: {
   readonly kaNumber?: bigint;
   readonly assertionRoot?: Digest32V1;
+  readonly publicTripleCount?: number;
 } = {}): Promise<FinalizedVmPlacementEvidenceV1> {
   const kaNumber = options.kaNumber ?? 1n;
   const kaId = rfc64VmPackKaId(kaNumber);
   const assertionRoot = options.assertionRoot ?? RFC64_VM_ASSERTION_ROOT;
+  const publicTripleCount = options.publicTripleCount ?? 10;
+  if (!Number.isSafeInteger(publicTripleCount) || publicTripleCount < 1) {
+    throw new RangeError('publicTripleCount must be a positive safe integer');
+  }
   const scope = {
     networkId: RFC64_VM_NETWORK_ID,
     contextGraphId: RFC64_VM_CONTEXT_GRAPH_NAME,
@@ -74,12 +81,23 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
     era: '0',
     bucketCount: '1',
   } as AuthorCatalogScopeV1;
+  const typedData = buildAuthorAttestationTypedData({
+    chainId: BigInt(RFC64_VM_CHAIN_ID),
+    kav10Address: RFC64_VM_KA_STORAGE,
+    merkleRoot: ethers.getBytes(assertionRoot),
+    authorAddress: RFC64_VM_AUTHOR,
+    reservedKaId: BigInt(kaId),
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  });
+  const attestation = RFC64_VM_AUTHOR_WALLET.signingKey.sign(
+    ethers.TypedDataEncoder.hash(typedData.domain, typedData.types, typedData.message),
+  );
   const seal = {
     assertionMerkleRoot: assertionRoot,
     authorAddress: RFC64_VM_AUTHOR,
-    authorAttestationR: `0x${'aa'.repeat(32)}`,
-    authorAttestationVS: `0x${'bb'.repeat(32)}`,
-    authorSchemeVersion: '1',
+    authorAttestationR: attestation.r,
+    authorAttestationVS: attestation.yParityAndS,
+    authorSchemeVersion: String(AUTHOR_SCHEME_VERSION_V1),
     assertedAtChainId: RFC64_VM_CHAIN_ID,
     assertedAtKav10Address: RFC64_VM_KA_STORAGE,
     reservedKaId: kaId,
@@ -87,7 +105,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
     contentScopeVersion: '2',
     kaUal: rfc64VmUal(kaNumber),
     assertionVersion: '2',
-    publicTripleCount: '10',
+    publicTripleCount: String(publicTripleCount),
     privateTripleCount: '0',
     privateMerkleRoot: null,
   } as CanonicalGraphScopedAuthorSealV1;

@@ -1,5 +1,7 @@
 import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MemoryLayer,
+  contextGraphLayerUri,
   type ContextGraphPolicyV1,
   type Digest32V1,
 } from '@origintrail-official/dkg-core';
@@ -8,6 +10,12 @@ import type {
   StrictCurrentFinalizedEvmSnapshotScopeV1,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
+import {
+  OxigraphStore,
+  readExactGraphPaged,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
@@ -16,6 +24,7 @@ import {
   createFinalizedVmRuntimeV1,
   type FinalizedVmMaterializerV1,
 } from '../src/rfc64/finalized-vm-runtime-v1.js';
+import { createFinalizedVmStoreMaterializerV1 } from '../src/rfc64/finalized-vm-store-materializer-v1.js';
 import {
   RFC64_VM_ASSERTION_ROOT,
   RFC64_VM_AUTHOR,
@@ -120,6 +129,63 @@ describe('RFC-64 finalized public VM runtime', () => {
     await expect(runtime(request(placement))).rejects.toMatchObject({
       code: 'finalized-vm-runtime-materialization',
     } satisfies Partial<FinalizedVmRuntimeErrorV1>);
+  });
+
+  it('atomically promotes the verified catalog projection into an exact VM graph', async () => {
+    const store = new OxigraphStore();
+    const graphlessProjection: Quad[] = [
+      { subject: 'urn:rfc64:asset', predicate: 'urn:rfc64:value', object: '"one"', graph: '' },
+      { subject: 'urn:rfc64:asset', predicate: 'urn:rfc64:kind', object: '"demo"', graph: '' },
+    ];
+    const assertionRoot = ethers.hexlify(computeFlatKCRootV10(
+      graphlessProjection,
+      [],
+    )).toLowerCase() as Digest32V1;
+    const placement = await createRfc64FinalizedVmPlacementFixture({
+      assertionRoot,
+      publicTripleCount: graphlessProjection.length,
+    });
+    const swmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.SharedWorkingMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    const vmGraph = contextGraphLayerUri(
+      RFC64_VM_CONTEXT_GRAPH_NAME,
+      MemoryLayer.VerifiableMemory,
+      RFC64_VM_AUTHOR,
+      1,
+    );
+    await store.insert(graphlessProjection.map((quad) => ({ ...quad, graph: swmGraph })));
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(
+      snapshotTransport({ assertionRoot }).snapshot,
+      createFinalizedVmStoreMaterializerV1({ store }),
+    ));
+
+    const result = await runtime(request(placement));
+
+    expect(result.receipts).toHaveLength(1);
+    expect(result.receipts[0]).toMatchObject({
+      status: 'materialized',
+      vmGraphIri: vmGraph,
+      tripleCount: String(graphlessProjection.length),
+    });
+    const vmPostRead = await readExactGraphPaged(store, vmGraph, {
+      expectedQuadCount: graphlessProjection.length,
+      outputGraph: '',
+    });
+    expect(vmPostRead).toHaveLength(graphlessProjection.length);
+    expect(vmPostRead).toEqual(expect.arrayContaining(graphlessProjection));
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/status> "confirmed" } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+    const receiptRows = await store.query(
+      `SELECT ?tx WHERE { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/transactionHash> ?tx } }`,
+    );
+    expect(receiptRows).toEqual({ type: 'bindings', bindings: [] });
   });
 });
 

@@ -103,6 +103,7 @@ const blockedRfc64Modules = [
   'durable-file-store-v1.js',
   'finalized-vm-composer-v1.js',
   'finalized-vm-runtime-v1.js',
+  'finalized-vm-store-materializer-v1.js',
   'ka-bundle-store-v1-internal.js',
   'ka-bundle-store-v1.js',
   'open-catalog-policy-v1.js',
