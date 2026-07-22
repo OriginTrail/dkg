@@ -493,23 +493,11 @@ function decodeCanonicalResult(
 function snapshotConfig(input: unknown): ScannerConfigSnapshotV1 {
   try {
     const record = snapshotExactDataRecord(input, CONFIG_KEYS);
-    assertNetworkIdV1(record.networkId, 'finalized VM scanner networkId');
-    assertCanonicalChainId(record.chainId, 'finalized VM scanner chainId');
-    assertCanonicalNonzeroEvmAddress(
-      record.contextGraphStorageAddress,
-      'finalized VM scanner ContextGraphStorage address',
-    );
-    assertCanonicalNonzeroEvmAddress(
-      record.knowledgeAssetStorageAddress,
-      'finalized VM scanner DKGKnowledgeAssets address',
-    );
+    const sessionConfig = snapshotSessionConfigFields(record);
     if (typeof record.snapshot !== 'function') throw new Error('snapshot is not callable');
     const snapshot = record.snapshot as StrictCurrentFinalizedEvmSnapshotScopeV1;
     return Object.freeze({
-      networkId: record.networkId,
-      chainId: record.chainId,
-      contextGraphStorageAddress: record.contextGraphStorageAddress,
-      knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
+      ...sessionConfig,
       snapshot,
     });
   } catch (cause) {
@@ -520,25 +508,31 @@ function snapshotConfig(input: unknown): ScannerConfigSnapshotV1 {
 function snapshotSessionConfig(input: unknown): ScannerSessionConfigSnapshotV1 {
   try {
     const record = snapshotExactDataRecord(input, SESSION_CONFIG_KEYS);
-    assertNetworkIdV1(record.networkId, 'finalized VM scanner networkId');
-    assertCanonicalChainId(record.chainId, 'finalized VM scanner chainId');
-    assertCanonicalNonzeroEvmAddress(
-      record.contextGraphStorageAddress,
-      'finalized VM scanner ContextGraphStorage address',
-    );
-    assertCanonicalNonzeroEvmAddress(
-      record.knowledgeAssetStorageAddress,
-      'finalized VM scanner DKGKnowledgeAssets address',
-    );
-    return Object.freeze({
-      networkId: record.networkId,
-      chainId: record.chainId,
-      contextGraphStorageAddress: record.contextGraphStorageAddress,
-      knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
-    });
+    return snapshotSessionConfigFields(record);
   } catch (cause) {
     throw new TypeError('Finalized VM session scanner configuration is invalid', { cause });
   }
+}
+
+function snapshotSessionConfigFields(
+  record: Record<string, unknown>,
+): ScannerSessionConfigSnapshotV1 {
+  assertNetworkIdV1(record.networkId, 'finalized VM scanner networkId');
+  assertCanonicalChainId(record.chainId, 'finalized VM scanner chainId');
+  assertCanonicalNonzeroEvmAddress(
+    record.contextGraphStorageAddress,
+    'finalized VM scanner ContextGraphStorage address',
+  );
+  assertCanonicalNonzeroEvmAddress(
+    record.knowledgeAssetStorageAddress,
+    'finalized VM scanner DKGKnowledgeAssets address',
+  );
+  return Object.freeze({
+    networkId: record.networkId,
+    chainId: record.chainId,
+    contextGraphStorageAddress: record.contextGraphStorageAddress,
+    knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
+  });
 }
 
 function snapshotRequest(input: unknown): Readonly<FinalizedVmChainScanRequestV1> {

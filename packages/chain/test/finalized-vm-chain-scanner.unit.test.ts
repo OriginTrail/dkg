@@ -21,7 +21,7 @@ import {
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from '../src/current-finalized-evm-snapshot.js';
 import { CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1 } from '../src/current-finalized-evm-read-profile.js';
-import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/strict-current-finalized-evm-rpc.js';
+import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/strict-current-finalized-evm-snapshot-factory.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,
@@ -304,9 +304,31 @@ describe('RFC-64 finalized VM chain scanner', () => {
     });
   });
 
-  it('rejects non-canonical ABI bytes and hostile local shapes', async () => {
+  it('rejects a decodable non-canonical ABI result at the assertion decoder', async () => {
+    let batches = 0;
+    const nonCanonicalRoot = `${bytes32Result(ROOT_A).slice(0, 2)}${bytes32Result(ROOT_A).slice(2).toUpperCase()}`;
+    const scanner = createFinalizedVmChainScannerV1(config(snapshotStub(async () => {
+      batches += 1;
+      if (batches === 1) return activeCountResults(1n);
+      if (batches === 2) return [uintResult(KA_A)];
+      return [
+        updateContextResult(2n),
+        nonCanonicalRoot,
+        addressResult(AUTHOR_A),
+        addressResult(PUBLISHER_A),
+      ];
+    })));
+
+    await expect(scanner({
+      contextGraphId: CG_ID,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'malformed-return' });
+    expect(batches).toBe(3);
+  });
+
+  it('rejects incomplete batch shapes and hostile local inputs', async () => {
     const malformed = createFinalizedVmChainScannerV1(config(snapshotStub(async () => [
-      `${uintResult(0n)}00`,
+      uintResult(0n),
     ])));
     await expect(malformed({
       contextGraphId: CG_ID,
