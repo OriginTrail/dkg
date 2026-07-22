@@ -18,11 +18,15 @@ export function snapshotExactDataRecord(
   }
   const prototype = Object.getPrototypeOf(input);
   if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
+  const expectedKeySet = new Set(expectedKeys);
+  if (expectedKeySet.size !== expectedKeys.length) {
+    throw new Error('expected keys must be unique');
+  }
   const actualKeys = Reflect.ownKeys(input);
   if (
     actualKeys.some((key) => typeof key !== 'string')
     || actualKeys.length !== expectedKeys.length
-    || (actualKeys as string[]).sort().some((key, index) => key !== expectedKeys[index])
+    || (actualKeys as string[]).some((key) => !expectedKeySet.has(key))
   ) {
     throw new Error('unknown or missing fields');
   }
