@@ -140,6 +140,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
+    const rfc64CatalogCalls: any[] = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
@@ -173,6 +174,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         status: 'confirmed',
         publicQuads: [],
       };
+    };
+    agent.recordConfirmedRfc64PublicCatalogAssetV1 = async (input: any) => {
+      rfc64CatalogCalls.push(input);
+      return null;
     };
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
@@ -221,6 +226,17 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
     expect(result.status).toBe('confirmed');
+    expect(rfc64CatalogCalls).toHaveLength(1);
+    expect(rfc64CatalogCalls[0]).toMatchObject({
+      contextGraphId: CG,
+      assertionCoordinate: NAME,
+      publicQuads: [PUBLIC_QUAD],
+    });
+    expect(rfc64CatalogCalls[0].seal).toMatchObject({
+      authorAddress: AGENT_B,
+      reservedKaId: RESERVED_KA_ID,
+      kaUal: KA_UAL,
+    });
   });
 
   it('maps an empty exact KA graph to the mint no-data precondition', async () => {

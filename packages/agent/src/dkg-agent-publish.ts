@@ -98,6 +98,7 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
+  type AssertionCoordinateV1,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   withSpan,
@@ -5406,6 +5407,24 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    if (result.status === 'confirmed') {
+      try {
+        await this.recordConfirmedRfc64PublicCatalogAssetV1({
+          contextGraphId: request.contextGraphId as never,
+          subGraphName: request.subGraphName as never,
+          assertionCoordinate: request.name as AssertionCoordinateV1,
+          publicQuads: snapshotQuads,
+          seal,
+        });
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Confirmed queued publish for <${assertionUri}> but RFC-64 catalog advancement failed: `
+            + (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
     return { ...result, assertionUri, seal };
   }
 
@@ -5956,6 +5975,24 @@ export class PublishMethods extends DKGAgentBase {
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
           `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    if (result.status === 'confirmed') {
+      try {
+        await this.recordConfirmedRfc64PublicCatalogAssetV1({
+          contextGraphId: contextGraphId as never,
+          subGraphName: opts?.subGraphName as never,
+          assertionCoordinate: name as AssertionCoordinateV1,
+          publicQuads: canonicalSwmQuads,
+          seal,
+        });
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Confirmed publish for <${assertionUri}> but RFC-64 catalog advancement failed: `
+            + (err instanceof Error ? err.message : String(err)),
         );
       }
     }

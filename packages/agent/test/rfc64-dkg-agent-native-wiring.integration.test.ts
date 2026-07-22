@@ -12,6 +12,7 @@ import {
   contextGraphLayerUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
+  type AssertionSeal,
   type ContextGraphIdV1,
   type ContextGraphPolicyV1,
   type Digest32V1,
@@ -28,11 +29,13 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
+  snapshotRfc64PublicCatalogAutoPublishConfigV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  Rfc64PublicCatalogAutoPublishConfigV1,
 } from '../src/dkg-agent-types.js';
 import {
   createLoopbackJsonRpcTestHarness,
@@ -97,6 +100,7 @@ async function startNativeAgent(
     chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
     initialSubscription?: ContextGraphIdV1;
   }>,
+  autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1,
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -116,6 +120,7 @@ async function startNativeAgent(
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: deployment,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
+    rfc64PublicCatalogAutoPublish: autoPublish,
     ...(finalizedRuntime === undefined ? {} : {
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
@@ -268,6 +273,147 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       assertedAtKav10Address: `0x${'00'.repeat(20)}` as never,
     })).toThrow(/non-zero EVM address/);
   });
+
+  it('snapshots the opt-in normal-publication catalog producer configuration', () => {
+    const callerOwned = {
+      peers: ['12D3KooReceiver'],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    const snapshot = snapshotRfc64PublicCatalogAutoPublishConfigV1(callerOwned)!;
+    callerOwned.peers.push('hostile-late-mutation');
+    expect(snapshot).toEqual({
+      peers: ['12D3KooReceiver'],
+      catalogIssuerDelegationEffectiveAt: '0',
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.peers)).toBe(true);
+    expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
+      peers: ['duplicate', 'duplicate'],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    })).toThrow(/must be unique/u);
+  });
+
+  it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
+    const receiver = await startNativeAgent('auto-publish-receiver');
+    const author = await startNativeAgent(
+      'auto-publish-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [receiver.peerId],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    for (const agent of [author, receiver]) {
+      agent.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ownerAddress: AUTHOR,
+      });
+    }
+    await connectBothWays(author, receiver);
+
+    const seal = assertionSealFromCanonical(await authorSeal(11n));
+    const first = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'ordinary-confirmed-publication' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: 'urn:ignored-local-graph',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: 'urn:ignored-local-graph',
+        },
+      ],
+      seal,
+    });
+    expect(first).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const scopeDigest = catalogScopeDigest();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toEqual(first);
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: first?.currentCatalogHeadDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      applied: 1,
+      failed: 0,
+    });
+
+    const replay = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'ordinary-confirmed-publication' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal,
+    });
+    expect(replay).toEqual(first);
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver.applied).toBe(1);
+
+    const second = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'second-ordinary-confirmed-publication' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal: assertionSealFromCanonical(await authorSeal(12n)),
+    });
+    expect(second).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: second?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '2',
+    });
+    expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      applied: 2,
+      failed: 0,
+    });
+  }, 60_000);
 
   it('snapshots the explicit access authority and fails closed before private activation', async () => {
     const resolver = async () => AUTHOR;
@@ -975,4 +1121,27 @@ async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorS
   } as unknown as CanonicalGraphScopedAuthorSealV1;
   assertCanonicalGraphScopedAuthorSealV1(seal);
   return seal;
+}
+
+function assertionSealFromCanonical(seal: CanonicalGraphScopedAuthorSealV1): AssertionSeal {
+  return {
+    merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
+    authorAddress: seal.authorAddress,
+    authorAttestationR: ethers.getBytes(seal.authorAttestationR),
+    authorAttestationVS: ethers.getBytes(seal.authorAttestationVS),
+    authorSchemeVersion: 1,
+    chainId: BigInt(seal.assertedAtChainId),
+    kav10Address: seal.assertedAtKav10Address,
+    reservedKaId: BigInt(seal.reservedKaId),
+    finalizedAtIso: seal.assertionFinalizedAt,
+    contentScopeVersion: 2,
+    kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion,
+    publicTripleCount: Number(seal.publicTripleCount),
+    ...(seal.privateMerkleRoot === null
+      ? {}
+      : { privateMerkleRoot: ethers.getBytes(seal.privateMerkleRoot) }),
+    privateTripleCount: Number(seal.privateTripleCount),
+    rootEntities: [],
+  };
 }

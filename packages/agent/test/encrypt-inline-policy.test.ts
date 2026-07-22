@@ -764,13 +764,14 @@ const QUEUED_TEST_LIFECYCLE = '0x2222222222222222222222222222222222222222';
 function makeQueuedAgentHarness(options: {
   peerId: string;
   ual: string;
+  publishStatus?: 'tentative' | 'confirmed';
   chain?: Record<string, unknown>;
   onChainContextGraphId?: string | null;
   encryptInlinePayload?: unknown;
   encryptInlineChunked?: unknown;
 }) {
   const publisherPublish = recorder(async (_opts: any) => ({
-    status: 'tentative' as const,
+    status: options.publishStatus ?? 'tentative',
     ual: options.ual,
   }));
   const agentLike: any = {
@@ -853,6 +854,46 @@ async function makeQueuedPublishRequest(options: {
 }
 
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
+  it('hands one confirmed queued public publish to the RFC-64 catalog bridge', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-catalog',
+      ual: 'did:dkg:local/queued-catalog',
+      publishStatus: 'confirmed',
+    });
+    const catalogAdvance = recorder(async () => null);
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = catalogAdvance;
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-public',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka',
+      shareOperationId: 'share-op-catalog',
+      intentByte: 'ad',
+      quads: snapshotQuads,
+    });
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+
+    expect(catalogAdvance.calls).toHaveLength(1);
+    expect(catalogAdvance.calls[0]?.[0]).toMatchObject({
+      contextGraphId: 'public-cg',
+      assertionCoordinate: 'queued-public-ka',
+      publicQuads: snapshotQuads,
+      seal: {
+        authorAddress: QUEUED_TEST_AUTHOR,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      },
+    });
+  });
+
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
     const realChunked = recorder(async () => ({

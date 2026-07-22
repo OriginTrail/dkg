@@ -44,6 +44,7 @@ const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
+  'recordConfirmedRfc64PublicCatalogAssetV1',
 ];
 for (const method of requiredCatalogMethods) {
   if (

@@ -406,6 +406,8 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
+import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { snapshotRfc64PublicCatalogAutoPublishConfigV1 } from './rfc64/catalog-authority-config-v1.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -704,6 +706,9 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
     );
+    const rfc64PublicCatalogAutoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
+      config.rfc64PublicCatalogAutoPublish,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -810,6 +815,7 @@ export class DKGAgent extends DKGAgentBase {
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
+      rfc64PublicCatalogAutoPublish,
     };
 
     const port = config.listenPort ?? 0;
@@ -3057,5 +3063,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogAutoPublishMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogAutoPublishMethods]);
