@@ -18,6 +18,7 @@
     "generate": "node --experimental-strip-types src/cli/generate.ts",
     "verify": "node --experimental-strip-types src/cli/verify.ts",
     "live:generate": "node --import tsx run.ts",
+    "live:public-vm": "node --import tsx launch-public-vm.ts",
     "live:verify": "node --import tsx verify-live.ts"
   }
 }

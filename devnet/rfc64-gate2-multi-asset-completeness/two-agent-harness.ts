@@ -56,6 +56,8 @@ export function assertGate2HarnessSourceStateV1(
 
 export function spawnGate2HarnessAgentV1(input: {
   readonly dataDir: string;
+  readonly finalizedVmConfigJson?: string;
+  readonly networkChainId?: string;
   readonly registry: ChildProcessRegistry;
   readonly repoRoot: string;
   readonly role: Gate2HarnessAgentRoleV1;
@@ -80,6 +82,12 @@ export function spawnGate2HarnessAgentV1(input: {
         DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[input.role],
         DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: input.runtimeManifestDigest,
         DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: input.sourceCommit,
+        ...(input.networkChainId === undefined
+          ? {}
+          : { DKG_RFC64_GATE2_NETWORK_CHAIN_ID: input.networkChainId }),
+        ...(input.finalizedVmConfigJson === undefined
+          ? {}
+          : { DKG_RFC64_GATE2_FINALIZED_VM_CONFIG: input.finalizedVmConfigJson }),
         NODE_ENV: 'production',
       },
     },
