@@ -108,6 +108,10 @@ describe('RFC-64 finalized Context Graph chain read', () => {
     });
     expect(snapshotFinalizedContextGraphReadV1(structuredClone(open)).publishAuthority)
       .toBeNull();
+    expectFailure(
+      () => snapshotFinalizedContextGraphReadV1({ ...open, publishAuthority: ZERO }),
+      'malformed-authority',
+    );
   });
 
   it('passes one frozen canonical binding through the resolver seam', async () => {

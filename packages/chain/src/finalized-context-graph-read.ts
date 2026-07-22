@@ -181,6 +181,15 @@ function canonicalNullableAddress(
   return canonicalNonZeroAddress(value, code, label);
 }
 
+function canonicalNormalizedNullableAddress(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+  label: string,
+): EvmAddressV1 | null {
+  if (value === null) return null;
+  return canonicalNonZeroAddress(value, code, label);
+}
+
 function canonicalDigest32(
   value: unknown,
   code: FinalizedContextGraphReadErrorCodeV1,
@@ -199,6 +208,17 @@ function canonicalDigest32(
 
 function canonicalNullableNameHash(value: unknown): Digest32V1 | null {
   if (value === null || value === ZERO_DIGEST_32) return null;
+  return canonicalDigest32(value, 'malformed-name-binding', 'nameHash');
+}
+
+function canonicalNormalizedNullableNameHash(value: unknown): Digest32V1 | null {
+  if (value === null) return null;
+  if (value === ZERO_DIGEST_32) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'malformed-name-binding',
+      'normalized nameHash must use null instead of the raw zero-digest sentinel',
+    );
+  }
   return canonicalDigest32(value, 'malformed-name-binding', 'nameHash');
 }
 
@@ -245,8 +265,6 @@ function composeValidatedFinalizedContextGraphReadV1(
   binding: FinalizedContextGraphBindingV1,
   raw: UntrustedFinalizedContextGraphFieldsV1,
 ): FinalizedContextGraphReadV1 {
-  const { chainId, contextGraphId, governanceContract } = binding;
-
   const owner = canonicalNullableAddress(raw.owner, 'malformed-owner', 'owner');
   if (owner === null) {
     throw new FinalizedContextGraphReadErrorV1(
@@ -255,35 +273,53 @@ function composeValidatedFinalizedContextGraphReadV1(
     );
   }
 
-  const publishAuthority = canonicalNullableAddress(
-    raw.publishAuthority,
+  return composeNormalizedFinalizedContextGraphReadV1(binding, {
+    ...raw,
+    owner,
+    publishAuthority: canonicalNullableAddress(
+      raw.publishAuthority,
+      'malformed-authority',
+      'publishAuthority',
+    ),
+    nameHash: canonicalNullableNameHash(raw.nameHash),
+  });
+}
+
+function composeNormalizedFinalizedContextGraphReadV1(
+  binding: FinalizedContextGraphBindingV1,
+  fields: UntrustedFinalizedContextGraphFieldsV1,
+): FinalizedContextGraphReadV1 {
+  const { chainId, contextGraphId, governanceContract } = binding;
+  const owner = canonicalNonZeroAddress(fields.owner, 'malformed-owner', 'owner');
+  const publishAuthority = canonicalNormalizedNullableAddress(
+    fields.publishAuthority,
     'malformed-authority',
     'publishAuthority',
   );
   const publishAuthorityAccountId = canonicalDecimalU256(
-    raw.publishAuthorityAccountId,
+    fields.publishAuthorityAccountId,
     'request-binding',
     'publishAuthorityAccountId',
   );
 
   try {
-    assertContextGraphAccessPolicyV1(raw.accessPolicy);
+    assertContextGraphAccessPolicyV1(fields.accessPolicy);
   } catch {
     throw new FinalizedContextGraphReadErrorV1(
       'unsupported-access-policy',
-      `unsupported accessPolicy ${String(raw.accessPolicy)}`,
+      `unsupported accessPolicy ${String(fields.accessPolicy)}`,
     );
   }
-  const accessPolicy: ContextGraphAccessPolicyV1 = raw.accessPolicy;
+  const accessPolicy: ContextGraphAccessPolicyV1 = fields.accessPolicy;
   try {
-    assertContextGraphPublishPolicyV1(raw.publishPolicy);
+    assertContextGraphPublishPolicyV1(fields.publishPolicy);
   } catch {
     throw new FinalizedContextGraphReadErrorV1(
       'unsupported-publish-policy',
-      `unsupported publishPolicy ${String(raw.publishPolicy)}`,
+      `unsupported publishPolicy ${String(fields.publishPolicy)}`,
     );
   }
-  const publishPolicy: ContextGraphPublishPolicyV1 = raw.publishPolicy;
+  const publishPolicy: ContextGraphPublishPolicyV1 = fields.publishPolicy;
   let publishDomain: ContextGraphPublishDomainV1;
   try {
     publishDomain = snapshotContextGraphPublishDomainV1(
@@ -297,13 +333,13 @@ function composeValidatedFinalizedContextGraphReadV1(
       'publish policy disagrees with its normalized authority tuple',
     );
   }
-  if (typeof raw.active !== 'boolean') {
+  if (typeof fields.active !== 'boolean') {
     throw new FinalizedContextGraphReadErrorV1('malformed-anchor', 'active must be a boolean');
   }
 
-  const blockHash = canonicalDigest32(raw.blockHash, 'malformed-anchor', 'blockHash');
-  const blockNumber = canonicalBlockNumber(raw.blockNumber, 'request-binding');
-  const nameHash = canonicalNullableNameHash(raw.nameHash);
+  const blockHash = canonicalDigest32(fields.blockHash, 'malformed-anchor', 'blockHash');
+  const blockNumber = canonicalBlockNumber(fields.blockNumber, 'request-binding');
+  const nameHash = canonicalNormalizedNullableNameHash(fields.nameHash);
 
   return Object.freeze({
     chainId,
@@ -312,7 +348,7 @@ function composeValidatedFinalizedContextGraphReadV1(
     blockNumber,
     blockHash,
     owner,
-    active: raw.active,
+    active: fields.active,
     accessPolicy,
     publishPolicy: publishDomain.publishPolicy,
     publishAuthority: publishDomain.publishAuthority,
@@ -355,12 +391,13 @@ export function snapshotFinalizedContextGraphReadV1(
       'finalized Context Graph read must be an exact data-only record',
     );
   }
-  return composeFinalizedContextGraphReadV1(
-    {
-      chainId: record.chainId,
-      contextGraphId: record.contextGraphId,
-      governanceContract: record.governanceContract,
-    },
+  const binding = validateFinalizedContextGraphReadRequestV1({
+    chainId: record.chainId,
+    contextGraphId: record.contextGraphId,
+    governanceContract: record.governanceContract,
+  });
+  return composeNormalizedFinalizedContextGraphReadV1(
+    binding,
     {
       blockNumber: record.blockNumber,
       blockHash: record.blockHash,
@@ -368,9 +405,7 @@ export function snapshotFinalizedContextGraphReadV1(
       active: record.active,
       accessPolicy: record.accessPolicy,
       publishPolicy: record.publishPolicy,
-      publishAuthority: record.publishAuthority === null
-        ? ZERO_ADDRESS
-        : record.publishAuthority,
+      publishAuthority: record.publishAuthority,
       publishAuthorityAccountId: record.publishAuthorityAccountId,
       nameHash: record.nameHash,
     },

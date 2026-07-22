@@ -100,6 +100,36 @@ describe('RFC-64 finalized VM placement composition', () => {
     expect(Object.isFrozen(composed.rows[0])).toBe(true);
   });
 
+  it('orders multiple joined placements by finalized inventory ordinal', async () => {
+    const first = await createPlacement(KA_1, ROOT_1);
+    const second = await createPlacement(KA_2, ROOT_2);
+
+    const composed = composeFinalizedVmSetV1(requestFor([second, first]));
+
+    expect(composed.rows.map(({ ordinal, ual, placementEvidenceDigest }) => ({
+      ordinal,
+      ual,
+      placementEvidenceDigest,
+    }))).toEqual([
+      {
+        ordinal: '0',
+        ual: ual(1n),
+        placementEvidenceDigest:
+          readVerifiedAuthorCatalogRowAuthorshipV1(first.authorship).catalogRowDigest,
+      },
+      {
+        ordinal: '1',
+        ual: ual(2n),
+        placementEvidenceDigest:
+          readVerifiedAuthorCatalogRowAuthorshipV1(second.authorship).catalogRowDigest,
+      },
+    ]);
+    expect(composed.evidence).toMatchObject({
+      rowCount: '2',
+      highestFinalizedOrdinal: '1',
+    });
+  });
+
   it('fails closed on structural capability forgeries and duplicate placement', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
     expectCode(() => composeFinalizedVmSetV1(requestFor([{
