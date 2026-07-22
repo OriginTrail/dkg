@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -797,6 +798,13 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
+  // #1837 — atomic by-exact-jobId TERMINAL record removal (idempotent). Distinct from
+  // knowledgeAssetCancelShareJob (DELETE = queued cancellation that retains the row).
+  // cleared / already_absent resolve normally (200); rejected throws via post().
+  async knowledgeAssetClearShareJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/clear`, {});
+  }
+
   /** Publish to VM (mint or update on chain; git push origin main). */
   async knowledgeAssetPublish(
     contextGraphId: string,
@@ -1241,6 +1249,27 @@ export class ApiClient {
     return this.get(`/api/publisher/job-by-intent?${qs.toString()}`);
   }
 
+  // #1829 — read-only append-only journal. By jobId, or facts-pure by lifecycle
+  // identity. txHashes are ATTEMPTED submissions — verify against chain, never treat
+  // as sent.
+  async publisherJournal(query: {
+    jobId?: string;
+    contextGraphId?: string;
+    name?: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<JournalReadResult> {
+    const qs = new URLSearchParams();
+    if (query.jobId !== undefined) qs.set('jobId', query.jobId);
+    if (query.contextGraphId !== undefined) qs.set('contextGraphId', query.contextGraphId);
+    if (query.name !== undefined) qs.set('name', query.name);
+    if (query.subGraphName !== undefined) qs.set('subGraphName', query.subGraphName);
+    if (query.agentAddress !== undefined) qs.set('agentAddress', query.agentAddress);
+    if (query.intentKey !== undefined) qs.set('intentKey', query.intentKey);
+    return this.get(`/api/publisher/journal?${qs.toString()}`);
+  }
+
   async publisherStats(): Promise<Record<string, number>> {
     return this.get('/api/publisher/stats');
   }
@@ -1255,6 +1284,14 @@ export class ApiClient {
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
+  }
+
+  // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
+  // status-scoped publisherClear). cleared / already_absent resolve normally (200);
+  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // carrying { outcome:'rejected', reason } in the response body.
+  async publisherClearJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', { jobId });
   }
 
   // ------------------------- EPCIS -------------------------------------

@@ -14,6 +14,8 @@
  * differences from `AsyncLiftPublisher`.
  */
 
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
+
 export const PROMOTE_JOB_STATES = [
   'queued',
   'running',
@@ -217,6 +219,18 @@ export interface AsyncPromoteQueue {
   pause(): Promise<void>;
   resume(): Promise<void>;
   getStats(): Promise<PromoteStats>;
+}
+
+/**
+ * #1837 — atomic by-exact-jobId terminal cleanup for the SWM share (promote) queue.
+ * Segregated off the base contract (mirrors the publisher-side VmPublishTerminalJobClearer);
+ * a mutation/admin capability. Clears the exact job ONLY when in a native terminal state
+ * ({succeeded, failed}, no carve-out — nothing background re-drives a terminal promote row),
+ * rejects otherwise without mutation, idempotent for an absent job, never broadens to other
+ * jobs. Reuses the shared TerminalJobClearOutcome for symmetry with the lift clearer.
+ */
+export interface PromoteTerminalJobClearer {
+  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
 }
 
 export interface AsyncPromoteQueueConfig {

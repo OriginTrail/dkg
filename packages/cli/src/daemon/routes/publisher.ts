@@ -186,6 +186,7 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
+import { respondTerminalClearOutcome } from './terminal-clear-response.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -322,6 +323,57 @@ import {
 import type { RequestContext } from './context.js';
 
 
+interface PublisherLifecycleFacts {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress: string;
+  intentKey?: string;
+}
+
+// #1828/#1829 — parse + validate the lifecycle facts shared by GET /job-by-intent and
+// GET /journal from query params, using the SAME normalization admission persisted (or a
+// facts read silently misses entries): contextGraphId trimmed + prefix-stripped
+// (normalizeContextGraphIdOrUri); an empty subGraphName rejected (root lane = OMIT the
+// param); agentAddress defaulted to the caller lane (admission persists a non-empty lane,
+// an explicit param wins); C0/DEL control chars rejected so a crafted value cannot forge a
+// colliding U+001F-joined lifecycle key. Returns null after sending a 400 on any violation.
+function parsePublisherLifecycleFactsFromQuery(
+  url: URL,
+  res: ServerResponse,
+  requestAgentAddress: string,
+): PublisherLifecycleFacts | null {
+  const rawContextGraphId = url.searchParams.get("contextGraphId");
+  const name = url.searchParams.get("name") ?? undefined;
+  if (!rawContextGraphId || !name) {
+    jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
+    return null;
+  }
+  const intentKey = url.searchParams.get("intentKey") ?? undefined;
+  if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+    jsonResponse(res, 400, { error: "Malformed intentKey" });
+    return null;
+  }
+  const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+  const rawSubGraphName = url.searchParams.get("subGraphName");
+  if (!validateOptionalSubGraphName(rawSubGraphName, res)) return null;
+  const subGraphName = rawSubGraphName ?? undefined;
+  const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+  const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+  const hasControlChar = (value: string | undefined): boolean =>
+    value !== undefined && [...value].some((ch) => {
+      const code = ch.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+  if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+    jsonResponse(res, 400, {
+      error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+    });
+    return null;
+  }
+  return { contextGraphId, name, subGraphName, agentAddress, intentKey };
+}
+
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -397,56 +449,27 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
   // when supplied, only qualifies exactIntentMatch. Never mutates.
   if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
-    const rawContextGraphId = url.searchParams.get("contextGraphId");
-    const name = url.searchParams.get("name") ?? undefined;
-    if (!rawContextGraphId || !name) {
-      return jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
-    }
-    const intentKey = url.searchParams.get("intentKey") ?? undefined;
-    if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
-      return jsonResponse(res, 400, { error: "Malformed intentKey" });
-    }
-    // Derive the lifecycle key from the SAME normalization admission persisted, or
-    // a client that retries with the exact facts it originally submitted gets a
-    // false result=none (#1828):
-    //  - contextGraphId: admission runs resolveRequiredWriteContextGraphId, which
-    //    trims and strips the did:dkg:context-graph: prefix before persisting.
-    //  - agentAddress: admission always persists a non-empty lane
-    //    (agentAddress ?? defaultAgentAddress ?? peerId); a recovering client rarely
-    //    retains it, so default to the caller's authenticated lane — resolved by the
-    //    identical chain (resolveAgentAddress) admission used — instead of the empty
-    //    lane, which would never match. An explicit query param still wins.
-    const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
-    // Admission rejects an empty subGraphName (validateOptionalSubGraphName): the
-    // root lane is addressed by OMITTING the param, not by an empty value. Reuse the
-    // same validator so an explicit `subGraphName=` is a 400 rather than silently
-    // aliasing the root job — knowledgeAssetVmPublishLifecycleKey collapses '' and
-    // undefined to the same lane (`subGraphName ?? ''`). #1828 review.
-    const rawSubGraphName = url.searchParams.get("subGraphName");
-    if (!validateOptionalSubGraphName(rawSubGraphName, res)) return;
-    const subGraphName = rawSubGraphName ?? undefined;
-    const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
-    const agentAddress = explicitAgentAddress ?? requestAgentAddress;
-    // The lifecycle key joins these facts with a U+001F control char (matching the
-    // promote-queue uniquenessKey), whose safety depends on no component carrying
-    // that delimiter. Reject C0 control chars on this public route so a crafted
-    // param cannot forge a colliding key. #1828.
-    const hasControlChar = (value: string | undefined): boolean =>
-      value !== undefined && /[\u0000-\u001F\u007F]/.test(value);
-    if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
-      return jsonResponse(res, 400, {
-        error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
-      });
-    }
-    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent({
-      contextGraphId,
-      name,
-      subGraphName,
-      agentAddress,
-      intentKey,
-    });
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
     const { kind, ...rest } = lookup;
     return jsonResponse(res, 200, { result: kind, ...rest });
+  }
+
+  // GET /api/publisher/journal?jobId=  OR  ?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1829 — read-only append-only admission/transaction journal. By jobId, or facts-pure
+  // by lifecycle identity (derived with the SAME normalization admission persisted).
+  // txHashes are ATTEMPTED submissions — reconcile against chain, never treat as sent.
+  if (req.method === "GET" && path === "/api/publisher/journal") {
+    const jobId = url.searchParams.get("jobId")?.trim() || undefined;
+    if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
+      return jsonResponse(res, 200, result);
+    }
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const result = await publisherControl.readJournalByIntent(facts);
+    return jsonResponse(res, 200, result);
   }
 
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
@@ -522,5 +545,28 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     }
     const count = await publisherControl.clear(status);
     return jsonResponse(res, 200, { cleared: count, status });
+  }
+
+  // POST /api/publisher/clear-job  { jobId }
+  // #1837 — atomic by-exact-jobId TERMINAL clear. DISTINCT from cancel (which aborts an
+  // ACCEPTED job) and from bulk /clear (status-scoped): clears exactly one job iff it is
+  // in a native terminal state, is idempotent for an absent job (already_absent = 200,
+  // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
+  if (req.method === "POST" && path === "/api/publisher/clear-job") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let clearJobParsed: any;
+    try {
+      clearJobParsed = JSON.parse(body || "{}");
+    } catch {
+      return jsonResponse(res, 400, { error: "Invalid JSON body" });
+    }
+    // `JSON.parse("null")` etc. succeeds but yields a non-object; optional-chain so a
+    // `null`/primitive body falls through to the malformed guard (400), never a
+    // destructure TypeError → 500.
+    const jobId = clearJobParsed && typeof clearJobParsed === "object" ? clearJobParsed.jobId : undefined;
+    if (typeof jobId !== "string" || jobId.trim().length === 0) {
+      return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
+    }
+    return respondTerminalClearOutcome(res, await publisherControl.clearTerminalJob(jobId), jobId);
   }
 }

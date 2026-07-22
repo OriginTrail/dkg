@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import {
   AUTO_UPDATE_GIT_ONLY_FIELDS,
   parseAutoUpdateVerifyTagSignature,
+  type DkgConfig,
 } from '../../config.js';
+import { resolveMetricsCollectorConfig } from '../../metrics-collector-config.js';
 import {
   formatAutoUpdateTagVerificationWarning,
   resolveAutoUpdateGitRefPlan,
@@ -94,6 +96,29 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
         advisory: 'Pick a port in the 1024-65535 range (1-1023 require root). Default is 9200.',
         subject: 'apiPort',
       });
+    }
+  }
+
+  const telemetry = parsed.telemetry;
+  if (telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)) {
+    const metrics = (telemetry as Record<string, unknown>).metrics;
+    if (metrics && typeof metrics === 'object' && !Array.isArray(metrics)) {
+      const collectionEnabled = (metrics as Record<string, unknown>).collectionEnabled;
+      if (collectionEnabled !== undefined) {
+        try {
+          resolveMetricsCollectorConfig({
+            telemetry: { metrics: { collectionEnabled } },
+          } as unknown as Pick<DkgConfig, 'telemetry'>, {});
+        } catch (err) {
+          findings.push({
+            check: 'config-sanity',
+            severity: 'error',
+            message: err instanceof Error ? err.message : String(err),
+            advisory: 'Set telemetry.metrics.collectionEnabled to true or false.',
+            subject: 'telemetry.metrics.collectionEnabled',
+          });
+        }
+      }
     }
   }
 

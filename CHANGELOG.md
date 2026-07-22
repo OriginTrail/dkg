@@ -4,6 +4,37 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.9] - 2026-07-21
+
+Public Context Graphs work fully: any agent can reliably sync both SWM and VM, including late joiners and Context Graphs whose operation history exceeds the previous snapshot ceiling. This release consolidates the testnet-canary line previously rolled out to nodes by branch ref, plus the fifa-class metadata ceiling fix, validated by a devnet hold-out proof (a node absent during publication reconstructs the full corpus with per-graph digest verification) and by the testnet fleet. **No smart-contract changes — no deployment required** (no Solidity source or ABI changes since 10.0.7).
+
+### Fixed
+
+- **SWM meta sync past the 64,000-row snapshot ceiling** (#1847, #1880): TTL-filtered meta is now served through a bounded session plan instead of a raw snapshot cut off at the store's 64,000-row window, with per-subject count and sha-256 digest verification binding every page. Context Graphs with long operation histories (e.g. `fifa-world-cup-2026`) sync completely instead of silently refusing.
+- **Exact-batch VM reconciliation** (#1871, #1876): chain-driven VM reconciliation fetches exactly the missing assets in bounded batches (wire-capped, with recovery damping) instead of full-graph passes, and three reconcile race/boundary conditions are closed.
+- **Public CG catch-up materializes verified snapshots** (#1842): late-joining subscribers materialize verified public snapshots into the store under the same per-KA write lock live gossip uses, with in-lock version ordering and digest-bound skip guards — content arrives, not just metadata.
+- **Plaintext SWM accepted on public agent-gated CGs** (#1843, #1852, #1853): sender and receiver now agree on the encryption requirement for public/curated Context Graphs (requires-encryption split from supports-encryption), and the on-chain public-access probe is evaluated lazily so ungated receives stay off the chain-RPC hot path.
+- **Curator can VM-publish a member-shared rootless KA** (#1780): author resolution from finalized-assertion seals, fail-closed on conflicting or mismatched seals.
+- **Markdown KA entities preserved across SWM sharing** (#1779).
+- **Public CG metadata projection and subscription catch-up** (#1848, #1866, #1885): member-proof required for private meta refresh, public meta projection corrected, CG-hash fallback fixed.
+- **Broadcast durability** (#1851): the pre-send broadcast record is fsynced before the transaction is sent, preventing crash-recovery double-submit.
+
+### Added
+
+- **Append-only admission & transaction journal** (#1829, #1875): every VM-publish lifecycle transition is journaled node-locally (seq-ordered, gap-detectable) and readable via `GET /api/publisher/journal` by job or by lifecycle facts. Recorded tx hashes are attempted submissions — reconcile against chain.
+- **Durable-admission recovery lookup** (#1828, #1849): `GET /api/publisher/job-by-intent` recovers an admitted async VM-publish job from client-retained facts after a lost 202 response.
+- **Public CG SWM+VM sync proof harness** (#1844): `devnet/public-cg-sync-proof/` — the end-to-end gate (exact content counts, arm's-length receivers, hold-out reconstruction) used to validate this release.
+- **Node UI local metrics collection toggle** (#1892).
+
+### Changed
+
+- **Outbox metadata cleanup** (#1646): metadata capability is explicit and payload-free at the store boundary; diagnostics no longer load payloads.
+
+### Known issues
+
+- Recovery/journal lookups for a curator-published member KA require an explicit `agentAddress=<member>` query parameter (the omitted-parameter default resolves to the caller); fix queued.
+- The chain-reconcile watermark counter can trail the chain head on provenance-fenced entries; cosmetic — durable sync delivers the content and the counter is not a health signal.
+
 ## [10.0.8] - 2026-07-17
 
 Durable-sync materialization hardening for large private Context Graphs. This release makes durable catch-up survive transport drops, responder restarts, and multi-million-quad snapshots without discarding verified work, and fixes the relay and dial paths that stalled fan-out under load. Validated by a 500-Knowledge-Asset private-CG late-join scale test on Gnosis mainnet (5,337,721 unique quads, exact per-graph digest verification). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.7).

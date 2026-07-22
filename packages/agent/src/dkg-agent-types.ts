@@ -994,6 +994,13 @@ export interface CatchupSyncDiagnostics {
 export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
+  /**
+   * True only when every requested Context Graph reached a verified terminal
+   * state in this invocation. Committed prefixes remain observable through the
+   * counters while this stays false, so callers never have to infer whole-run
+   * completeness from per-phase progress.
+   */
+  complete: boolean;
 }
 
 export interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {

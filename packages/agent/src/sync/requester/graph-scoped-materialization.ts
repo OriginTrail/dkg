@@ -36,20 +36,32 @@ export interface VerifiedGraphScopedAsset {
   metadataQuads: Quad[];
 }
 
+export interface AuthenticatedGraphScopedAsset {
+  asset: VerifiedGraphScopedAsset;
+  /** Null only for explicit no-chain development mode. */
+  onChainContextGraphId: string | null;
+}
+
+export type VerifyContextGraphBinding = (
+  localContextGraphId: string,
+  onChainContextGraphId: bigint,
+) => Promise<boolean>;
+
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
 
 /**
  * Bind the peer-verified payload to current chain truth before its structural
  * metadata can influence local assertion ordering. No-chain development keeps
- * the integrity-only behavior; production chains fail closed without both
- * constant-size views.
+ * the integrity-only behavior; production chains fail closed without the
+ * required constant-size chain views. Local-id matching stays in the agent's
+ * context-graph identity layer and is injected here as a focused verifier.
  */
 export async function authenticateVerifiedGraphScopedAsset(
   chain: ChainAdapter,
   asset: VerifiedGraphScopedAsset,
-  resolveOnChainContextGraphId?: (contextGraphId: string) => Promise<string | null>,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
   receivedAt = new Date(),
-): Promise<VerifiedGraphScopedAsset> {
+): Promise<AuthenticatedGraphScopedAsset> {
   const receivedAtMs = receivedAt.getTime();
   if (!Number.isFinite(receivedAtMs)) {
     throw new Error(`Graph-scoped durable sync ${asset.ual} has an invalid local receive time`);
@@ -74,15 +86,17 @@ export async function authenticateVerifiedGraphScopedAsset(
   // tentative because it has integrity verification but no chain provenance.
   if (chain.chainId === 'none') {
     return {
-      ...asset,
-      metadataQuads: [...asset.metadataQuads, ...locallyVisibleMetadata('tentative')],
+      asset: {
+        ...asset,
+        metadataQuads: [...asset.metadataQuads, ...locallyVisibleMetadata('tentative')],
+      },
+      onChainContextGraphId: null,
     };
   }
   if (
     !chain.getLatestMerkleRoot
     || !chain.getMerkleRootCount
     || !chain.getKAContextGraphId
-    || !resolveOnChainContextGraphId
   ) {
     throw Object.assign(
       new Error(
@@ -104,11 +118,10 @@ export async function authenticateVerifiedGraphScopedAsset(
   if (roots.length !== 1) {
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
-  const [latestRoot, rootCount, boundContextGraphId, expectedContextGraphId] = await Promise.all([
+  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
     chain.getLatestMerkleRoot(kaId),
     chain.getMerkleRootCount(kaId),
     chain.getKAContextGraphId(kaId),
-    resolveOnChainContextGraphId(asset.contextGraphId),
   ]);
   if (latestRoot.length !== 32 || !bytesEqual(latestRoot, roots[0]!)) {
     throw Object.assign(
@@ -125,15 +138,25 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH' },
     );
   }
-  if (
-    expectedContextGraphId === null
-    || BigInt(expectedContextGraphId) <= 0n
-    || boundContextGraphId !== BigInt(expectedContextGraphId)
-  ) {
+  if (boundContextGraphId <= 0n) {
     throw Object.assign(
       new Error(
-        `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, ` +
-        `not local context graph ${asset.contextGraphId} (${expectedContextGraphId ?? 'unresolved'})`,
+        `Graph-scoped durable sync ${asset.ual} is bound to invalid context graph ${boundContextGraphId}`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  if (!verifyContextGraphBinding) {
+    throw Object.assign(
+      new Error('Graph-scoped durable sync requires local-to-chain context-graph verification'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  if (!(await verifyContextGraphBinding(asset.contextGraphId, boundContextGraphId))) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
+        + `which does not match local context graph ${asset.contextGraphId}`,
       ),
       { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
     );
@@ -211,17 +234,20 @@ export async function authenticateVerifiedGraphScopedAsset(
     throw new Error(`Graph-scoped durable sync ${asset.ual} has invalid receipt ordering data`);
   }
   return {
-    ...asset,
-    metadataQuads: [
-      ...asset.metadataQuads,
-      ...locallyVisibleMetadata('confirmed'),
-      {
-        subject: asset.ual,
-        predicate: MATERIALIZED_VERSION,
-        object: `"${materializedBlock}:${materializedTxIndex}"`,
-        graph: asset.metaGraph,
-      },
-    ],
+    asset: {
+      ...asset,
+      metadataQuads: [
+        ...asset.metadataQuads,
+        ...locallyVisibleMetadata('confirmed'),
+        {
+          subject: asset.ual,
+          predicate: MATERIALIZED_VERSION,
+          object: `"${materializedBlock}:${materializedTxIndex}"`,
+          graph: asset.metaGraph,
+        },
+      ],
+    },
+    onChainContextGraphId: boundContextGraphId.toString(),
   };
 }
 

@@ -25,6 +25,8 @@ import {
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
   type LiftPublishSnapshotRequest,
+  type AdmissionJournalEntry,
+  type JournalKind,
 } from './lift-job.js';
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
@@ -33,10 +35,15 @@ import type {
   AsyncLiftPublisherRecoveryResolver,
   IntentLookupInput,
   IntentLookupResult,
+  JournalReadInput,
+  JournalReadResult,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
+  VmPublishAdmissionJournalReader,
+  VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
+import { isSafeClearJobId, type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
@@ -55,10 +62,16 @@ import {
   CONTROL_WALLET_ID,
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
+  DEFAULT_JOURNAL_GRAPH_URI,
+  JOURNAL_SEQ,
+  JOURNAL_LIFECYCLE_KEY,
+  JOURNAL_JOB_ID,
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
   knowledgeAssetVmPublishLifecycleKey,
+  serializeJournalEntry,
+  parseJournalEntry,
   serializeVmPublishIntentIndex,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
@@ -69,6 +82,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isClearableTerminalLiftJob,
   isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
@@ -90,6 +104,29 @@ type AsyncLiftJobHandler = {
   readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
   readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
 };
+
+// #1829 — journal kind for a generic update()-driven transition (total over
+// LiftJobState, never throws). 'accepted' is unreachable via update()
+// (assertActiveClaimLock + all 'accepted' writes go through writeJob directly with
+// explicit admission/reaccept/recover-reset kinds), but is mapped safely.
+function statusToKind(status: LiftJobState): JournalKind {
+  switch (status) {
+    case 'accepted':
+      return 'admission';
+    case 'claimed':
+      return 'claimed';
+    case 'validated':
+      return 'validated';
+    case 'broadcast':
+      return 'broadcast';
+    case 'included':
+      return 'included';
+    case 'finalized':
+      return 'finalized';
+    case 'failed':
+      return 'failed';
+  }
+}
 
 function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
   if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
@@ -158,8 +195,12 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
+  // read-modify-write seq allocation is atomic without touching the claim lock (lock
+  // order is always claim→journal; appendJournal never calls writeJob → no reentrancy).
+  private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
   private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
@@ -167,6 +208,8 @@ export class TripleStoreAsyncLiftPublisher
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
+  private readonly journalGraphUri: string;
+  private readonly journalWrites: boolean;
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
@@ -210,6 +253,8 @@ export class TripleStoreAsyncLiftPublisher
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
+    this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
+    this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
     this.retryBackoffMaxMs = config.retryBackoffMaxMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_MAX_MS;
@@ -265,7 +310,7 @@ export class TripleStoreAsyncLiftPublisher
         retries: { retryCount: 0, maxRetries: this.maxRetries },
         controlPlane: { jobRef: jobSubject(jobId) },
       };
-      await this.writeJob(job);
+      await this.writeJob(job, 'admission');
       return jobId;
     });
   }
@@ -288,7 +333,7 @@ export class TripleStoreAsyncLiftPublisher
       const claimedJob = this.buildClaimedJob(claimed, walletId, claimToken, now, lockExpiresAt);
 
       this.assertJobMatchesStatus(claimedJob);
-      await this.writeJob(claimedJob);
+      await this.writeJob(claimedJob, 'claimed');
       await this.writeWalletLock({
         walletId,
         jobId: claimedJob.jobId,
@@ -311,7 +356,7 @@ export class TripleStoreAsyncLiftPublisher
     if (next.status === 'finalized') {
       await this.promoteFinalizedPrivateStaging(next);
     }
-    await this.writeJob(next);
+    await this.writeJob(next, statusToKind(next.status));
     await this.syncWalletLockForJob(next);
   }
 
@@ -638,7 +683,7 @@ export class TripleStoreAsyncLiftPublisher
     if (!this.chainRecoveryResolver) {
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)), 'recover-reset');
         return true;
       }
       return false;
@@ -650,12 +695,12 @@ export class TripleStoreAsyncLiftPublisher
       await this.releaseWalletLockForJob(job);
       const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
       await this.promoteFinalizedPrivateStaging(finalized);
-      await this.writeJob(finalized);
+      await this.writeJob(finalized, 'recovered-finalize');
       return true;
     }
     if (this.hasInconclusiveRecoveryTimedOut(recoverable)) {
       await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.failInconclusiveRecovery(recoverable));
+      await this.writeJob(this.failInconclusiveRecovery(recoverable), 'failed');
       return true;
     }
     return false;
@@ -699,7 +744,7 @@ export class TripleStoreAsyncLiftPublisher
             recoverable,
             resolved.inclusion,
             resolved.finalization,
-          ));
+          ), 'recovered-finalize');
           return true;
         }
 
@@ -707,14 +752,14 @@ export class TripleStoreAsyncLiftPublisher
         // claim local recovery. Preserve the explicit terminal diagnosis rather
         // than silently marking the queue job finalized.
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+        await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
         return true;
       }
     }
 
     if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) return false;
     await this.releaseWalletLockForJob(job);
-    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+    await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable), 'failed');
     return true;
   }
 
@@ -800,7 +845,7 @@ export class TripleStoreAsyncLiftPublisher
       });
       this.assertJobMatchesStatus(next);
       await this.promoteFinalizedPrivateStaging(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'finalized');
       await this.syncWalletLockForJob(next);
       return next;
     }
@@ -822,7 +867,7 @@ export class TripleStoreAsyncLiftPublisher
     if (current.status === 'validated') {
       next = this.mergeJob(next, 'broadcast', { broadcast: mapped.broadcast });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'broadcast');
       await this.syncWalletLockForJob(next);
     }
 
@@ -832,7 +877,7 @@ export class TripleStoreAsyncLiftPublisher
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'included');
       await this.syncWalletLockForJob(next);
       return next;
     }
@@ -843,7 +888,7 @@ export class TripleStoreAsyncLiftPublisher
         inclusion: mapped.inclusion,
       });
       this.assertJobMatchesStatus(next);
-      await this.writeJob(next);
+      await this.writeJob(next, 'included');
       await this.syncWalletLockForJob(next);
     }
 
@@ -854,7 +899,7 @@ export class TripleStoreAsyncLiftPublisher
     });
     this.assertJobMatchesStatus(next);
     await this.promoteFinalizedPrivateStaging(next);
-    await this.writeJob(next);
+    await this.writeJob(next, 'finalized');
     await this.syncWalletLockForJob(next);
     return next;
   }
@@ -867,7 +912,7 @@ export class TripleStoreAsyncLiftPublisher
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
     }));
     this.assertJobMatchesStatus(next);
-    await this.writeJob(next);
+    await this.writeJob(next, 'failed');
     await this.syncWalletLockForJob(next);
     return next;
   }
@@ -884,7 +929,7 @@ export class TripleStoreAsyncLiftPublisher
     for (const job of interrupted) {
       if (job.status === 'claimed' || job.status === 'validated') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)));
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)), 'recover-reset');
         recovered += 1;
         continue;
       }
@@ -912,7 +957,7 @@ export class TripleStoreAsyncLiftPublisher
           const recoverable = { ...jobWithoutFailure, status: restoredStatus } as unknown as LiftJobBroadcast;
           const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
           await this.promoteFinalizedPrivateStaging(finalized);
-          await this.writeJob(finalized);
+          await this.writeJob(finalized, 'recovered-finalize');
           recovered += 1;
         }
         // If still inconclusive, leave in failed state — next recover() will retry again.
@@ -950,17 +995,24 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') return 0;
 
-    let retried = 0;
-    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-      if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-      // Jobs that failed with a recovery-phase resolution must go through recover(),
-      // not retry(), to avoid double-publishing if the original tx eventually lands.
-      if (job.failure.resolution === 'retry_recovery') continue;
+    // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
+    // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
+    // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
+    // after retry() flips it active. Without this lock the "a transitioning job cannot be
+    // swept" guarantee does not hold.
+    return this.withClaimLock(async () => {
+      let retried = 0;
+      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+        // Jobs that failed with a recovery-phase resolution must go through recover(),
+        // not retry(), to avoid double-publishing if the original tx eventually lands.
+        if (job.failure.resolution === 'retry_recovery') continue;
 
-      await this.reacceptFailedJob(job);
-      retried += 1;
-    }
-    return retried;
+        await this.reacceptFailedJob(job);
+        retried += 1;
+      }
+      return retried;
+    });
   }
 
   async clear(status: 'finalized' | 'failed'): Promise<number> {
@@ -968,9 +1020,10 @@ export class TripleStoreAsyncLiftPublisher
     const jobs = await this.list({ status });
     let cleared = 0;
     for (const job of jobs) {
-      // Protect retry_recovery jobs — they may still have a pending on-chain tx
-      // that periodic recovery will finalize. Only explicit cancel can remove them.
-      if (status === 'failed' && isFailedJob(job) && job.failure.resolution === 'retry_recovery') continue;
+      // #1837 — single terminal-clear authority shared with clearTerminalJob: skips
+      // retry_recovery-failed jobs (a pending on-chain tx may still land). Behavior is
+      // identical to the prior inline `resolution === 'retry_recovery'` guard.
+      if (!isClearableTerminalLiftJob(job)) continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
       cleared += 1;
@@ -978,16 +1031,227 @@ export class TripleStoreAsyncLiftPublisher
     return cleared;
   }
 
+  /**
+   * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withClaimLock so it is
+   * serialized against claimNext/enqueue/reaccept and retry() (the only terminal→active
+   * transitions) — a job transitioning cannot be swept, and concurrent clears are
+   * deterministic (exactly one 'cleared', the rest 'already_absent'). deleteJob is
+   * subject-scoped to the control-plane graph, so it never touches another job or the
+   * #1829 journal. Never throws / never mutates on a reject.
+   */
+  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+    // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
+    // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
+    // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
+    // instead of the bounded outcome.
+    if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+    return this.withClaimLock(async () => {
+      await this.ensureGraph();
+      const rows = expectBindings(
+        await this.store.query(
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+        ),
+      );
+      if (rows.length === 0) return { outcome: 'already_absent' };
+      // Parse defensively — a corrupt persisted payload must surface as rejected(malformed),
+      // never throw (parseJobPayload does an unguarded JSON.parse).
+      let job: LiftJob | null;
+      try {
+        job = this.parseJobPayload(rows[0]?.['payload']);
+      } catch {
+        return { outcome: 'rejected', reason: 'malformed' };
+      }
+      if (job === null) return { outcome: 'rejected', reason: 'malformed' };
+      if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
+      if (!isClearableTerminalLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
+      await this.releaseWalletLockForJob(job);
+      await this.deleteJob(jobId);
+      return { outcome: 'cleared' };
+    });
+  }
+
   private async ensureGraph(): Promise<void> {
     if (this.graphEnsured) return;
     await this.store.createGraph(this.graphUri);
     await this.store.createGraph(this.walletLockGraphUri);
+    await this.store.createGraph(this.journalGraphUri);
     this.graphEnsured = true;
   }
 
-  private async writeJob(job: LiftJob): Promise<void> {
+  private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(serializeJob(job, this.graphUri));
+    await this.appendJournal(job, kind);
+  }
+
+  /**
+   * #1829 — append one immutable journal entry for this transition. DEFENSIVE by
+   * construction (mirrors serializeVmPublishIntentIndex): it runs inside writeJob,
+   * which re-persists arbitrary persisted/legacy jobs, so it must NEVER throw back
+   * into the state machine. It:
+   *  - no-ops unless journalWrites is enabled (daemon-only) — the CLI inspector /
+   *    standalone runner must not race the node-local per-lineageKey seq;
+   *  - no-ops for the 'rollback-noop' sentinel (the #1851 rollback re-write) and any
+   *    non-named-KA job (raw-lift/KA-update have no lifecycle key; named-KA scope);
+   *  - derives lineageKey via the U+001F-guarded key helper inside try/catch and
+   *    skips a legacy delimiter-bearing job rather than propagating (else it re-opens
+   *    the #1849 scan-poisoning / delete-then-throw data-loss class);
+   *  - swallows ANY store/allocation error — the journal is auxiliary (recovery reads
+   *    the mutable record, never the journal), so a journal hiccup must not fail-close
+   *    the authoritative write. A swallowed append is an invisible gap: "complete"
+   *    means "no seq gap", not "every transition present".
+   */
+  private async appendJournal(job: LiftJob, kind: JournalKind): Promise<void> {
+    if (!this.journalWrites) return;
+    if (kind === 'rollback-noop') return;
+    if (job.request.jobType !== 'knowledge-asset-vm-publish') return;
+    let lineageKey: string;
+    try {
+      lineageKey = knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+    } catch {
+      return; // legacy delimiter-bearing job — skip, never propagate
+    }
+    try {
+      await this.withJournalLock(lineageKey, async () => {
+        const seq = await this.allocateJournalSeq(lineageKey);
+        const entry = this.buildJournalEntry(job, kind, lineageKey, seq);
+        await this.store.insert(serializeJournalEntry(entry, this.journalGraphUri));
+      });
+    } catch {
+      // Auxiliary log — must never abort the authoritative state write.
+    }
+  }
+
+  /** #1829 — next per-lineageKey seq: numeric MAX+1 over the journal graph, first = 0. */
+  private async allocateJournalSeq(lineageKey: string): Promise<number> {
+    const result = await this.store.query(
+      `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${this.journalGraphUri}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
+    );
+    const rows = expectBindings(result);
+    const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
+    if (raw === undefined) return 0;
+    return parseIntegerLiteral(raw) + 1;
+  }
+
+  private buildJournalEntry(job: LiftJob, kind: JournalKind, lineageKey: string, seq: number): AdmissionJournalEntry {
+    const publish = (job.request as { knowledgeAssetVmPublish: { intentKey?: string } }).knowledgeAssetVmPublish;
+    const txHash = 'broadcast' in job ? job.broadcast?.txHash : undefined;
+    const blockNumber = 'inclusion' in job ? job.inclusion?.blockNumber : undefined;
+    const merkleRoot = 'broadcast' in job ? job.broadcast?.merkleRoot : undefined;
+    const ual = 'finalization' in job ? (job.finalization as { ual?: string } | undefined)?.ual : undefined;
+    const failureCode = 'failure' in job ? job.failure?.code : undefined;
+    const recoveredFromStatus = 'recovery' in job
+      ? (job.recovery as { recoveredFromStatus?: string } | undefined)?.recoveredFromStatus
+      : undefined;
+    return {
+      seq,
+      at: this.now(),
+      kind: kind as Exclude<JournalKind, 'rollback-noop'>,
+      jobId: job.jobId,
+      lineageKey,
+      ...(publish.intentKey !== undefined ? { intentKey: publish.intentKey } : {}),
+      ...(txHash !== undefined ? { txHash } : {}),
+      ...(blockNumber !== undefined ? { blockNumber } : {}),
+      ...(merkleRoot !== undefined ? { merkleRoot } : {}),
+      ...(ual !== undefined ? { ual } : {}),
+      ...(failureCode !== undefined ? { failureCode } : {}),
+      ...(recoveredFromStatus !== undefined ? { recoveredFromStatus } : {}),
+    };
+  }
+
+  /**
+   * #1829 — facts-pure lineage read. Derives the lineageKey from the retained facts
+   * (NEVER the ephemeral #1828 job-subject index, which clear/cancel remove), so it
+   * still resolves after the job is gone. Read-only.
+   */
+  async readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    let lineageKey: string;
+    try {
+      lineageKey = knowledgeAssetVmPublishLifecycleKey(facts);
+    } catch {
+      return { entries: [], maxSeq: -1, complete: true, txHashes: [] };
+    }
+    const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, lineageKey);
+    const entries = facts.intentKey === undefined
+      ? lineage
+      : lineage.filter((e) => e.intentKey === facts.intentKey);
+    // maxSeq/complete describe the whole LINEAGE (the contiguity reference); entries and
+    // txHashes describe the queried subset (an intentKey filter is one version within it).
+    return this.summarizeJournal(entries, lineage);
+  }
+
+  /** #1829 — all journal entries bearing this jobId. Read-only. */
+  async readJournalByJob(jobId: string): Promise<JournalReadResult> {
+    await this.ensureGraph();
+    const jobEntries = await this.readJournalEntriesBy(JOURNAL_JOB_ID, jobId);
+    if (jobEntries.length === 0) return { entries: [], maxSeq: -1, complete: true, txHashes: [] };
+    // A successor job continues the lineage seq (does NOT restart at 0), so completeness
+    // is a property of the LINEAGE, not this job's slice. Resolve the lineage from any
+    // entry (all of a job's entries share one lineageKey) and compute maxSeq/complete over it.
+    const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, jobEntries[0]!.lineageKey);
+    return this.summarizeJournal(jobEntries, lineage);
+  }
+
+  // Object-bound read of every entry whose `predicate` equals `value`, grouped by
+  // subject and parsed. A corrupt row is skipped (parseJournalEntry returns null).
+  private async readJournalEntriesBy(predicate: string, value: string): Promise<AdmissionJournalEntry[]> {
+    const result = await this.store.query(
+      `SELECT ?e ?p ?o WHERE { GRAPH <${this.journalGraphUri}> { ?e <${predicate}> ${literal(value)} . ?e ?p ?o } }`,
+    );
+    const bySubject = new Map<string, Record<string, string>>();
+    for (const row of expectBindings(result)) {
+      const subject = row['e'];
+      const p = row['p'];
+      const o = row['o'];
+      if (subject === undefined || p === undefined || o === undefined) continue;
+      const map = bySubject.get(subject) ?? {};
+      map[p] = o;
+      bySubject.set(subject, map);
+    }
+    return [...bySubject.values()]
+      .map((map) => parseJournalEntry(map))
+      .filter((e): e is AdmissionJournalEntry => e !== null)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  // `entries` is the queried subset returned to the caller; `lineage` is the full
+  // per-lineageKey set the completeness check is computed over (defaults to `entries`
+  // for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
+  // subset read never spuriously reports incomplete. On oxigraph `complete` is
+  // authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
+  // lost on crash without a visible gap — documented on JournalReadResult as best-effort.
+  private summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
+    const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
+    const complete = lineage.length === maxSeq + 1;
+    const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
+    return { entries, maxSeq, complete, txHashes };
+  }
+
+  /**
+   * #1829 — per-lineageKey mutex for the journal read-modify-write (seq allocation +
+   * insert). Distinct lineages append in parallel; the same lineage serializes. Never
+   * acquired while holding — or acquiring — the claim lock, so no reentrancy/deadlock.
+   */
+  private async withJournalLock<T>(lineageKey: string, fn: () => Promise<T>): Promise<T> {
+    // journalGraphUri is a fixed constant, so the lineageKey alone keys the bucket.
+    const key = lineageKey;
+    const previous = TripleStoreAsyncLiftPublisher.journalQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    TripleStoreAsyncLiftPublisher.journalQueues.set(key, next);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (TripleStoreAsyncLiftPublisher.journalQueues.get(key) === next) {
+        TripleStoreAsyncLiftPublisher.journalQueues.delete(key);
+      }
+    }
   }
 
   private async deleteJob(jobId: string): Promise<void> {
@@ -1148,7 +1412,7 @@ export class TripleStoreAsyncLiftPublisher
         this.mergeJob(current, 'failed', { failure: failure as any }),
       );
       this.assertJobMatchesStatus(failed);
-      await this.writeJob(failed);
+      await this.writeJob(failed, 'failed');
       await this.syncWalletLockForJob(failed);
       return failed;
     }
@@ -1241,7 +1505,11 @@ export class TripleStoreAsyncLiftPublisher
       await this.update(current.jobId, 'broadcast', { broadcast });
       await this.store.flush?.();
     } catch (error) {
-      await this.writeJob(current);
+      // #1829 — 'rollback-noop': restoring the prior 'validated' job must NOT append a
+      // duplicate journal entry (the original 'validated' entry already exists, and the
+      // pre-flush 'broadcast' entry already recorded the attempt). The subsequent
+      // failure transition emits the terminal entry.
+      await this.writeJob(current, 'rollback-noop');
       throw error;
     }
   }
@@ -1494,7 +1762,7 @@ export class TripleStoreAsyncLiftPublisher
       },
     };
     await this.releaseWalletLockForJob(job);
-    await this.writeJob(reaccepted);
+    await this.writeJob(reaccepted, 'reaccept');
     return reaccepted;
   }
 
@@ -1566,7 +1834,7 @@ export class TripleStoreAsyncLiftPublisher
     });
     this.assertJobMatchesStatus(finalized);
     await this.promoteFinalizedPrivateStaging(finalized);
-    await this.writeJob(finalized);
+    await this.writeJob(finalized, 'noop-finalized');
     await this.syncWalletLockForJob(finalized);
     return finalized;
   }

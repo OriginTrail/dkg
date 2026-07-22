@@ -21,6 +21,7 @@ import {
   createResponderGraphListMemo,
   createResponderExactGraphPagePlanMemo,
   createResponderFreshSwmDataGraphPlanMemo,
+  createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
@@ -446,6 +447,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
   );
+  const freshSwmMetaPlanMemo = createResponderFreshSwmMetaPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+    // #1847 review: retained TTL meta session plans are control-plane state and
+    // must be charged to the same process-wide budget as retained snapshots —
+    // peers cannot stack uncharged plans, and global pressure evicts idle ones.
+    responderSnapshotBudget,
+  );
   const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
@@ -672,6 +681,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            freshMetaPlanMemo: freshSwmMetaPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();

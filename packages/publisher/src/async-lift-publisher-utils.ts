@@ -26,7 +26,13 @@ export {
   CONTROL_PAYLOAD as PAYLOAD_PREDICATE,
   CONTROL_STATUS as STATUS_PREDICATE,
   CONTROL_LIFECYCLE_KEY,
+  DEFAULT_JOURNAL_GRAPH_URI,
+  JOURNAL_SEQ,
+  JOURNAL_LIFECYCLE_KEY,
+  JOURNAL_JOB_ID,
   knowledgeAssetVmPublishLifecycleKey,
+  serializeJournalEntry,
+  parseJournalEntry,
   serializeVmPublishIntentIndex,
   createJobSlug,
   jobSubject,
@@ -63,6 +69,19 @@ export function getRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
 
 export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
+}
+
+/**
+ * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
+ * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
+ * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
+ * still carry a pending on-chain tx that periodic recovery will finalize, so only explicit
+ * cancel removes them. A `retry_recovery`-failed job is therefore treated as
+ * NONTERMINAL-for-cleanup.
+ */
+export function isClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isTerminalLiftJobState(job.status)
+    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
 }
 
 /**
