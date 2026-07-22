@@ -1,8 +1,8 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { assertNetworkIdV1, type NetworkIdV1 } from './author-catalog-codec.js';
 import { canonicalizeJsonBytes, type CanonicalJsonValue } from './canonical-json.js';
 import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
+import { assertNetworkIdV1, type NetworkIdV1 } from './sync-wire-identifiers.js';
 import { snapshotExactDataRecord } from './sync-wire-objects.js';
 import {
   MAX_DECIMAL_U64,
@@ -209,7 +209,8 @@ function snapshotFinalizedVmSetRowForScopeV1(
     if (parsed.agentAddress !== record.authorAddress) {
       fail('finalized-vm-set-ual', 'row.ual author differs from row.authorAddress');
     }
-    if (parsed.chainId !== scope.networkId) {
+    const ualNetworkId = parsed.chainId;
+    if (ualNetworkId !== scope.networkId) {
       fail('finalized-vm-set-ual', 'row.ual namespace differs from the trusted network profile');
     }
   } catch (cause) {
