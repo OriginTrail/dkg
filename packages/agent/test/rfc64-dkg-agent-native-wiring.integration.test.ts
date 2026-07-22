@@ -20,7 +20,6 @@ import {
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +35,11 @@ import {
   sendJsonRpcError,
   sendJsonRpcResult,
 } from '../../chain/test/loopback-rpc-harness.js';
+import {
+  FinalizedVmLoopbackMockChainAdapterV1,
+  createFinalizedVmLoopbackRpcV1,
+  type FinalizedVmLoopbackFixtureConfigV1,
+} from '../../../devnet/rfc64-gate2-multi-asset-completeness/finalized-vm-loopback-fixture.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -70,38 +74,6 @@ const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
 
-const CG = new ethers.Interface([
-  'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
-  'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
-  'function isContextGraphActive(uint256 contextGraphId) view returns (bool)',
-  'function getContextGraphKaCount(uint256 contextGraphId) view returns (uint256)',
-  'function getContextGraphKaAt(uint256 contextGraphId, uint256 ordinal) view returns (uint256)',
-]);
-const KA = new ethers.Interface([
-  'function getKnowledgeAssetUpdateContext(uint256 id) view returns (uint256 merkleRootsCount, uint256 minted, uint88 byteSize, uint40 endEpoch, uint96 tokenAmount, bool isImmutable, uint32 merkleLeafCount)',
-  'function getLatestMerkleRoot(uint256 id) view returns (bytes32)',
-  'function getLatestMerkleRootAuthor(uint256 id) view returns (address)',
-  'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
-]);
-
-class FinalizedVmMockChainAdapter extends MockChainAdapter {
-  constructor() {
-    super(NETWORK_ID);
-  }
-
-  override async getEvmChainId(): Promise<bigint> {
-    return 20_430n;
-  }
-
-  override async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
-    return KAV10;
-  }
-
-  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    return KAV10;
-  }
-}
-
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
     try { await agent.stop(); } catch { /* best-effort */ }
@@ -117,7 +89,7 @@ async function startNativeAgent(
   accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1,
   finalizedRuntime?: Readonly<{
     rpcUrl: string;
-    chainAdapter: FinalizedVmMockChainAdapter;
+    chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
     initialSubscription?: ContextGraphIdV1;
   }>,
 ): Promise<DKGAgent> {
@@ -555,101 +527,49 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     const kaNumber = 7n;
     const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const fixture = Object.freeze({
+      accessPolicy: 0,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      assets: Object.freeze([Object.freeze({
+        assertionRoot: ASSERTION_ROOT,
+        assertionVersion: '1',
+        authorAddress: AUTHOR,
+        kaId,
+        publisherAddress: `0x${'66'.repeat(20)}` as EvmAddressV1,
+      })]),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7b',
+      nameHash: nameHash as Digest32V1,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      publishPolicy: 1,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
     const rpc = await rpcHarness.start((call, response) => {
-      switch (call.method) {
-        case 'eth_chainId':
-          sendJsonRpcResult(response, call, ethers.toQuantity(20_430));
-          return;
-        case 'eth_getBlockByNumber':
-          sendJsonRpcResult(response, call, {
-            number: '0x7b',
-            hash: FINALIZED_BLOCK_HASH,
-          });
-          return;
-        case 'eth_getCode':
-          sendJsonRpcResult(response, call, '0x6000');
-          return;
-        case 'eth_call': {
-          const request = call.params[0] as { readonly data?: string };
-          if (request.data === '0x') {
-            sendJsonRpcResult(response, call, '0x');
-            return;
-          }
-          const selector = request.data?.slice(0, 10);
-          switch (selector) {
-            case CG.getFunction('getContextGraph')!.selector:
-              sendJsonRpcResult(response, call, CG.encodeFunctionResult(
-                'getContextGraph',
-                [AUTHOR, [], 0n, true, 1n, 0, 1, ethers.ZeroAddress, 0n],
-              ));
-              return;
-            case CG.getFunction('getNameHash')!.selector:
-              sendJsonRpcResult(response, call, CG.encodeFunctionResult('getNameHash', [nameHash]));
-              return;
-            case CG.getFunction('isContextGraphActive')!.selector:
-              sendJsonRpcResult(
-                response,
-                call,
-                CG.encodeFunctionResult('isContextGraphActive', [true]),
-              );
-              return;
-            case CG.getFunction('getContextGraphKaCount')!.selector:
-              sendJsonRpcResult(
-                response,
-                call,
-                CG.encodeFunctionResult('getContextGraphKaCount', [1n]),
-              );
-              return;
-            case CG.getFunction('getContextGraphKaAt')!.selector:
-              sendJsonRpcResult(
-                response,
-                call,
-                CG.encodeFunctionResult('getContextGraphKaAt', [BigInt(kaId)]),
-              );
-              return;
-            case KA.getFunction('getKnowledgeAssetUpdateContext')!.selector:
-              sendJsonRpcResult(response, call, KA.encodeFunctionResult(
-                'getKnowledgeAssetUpdateContext',
-                [1n, 0n, 0n, 0n, 0n, false, 0],
-              ));
-              return;
-            case KA.getFunction('getLatestMerkleRoot')!.selector:
-              sendJsonRpcResult(
-                response,
-                call,
-                KA.encodeFunctionResult('getLatestMerkleRoot', [ASSERTION_ROOT]),
-              );
-              return;
-            case KA.getFunction('getLatestMerkleRootAuthor')!.selector:
-              sendJsonRpcResult(
-                response,
-                call,
-                KA.encodeFunctionResult('getLatestMerkleRootAuthor', [AUTHOR]),
-              );
-              return;
-            case KA.getFunction('getLatestMerkleRootPublisher')!.selector:
-              sendJsonRpcResult(response, call, KA.encodeFunctionResult(
-                'getLatestMerkleRootPublisher',
-                [`0x${'66'.repeat(20)}`],
-              ));
-              return;
-            default:
-              sendJsonRpcError(response, call, -32602, `unexpected eth_call ${selector}`);
-              return;
-          }
-        }
-        default:
-          sendJsonRpcError(response, call, -32601, 'method not found');
+      try {
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
       }
     });
-    const authorChain = new FinalizedVmMockChainAdapter();
-    const receiverChain = new FinalizedVmMockChainAdapter();
-    (receiverChain as any).nextContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
-    const created = await receiverChain.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-      nameHash,
-    });
+    const authorChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    const created = await receiverChain.createOnChainContextGraphAtIdForTesting(
+      BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+      {
+        accessPolicy: 0,
+        publishPolicy: 1,
+        nameHash,
+      },
+    );
     expect(created.contextGraphId.toString()).toBe(ON_CHAIN_CONTEXT_GRAPH_ID);
     const [author, receiver] = await Promise.all([
       startNativeAgent(
@@ -755,7 +675,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       currentCatalogHeadDigest: successor.headObjectDigest,
       inventoryRowCount: '1',
     });
-    expect(rpc.calls.some(({ method }) => method === 'eth_call')).toBe(true);
+    expect(finalizedRpc.calls.some(({ method }) => method === 'eth_call')).toBe(true);
   }, 60_000);
 
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {

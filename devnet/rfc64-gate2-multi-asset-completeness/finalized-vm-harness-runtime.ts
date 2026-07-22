@@ -1,13 +1,18 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   assertContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
+  type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
-import { ethers } from 'ethers';
+
+import {
+  FinalizedVmLoopbackMockChainAdapterV1,
+  createFinalizedVmLoopbackRpcV1,
+  type FinalizedVmLoopbackFixtureConfigV1,
+} from './finalized-vm-loopback-fixture.js';
 
 export const RFC64_GATE2_DEPLOYMENT = Object.freeze({
   networkId: 'otp:20430',
@@ -26,44 +31,12 @@ export interface FinalizedVmHarnessConfigV1 {
 }
 
 export interface FinalizedVmHarnessRuntimeV1 {
-  readonly chainAdapter: MockChainAdapter;
+  readonly chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
   readonly rpcUrl: string;
   close(): Promise<void>;
 }
 
-const CONTEXT_GRAPH_INTERFACE = new ethers.Interface([
-  'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
-  'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
-  'function isContextGraphActive(uint256 contextGraphId) view returns (bool)',
-  'function getContextGraphKaCount(uint256 contextGraphId) view returns (uint256)',
-  'function getContextGraphKaAt(uint256 contextGraphId, uint256 ordinal) view returns (uint256)',
-]);
-const KNOWLEDGE_ASSET_INTERFACE = new ethers.Interface([
-  'function getKnowledgeAssetUpdateContext(uint256 id) view returns (uint256 merkleRootsCount, uint256 minted, uint88 byteSize, uint40 endEpoch, uint96 tokenAmount, bool isImmutable, uint32 merkleLeafCount)',
-  'function getLatestMerkleRoot(uint256 id) view returns (bytes32)',
-  'function getLatestMerkleRootAuthor(uint256 id) view returns (address)',
-  'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
-]);
 const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
-const ZERO_ADDRESS = ethers.ZeroAddress.toLowerCase();
-
-class FinalizedVmHarnessMockChainAdapter extends MockChainAdapter {
-  constructor() {
-    super(RFC64_GATE2_DEPLOYMENT.networkId);
-  }
-
-  override async getEvmChainId(): Promise<bigint> {
-    return BigInt(RFC64_GATE2_DEPLOYMENT.assertedAtChainId);
-  }
-
-  override async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
-    return RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address;
-  }
-
-  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    return RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address;
-  }
-}
 
 export function parseFinalizedVmHarnessConfigV1(
   input: string,
@@ -106,7 +79,29 @@ export function parseFinalizedVmHarnessConfigV1(
 export async function startFinalizedVmHarnessRuntimeV1(
   config: Readonly<FinalizedVmHarnessConfigV1>,
 ): Promise<Readonly<FinalizedVmHarnessRuntimeV1>> {
-  const chainAdapter = new FinalizedVmHarnessMockChainAdapter();
+  const fixture = Object.freeze({
+    accessPolicy: 0,
+    active: true,
+    assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
+    assertedAtKav10Address:
+      RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address as EvmAddressV1,
+    assets: Object.freeze([Object.freeze({
+      assertionRoot: config.assertionRoot,
+      assertionVersion: config.assertionVersion,
+      authorAddress: config.authorAddress,
+      kaId: config.kaId,
+      publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
+    })]),
+    blockHash: FINALIZED_BLOCK_HASH as Digest32V1,
+    blockNumberQuantity: '0x7b',
+    nameHash: config.nameHash,
+    networkId: RFC64_GATE2_DEPLOYMENT.networkId as NetworkIdV1,
+    onChainContextGraphId: config.onChainContextGraphId,
+    ownerAddress: config.authorAddress,
+    publishPolicy: 1,
+  } satisfies FinalizedVmLoopbackFixtureConfigV1);
+  const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
+  const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
   const created = await chainAdapter.createOnChainContextGraphAtIdForTesting(
     BigInt(config.onChainContextGraphId),
     {
@@ -141,23 +136,7 @@ export async function startFinalizedVmHarnessRuntimeV1(
       );
       const method = requiredString(call.method, 'finalized VM JSON-RPC method');
       const params = plainArray(call.params, 'finalized VM JSON-RPC params');
-      let result: unknown;
-      switch (method) {
-        case 'eth_chainId':
-          result = '0x4fce';
-          break;
-        case 'eth_getBlockByNumber':
-          result = { number: '0x7b', hash: FINALIZED_BLOCK_HASH };
-          break;
-        case 'eth_getCode':
-          result = '0x6000';
-          break;
-        case 'eth_call':
-          result = finalizedVmEthCallResult(params, config);
-          break;
-        default:
-          throw new Error(`unexpected finalized VM JSON-RPC method ${method}`);
-      }
+      const result = rpcFixture.respond(method, params);
       sendRpcResponse(response, call.id, { result });
     } catch (error) {
       sendRpcResponse(response, null, {
@@ -187,63 +166,6 @@ export async function startFinalizedVmHarnessRuntimeV1(
       if (current !== undefined) await closeServer(current);
     },
   });
-}
-
-function finalizedVmEthCallResult(
-  params: readonly unknown[],
-  config: Readonly<FinalizedVmHarnessConfigV1>,
-): string {
-  const call = plainRecord(params[0], 'finalized VM eth_call object');
-  const data = requiredString(call.data, 'finalized VM eth_call data');
-  if (data === '0x') return '0x';
-  const selector = data.slice(0, 10);
-  switch (selector) {
-    case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph')!.selector:
-      return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getContextGraph', [
-        config.authorAddress,
-        [],
-        0n,
-        true,
-        1n,
-        0,
-        1,
-        ZERO_ADDRESS,
-        0n,
-      ]);
-    case CONTEXT_GRAPH_INTERFACE.getFunction('getNameHash')!.selector:
-      return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getNameHash', [config.nameHash]);
-    case CONTEXT_GRAPH_INTERFACE.getFunction('isContextGraphActive')!.selector:
-      return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('isContextGraphActive', [true]);
-    case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraphKaCount')!.selector:
-      return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getContextGraphKaCount', [1n]);
-    case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraphKaAt')!.selector:
-      return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult(
-        'getContextGraphKaAt',
-        [BigInt(config.kaId)],
-      );
-    case KNOWLEDGE_ASSET_INTERFACE.getFunction('getKnowledgeAssetUpdateContext')!.selector:
-      return KNOWLEDGE_ASSET_INTERFACE.encodeFunctionResult(
-        'getKnowledgeAssetUpdateContext',
-        [BigInt(config.assertionVersion), 0n, 0n, 0n, 0n, false, 0],
-      );
-    case KNOWLEDGE_ASSET_INTERFACE.getFunction('getLatestMerkleRoot')!.selector:
-      return KNOWLEDGE_ASSET_INTERFACE.encodeFunctionResult(
-        'getLatestMerkleRoot',
-        [config.assertionRoot],
-      );
-    case KNOWLEDGE_ASSET_INTERFACE.getFunction('getLatestMerkleRootAuthor')!.selector:
-      return KNOWLEDGE_ASSET_INTERFACE.encodeFunctionResult(
-        'getLatestMerkleRootAuthor',
-        [config.authorAddress],
-      );
-    case KNOWLEDGE_ASSET_INTERFACE.getFunction('getLatestMerkleRootPublisher')!.selector:
-      return KNOWLEDGE_ASSET_INTERFACE.encodeFunctionResult(
-        'getLatestMerkleRootPublisher',
-        ['0x6666666666666666666666666666666666666666'],
-      );
-    default:
-      throw new Error(`unexpected finalized VM eth_call selector ${selector}`);
-  }
 }
 
 function sendRpcResponse(
