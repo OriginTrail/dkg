@@ -16,7 +16,6 @@ import {
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CountV1,
-  type ContextGraphPolicyV1,
   type Digest32V1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
@@ -30,9 +29,7 @@ import type {
   Rfc64PublicCatalogReceiverReconcilerV1,
   Rfc64PublicCatalogReconcileResultV1,
 } from './public-catalog-receiver-v1.js';
-import type {
-  Rfc64PublicCatalogHeadAnnouncementV1,
-} from './public-catalog-transport-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
 export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
   Rfc64PublicCatalogNativeReceiverV1,
@@ -71,45 +68,6 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
   readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
-}
-
-/**
- * Derive the one fixed Gate-1 public/open scope from accepted local policy and
- * require the announcement to name that exact owner/network/CG/era/root lane.
- * Policy and signature-variant digests are transport/authentication context,
- * not semantic catalog identity, and therefore do not participate.
- */
-export function deriveRfc64PublicOpenCatalogScopeV1(
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  acceptedPolicy: ContextGraphPolicyV1,
-): AuthorCatalogScopeV1 {
-  if (
-    acceptedPolicy.accessPolicy !== 0
-    || acceptedPolicy.source.kind !== 'owner-signed-unregistered'
-    || acceptedPolicy.networkId !== announcement.networkId
-    || acceptedPolicy.contextGraphId !== announcement.contextGraphId
-    || acceptedPolicy.governanceChainId !== null
-    || acceptedPolicy.governanceContractAddress !== null
-    || acceptedPolicy.ownershipTransitionDigest !== null
-    || acceptedPolicy.era !== announcement.catalogEra
-    || announcement.subGraphName !== null
-    || acceptedPolicy.source.ownerAddress !== announcement.authorAddress
-  ) {
-    throw new Error(
-      'RFC-64 Gate 1 announcement is not bound to the accepted null-governance owner policy',
-    );
-  }
-  return Object.freeze({
-    networkId: acceptedPolicy.networkId,
-    contextGraphId: acceptedPolicy.contextGraphId,
-    governanceChainId: acceptedPolicy.governanceChainId,
-    governanceContractAddress: acceptedPolicy.governanceContractAddress,
-    ownershipTransitionDigest: acceptedPolicy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress: acceptedPolicy.source.ownerAddress,
-    era: acceptedPolicy.era,
-    bucketCount: '1' as CountV1,
-  });
 }
 
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1

@@ -18,6 +18,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-durable-file-store-v1.test.ts",
   "test/rfc64-secure-filesystem-policy-v1.test.ts",
   "test/rfc64-public-catalog-transport-v1.test.ts",
+  "test/rfc64-public-catalog-current-head-discovery-v1.test.ts",
   "test/rfc64-public-catalog-receiver-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",

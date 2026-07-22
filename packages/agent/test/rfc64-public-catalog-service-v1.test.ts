@@ -28,6 +28,9 @@ import {
   type Rfc64PublicCatalogReconcilerClientsV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+} from '../src/rfc64/public-catalog-current-head-discovery-v1.js';
+import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1,
@@ -99,10 +102,11 @@ class RecordingRouter {
   }
 }
 
-function controlObjects(): Rfc64ControlObjectOperationsV1 {
+function controlObjects() {
   return {
     namespaceDurability: 'posix-hardlink-no-replace-directory-fsync-v1',
     getVerifiedObject: vi.fn(async () => null),
+    getVerifiedObjectByDigest: vi.fn(async () => null),
     stageVerifiedObjects: vi.fn(async (input) => ({
       durable: true,
       namespaceDurability: 'posix-hardlink-no-replace-directory-fsync-v1',
@@ -809,6 +813,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       controlObjects: controlObjects(),
       accessPolicyAuthority: accessPolicyAuthority(),
       native: nativeOptions(() => inertReconciler()),
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
     });
 
     expect(() => service.start()).toThrow('registration failed');
@@ -821,6 +826,10 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(countEvent(
       router,
       `unregister:${RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_PROTOCOL_V1}`,
+    )).toBe(1);
+    expect(countEvent(
+      router,
+      `unregister:${RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1}`,
     )).toBe(1);
     await service.close();
   });

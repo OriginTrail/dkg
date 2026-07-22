@@ -41,6 +41,7 @@ export {
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/public-catalog-transport-v1.js';
+export * from './rfc64/public-catalog-current-head-discovery-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -53,6 +54,7 @@ export {
   type Rfc64AppliedInventoryDigestRowV1,
 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 export * from './rfc64/public-catalog-successor-producer-v1.js';
+export * from './rfc64/public-open-catalog-scope-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
