@@ -204,6 +204,29 @@ describe('RFC-64 finalized public VM runtime', () => {
     });
     expect(vmPostRead).toHaveLength(graphlessProjection.length);
     expect(vmPostRead).toEqual(expect.arrayContaining(graphlessProjection));
+    const metadataBeforeReplay = await store.query(
+      `SELECT ?p ?o WHERE { `
+        + `GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> ?p ?o } } ORDER BY ?p ?o`,
+    );
+
+    const replay = await runtime(request(placement));
+
+    expect(replay.receipts).toHaveLength(1);
+    expect(replay.receipts[0]).toMatchObject({
+      status: 'existing',
+      vmGraphIri: vmGraph,
+      tripleCount: String(graphlessProjection.length),
+    });
+    await expect(readExactGraphPaged(store, vmGraph, {
+      expectedQuadCount: graphlessProjection.length,
+      outputGraph: '',
+    })).resolves.toEqual(vmPostRead);
+    await expect(store.query(
+      `SELECT ?p ?o WHERE { `
+        + `GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> ?p ?o } } ORDER BY ?p ?o`,
+    )).resolves.toEqual(metadataBeforeReplay);
     await expect(store.query(
       `ASK { GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
         + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/status> "confirmed" } }`,

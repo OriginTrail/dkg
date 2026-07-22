@@ -5918,6 +5918,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
         let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
         let registrationChanged = false;
+        let nextOnChainHash = current.onChainHash;
         if (confirmedOnChainId && current.onChainId !== confirmedOnChainId) {
           this.bindSubscriptionOnChainId(contextGraphId, current, confirmedOnChainId);
           registrationChanged = true;
@@ -5926,11 +5927,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           confirmedOnChainHash
           && current.onChainHash?.toLowerCase() !== confirmedOnChainHash
         ) {
-          this.recordCgWireId(contextGraphId, confirmedOnChainHash);
+          nextOnChainHash = confirmedOnChainHash;
           registrationChanged = true;
         }
         if (registrationChanged) {
-          this.setContextGraphSubscription(contextGraphId, { ...current });
+          this.setContextGraphSubscription(contextGraphId, {
+            ...current,
+            onChainHash: nextOnChainHash,
+          });
           current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
         }
 
@@ -5960,12 +5964,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
-    this.subscribedContextGraphs.set(contextGraphId, next);
-    this.indexContextGraphWireId(
-      contextGraphId,
-      next.onChainHash ?? this.contextGraphWireId(contextGraphId),
-    );
-    if (!next.subscribed && !next.coreHosted) {
+    const previous = this.subscribedContextGraphs.get(contextGraphId);
+    const localWireId = this.contextGraphWireId(contextGraphId);
+    const previousWireId = previous?.onChainHash
+      ? this.contextGraphWireId(previous.onChainHash)
+      : localWireId;
+    const nextOnChainHash = next.onChainHash
+      ? this.contextGraphWireId(next.onChainHash)
+      : undefined;
+    const nextWireId = nextOnChainHash ?? localWireId;
+    const canonicalNext = next.onChainHash === nextOnChainHash
+      ? next
+      : { ...next, onChainHash: nextOnChainHash };
+    if (
+      previousWireId !== nextWireId
+      && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
+    ) {
+      this.wireIdToLocalCgId.delete(previousWireId);
+    }
+    this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
+    this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     if (options?.persist !== false) {
@@ -5979,13 +5998,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      if (next.subscribed) {
+      if (canonicalNext.subscribed) {
         this.persistLocalNodeMembership(contextGraphId);
       } else {
         this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
       }
     }
-    return next;
+    return canonicalNext;
   }
 
   markContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string, patch: Partial<ContextGraphSub>): void {
@@ -6711,9 +6730,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastReconciledOrdinal: row.lastReconciledOrdinal,
           coreHosted: row.coreHosted,
         }, { persist: false });
-        if (row.onChainHash) {
-          this.recordCgWireId(row.id, row.onChainHash);
-        }
         if (row.syncScoped) {
           this.trackSyncContextGraph(row.id);
         }

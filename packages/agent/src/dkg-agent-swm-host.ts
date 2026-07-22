@@ -1123,7 +1123,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // chain-fallback resolver and the catchup-request path can
     // translate either direction without an extra RPC.
     if (storageCgId !== contextGraphId) {
-      this.recordCgWireId(storageCgId, subscriptionWireId);
+      const storageSubscription = this.subscribedContextGraphs.get(storageCgId) ?? {
+        subscribed: false,
+        synced: false,
+        pendingMeta: true,
+      };
+      this.setContextGraphSubscription(storageCgId, {
+        ...storageSubscription,
+        onChainHash: subscriptionWireId,
+      }, { persist: false });
     }
     // Cheap "is this ciphertext" sniff: try to decode as one of the
     // two encrypted carriers; if neither parses, drop early so we
@@ -1679,11 +1687,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     this.beaconCuratorByWireId.set(wireId, curatorEoa);
 
-    // Stage the synthetic subscription record + wire-id reverse
-    // mapping — same as the chain-event auto-subscribe path. The
-    // hash IS the local id for cores that didn't create or join
-    // the CG, so `recordCgWireId(wireId, wireId)` is the right
-    // identity-translation entry.
+    // Stage the synthetic subscription record + wire-id reverse mapping through
+    // the canonical subscription mutator. The hash is the local id for cores
+    // that did not create or join the CG.
     if (!this.subscribedContextGraphs.has(wireId)) {
       this.setContextGraphSubscription(wireId, {
         subscribed: false,
@@ -1695,7 +1701,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const existing = this.subscribedContextGraphs.get(wireId)!;
       this.setContextGraphSubscription(wireId, { ...existing, onChainHash: wireId }, { persist: false });
     }
-    this.recordCgWireId(wireId, wireId);
 
     try {
       await this.reconcileSwmHostModeSubscription(wireId, SUBSCRIPTION_SOURCES.BEACON);

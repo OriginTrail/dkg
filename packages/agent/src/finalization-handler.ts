@@ -1544,7 +1544,7 @@ export class FinalizationHandler {
           assertionGraph: vmGraph,
         },
         'confirmed',
-        provenance,
+        { kind: 'transaction', provenance },
       );
       await this.store.deleteByPattern({ graph: metaGraph, subject: scope.ual });
       await this.store.insert(metadata);

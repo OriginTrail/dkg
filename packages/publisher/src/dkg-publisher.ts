@@ -4028,7 +4028,7 @@ export class DKGPublisher implements Publisher {
                 ),
               },
               'confirmed',
-              confirmedProvenance,
+              { kind: 'transaction', provenance: confirmedProvenance },
             )
           : generateConfirmedFullMetadata(
               confirmedMeta,
@@ -4824,7 +4824,7 @@ export class DKGPublisher implements Publisher {
               assertionGraph: dataGraph,
             },
             provenance ? 'confirmed' : 'tentative',
-            provenance,
+            provenance ? { kind: 'transaction', provenance } : undefined,
           );
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,

@@ -589,12 +589,15 @@ export class GossipPublishHandler {
           verified ? 'confirmed' : 'tentative',
           verified
             ? {
-                txHash,
-                blockNumber,
-                blockTimestamp: Math.floor(Date.now() / 1000),
-                publisherAddress: request.publisherAddress,
-                batchId: startKAId,
-                chainId: request.chainId,
+                kind: 'transaction',
+                provenance: {
+                  txHash,
+                  blockNumber,
+                  blockTimestamp: Math.floor(Date.now() / 1000),
+                  publisherAddress: request.publisherAddress,
+                  batchId: startKAId,
+                  chainId: request.chainId,
+                },
               }
             : undefined,
         );

@@ -106,6 +106,19 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
+export type GraphKnowledgeAssetConfirmation =
+  | Readonly<{
+      kind: 'transaction';
+      provenance: OnChainProvenance;
+    }>
+  | Readonly<{
+      kind: 'finalized-materialization';
+      provenance: Readonly<{
+        batchId: bigint;
+        materializedVersion: MaterializedVersion;
+      }>;
+    }>;
+
 export interface GraphKnowledgeAssetMetadata extends KCMetadata {
   assertionVersion: string | number | bigint;
   publicTripleCount: number;
@@ -330,42 +343,36 @@ export function generateConfirmedFullMetadata(
 export function generateGraphKnowledgeAssetMetadata(
   meta: GraphKnowledgeAssetMetadata,
   status: 'tentative' | 'confirmed',
-  provenance?: OnChainProvenance,
+  confirmation?: GraphKnowledgeAssetConfirmation,
 ): Quad[] {
   const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
   if (status === 'confirmed') {
-    if (!provenance) {
-      throw new Error('Confirmed graph-scoped KA metadata requires on-chain provenance');
+    if (!confirmation) {
+      throw new Error('Confirmed graph-scoped KA metadata requires confirmation provenance');
     }
-    quads.push(...generateConfirmedMetadata(scope.ual, meta.contextGraphId, provenance));
+    if (confirmation.kind === 'transaction') {
+      quads.push(...generateConfirmedMetadata(
+        scope.ual,
+        meta.contextGraphId,
+        confirmation.provenance,
+      ));
+    } else {
+      const { batchId, materializedVersion } = confirmation.provenance;
+      if (batchId < 0n) {
+        throw new Error('Finalized graph metadata batchId must be non-negative');
+      }
+      quads.push(
+        getConfirmedStatusQuad(scope.ual, meta.contextGraphId),
+        mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
+        materializedVersionQuad(metaGraph, scope.ual, materializedVersion),
+      );
+    }
   } else {
+    if (confirmation !== undefined) {
+      throw new Error('Tentative graph-scoped KA metadata cannot carry confirmation provenance');
+    }
     quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
   }
-  return quads;
-}
-
-/**
- * Canonical confirmed metadata for RFC-64 finalized-chain materialization.
- * The finalized inventory supplies a KA id and chain ordering point but no
- * publication transaction hash, so this deliberately emits no synthetic
- * transactionHash statement.
- */
-export function generateRfc64FinalizedGraphKnowledgeAssetMetadata(
-  meta: GraphKnowledgeAssetMetadata,
-  confirmation: Readonly<{
-    batchId: bigint;
-    materializedVersion: MaterializedVersion;
-  }>,
-): Quad[] {
-  if (confirmation.batchId < 0n) {
-    throw new Error('RFC-64 finalized graph metadata batchId must be non-negative');
-  }
-  const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
-  quads.push(
-    getConfirmedStatusQuad(scope.ual, meta.contextGraphId),
-    mq(scope.ual, `${DKG}batchId`, intLit(confirmation.batchId), metaGraph),
-    materializedVersionQuad(metaGraph, scope.ual, confirmation.materializedVersion),
-  );
   return quads;
 }
 

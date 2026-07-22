@@ -706,7 +706,7 @@ export class UpdateHandler {
         assertionGraph: vmGraph,
       },
       'confirmed',
-      provenance,
+      { kind: 'transaction', provenance },
     );
 
     const outcome = await withMaterializationLock(

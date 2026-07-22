@@ -1,6 +1,7 @@
 import {
   DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
   MemoryLayer,
+  assertSafeIri,
   contextGraphLayerUri,
   contextGraphMetaUri,
   parseDeterministicKnowledgeAssetUal,
@@ -16,7 +17,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
-  generateRfc64FinalizedGraphKnowledgeAssetMetadata,
+  generateGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -32,6 +33,7 @@ import type {
 const POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
   'OT-RFC-64:finalized-vm-post-read:v1\0',
 );
+const PUBLISHED_AT_PREDICATE = 'http://dkg.io/ontology/publishedAt';
 
 export interface FinalizedVmStoreMaterializerOptionsV1 {
   readonly store: TripleStore;
@@ -44,23 +46,7 @@ export interface FinalizedVmStoreMaterializerOptionsV1 {
 export function createFinalizedVmStoreMaterializerV1(
   options: FinalizedVmStoreMaterializerOptionsV1,
 ): FinalizedVmMaterializerV1 {
-  const storeDescriptor = options !== null && typeof options === 'object'
-    ? Object.getOwnPropertyDescriptor(options, 'store')
-    : undefined;
-  if (
-    options === null
-    || typeof options !== 'object'
-    || Object.getPrototypeOf(options) !== Object.prototype
-    || Reflect.ownKeys(options).length !== 1
-    || storeDescriptor === undefined
-    || !storeDescriptor.enumerable
-    || !Object.prototype.hasOwnProperty.call(storeDescriptor, 'value')
-    || storeDescriptor.value === null
-    || typeof storeDescriptor.value !== 'object'
-  ) {
-    throw new TypeError('finalized VM store materializer requires one TripleStore');
-  }
-  const store = storeDescriptor.value as TripleStore;
+  const { store } = options;
   return Object.freeze(async (request): Promise<FinalizedVmMaterializationReceiptV1> => {
     request.signal.throwIfAborted();
     const binding = readVerifiedCatalogSealBindingV1(request.placement.sealBinding);
@@ -116,7 +102,7 @@ export function createFinalizedVmStoreMaterializerV1(
     if (!Number.isFinite(timestamp.getTime())) {
       throw new Error('finalized VM seal timestamp is invalid');
     }
-    const metadataQuads = generateRfc64FinalizedGraphKnowledgeAssetMetadata({
+    const metadataQuads = generateGraphKnowledgeAssetMetadata({
       contextGraphId: request.catalogLane.contextGraphId,
       ual: request.candidate.ual,
       merkleRoot: ethers.getBytes(request.candidate.assertionRoot),
@@ -131,11 +117,14 @@ export function createFinalizedVmStoreMaterializerV1(
       ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
       assertionGraph: vmGraph,
       ...(subGraphName ? { subGraphName } : {}),
-    }, {
-      batchId: BigInt(request.candidate.kaId),
-      materializedVersion: {
-        blockNumber: boundedMaterializedBlockNumber(request.candidate.finalizedBlockNumber),
-        txIndex: 0,
+    }, 'confirmed', {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: BigInt(request.candidate.kaId),
+        materializedVersion: {
+          blockNumber: boundedMaterializedBlockNumber(request.candidate.finalizedBlockNumber),
+          txIndex: 0,
+        },
       },
     });
     const asset = Object.freeze({
@@ -147,11 +136,18 @@ export function createFinalizedVmStoreMaterializerV1(
       dataQuads: graphlessProjection.map((quad) => ({ ...quad, graph: vmGraph })),
       metadataQuads: [...metadataQuads],
     }) satisfies VerifiedGraphScopedAsset;
-    const outcome = await materializeVerifiedGraphScopedAsset({
+    const existingBefore = await hasExactFinalizedMaterialization(
       store,
       asset,
-      options: { source: 'rfc64-finalized-vm-materialization' },
-    });
+      graphlessProjection,
+    );
+    const outcome = existingBefore
+      ? 'stale'
+      : await materializeVerifiedGraphScopedAsset({
+          store,
+          asset,
+          options: { source: 'rfc64-finalized-vm-materialization' },
+        });
     if (outcome === 'quarantined') {
       throw new Error('finalized VM projection was quarantined by store limits');
     }
@@ -169,6 +165,12 @@ export function createFinalizedVmStoreMaterializerV1(
     if (quadsToNQuads(postRead) !== quadsToNQuads(graphlessProjection)) {
       throw new Error('finalized VM post-read differs from the verified catalog projection');
     }
+    if (
+      existingBefore
+      && !(await hasExactFinalizedMaterialization(store, asset, graphlessProjection))
+    ) {
+      throw new Error('finalized VM replay metadata changed during exact post-read');
+    }
     const postReadDigest = ethers.keccak256(ethers.concat([
       POST_READ_DIGEST_DOMAIN_V1,
       ethers.toUtf8Bytes(quadsToNQuads(postRead)),
@@ -183,6 +185,45 @@ export function createFinalizedVmStoreMaterializerV1(
       postReadDigest,
     });
   });
+}
+
+async function hasExactFinalizedMaterialization(
+  store: TripleStore,
+  asset: VerifiedGraphScopedAsset,
+  graphlessProjection: readonly Quad[],
+): Promise<boolean> {
+  let currentProjection: Quad[];
+  try {
+    currentProjection = await readExactGraphPaged(store, asset.assertionGraph, {
+      expectedQuadCount: graphlessProjection.length,
+      maxQuadCount: graphlessProjection.length,
+      maxNQuadsBytes:
+        DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1.maxProjectionBytes,
+      outputGraph: '',
+      queryOptions: { source: 'rfc64-finalized-vm-replay-read' },
+    });
+  } catch {
+    return false;
+  }
+  if (quadsToNQuads(currentProjection) !== quadsToNQuads(graphlessProjection)) {
+    return false;
+  }
+  const result = await store.query(`
+    SELECT ?predicate ?object WHERE {
+      GRAPH <${assertSafeIri(asset.metaGraph)}> {
+        <${assertSafeIri(asset.ual)}> ?predicate ?object .
+      }
+    }
+  `, { source: 'rfc64-finalized-vm-replay-meta-read' });
+  if (result.type !== 'bindings') return false;
+  const current = new Set(result.bindings
+    .filter((row) => row.predicate !== PUBLISHED_AT_PREDICATE)
+    .map((row) => `${row.predicate}\0${row.object}`));
+  const expected = new Set(asset.metadataQuads
+    .filter((quad) => quad.predicate !== PUBLISHED_AT_PREDICATE)
+    .map((quad) => `${quad.predicate}\0${quad.object}`));
+  if (current.size !== expected.size) return false;
+  return [...expected].every((row) => current.has(row));
 }
 
 function boundedTripleCount(value: string, label: string): number {
