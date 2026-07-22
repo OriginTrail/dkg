@@ -19,9 +19,12 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeControlObjectDigestHex,
   computeKaChunkTreeRootV1,
+  decodeOpaqueKaBundleV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
   encodeOpaqueKaBundleV1,
+  parseCanonicalGraphScopedAuthorSealV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type AuthorCatalogHeadV1,
@@ -152,6 +155,51 @@ async function connect(from: DKGNode, to: DKGNode): Promise<void> {
 }
 
 describe('RFC-64 Gate 1 native successor to public SWM', () => {
+  it('refuses cold bootstrap when an omitted author projection and seal lack durable history', async () => {
+    const fixture = await setupLiveReceiver();
+    const decoded = decodeOpaqueKaBundleV1(fixture.secondRowBundle.bundleBytes);
+    const seal = parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes);
+    const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+    });
+    const staleGraph = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`
+      + `/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    await fixture.receiverStore.insert([
+      {
+        subject: 'https://example.org/stale',
+        predicate: 'https://schema.org/name',
+        object: '"omitted"',
+        graph: staleGraph,
+      },
+      ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+      }),
+    ]);
+
+    await expect(fixture.synchronize()).rejects.toMatchObject({
+      code: 'catalog-native-receiver-history',
+      message: expect.stringContaining('omitted by the fetched exact head'),
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.hasGraph(staleGraph)).resolves.toBe(true);
+    const sealRead = await fixture.receiverStore.query(
+      `SELECT ?p ?o WHERE { GRAPH <${placement.metaGraph}> { `
+        + `<${placement.subject}> ?p ?o } } LIMIT 1`,
+    );
+    expect(sealRead).toMatchObject({ type: 'bindings' });
+    if (sealRead.type !== 'bindings') throw new Error('stale seal query was not bindings');
+    expect(sealRead.bindings).toHaveLength(1);
+  }, 30_000);
+
   it('bootstraps exact empty genesis then activates one successor without manual seeding', async () => {
     const fixture = await setupLiveReceiver();
     const genesisEvidence = await fixture.bootstrap();

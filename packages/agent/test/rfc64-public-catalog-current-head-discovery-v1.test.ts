@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   DKGNode,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   ProtocolRouter,
   computeControlSignatureVariantDigestHex,
   type AuthorCatalogScopeV1,
+  type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
   type TimestampMsV1,
@@ -44,6 +46,8 @@ const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const DELEGATION_DIGEST = `0x${'72'.repeat(32)}` as Digest32V1;
 const POLICY_DIGEST = `0x${'71'.repeat(32)}` as Digest32V1;
+const GOVERNANCE_CONTRACT =
+  '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
 const temporaryDirectories: string[] = [];
 const nodes: DKGNode[] = [];
@@ -105,6 +109,43 @@ function catalogScope(
     era: '0',
     bucketCount: '1',
   }) as AuthorCatalogScopeV1;
+}
+
+function governedCatalogScope(): AuthorCatalogScopeV1 {
+  return Object.freeze({
+    ...catalogScope(),
+    governanceChainId: '20430',
+    governanceContractAddress: GOVERNANCE_CONTRACT,
+    ownershipTransitionDigest: `0x${'57'.repeat(32)}`,
+  }) as AuthorCatalogScopeV1;
+}
+
+function finalizedPublicPolicy(): ContextGraphPolicyV1 {
+  return Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: '20430',
+    governanceContractAddress: GOVERNANCE_CONTRACT,
+    ownershipTransitionDigest: `0x${'57'.repeat(32)}`,
+    era: '0',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: {
+      kind: 'finalized-chain',
+      chainId: '20430',
+      contractAddress: GOVERNANCE_CONTRACT,
+      blockNumber: '123',
+      blockHash: `0x${'77'.repeat(32)}`,
+    },
+    effectiveAt: '1773900000000',
+    issuedAt: '1773900000000',
+  });
 }
 
 async function stageHead(
@@ -179,6 +220,27 @@ function directAuthorization(scope = catalogScope()) {
 }
 
 describe('RFC-64 public catalog current-head discovery v1', () => {
+  it('accepts the deprecated open-authorizer option but rejects ambiguity', () => {
+    const router = {
+      register() {},
+      unregister() {},
+    } as unknown as ProtocolRouter;
+    const legacy = vi.fn(async () => directAuthorization());
+    expect(() => new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeOpenCatalogOperation: legacy,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).not.toThrow();
+    expect(() => new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeCatalogOperation: legacy,
+      authorizeOpenCatalogOperation: legacy,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).toThrow(/exactly one catalog access-policy authorizer/u);
+  });
+
   it('treats an unsorted expected-key declaration as an exact key set', () => {
     expect(snapshotRfc64ExactWireRecordV1(
       { alpha: '1', beta: '2' },
@@ -271,6 +333,53 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       ) as Digest32V1,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     })).resolves.toBeNull();
+  }, 30_000);
+
+  it('preserves the finalized public governance scope during current-head discovery', async () => {
+    const [providerNode, requesterNode, providerPersistence, requesterPersistence] =
+      await Promise.all([
+        startNode(),
+        startNode(),
+        openPersistence('governed-provider'),
+        openPersistence('governed-requester'),
+      ]);
+    await connect(requesterNode, providerNode);
+    const expectedScope = governedCatalogScope();
+    const head = await stageHead(providerPersistence, expectedScope);
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async (
+      trustedScope: Readonly<AuthorCatalogScopeV1>,
+    ) => {
+      expect(trustedScope).toEqual(expectedScope);
+      return head.objectDigest as Digest32V1;
+    });
+    const provider = new Rfc64PublicCatalogServiceV1({
+      router: new ProtocolRouter(providerNode),
+      controlObjects: providerPersistence.controlObjects,
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest },
+      transportTimeoutMs: 4_000,
+    });
+    const requester = new Rfc64PublicCatalogServiceV1({
+      router: new ProtocolRouter(requesterNode),
+      controlObjects: requesterPersistence.controlObjects,
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      transportTimeoutMs: 4_000,
+    });
+    services.push(provider, requester);
+    for (const service of [provider, requester]) {
+      service.acceptPolicySnapshot({
+        policy: finalizedPublicPolicy(),
+        policyDigest: POLICY_DIGEST,
+      });
+      service.start();
+    }
+
+    await expect(requester.discoverCurrentCatalogHead({
+      remotePeerId: providerNode.peerId,
+      scope: discoveryScope(),
+    })).resolves.toMatchObject({
+      head: { envelope: { objectDigest: head.objectDigest } },
+    });
+    expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
   }, 30_000);
 
   it('retries once when the applied ref advances while the old immutable head is read', async () => {

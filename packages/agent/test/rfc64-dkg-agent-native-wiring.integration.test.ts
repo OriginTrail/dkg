@@ -800,6 +800,79 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
+  it('rejects the provider-sync API when scheduled semantic activation fails', async () => {
+    const [author, provider] = await Promise.all([
+      startNativeAgent('failure-author'),
+      startNativeAgent('failure-provider'),
+    ]);
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, provider);
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [provider.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    const successor = await author.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assertionCoordinate: 'failure-current-snapshot' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(7n),
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [provider.peerId],
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const cold = await startNativeAgent('failure-late-receiver');
+    cold.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(provider, cold);
+    const replaceGraphAndSubject = vi.spyOn(
+      (cold as any).store,
+      'replaceGraphAndSubject',
+    ).mockRejectedValue(new Error('simulated receiver semantic-activation failure'));
+
+    await expect(cold.synchronizeRfc64PublicCatalogFromProviderV1({
+      remotePeerId: provider.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    })).rejects.toThrow(/reconciliation failed \(catalog-native-receiver-activation\)/u);
+    expect(replaceGraphAndSubject).toHaveBeenCalled();
+    expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
+      successor.headObjectDigest,
+    )).toEqual({
+      catalogHeadDigest: successor.headObjectDigest,
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-activation',
+    });
+    expect(cold.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 60_000);
+
   it('materializes finalized VM through production two-agent wiring before applying the head', async () => {
     const kaNumber = 7n;
     const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
