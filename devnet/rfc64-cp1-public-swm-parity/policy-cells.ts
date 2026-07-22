@@ -74,13 +74,31 @@ export function cp1PublicPolicy(spec: Cp1PublicCellSpec): ContextGraphPolicyV1 {
 }
 
 export function cp1PolicyDigest(spec: Cp1PublicCellSpec): Digest32V1 {
-  return computeContextGraphPolicyObjectDigestV1({
-    issuer: CP1_OWNER_ADDRESS,
+  return computeContextGraphPolicyObjectDigestV1(
+    cp1UnsignedOwnerPolicyEnvelope(cp1PublicPolicy(spec)),
+  );
+}
+
+/**
+ * Assemble the canonical owner-signed policy envelope at one explicit runtime
+ * validation boundary. ContextGraphPolicyV1 is JSON-safe by construction, but
+ * its nominal interface does not structurally extend CanonicalJsonValue; the
+ * core digest codec revalidates the exact envelope and payload before hashing.
+ */
+function cp1UnsignedOwnerPolicyEnvelope(
+  policy: ContextGraphPolicyV1,
+): UnsignedControlEnvelopeV1 {
+  if (policy.source.kind !== 'owner-signed-unregistered') {
+    throw new Error('CP1 policy envelope requires an owner-signed source');
+  }
+  const envelope = Object.freeze({
+    issuer: policy.source.ownerAddress,
     objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-    payload: cp1PublicPolicy(spec),
-    signatureEvidence: { kind: 'none' },
+    payload: policy,
+    signatureEvidence: Object.freeze({ kind: 'none' as const }),
     signatureSuite: 'eip191-personal-sign-digest-v1',
-  } as unknown as UnsignedControlEnvelopeV1);
+  } as const);
+  return envelope as unknown as UnsignedControlEnvelopeV1;
 }
 
 export function cp1CatalogScope(spec: Cp1PublicCellSpec): AuthorCatalogScopeV1 {
