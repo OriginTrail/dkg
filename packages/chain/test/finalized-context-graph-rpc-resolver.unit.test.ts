@@ -28,7 +28,7 @@ import {
   sendJsonRpcError as sendError,
   sendJsonRpcResult as sendResult,
   type LoopbackJsonRpcServer,
-} from './loopback-json-rpc-test-helpers.js';
+} from './loopback-rpc-harness.js';
 
 const CHAIN_ID = '20430' as ChainIdV1;
 const STORAGE = `0x${'11'.repeat(20)}` as EvmAddressV1;
