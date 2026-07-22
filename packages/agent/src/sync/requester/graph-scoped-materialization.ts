@@ -11,10 +11,9 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-  normalizeGraphKnowledgeAssetConfirmationKindV1,
+  readGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
-  type GraphKnowledgeAssetConfirmationKind,
 } from '@origintrail-official/dkg-publisher';
 import {
   filterOversizedSyncQuads,
@@ -33,8 +32,6 @@ export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
   ual: string;
   assertionVersion: bigint;
-  /** Omitted only for rolling-compatible receipt-backed metadata. */
-  confirmationKind?: GraphKnowledgeAssetConfirmationKind;
   assertionGraph: string;
   metaGraph: string;
   dataQuads: Quad[];
@@ -184,9 +181,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     );
   }
 
-  const confirmationKind = normalizeGraphKnowledgeAssetConfirmationKindV1(
-    asset.confirmationKind,
-  );
+  const confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads);
   let materializedBlock: number;
   let materializedTxIndex: number;
   if (confirmationKind === 'finalized-materialization') {
@@ -327,7 +322,8 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     if (currentVersion === asset.assertionVersion) {
       const [currentPublishedAt, currentReceiptProvenance] = await Promise.all([
         readCurrentPublishedAt(store, asset.metaGraph, asset.ual, options),
-        asset.confirmationKind === 'finalized-materialization'
+        readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads)
+          === 'finalized-materialization'
           ? readCurrentReceiptBackedProvenance(
               store,
               asset.metaGraph,

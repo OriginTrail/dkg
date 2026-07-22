@@ -22,6 +22,8 @@ export const RFC64_GATE2_DEPLOYMENT = Object.freeze({
 
 const RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS =
   '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS =
+  '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
 export interface FinalizedVmHarnessConfigV1 {
   readonly assertionRoot: Digest32V1;
@@ -88,6 +90,7 @@ export async function startFinalizedVmHarnessRuntimeV1(
     assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address:
       RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address as EvmAddressV1,
+    knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
     assets: Object.freeze([Object.freeze({
       assertionRoot: config.assertionRoot,
       assertionVersion: config.assertionVersion,

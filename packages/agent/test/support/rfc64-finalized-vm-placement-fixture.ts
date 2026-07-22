@@ -44,6 +44,7 @@ export const RFC64_VM_CONTEXT_GRAPH_NAME = 'agent-blackbox-vm' as const;
 export const RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID = '14' as const;
 export const RFC64_VM_CG_STORAGE = `0x${'33'.repeat(20)}` as EvmAddressV1;
 export const RFC64_VM_KA_STORAGE = `0x${'44'.repeat(20)}` as EvmAddressV1;
+export const RFC64_VM_KAV10 = `0x${'55'.repeat(20)}` as EvmAddressV1;
 export const RFC64_VM_PUBLISHER = `0x${'66'.repeat(20)}` as EvmAddressV1;
 export const RFC64_VM_BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
 export const RFC64_VM_ASSERTION_ROOT = `0x${'88'.repeat(32)}` as Digest32V1;
@@ -83,7 +84,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
   } as AuthorCatalogScopeV1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(RFC64_VM_CHAIN_ID),
-    kav10Address: RFC64_VM_KA_STORAGE,
+    kav10Address: RFC64_VM_KAV10,
     merkleRoot: ethers.getBytes(assertionRoot),
     authorAddress: RFC64_VM_AUTHOR,
     reservedKaId: BigInt(kaId),
@@ -99,7 +100,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
     authorAttestationVS: attestation.yParityAndS,
     authorSchemeVersion: String(AUTHOR_SCHEME_VERSION_V1),
     assertedAtChainId: RFC64_VM_CHAIN_ID,
-    assertedAtKav10Address: RFC64_VM_KA_STORAGE,
+    assertedAtKav10Address: RFC64_VM_KAV10,
     reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-22T08:00:00.000Z',
     contentScopeVersion: '2',
@@ -229,7 +230,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
       {
         networkId: RFC64_VM_NETWORK_ID,
         assertedAtChainId: RFC64_VM_CHAIN_ID,
-        assertedAtKav10Address: RFC64_VM_KA_STORAGE,
+        assertedAtKav10Address: RFC64_VM_KAV10,
       },
     ),
   };

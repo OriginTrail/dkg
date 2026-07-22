@@ -81,6 +81,8 @@ export interface FinalizedVmRuntimeConfigV1 {
   readonly chainId: ChainIdV1;
   readonly contextGraphStorageAddress: EvmAddressV1;
   readonly knowledgeAssetStorageAddress: EvmAddressV1;
+  /** KnowledgeAssetsV10 lifecycle contract used by author attestations and catalog seals. */
+  readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
 }
@@ -128,6 +130,7 @@ interface RuntimeConfigSnapshotV1 {
   readonly chainId: FinalizedVmChainInventoryV1['chainId'];
   readonly contextGraphStorageAddress: EvmAddressV1;
   readonly knowledgeAssetStorageAddress: EvmAddressV1;
+  readonly knowledgeAssetsLifecycleAddress: EvmAddressV1;
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   readonly materialize: FinalizedVmMaterializerV1;
 }
@@ -202,6 +205,7 @@ export function createFinalizedVmRuntimeV1(
         );
 
         const composed = composeFinalizedVmSetV1({
+          assertedAtKav10Address: config.knowledgeAssetsLifecycleAddress,
           catalogLane: request.catalogLane,
           finalizedContextGraph,
           inventory,
@@ -259,6 +263,7 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     assertCanonicalChainId(input.chainId, 'finalized VM runtime chainId');
     assertNonzeroAddress(input.contextGraphStorageAddress, 'contextGraphStorageAddress');
     assertNonzeroAddress(input.knowledgeAssetStorageAddress, 'knowledgeAssetStorageAddress');
+    assertNonzeroAddress(input.knowledgeAssetsLifecycleAddress, 'knowledgeAssetsLifecycleAddress');
     if (typeof input.snapshot !== 'function') throw new TypeError('snapshot is not callable');
     if (typeof input.materialize !== 'function') throw new TypeError('materialize is not callable');
   } catch (cause) {
@@ -269,6 +274,7 @@ function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapsho
     chainId: input.chainId,
     contextGraphStorageAddress: input.contextGraphStorageAddress,
     knowledgeAssetStorageAddress: input.knowledgeAssetStorageAddress,
+    knowledgeAssetsLifecycleAddress: input.knowledgeAssetsLifecycleAddress,
     snapshot: input.snapshot,
     materialize: input.materialize,
   });

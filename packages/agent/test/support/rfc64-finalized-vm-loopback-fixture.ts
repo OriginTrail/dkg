@@ -22,6 +22,7 @@ export interface FinalizedVmLoopbackFixtureConfigV1 {
   readonly active: boolean;
   readonly assertedAtChainId: string;
   readonly assertedAtKav10Address: EvmAddressV1;
+  readonly knowledgeAssetStorageAddress: EvmAddressV1;
   readonly assets: readonly FinalizedVmLoopbackAssetV1[];
   readonly blockHash: Digest32V1;
   readonly blockNumberQuantity: string;
@@ -77,7 +78,7 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
   }
 
   override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    return this.#fixture.assertedAtKav10Address;
+    return this.#fixture.knowledgeAssetStorageAddress;
   }
 }
 
@@ -121,7 +122,7 @@ function finalizedVmEthCallResult(
   if (CONTEXT_GRAPH_SELECTORS.has(selector)) {
     assertCallTarget(target, fixture.contextGraphStorageAddress, 'context graph');
   } else if (KNOWLEDGE_ASSET_SELECTORS.has(selector)) {
-    assertCallTarget(target, fixture.assertedAtKav10Address, 'knowledge asset');
+    assertCallTarget(target, fixture.knowledgeAssetStorageAddress, 'knowledge asset storage');
   }
   switch (selector) {
     case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph')!.selector:

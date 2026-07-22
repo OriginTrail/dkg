@@ -22,6 +22,7 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
   readonly getEvmChainId: () => Promise<bigint>;
   readonly getKnowledgeAssetStorageAddress: () => Promise<string>;
+  readonly getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
   readonly store: TripleStore;
 }
 
@@ -49,11 +50,17 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       throw new Error('RFC-64 finalized VM precommit requires trusted RPC configuration');
     }
 
-    const [onChainContextGraphId, liveChainId, knowledgeAssetStorageAddress] =
+    const [
+      onChainContextGraphId,
+      liveChainId,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetsLifecycleAddress,
+    ] =
       await Promise.all([
         options.getOnChainContextGraphId(plan.catalogScope.contextGraphId, signal),
         options.getEvmChainId(),
         options.getKnowledgeAssetStorageAddress(),
+        options.getKnowledgeAssetsLifecycleAddress(),
       ]);
     signal.throwIfAborted();
     if (onChainContextGraphId === null) {
@@ -72,12 +79,18 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       canonicalKnowledgeAssetStorageAddress,
       'RFC-64 finalized VM knowledge asset storage address',
     );
+    const canonicalKnowledgeAssetsLifecycleAddress = knowledgeAssetsLifecycleAddress.toLowerCase();
+    assertCanonicalEvmAddress(
+      canonicalKnowledgeAssetsLifecycleAddress,
+      'RFC-64 finalized VM knowledge assets lifecycle address',
+    );
     const chainId = policy.governanceChainId;
     const runtime = createFinalizedVmRuntimeV1({
       networkId: plan.catalogScope.networkId,
       chainId,
       contextGraphStorageAddress: policy.governanceContractAddress,
       knowledgeAssetStorageAddress: canonicalKnowledgeAssetStorageAddress,
+      knowledgeAssetsLifecycleAddress: canonicalKnowledgeAssetsLifecycleAddress,
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
         chainId,
         endpoints: options.rpcEndpoints,

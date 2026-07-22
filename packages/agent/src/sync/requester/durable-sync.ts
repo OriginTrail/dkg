@@ -744,9 +744,8 @@ function partitionVerifiedGraphScopedAssets(
     if (!versionRaw || !/^\d+$/.test(versionRaw)) {
       throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
     }
-    let confirmationKind;
     try {
-      confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
+      readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
     } catch (cause) {
       throw new Error(
         `Verified graph-scoped KA ${ual} has invalid confirmation metadata`,
@@ -785,7 +784,6 @@ function partitionVerifiedGraphScopedAssets(
       contextGraphId,
       ual,
       assertionVersion: BigInt(versionRaw),
-      confirmationKind,
       assertionGraph,
       metaGraph,
       dataQuads: dataByGraph.get(assertionGraph) ?? [],

@@ -11,6 +11,7 @@ import {
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
+  readGraphKnowledgeAssetConfirmationKindV1,
   replaceLocallyTrustedKnowledgeAssetControls,
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
@@ -283,7 +284,6 @@ describe('durable graph-scoped KA materialization', () => {
         contextGraphId,
         ual,
         assertionVersion: 2n,
-        confirmationKind: 'finalized-materialization',
         assertionGraph,
         metaGraph,
         dataQuads: [v2Data],
@@ -319,7 +319,6 @@ describe('durable graph-scoped KA materialization', () => {
         contextGraphId,
         ual,
         assertionVersion: 2n,
-        confirmationKind: 'transaction',
         assertionGraph,
         metaGraph,
         dataQuads: [v2Data],
@@ -542,8 +541,9 @@ describe('durable graph-scoped KA materialization', () => {
     expect(assets[0]).toMatchObject({
       ual,
       assertionGraph,
-      confirmationKind: 'transaction',
     });
+    expect(readGraphKnowledgeAssetConfirmationKindV1(assets[0]!.metadataQuads))
+      .toBe('transaction');
     expect(inserted.filter((quad) => quad.subject === lifecycle)).toEqual(
       lifecycleRows.filter((quad) => quad.predicate !== `${DKG}assertionVersion`),
     );

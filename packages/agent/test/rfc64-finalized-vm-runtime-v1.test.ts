@@ -33,6 +33,7 @@ import {
   RFC64_VM_CG_STORAGE,
   RFC64_VM_CHAIN_ID,
   RFC64_VM_CONTEXT_GRAPH_NAME,
+  RFC64_VM_KAV10,
   RFC64_VM_KA_STORAGE,
   RFC64_VM_NETWORK_ID,
   RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
@@ -265,6 +266,7 @@ function runtimeConfig(
     chainId: RFC64_VM_CHAIN_ID,
     contextGraphStorageAddress: RFC64_VM_CG_STORAGE,
     knowledgeAssetStorageAddress: RFC64_VM_KA_STORAGE,
+    knowledgeAssetsLifecycleAddress: RFC64_VM_KAV10,
     snapshot,
     materialize,
   } as const;

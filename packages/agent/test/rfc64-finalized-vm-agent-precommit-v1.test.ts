@@ -16,6 +16,7 @@ import {
   RFC64_VM_CG_STORAGE,
   RFC64_VM_CHAIN_ID,
   RFC64_VM_CONTEXT_GRAPH_NAME,
+  RFC64_VM_KAV10,
   RFC64_VM_KA_STORAGE,
   RFC64_VM_NETWORK_ID,
   RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
@@ -89,6 +90,14 @@ describe('RFC-64 finalized VM agent precommit', () => {
     await expect(
       noncanonicalKnowledgeAssetStorage(plan(), new AbortController().signal),
     ).rejects.toThrow('knowledge asset storage address must be a lowercase 20-byte');
+
+    const noncanonicalKnowledgeAssetsLifecycle = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      getKnowledgeAssetsLifecycleAddress: async () => '0x1234',
+    });
+    await expect(
+      noncanonicalKnowledgeAssetsLifecycle(plan(), new AbortController().signal),
+    ).rejects.toThrow('knowledge assets lifecycle address must be a lowercase 20-byte');
   });
 });
 
@@ -99,6 +108,7 @@ function baseOptions() {
     getOnChainContextGraphId: async () => RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
     getEvmChainId: async () => BigInt(RFC64_VM_CHAIN_ID),
     getKnowledgeAssetStorageAddress: async () => RFC64_VM_KA_STORAGE,
+    getKnowledgeAssetsLifecycleAddress: async () => RFC64_VM_KAV10,
     store: new OxigraphStore(),
   } as const;
 }

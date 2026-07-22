@@ -242,6 +242,16 @@ async function execute(): Promise<void> {
         publication.headObjectDigest,
         `exact-set-${index + 1}.headObjectDigest`,
       );
+      const terminalFailure = await readTerminalFailureNullable(
+        receiver,
+        headDigest,
+        `exact-set-${index + 1}`,
+      );
+      if (terminalFailure !== null) {
+        throw new Error(
+          `exact-set-${index + 1} reconciliation failed: ${JSON.stringify(terminalFailure)}`,
+        );
+      }
       let synchronization: Record<string, unknown> | undefined;
       if (index === 0) {
         const applied = await readApplied(
@@ -758,6 +768,20 @@ async function readAppliedNullable(
       `${label}.inventoryRowCount`,
     ),
   });
+}
+
+async function readTerminalFailureNullable(
+  receiver: Gate2AgentChild,
+  catalogHeadDigest: string,
+  label: string,
+): Promise<Record<string, unknown> | null> {
+  const event = await receiver.request(
+    'terminalFailureReadback',
+    `${label}-terminal-failure-v1`,
+    'operation-completed',
+    { catalogHeadDigest },
+  );
+  return event.output === null ? null : outputRecord(event, `${label} terminal failure`);
 }
 
 async function readSynchronization(

@@ -677,17 +677,6 @@ export interface ContextGraphSub {
 }
 
 /**
- * Typed startup seed for controlled runtimes that need to model a subscription
- * restored before the first chain scan (for example, the RFC-64 process proof).
- * Seeds are in-memory overlays; durable production state still belongs to
- * `contextGraphSubscriptionStore`.
- */
-export interface InitialContextGraphSubscription {
-  readonly contextGraphId: string;
-  readonly state: Readonly<ContextGraphSub>;
-}
-
-/**
  * Metadata that passive discovery is allowed to contribute to the local
  * Context Graph catalogue.
  *
@@ -1082,8 +1071,6 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
-  /** Apply these typed in-memory subscriptions after durable rehydration and before chain polling. */
-  initialContextGraphSubscriptions?: readonly InitialContextGraphSubscription[];
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

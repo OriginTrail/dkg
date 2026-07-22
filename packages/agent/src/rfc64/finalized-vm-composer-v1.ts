@@ -1,9 +1,11 @@
 import {
   FinalizedVmSetAccumulatorV1,
+  assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSubGraphNameV1,
   readVerifiedCatalogSealBindingV1,
   type ContextGraphIdV1,
+  type EvmAddressV1,
   type FinalizedVmSetEvidenceV1,
   type FinalizedVmSetRowV1,
   type SubGraphNameV1,
@@ -25,6 +27,7 @@ import {
 import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 
 const COMPOSITION_KEYS = [
+  'assertedAtKav10Address',
   'catalogLane',
   'finalizedContextGraph',
   'inventory',
@@ -45,6 +48,8 @@ export interface FinalizedVmPlacementEvidenceV1 {
 }
 
 export interface ComposeFinalizedVmSetRequestV1 {
+  /** Trusted lifecycle/KAV10 deployment address against which catalog seals were authored. */
+  readonly assertedAtKav10Address: EvmAddressV1;
   readonly catalogLane: FinalizedVmCatalogLaneV1;
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
@@ -106,9 +111,15 @@ export function composeFinalizedVmSetV1(
     'finalized-vm-composition-input',
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
+  let assertedAtKav10Address: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
   let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   try {
+    assertCanonicalEvmAddress(
+      request.assertedAtKav10Address,
+      'finalized VM assertedAtKav10Address',
+    );
+    assertedAtKav10Address = request.assertedAtKav10Address;
     inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
     finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
       request.finalizedContextGraph,
@@ -206,6 +217,7 @@ export function composeFinalizedVmSetV1(
     assertCandidateMatchesPlacement(
       candidate,
       inventory,
+      assertedAtKav10Address,
       placement.authorship,
       placement.sealBinding,
     );
@@ -253,13 +265,14 @@ export function composeFinalizedVmSetV1(
 function assertCandidateMatchesPlacement(
   candidate: Readonly<FinalizedVmChainCandidateV1>,
   inventory: Readonly<FinalizedVmChainInventoryV1>,
+  assertedAtKav10Address: EvmAddressV1,
   authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>,
   sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>,
 ): void {
   const seal = sealBinding.seal;
   if (
     candidate.chainId !== seal.assertedAtChainId
-    || candidate.knowledgeAssetStorageAddress !== seal.assertedAtKav10Address
+    || assertedAtKav10Address !== seal.assertedAtKav10Address
     || candidate.kaId !== sealBinding.kaId
     || candidate.ual !== seal.kaUal
     || candidate.authorAddress !== sealBinding.authorAddress

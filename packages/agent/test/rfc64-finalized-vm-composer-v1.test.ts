@@ -54,6 +54,7 @@ const CONTEXT_GRAPH_NAME = 'agent-blackbox-vm' as const;
 const ON_CHAIN_CONTEXT_GRAPH_ID = '14' as const;
 const CG_STORAGE = `0x${'33'.repeat(20)}` as EvmAddressV1;
 const KA_STORAGE = `0x${'44'.repeat(20)}` as EvmAddressV1;
+const KAV10 = `0x${'55'.repeat(20)}` as EvmAddressV1;
 const PUBLISHER = `0x${'66'.repeat(20)}` as EvmAddressV1;
 const BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
 const ROOT_1 = `0x${'88'.repeat(32)}` as Digest32V1;
@@ -177,16 +178,11 @@ describe('RFC-64 finalized VM placement composition', () => {
       (row) => { row.assertionRoot = ROOT_1; },
       (row) => { row.attestedAuthorAddress = null; },
       (row) => { row.publisherAddress = null; },
-      (row) => { row.knowledgeAssetStorageAddress = `0x${'ab'.repeat(20)}`; },
     ];
     for (const mutate of mutations) {
       const inventory = structuredClone(base.inventory) as unknown as Record<string, unknown>;
       const rows = inventory.rows as Array<Record<string, unknown>>;
       mutate(rows[1]!);
-      if (rows[1]!.knowledgeAssetStorageAddress !== KA_STORAGE) {
-        inventory.knowledgeAssetStorageAddress = rows[1]!.knowledgeAssetStorageAddress;
-        rows[0]!.knowledgeAssetStorageAddress = rows[1]!.knowledgeAssetStorageAddress;
-      }
       expectCode(
         () => composeFinalizedVmSetV1({ ...base, inventory } as never),
         'finalized-vm-composition-mismatch',
@@ -196,6 +192,10 @@ describe('RFC-64 finalized VM placement composition', () => {
     expectCode(() => composeFinalizedVmSetV1({
       ...base,
       catalogLane: { contextGraphId: 'another-graph', subGraphName: null },
+    } as never), 'finalized-vm-composition-mismatch');
+    expectCode(() => composeFinalizedVmSetV1({
+      ...base,
+      assertedAtKav10Address: `0x${'ab'.repeat(20)}`,
     } as never), 'finalized-vm-composition-mismatch');
   });
 
@@ -250,6 +250,7 @@ function requestFor(
   placements: readonly FinalizedVmPlacementEvidenceV1[],
 ): ComposeFinalizedVmSetRequestV1 {
   return {
+    assertedAtKav10Address: KAV10,
     catalogLane: {
       contextGraphId: CONTEXT_GRAPH_NAME,
       subGraphName: null,
@@ -333,7 +334,7 @@ async function createPlacement(
   } as AuthorCatalogScopeV1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(CHAIN_ID),
-    kav10Address: KA_STORAGE,
+    kav10Address: KAV10,
     merkleRoot: ethers.getBytes(assertionRoot),
     authorAddress: AUTHOR,
     reservedKaId: BigInt(kaId),
@@ -351,7 +352,7 @@ async function createPlacement(
     authorAttestationVS: validAttestation ? attestation.yParityAndS : `0x${'bb'.repeat(32)}`,
     authorSchemeVersion: '1',
     assertedAtChainId: CHAIN_ID,
-    assertedAtKav10Address: KA_STORAGE,
+    assertedAtKav10Address: KAV10,
     reservedKaId: kaId,
     assertionFinalizedAt: '2026-07-22T08:00:00.000Z',
     contentScopeVersion: '2',
@@ -480,7 +481,7 @@ async function createPlacement(
     {
       networkId: NETWORK_ID,
       assertedAtChainId: CHAIN_ID,
-      assertedAtKav10Address: KA_STORAGE,
+      assertedAtKav10Address: KAV10,
     },
   );
   return { authorship, sealBinding };

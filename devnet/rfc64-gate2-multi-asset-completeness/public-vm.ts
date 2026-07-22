@@ -44,7 +44,8 @@ const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/m2-public-vm-process';
 const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
 const CG_STORAGE = '0x3333333333333333333333333333333333333333';
-const KA_STORAGE = '0x4444444444444444444444444444444444444444';
+const KAV10 = '0x4444444444444444444444444444444444444444';
+const KA_STORAGE = '0x5555555555555555555555555555555555555555';
 const AUTHOR_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
 const AUTHOR_WALLET = new ethers.Wallet(AUTHOR_PRIVATE_KEY);
 const AUTHOR_ADDRESS = AUTHOR_WALLET.address.toLowerCase();
@@ -62,7 +63,7 @@ const PROJECTION_NQUADS =
 const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: '20430',
-  assertedAtKav10Address: KA_STORAGE,
+  assertedAtKav10Address: KAV10,
 });
 const POLICY = Object.freeze({
   networkId: NETWORK_ID,
@@ -405,7 +406,7 @@ async function announceAndDrain(
 async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
   const typedData = buildAuthorAttestationTypedData({
     chainId: 20_430n,
-    kav10Address: KA_STORAGE,
+    kav10Address: KAV10,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
     authorAddress: AUTHOR_ADDRESS,
     reservedKaId: BigInt(KA_ID),
@@ -422,7 +423,7 @@ async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
     authorAttestationVS: signature.yParityAndS,
     authorSchemeVersion: '1',
     assertedAtChainId: '20430',
-    assertedAtKav10Address: KA_STORAGE,
+    assertedAtKav10Address: KAV10,
     reservedKaId: KA_ID,
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',

@@ -9,6 +9,8 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   produceDirectAuthorCatalogIssuerDelegationV1,
   produceEmptyAuthorCatalogGenesisV1,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
 } from '@origintrail-official/dkg-agent';
 import {
   MockChainAdapter,
@@ -167,10 +169,9 @@ async function boot(): Promise<void> {
       },
     }),
     ...(finalizedVmConfig === null ? {} : {
-      initialContextGraphSubscriptions: [{
-        contextGraphId: finalizedVmConfig.contextGraphId,
-        state: { subscribed: true, synced: false },
-      }],
+      contextGraphSubscriptionStore: createHarnessSubscriptionStore(
+        finalizedVmConfig.contextGraphId,
+      ),
     }),
   });
   agent = created;
@@ -194,6 +195,27 @@ async function boot(): Promise<void> {
     finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
   });
+}
+
+/** Model an already-durable subscription through the production restore boundary. */
+function createHarnessSubscriptionStore(
+  contextGraphId: string,
+): ContextGraphSubscriptionStore {
+  const records = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
+    id: contextGraphId,
+    subscribed: true,
+    synced: false,
+    syncScoped: true,
+  }]]);
+  return {
+    loadAll: async () => [...records.values()].map((record) => ({ ...record })),
+    load: async (id) => {
+      const record = records.get(id);
+      return record === undefined ? null : { ...record };
+    },
+    save: async (record) => { records.set(record.id, { ...record }); },
+    delete: async (id) => { records.delete(id); },
+  };
 }
 
 async function handle(command: Command): Promise<void> {

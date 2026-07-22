@@ -1352,6 +1352,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       getOnChainContextGraphId,
       getEvmChainId,
       getKnowledgeAssetStorageAddress,
+      getKnowledgeAssetsLifecycleAddress: async () => KAV10,
       store: fixture.receiverStore,
     });
     const receiver = fixture.createReceiver({

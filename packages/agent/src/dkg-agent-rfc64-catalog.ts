@@ -770,6 +770,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             }
             return this.chain.getDKGKnowledgeAssetsAddress();
           },
+          getKnowledgeAssetsLifecycleAddress: () =>
+            this.chain.getKnowledgeAssetsLifecycleAddress(),
           store: this.store,
         });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({

@@ -29,7 +29,11 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
-import type { Rfc64CatalogAccessPolicyAuthorityConfigV1 } from '../src/dkg-agent-types.js';
+import type {
+  ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
+  Rfc64CatalogAccessPolicyAuthorityConfigV1,
+} from '../src/dkg-agent-types.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -53,6 +57,7 @@ const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
 const SECOND_SUCCESSOR_ISSUED_AT = '1773900002000' as TimestampMsV1;
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const KA_STORAGE = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const CONTEXT_GRAPH_STORAGE =
   '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
@@ -119,16 +124,33 @@ async function startNativeAgent(
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
       ...(finalizedRuntime.initialSubscription === undefined ? {} : {
-        initialContextGraphSubscriptions: [{
-          contextGraphId: finalizedRuntime.initialSubscription,
-          state: { subscribed: true, synced: false },
-        }],
+        contextGraphSubscriptionStore: seededSubscriptionStore(
+          finalizedRuntime.initialSubscription,
+        ),
       }),
     }),
   });
   agents.push(agent);
   await agent.start();
   return agent;
+}
+
+function seededSubscriptionStore(contextGraphId: string): ContextGraphSubscriptionStore {
+  const records = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
+    id: contextGraphId,
+    subscribed: true,
+    synced: false,
+    syncScoped: true,
+  }]]);
+  return {
+    loadAll: async () => [...records.values()].map((record) => ({ ...record })),
+    load: async (id) => {
+      const record = records.get(id);
+      return record === undefined ? null : { ...record };
+    },
+    save: async (record) => { records.set(record.id, { ...record }); },
+    delete: async (id) => { records.delete(id); },
+  };
 }
 
 function tcpMultiaddr(agent: DKGAgent): string {
@@ -532,6 +554,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       active: true,
       assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
       assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
       assets: Object.freeze([Object.freeze({
         assertionRoot: ASSERTION_ROOT,
         assertionVersion: '1',
@@ -559,6 +582,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
         [BigInt(ON_CHAIN_CONTEXT_GRAPH_ID)],
       ),
     }, 'finalized'])).toThrow('context graph target');
+    const callsBeforeRuntime = finalizedRpc.calls.length;
     const rpc = await rpcHarness.start((call, response) => {
       try {
         sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
@@ -683,11 +707,12 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       currentCatalogHeadDigest: successor.headObjectDigest,
       inventoryRowCount: '1',
     });
-    const finalizedCallTargets = finalizedRpc.calls
+    const finalizedCallTargets = finalizedRpc.calls.slice(callsBeforeRuntime)
       .filter(({ method }) => method === 'eth_call')
       .map(({ params }) => (params[0] as { readonly to?: string }).to?.toLowerCase());
     expect(finalizedCallTargets).toContain(CONTEXT_GRAPH_STORAGE);
-    expect(finalizedCallTargets).toContain(KAV10);
+    expect(finalizedCallTargets).toContain(KA_STORAGE);
+    expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
 
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
