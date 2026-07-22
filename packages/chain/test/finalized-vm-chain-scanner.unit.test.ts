@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import {
+  FinalizedVmChainInventoryValidationErrorV1,
   snapshotFinalizedVmChainInventoryV1,
 } from '../src/finalized-vm-chain-inventory.js';
 import {
@@ -138,6 +139,20 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(Object.isFrozen(inventory)).toBe(true);
     expect(Object.isFrozen(inventory.rows)).toBe(true);
     expect(snapshotFinalizedVmChainInventoryV1(structuredClone(inventory))).toEqual(inventory);
+    expect(snapshotFinalizedVmChainInventoryV1(
+      structuredClone(inventory),
+      { maxRows: 2 },
+    )).toEqual(inventory);
+    expect(() => snapshotFinalizedVmChainInventoryV1(
+      structuredClone(inventory),
+      { maxRows: 1 },
+    )).toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    for (const maxRows of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+      expect(() => snapshotFinalizedVmChainInventoryV1(
+        structuredClone(inventory),
+        { maxRows },
+      )).toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    }
     expect(() => snapshotFinalizedVmChainInventoryV1({
       ...structuredClone(inventory),
       unexpected: true,
