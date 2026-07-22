@@ -10,6 +10,18 @@ export const LIFT_JOB_STATES = [
 
 export type LiftJobState = (typeof LIFT_JOB_STATES)[number];
 
+/**
+ * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
+ * (`recordDurableBroadcastBeforeSend`). Reported by the broadcast progress hook and
+ * switched on by the `processKnowledgeAssetVmPublish` catch, replacing the prior
+ * inference from a mutable `executorReturned` flag + a post-hoc `getStatus` re-read.
+ * - `'not-reached'`          the write-ahead hook never fired (no tx was signed or sent).
+ * - `'recorded-durable'`     `'broadcast'` was fsync-durably recorded; the tx is being/was sent.
+ * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
+ *                            and was rolled back to `'validated'`; the tx was never sent.
+ */
+export type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
+
 export const LIFT_TRANSITION_TYPES = ['CREATE', 'MUTATE', 'REVOKE'] as const;
 
 export type LiftTransitionType = (typeof LIFT_TRANSITION_TYPES)[number];

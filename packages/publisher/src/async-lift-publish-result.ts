@@ -160,6 +160,41 @@ export function mapPublishExceptionToLiftJobFailure(
   });
 }
 
+/**
+ * #1867 — a DEFINITIVE pre-acceptance send failure: an error the chain node returns while
+ * REJECTING the transaction before it is admitted to the mempool, so the tx provably never
+ * propagated and can never be mined. Only such errors may short-circuit the write-ahead
+ * `'broadcast'` recovery early-return into an immediate terminal failure. Every ambiguous
+ * error — RPC timeouts, `replacement transaction underpriced`, nonce races, `already known`,
+ * and reverts (post-mempool by definition) — MUST stay on the recovery track, or the #1851
+ * write-ahead durability guarantee regresses and a double-submit becomes possible.
+ *
+ * CONSERVATIVE WHITELIST — only `insufficient funds` (plus the no-funded-wallet selection
+ * failure, which is thrown pre-signing so no tx exists at all). A node rejects a tx it cannot
+ * afford (gas * price + value) at `eth_sendRawTransaction` submission, before the tx enters
+ * the mempool; this reject is never emitted after admission. `nonce` and `tx reverted` are
+ * deliberately EXCLUDED: a nonce error can follow a competing tx already propagating, and a
+ * revert means the tx was mined. Widen only with a per-error pre-mempool proof.
+ *
+ * Invariant: whatever this whitelists, `mapPublishExceptionToLiftJobFailure({ error,
+ * failedFromState: 'broadcast', ... })` classifies as `insufficient_funds` (terminal,
+ * `fail_job`, non-retryable), so the job is never chain-recovery-chased.
+ *
+ * The bare `includes('insufficient funds')` mirrors `classifyPublishFailureCode` exactly; a
+ * mined-then-reverted tx whose revert string contains that phrase is an accepted, intentional
+ * edge (same code the mapper would assign, and a revert is a failure on either path).
+ */
+export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  const errorCode = (error as { code?: unknown } | null | undefined)?.code;
+  return (
+    errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE ||
+    messageIndicatesNoFundedPublisherWallet(lower) ||
+    lower.includes('insufficient funds')
+  );
+}
+
 function classifyPublishFailureCode(
   lowerMessage: string,
   failedFromState: AsyncLiftPublishFailureInput['failedFromState'],

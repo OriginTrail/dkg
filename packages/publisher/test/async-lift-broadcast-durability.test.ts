@@ -6,6 +6,7 @@ import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core'
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
+  isDefinitivePreAcceptanceSendFailure,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import {
@@ -310,5 +311,126 @@ describe('async lift publisher broadcast durability', () => {
     expect(kinds).toEqual(['admission', 'claimed', 'validated', 'broadcast', 'failed']);
     expect(kinds.filter((k) => k === 'validated')).toHaveLength(1);
     expect(kinds.filter((k) => k === 'broadcast')).toHaveLength(1);
+  });
+
+  // A VM-publish executor that fires the pre-send write-ahead (records a durable
+  // 'broadcast'), then throws `error` — the post-write-ahead failure #1867 classifies.
+  function firesBroadcastThenThrows(
+    error: unknown,
+  ): NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> {
+    return {
+      execute: async (input) => {
+        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+        throw error;
+      },
+    };
+  }
+
+  // #1867 — a send that fails DEFINITIVELY before mempool acceptance (insufficient funds
+  // at eth_sendRawTransaction) throws AFTER the durable 'broadcast' record. Instead of
+  // stranding the job on the ~15-min recovery chase (ending in recovery_state_inconsistent),
+  // it must be an immediate terminal broadcast-phase failure — insufficient_funds — with no
+  // recovery lookup and no resend.
+  it('records an immediate terminal insufficient_funds when the send is rejected before acceptance (#1867)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('insufficient funds for gas * price + value'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    // Terminal failure now — NOT left as 'broadcast' for recovery to chase.
+    expect(processed?.status).toBe('failed');
+    expect(processed?.status).not.toBe('broadcast');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+    // Terminal, off the chain-recovery track (fail_job, non-retryable).
+    expect(processed?.failure?.resolution).toBe('fail_job');
+    expect(processed?.failure?.resolution).not.toBe('retry_recovery');
+    expect(processed?.failure?.retryable).toBe(false);
+    // The attempted broadcast tx hash is retained on the failed job for diagnostics.
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+
+    // recover() must NOT chase or resubmit a never-accepted tx: no work, job stays failed.
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  // #1867 (deliberate, LOCKED edge) — a mined-then-reverted tx whose revert string happens
+  // to contain "insufficient funds" is classified pre-acceptance terminal. This is an
+  // ACCEPTED consequence of the substring match: it mirrors classifyPublishFailureCode
+  // exactly (the mapper would assign insufficient_funds either way), and a revert is a
+  // failure on both the classifier and recovery paths — recovery would only terminate it
+  // later with a different code. The go-ethereum pre-check message is a node-level reject,
+  // not a Solidity revert, so this collision is not realistic for the publish call; the
+  // decision is intentional, not accidental. Do NOT "fix" this by excluding reverts.
+  it('classifies a revert message that contains "insufficient funds" as pre-acceptance terminal (accepted edge)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('execution reverted: insufficient funds'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+  });
+
+  // #1867 SAFETY INVARIANT (double-submit guard) — every AMBIGUOUS post-write-ahead error
+  // (one that could correspond to a tx already in the mempool or mined) MUST stay on the
+  // recovery early-return: left as 'broadcast', never terminated, never resent. If a future
+  // change broadens the whitelist to any of these, these cases fail loudly. Reverts here
+  // deliberately do NOT contain "insufficient funds" (that collision is the locked edge above).
+  it.each([
+    ['a plain RPC timeout', 'ETIMEDOUT: request timed out'],
+    ['a nonce race', 'nonce too low'],
+    ['a replacement-underpriced reject', 'replacement transaction underpriced'],
+    ['an already-known tx', 'already known'],
+    ['a plain on-chain revert', 'execution reverted: KnowledgeCollection: not authorized'],
+    ['an opaque executor error', 'stop after the durable write-ahead'],
+  ])('keeps %s on the recovery track (stays broadcast, no resend)', async (_label, message) => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(new Error(message)),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    // Left on the recovery track: the durable 'broadcast' is preserved, NOT terminated.
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    // Without a chain recovery resolver, recover() cannot resolve it and must not resend
+    // (recover() returns 0 recovered work here; the job stays 'broadcast').
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // Pure classifier contract for the conservative whitelist — locks the exact boundary
+  // independently of the wiring (the invariant test above proves the wiring honors it).
+  it('isDefinitivePreAcceptanceSendFailure whitelists only unambiguous pre-mempool rejects', () => {
+    // Whitelisted — provably before mempool admission.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('insufficient funds for gas * price + value'))).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('INSUFFICIENT FUNDS'))).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      Object.assign(new Error('re-wrapped'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE }),
+    )).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      new Error('No operational wallet has enough funds to publish'),
+    )).toBe(true);
+
+    // Excluded — each can correspond to a tx already in the mempool or mined.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('nonce too low'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('replacement transaction underpriced'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('already known'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: not authorized'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('ETIMEDOUT: request timed out'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(undefined)).toBe(false);
   });
 });
