@@ -251,10 +251,19 @@ function isCommitMarker(value: unknown): value is PromoteCommitMarker {
  * `unknown` from a SINGLE canonical payload read (matching the lift sibling), rather than
  * reading a secondary state-index triple. Never throws.
  */
+/**
+ * A payload that parsed as a structurally complete job whose `state` has been validated only
+ * as a non-empty string — the PROMOTE_JOB_STATES enum-membership check is deliberately deferred
+ * to the caller (so the by-jobId clear can report a well-formed-but-unrecognized state as
+ * `unknown`, distinct from a corrupt payload). Exposing `state: string` keeps the classifier
+ * boundary honest: it never types a value as `PromoteJobState` before that has been checked.
+ */
+export type StructurallyValidPromoteJobPayload = Omit<PromoteJob, 'state'> & { readonly state: string };
+
 export type PromoteJobParseResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'malformed' }
-  | { readonly kind: 'job'; readonly job: PromoteJob };
+  | { readonly kind: 'job'; readonly job: StructurallyValidPromoteJobPayload };
 
 export function classifyJobPayload(binding: string | undefined): PromoteJobParseResult {
   if (!binding) return { kind: 'absent' };
@@ -264,9 +273,12 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
     const parsed = JSON.parse(payload);
     if (!isRecord(parsed)) return { kind: 'malformed' };
     if (typeof parsed['jobId'] !== 'string' || parsed['jobId'].length === 0) return { kind: 'malformed' };
-    // The PROMOTE_JOB_STATES enum check is intentionally NOT applied here: a structurally
-    // valid job carrying an unrecognized `state` is `kind: 'job'` so the terminal clear can
-    // report it as `unknown`, distinct from a genuinely corrupt payload (`malformed`).
+    // `state` is structurally validated as a non-empty string here, but the PROMOTE_JOB_STATES
+    // enum-membership check is intentionally NOT applied: a well-formed job carrying an
+    // unrecognized state *string* is `kind: 'job'` so the terminal clear can report it as
+    // `unknown`. A missing or non-string `state` is structural corruption (not an unrecognized
+    // state), so — like every other malformed field — it is `malformed`, never `unknown`.
+    if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
     if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
     if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
@@ -281,7 +293,7 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
     }
     if (parsed['lease'] !== undefined && !isLease(parsed['lease'])) return { kind: 'malformed' };
     if (parsed['commitMarker'] !== undefined && !isCommitMarker(parsed['commitMarker'])) return { kind: 'malformed' };
-    return { kind: 'job', job: parsed as unknown as PromoteJob };
+    return { kind: 'job', job: parsed as unknown as StructurallyValidPromoteJobPayload };
   } catch {
     return { kind: 'malformed' };
   }
@@ -295,9 +307,11 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
  */
 export function parseJobPayload(binding: string | undefined): PromoteJob | null {
   const result = classifyJobPayload(binding);
-  return result.kind === 'job' && (PROMOTE_JOB_STATES as readonly string[]).includes(String(result.job.state))
-    ? result.job
-    : null;
+  if (result.kind !== 'job') return null;
+  // Re-apply the enum drop classifyJobPayload defers: a well-formed job whose state string is
+  // not a recognized value is skipped by the list/read/conflict paths. The cast is honest only
+  // once the membership check has passed (state is provably a PromoteJobState here).
+  return (PROMOTE_JOB_STATES as readonly string[]).includes(result.job.state) ? (result.job as PromoteJob) : null;
 }
 
 /**

@@ -636,11 +636,13 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (parsed.kind === 'absent') return { outcome: 'already_absent' };
       if (parsed.kind === 'malformed') return { outcome: 'rejected', reason: 'malformed' };
       const { job } = parsed;
-      // Structurally-valid job, but its state is not a recognized enum value.
+      // Structurally-valid job whose state is a well-formed string but not a recognized enum
+      // value → unknown (a missing/non-string state was already classified `malformed`). Narrow
+      // to PromoteJobState only AFTER the membership check confirms it.
       if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) {
         return { outcome: 'rejected', reason: 'unknown' };
       }
-      if (!isTerminalPromoteJobState(job.state)) return { outcome: 'rejected', reason: 'nonterminal' };
+      if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
     });

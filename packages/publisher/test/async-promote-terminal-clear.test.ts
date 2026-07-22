@@ -139,6 +139,17 @@ describe('#1837 promote queue clearTerminalJob', () => {
     await expect(queue.clearTerminalJob('corrupt-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
   });
 
+  // #1893 (review): a payload that is otherwise well-formed but carries no string `state` is
+  // structural corruption → malformed (HTTP 400), NOT the unknown-state path (HTTP 409).
+  it('rejects a payload with a missing/non-string state as malformed, not unknown', async () => {
+    const queue = createQueue();
+    const noState = { jobId: 'nostate-1', request: makeRequest(), enqueuedAt: now, updatedAt: now, attempt: { count: 0, maxRetries: 3 } };
+    await store.insert([
+      { subject: jobSubject('nostate-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(noState)), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
+    ]);
+    await expect(queue.clearTerminalJob('nostate-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
+  });
+
   it('concurrent clears of one terminal job are deterministic: one cleared, rest already_absent, no other job affected', async () => {
     const queue = createQueue();
     const target = await enqueueSucceeded(queue, { assertionName: 'a' });
@@ -174,7 +185,16 @@ describe('classifyJobPayload', () => {
     expect(classifyJobPayload(bind({ ...validJob, enqueuedAt: 'x' })).kind).toBe('malformed');
   });
 
-  it('job for a structurally-valid payload, INCLUDING a non-enum state', () => {
+  // #1893 (review): a missing or non-string `state` is structural corruption — it must be
+  // `malformed`, NOT `unknown` (which is reserved for a well-formed but non-enum state string).
+  it('malformed for a missing or non-string state', () => {
+    expect(classifyJobPayload(bind({ ...validJob, state: undefined })).kind).toBe('malformed'); // JSON.stringify drops the key
+    expect(classifyJobPayload(bind({ ...validJob, state: '' })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, state: 42 })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, state: null })).kind).toBe('malformed');
+  });
+
+  it('job for a structurally-valid payload, INCLUDING a non-enum state string', () => {
     expect(classifyJobPayload(bind(validJob))).toMatchObject({ kind: 'job' });
     const result = classifyJobPayload(bind({ ...validJob, state: 'bogus_state' }));
     expect(result.kind).toBe('job');
