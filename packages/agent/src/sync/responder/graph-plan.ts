@@ -572,6 +572,29 @@ export function serializeResponderRows(rows: readonly SyncRow[]): string {
   return rows.map(serializeResponderRow).join('\n');
 }
 
+const RESPONDER_ROW_ENCODER = new TextEncoder();
+
+/**
+ * Serialized (N-Quads, UTF-8) wire byte length of one responder row — the ONE
+ * byte model for response-frame budgets, shared by the byte-budget serializer
+ * and the subject-atomic extend so both reason about `maxResponseBytes` the same
+ * way (#1916). This is distinct from `estimateStringRowHeapBytes`, which
+ * estimates retained HEAP size for snapshot memory budgets only.
+ */
+function serializedResponderRowByteLength(row: SyncRow): number {
+  return RESPONDER_ROW_ENCODER.encode(serializeResponderRow(row)).byteLength;
+}
+
+/** Serialized wire size of a row list (rows joined by single-byte `\n`), using
+ * the same per-row accounting as {@link serializeResponderRowsWithinByteBudget}. */
+function serializedRowsResponseBytes(rows: readonly SyncRow[]): number {
+  let bytes = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    bytes += serializedResponderRowByteLength(rows[i]) + (i > 0 ? 1 : 0);
+  }
+  return bytes;
+}
+
 /**
  * Serialize the largest prefix that fits the negotiated response target.
  * Pagination advances by the number of N-Quads actually parsed by the
@@ -585,12 +608,11 @@ export function serializeResponderRowsWithinByteBudget(
   maxBytes: number,
 ): string {
   const safeMaxBytes = Math.max(1, Math.floor(maxBytes));
-  const encoder = new TextEncoder();
   const page: string[] = [];
   let bytes = 0;
   for (const row of rows) {
     const serialized = serializeResponderRow(row);
-    const rowBytes = encoder.encode(serialized).byteLength + (page.length > 0 ? 1 : 0);
+    const rowBytes = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
     if (page.length > 0 && bytes + rowBytes > safeMaxBytes) break;
     page.push(serialized);
     bytes += rowBytes;
@@ -3654,7 +3676,7 @@ async function readDurableMetaRowsPageSubjectAtomic(
     // (#1916): stop growing (bounding memory) and return the bounded window — the
     // caller's byte-budget serialization caps the response and splits this
     // oversized subject across pages with forward progress.
-    if (estimateRowsResponseBytes(window) >= safeMaxBytes) return window;
+    if (serializedRowsResponseBytes(window) >= safeMaxBytes) return window;
     // Otherwise grow the window (roughly doubling) and re-read as one query so
     // the boundary comparison stays self-consistent.
     extra = extra === 1 ? safeLimit + 1 : extra * 2;
@@ -3663,14 +3685,6 @@ async function readDurableMetaRowsPageSubjectAtomic(
     `durable-meta subject-atomic paging did not converge for "${contextGraphId}" at offset ${safeOffset} `
     + '(trailing subject exceeded the bounded window budget)',
   );
-}
-
-/** Conservative estimate of a row list's serialized response size (heap-byte
- * estimate ≥ N-Quads byte length), used to bound the subject-atomic extend. */
-function estimateRowsResponseBytes(rows: readonly SyncRow[]): number {
-  let bytes = 0;
-  for (const row of rows) bytes += estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
-  return bytes;
 }
 
 /**

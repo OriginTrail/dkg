@@ -787,6 +787,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // so serialize within the frame budget rather than emitting unbounded
           // N-Quads. The extend keeps every valid seal well under the budget, so
           // this only ever truncates a pathological oversized subject.
+          //
+          // Pagination contract: durable meta uses byte-budget pagination where a
+          // SHORT page is NOT EOF — only an empty page is. This is a
+          // REQUESTER-SIDE default (page-fetch: syncPageSize=8192 > SYNC_PAGE_SIZE
+          // ⇒ short≠EOF for every phase), NOT wire-negotiated here. Every
+          // testnet-canary+ requester holds it, so byte-capping is safe. A
+          // byte-capped meta page is ~14000 rows (4 MiB / ~300 B) ≫ the 500-row
+          // limit, so it is never short for normal meta; a short page only arises
+          // from a hostile huge-literal subject, and only a pre-canary 500-row
+          // short=EOF requester could then end early — follow-up: negotiate meta
+          // pageMode for wire-explicitness (see the #1788/#1916 follow-up issue).
           const serialized = serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
