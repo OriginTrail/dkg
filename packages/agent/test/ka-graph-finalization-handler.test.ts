@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -11,8 +14,10 @@ import {
 import {
   GraphManager,
   OxigraphStore,
+  StoreSchedulerBusyError,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   computePrivateRootV10,
@@ -21,6 +26,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { FinalizationRecoveryJournal } from '../src/finalization-recovery-journal.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -354,21 +360,194 @@ describe('graph-scoped finalization handler', () => {
 
   it('keeps the old VM graph and remains retryable when the atomic swap fails', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const replaceGraph = store.replaceGraph?.bind(store);
-    if (!replaceGraph) throw new Error('Oxigraph replaceGraph unavailable');
-    store.replaceGraph = async (graphUri, quads, options) => {
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.insert([{
+      subject: UAL,
+      predicate: 'urn:test:old-metadata',
+      object: '"preserved"',
+      graph: metaGraph,
+    }]);
+    const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+    if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+    store.replaceGraphAndSubject = async (graphUri, quads, metadataGraph, subject, metadata, options) => {
       if (graphUri === vmGraph) throw new Error('injected graph finalization failure');
-      return replaceGraph(graphUri, quads, options);
+      return replaceGraphAndSubject(graphUri, quads, metadataGraph, subject, metadata, options);
     };
 
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> <urn:test:old-metadata> "preserved" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
 
-    store.replaceGraph = replaceGraph;
+    store.replaceGraphAndSubject = replaceGraphAndSubject;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('recovers original transaction provenance after a pre-verification store timeout and restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const wire = encodeFinalizationMessage(message);
+      let currentRootCount = 2n;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => currentRootCount,
+        getKAContextGraphId: async () => 42n,
+      } as ChainAdapter;
+      const journal = new FinalizationRecoveryJournal(directory);
+      const pressured = new FinalizationHandler(
+        store,
+        chain,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        journal,
+      );
+      (pressured as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+
+      const query = store.query.bind(store);
+      let busyReads = 2;
+      store.query = async (sparql, options) => {
+        if (busyReads > 0) {
+          busyReads -= 1;
+          throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+        }
+        return query(sparql, options);
+      };
+      await pressured.handleFinalizationMessage(wire, CG, '12D3KooWPublisher');
+      expect(await journal.list()).toMatchObject([{
+        state: 'raw',
+        sourcePeerId: '12D3KooWPublisher',
+        txHash: message.txHash,
+      }]);
+      store.query = query;
+
+      const restarted = new FinalizationHandler(
+        store,
+        chain,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        new FinalizationRecoveryJournal(directory),
+      );
+      const internals = restarted as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      internals.verifyChainCgBinding = async () => true;
+
+      const reconcileInput = {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      };
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await journal.list()).toHaveLength(1);
+
+      currentRootCount = 1n;
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'normal',
+          'sparql-http.update',
+        );
+      };
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('already-confirmed');
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await new FinalizationRecoveryJournal(directory).list()).toEqual([]);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + '<http://dkg.io/ontology/materializedVersion> "123:4" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('never journals structurally invalid or legacy envelopes under store pressure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    try {
+      const { message } = await stageGraph();
+      const journal = new FinalizationRecoveryJournal(directory);
+      const pressured = new FinalizationHandler(
+        store,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        journal,
+      );
+      await pressured.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        startKAId: PACKED_KA_ID + 1n,
+      }), CG);
+      expect(await journal.list()).toEqual([]);
+
+      const query = store.query.bind(store);
+      store.query = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+      };
+      await expect(pressured.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        contentScopeVersion: 0,
+        rootEntities: ['urn:legacy:root'],
+      }), CG)).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      store.query = query;
+      expect(await journal.list()).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a scheduler timeout observable when durable recovery is unavailable', async () => {
+    const { message } = await stageGraph();
+    const pressured = new FinalizationHandler(store, undefined);
+    const query = store.query.bind(store);
+    store.query = async () => {
+      throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+    };
+
+    await expect(pressured.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    store.query = query;
   });
 
   it('does not delete a newer SWM assertion staged after source verification', async () => {

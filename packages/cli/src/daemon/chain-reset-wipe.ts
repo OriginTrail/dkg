@@ -52,7 +52,8 @@
  *
  * Files wiped: `store.nq` (always backed up, see above), `store.nq.tmp`,
  *              `random-sampling.wal`, `publish-journal.*` (all variants from
- *              publisher-runner).
+ *              publisher-runner), `pending-finalizations.json` and its
+ *              interrupted-write temporary files.
  *
  * Files preserved: `wallets.json` (operator identity), `auth.token`,
  *              `config.json`, `node-ui.db` (dashboard state),
@@ -550,10 +551,14 @@ function performWipe(
     ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
+  wipeAbs(join(dataDir, 'pending-finalizations.json'), 'pending-finalizations.json');
 
   try {
     for (const f of readdirSync(dataDir)) {
-      if (f.startsWith('publish-journal.')) {
+      if (
+        f.startsWith('publish-journal.')
+        || f.startsWith('pending-finalizations.json.tmp.')
+      ) {
         try {
           rmSync(join(dataDir, f), { force: true });
           removedFiles.push(f);
@@ -567,7 +572,7 @@ function performWipe(
   } catch (err) {
     const message = (err as Error).message;
     failedFiles.push({ file: dataDir, error: message });
-    log(`  WARN: failed to list publish journals in ${dataDir}: ${message}`);
+    log(`  WARN: failed to list chain-state journals in ${dataDir}: ${message}`);
   }
 
   for (const f of removedFiles) log(`  removed: ${f}`);

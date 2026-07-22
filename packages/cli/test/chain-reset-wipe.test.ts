@@ -12,7 +12,8 @@
  *      written, networks that haven't opted in stay untouched).
  *   2. Persisted == current → no wipe, idempotent.
  *   3. Marker changed → wipe ALL of: store.nq, store.nq.tmp,
- *      random-sampling.wal, every publish-journal.* file. Save new marker.
+ *      random-sampling.wal, every publish-journal.* file, and the inbound
+ *      finalization recovery journal. Save new marker.
  *   4. First boot WITH marker present (no persisted state) → wipe.
  *      Documented design: only way to reach here on an existing install
  *      is "auto-update brought a release with a fresh marker", which by
@@ -42,6 +43,8 @@ function seedAllFiles(dataDir: string) {
   writeFileSync(join(dataDir, 'publish-journal.0'), 'journal-0');
   writeFileSync(join(dataDir, 'publish-journal.1'), 'journal-1');
   writeFileSync(join(dataDir, 'publish-journal.staging'), 'journal-staging');
+  writeFileSync(join(dataDir, 'pending-finalizations.json'), '{"entries":[]}');
+  writeFileSync(join(dataDir, 'pending-finalizations.json.tmp.interrupted'), 'partial');
   // Files that MUST be preserved across the wipe.
   writeFileSync(join(dataDir, 'wallets.json'), '[{"address":"0x..."}]');
   writeFileSync(join(dataDir, 'auth.token'), 'secret-token');
@@ -104,6 +107,8 @@ describe('chainResetWipe — first boot with marker present', () => {
         'publish-journal.0',
         'publish-journal.1',
         'publish-journal.staging',
+        'pending-finalizations.json',
+        'pending-finalizations.json.tmp.interrupted',
       ]),
     );
     expect(result.removedFiles).not.toContain('store.nq');
@@ -114,6 +119,8 @@ describe('chainResetWipe — first boot with marker present', () => {
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
     expect(existsSync(join(dataDir, 'store.nq.tmp'))).toBe(false);
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'pending-finalizations.json'))).toBe(false);
+    expect(existsSync(join(dataDir, 'pending-finalizations.json.tmp.interrupted'))).toBe(false);
     expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(true);
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
@@ -177,6 +184,8 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
     expect(existsSync(join(dataDir, 'publish-journal.0'))).toBe(false);
     expect(existsSync(join(dataDir, 'publish-journal.1'))).toBe(false);
     expect(existsSync(join(dataDir, 'publish-journal.staging'))).toBe(false);
+    expect(existsSync(join(dataDir, 'pending-finalizations.json'))).toBe(false);
+    expect(existsSync(join(dataDir, 'pending-finalizations.json.tmp.interrupted'))).toBe(false);
 
     // Preserved (the contract that makes auto-wipe safe):
     expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);

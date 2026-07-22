@@ -236,6 +236,7 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationRecoveryJournal } from './finalization-recovery-journal.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -1657,6 +1658,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           localPeerId: this.peerId,
           localNodeIdentityId: this.identityId.toString(),
         },
+        this.config.dataDir
+          ? new FinalizationRecoveryJournal(this.config.dataDir)
+          : undefined,
       );
     }
     return this.finalizationHandler;
