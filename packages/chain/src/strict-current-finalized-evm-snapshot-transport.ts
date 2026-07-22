@@ -302,7 +302,7 @@ function createPinnedSnapshotRpcClient(
     );
     requestId += 1;
     try {
-      return await postStrictFinalizedJsonRpcV1(
+      const result = await postStrictFinalizedJsonRpcV1(
         endpoint,
         requestId,
         method,
@@ -310,26 +310,36 @@ function createPinnedSnapshotRpcClient(
         CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
         rpcDeadline.signal,
       );
+      assertPinnedSnapshotRpcLifecycleV1(request, totalDeadline, rpcDeadline);
+      return result;
     } catch (cause) {
-      if (request.signal.aborted) {
-        throw cancelled('Current-finalized snapshot was cancelled');
-      }
-      if (totalDeadline.timedOut()) {
-        throw timedOut(
-          `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
-        );
-      }
-      if (rpcDeadline.timedOut()) {
-        throw timedOut(
-          `Current-finalized snapshot JSON-RPC exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
-        );
-      }
+      assertPinnedSnapshotRpcLifecycleV1(request, totalDeadline, rpcDeadline);
       if (cause instanceof CurrentFinalizedEvmCallErrorV1) throw cause;
       throw unavailable('Current-finalized snapshot JSON-RPC failed closed', cause);
     } finally {
       rpcDeadline.close();
     }
   };
+}
+
+function assertPinnedSnapshotRpcLifecycleV1(
+  request: StrictCurrentFinalizedEvmSnapshotRequestV1,
+  totalDeadline: DeadlineScopeV1,
+  rpcDeadline: DeadlineScopeV1,
+): void {
+  if (request.signal.aborted) {
+    throw cancelled('Current-finalized snapshot was cancelled');
+  }
+  if (totalDeadline.timedOut()) {
+    throw timedOut(
+      `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
+    );
+  }
+  if (rpcDeadline.timedOut()) {
+    throw timedOut(
+      `Current-finalized snapshot JSON-RPC exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
+    );
+  }
 }
 
 async function executeSnapshotBatch(

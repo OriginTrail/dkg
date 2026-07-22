@@ -21,7 +21,7 @@ import {
 import {
   type StrictCurrentFinalizedEvmReadCallV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
-import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/strict-current-finalized-evm-snapshot-factory.js';
+import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/index.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -656,6 +656,103 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       await closed.promise;
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('aborts a hung dynamic RPC at its per-request deadline', async () => {
+    const started = deferred<void>();
+    const closed = deferred<void>();
+    const baseHandler = successfulHandler();
+    const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
+      if (rpcCall.method !== 'eth_call' || isPreflightProbe(rpcCall)) {
+        return baseHandler(rpcCall, response, rawRequest);
+      }
+      response.on('close', () => closed.resolve(undefined));
+      started.resolve(undefined);
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const operation = withSnapshot(
+        request(),
+        async (session) => session.read([call(FIRST_DATA)]),
+      );
+      const outcome = operation.then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1);
+
+      expect(await outcome).toMatchObject({ code: 'rpc-timeout' });
+      await closed.promise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a successful dynamic RPC result delivered after its deadline', async () => {
+    const dynamicCallStarted = deferred<void>();
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        readonly id: number;
+        readonly method: string;
+        readonly params: readonly unknown[];
+      };
+      let result: unknown;
+      switch (body.method) {
+        case 'eth_chainId':
+          result = CHAIN_QUANTITY;
+          break;
+        case 'eth_getBlockByNumber':
+          result = { number: '0x7b', hash: BLOCK_HASH };
+          break;
+        case 'eth_getCode':
+          result = '0x6000';
+          break;
+        case 'eth_call':
+          if (isPreflightProbe({ params: body.params })) {
+            result = '0x';
+          } else {
+            dynamicCallStarted.resolve(undefined);
+            await delay(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1 + 500);
+            result = '0xaaaa';
+          }
+          break;
+        default:
+          throw new Error(`Unexpected JSON-RPC method ${body.method}`);
+      }
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: ['https://snapshot-rpc.test'],
+    });
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const operation = withSnapshot(
+        request(),
+        async (session) => session.read([call(FIRST_DATA)]),
+      );
+      const outcome = operation.then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+      await dynamicCallStarted.promise;
+      await vi.advanceTimersByTimeAsync(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1 + 500);
+
+      expect(await outcome).toMatchObject({ code: 'rpc-timeout' });
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
     }
   });
 
