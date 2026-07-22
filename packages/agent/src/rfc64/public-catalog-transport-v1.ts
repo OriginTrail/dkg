@@ -21,7 +21,6 @@ import {
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
-  readVerifiedControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 
@@ -36,6 +35,17 @@ import {
   withCurrentRfc64CatalogPolicyV1,
 } from './catalog-transport-authorization-v1.js';
 import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
+import {
+  Rfc64CatalogTransportWireUtilityErrorV1,
+  assertRfc64CanonicalEvmAddressV1,
+  assertRfc64ExactIssuerSignatureProofV1,
+  encodeRfc64FlatCanonicalJsonV1,
+  encodeRfc64FoundStatusResponseV1,
+  parseRfc64FlatCanonicalJsonV1,
+  parseRfc64StatusResponsePayloadV1,
+  snapshotRfc64ExactWireRecordV1,
+  snapshotRfc64PeerIdV1,
+} from './catalog-transport-wire-v1-internal.js';
 
 /**
  * Additive RFC-64 protocol IDs. Their `/catalog/1` component is the wire
@@ -59,12 +69,7 @@ export const RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1 = 32 * 1024;
 const ACK = Uint8Array.of(1);
 const ANNOUNCEMENT_DENIED = 0;
 const FETCH_NOT_FOUND = 0;
-const FETCH_FOUND = 1;
 const FETCH_DENIED = 2;
-const MAX_PEER_ID_BYTES = 256;
-const UTF8 = new TextEncoder();
-// Keep a leading BOM visible so canonical re-encoding rejects it.
-const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const ANNOUNCEMENT_KEYS = Object.freeze([
   'authorAddress',
@@ -368,13 +373,14 @@ export class Rfc64PublicCatalogTransportV1 {
           );
         }
         const envelopeBytes = canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1(envelope);
-        const response = new Uint8Array(1 + envelopeBytes.byteLength);
-        response[0] = FETCH_FOUND;
-        response.set(envelopeBytes, 1);
-        if (response.byteLength > RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1) {
+        try {
+          return encodeRfc64FoundStatusResponseV1(
+            envelopeBytes,
+            RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1,
+          );
+        } catch (cause) {
           fail('catalog-transport-wire', 'author-catalog head exceeds the v1 fetch response cap');
         }
-        return response;
       },
     );
     if (!served.authorized) {
@@ -555,33 +561,36 @@ function validateWireScope<Kind extends
   if (!isPlainRecord(value)) {
     fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain object');
   }
-  assertExactWireKeys(value, expectedKind === RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1
+  const snapshot = snapshotExactWireRecord(
+    value,
+    expectedKind === RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1
     ? ANNOUNCEMENT_KEYS
-    : FETCH_REQUEST_KEYS);
-  if (value.kind !== expectedKind) {
+    : FETCH_REQUEST_KEYS,
+  );
+  if (snapshot.kind !== expectedKind) {
     fail('catalog-transport-wire', `RFC-64 catalog message kind must be ${expectedKind}`);
   }
   try {
-    assertNetworkIdV1(value.networkId);
-    assertContextGraphIdV1(value.contextGraphId);
-    if (value.subGraphName !== null) assertSubGraphNameV1(value.subGraphName);
-    assertCanonicalEvmAddressV1(value.authorAddress, 'authorAddress');
-    assertCanonicalDecimalU64(value.catalogEra, 'catalogEra');
-    assertCanonicalDecimalU64(value.catalogVersion, 'catalogVersion');
-    assertCanonicalDigest(value.policyDigest, 'policyDigest');
-    assertCanonicalDigest(value.catalogHeadObjectDigest, 'catalogHeadObjectDigest');
-    assertCanonicalDigest(value.signatureVariantDigest, 'signatureVariantDigest');
+    assertNetworkIdV1(snapshot.networkId);
+    assertContextGraphIdV1(snapshot.contextGraphId);
+    if (snapshot.subGraphName !== null) assertSubGraphNameV1(snapshot.subGraphName);
+    assertCanonicalEvmAddressV1(snapshot.authorAddress, 'authorAddress');
+    assertCanonicalDecimalU64(snapshot.catalogEra, 'catalogEra');
+    assertCanonicalDecimalU64(snapshot.catalogVersion, 'catalogVersion');
+    assertCanonicalDigest(snapshot.policyDigest, 'policyDigest');
+    assertCanonicalDigest(snapshot.catalogHeadObjectDigest, 'catalogHeadObjectDigest');
+    assertCanonicalDigest(snapshot.signatureVariantDigest, 'signatureVariantDigest');
     return Object.freeze({
-      authorAddress: value.authorAddress,
-      catalogEra: value.catalogEra,
-      catalogHeadObjectDigest: value.catalogHeadObjectDigest,
-      catalogVersion: value.catalogVersion,
-      contextGraphId: value.contextGraphId,
+      authorAddress: snapshot.authorAddress,
+      catalogEra: snapshot.catalogEra,
+      catalogHeadObjectDigest: snapshot.catalogHeadObjectDigest,
+      catalogVersion: snapshot.catalogVersion,
+      contextGraphId: snapshot.contextGraphId,
       kind: expectedKind,
-      networkId: value.networkId,
-      policyDigest: value.policyDigest,
-      signatureVariantDigest: value.signatureVariantDigest,
-      subGraphName: value.subGraphName,
+      networkId: snapshot.networkId,
+      policyDigest: snapshot.policyDigest,
+      signatureVariantDigest: snapshot.signatureVariantDigest,
+      subGraphName: snapshot.subGraphName,
     }) as never;
   } catch (cause) {
     if (cause instanceof Rfc64PublicCatalogTransportErrorV1) throw cause;
@@ -590,29 +599,39 @@ function validateWireScope<Kind extends
 }
 
 function parseFetchResponse(input: Uint8Array): SignedAuthorCatalogHeadEnvelopeV1 | null {
-  if (
-    input.byteLength < 1
-    || input.byteLength > RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1
-  ) {
-    fail('catalog-transport-wire', 'author-catalog head response is empty or oversized');
-  }
-  if (input[0] === FETCH_NOT_FOUND) {
-    if (input.byteLength !== 1) {
-      fail('catalog-transport-wire', 'not-found author-catalog response has trailing bytes');
+  let framed;
+  try {
+    framed = parseRfc64StatusResponsePayloadV1(
+      input,
+      RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1,
+    );
+  } catch (cause) {
+    if (
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+      && cause.reason === 'response-trailing'
+    ) {
+      fail(
+        'catalog-transport-wire',
+        input[0] === FETCH_NOT_FOUND
+          ? 'not-found author-catalog response has trailing bytes'
+          : 'denied author-catalog response has trailing bytes',
+        cause,
+      );
     }
-    return null;
-  }
-  if (input[0] === FETCH_DENIED) {
-    if (input.byteLength !== 1) {
-      fail('catalog-transport-wire', 'denied author-catalog response has trailing bytes');
+    if (
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+      && cause.reason === 'response-status'
+    ) {
+      fail('catalog-transport-wire', 'author-catalog head response has an invalid status', cause);
     }
+    fail('catalog-transport-wire', 'author-catalog head response is empty or oversized', cause);
+  }
+  if (framed.status === 'not-found') return null;
+  if (framed.status === 'denied') {
     fail('catalog-transport-policy-denied', 'remote peer denied the author-catalog fetch');
   }
-  if (input[0] !== FETCH_FOUND || input.byteLength === 1) {
-    fail('catalog-transport-wire', 'author-catalog head response has an invalid status');
-  }
   try {
-    return parseCanonicalSignedAuthorCatalogHeadEnvelopeV1(input.subarray(1), {
+    return parseCanonicalSignedAuthorCatalogHeadEnvelopeV1(framed.payload, {
       maxBytes: RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1 - 1,
     });
   } catch (cause) {
@@ -671,23 +690,17 @@ function assertExactIssuerSignatureProof(
   envelope: SignedControlEnvelopeV1,
   proof: VerifiedControlEnvelopeIssuerSignatureV1,
 ): void {
-  let snapshot;
   try {
-    snapshot = readVerifiedControlEnvelopeIssuerSignatureV1(proof);
+    assertRfc64ExactIssuerSignatureProofV1(envelope, proof);
   } catch (cause) {
-    fail('catalog-transport-signature', 'issuer signature proof was not minted by the verifier', cause);
-  }
-  const expectedVariant = computeControlSignatureVariantDigestHex(
-    envelope.objectDigest,
-    envelope.signature,
-  );
-  if (
-    snapshot.objectDigest !== envelope.objectDigest
-    || snapshot.signatureVariantDigest !== expectedVariant
-    || snapshot.issuer !== envelope.issuer
-    || snapshot.signatureSuite !== envelope.signatureSuite
-  ) {
-    fail('catalog-transport-signature', 'issuer signature proof is not bound to the exact envelope');
+    fail(
+      'catalog-transport-signature',
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+        && cause.reason === 'issuer-proof-unminted'
+        ? 'issuer signature proof was not minted by the verifier'
+        : 'issuer signature proof is not bound to the exact envelope',
+      cause,
+    );
   }
 }
 
@@ -695,23 +708,26 @@ function encodeFlatCanonicalJson(
   value: object,
   maxBytes: number,
 ): Uint8Array {
-  if (!isPlainRecord(value)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain object');
-  }
-  const keys = Object.keys(value).sort();
-  const fields: string[] = [];
-  for (const key of keys) {
-    const field = value[key];
-    if (field !== null && typeof field !== 'string') {
-      fail('catalog-transport-wire', 'RFC-64 catalog messages accept only string or null fields');
+  try {
+    return encodeRfc64FlatCanonicalJsonV1(value, maxBytes);
+  } catch (cause) {
+    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
+      if (cause.reason === 'plain-object') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain object', cause);
+      }
+      if (cause.reason === 'field-shape') {
+        fail(
+          'catalog-transport-wire',
+          'RFC-64 catalog messages accept only string or null fields',
+          cause,
+        );
+      }
+      if (cause.reason === 'oversized') {
+        fail('catalog-transport-wire', `RFC-64 catalog message exceeds ${maxBytes} bytes`, cause);
+      }
     }
-    fields.push(`${JSON.stringify(key)}:${JSON.stringify(field)}`);
+    throw cause;
   }
-  const bytes = UTF8.encode(`{${fields.join(',')}}`);
-  if (bytes.byteLength > maxBytes) {
-    fail('catalog-transport-wire', `RFC-64 catalog message exceeds ${maxBytes} bytes`);
-  }
-  return bytes;
 }
 
 function parseFlatCanonicalJson(
@@ -719,74 +735,72 @@ function parseFlatCanonicalJson(
   expectedKeys: readonly string[],
   maxBytes: number,
 ): Record<string, unknown> {
-  if (!(input instanceof Uint8Array) || input.byteLength < 2 || input.byteLength > maxBytes) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message is empty or oversized');
-  }
-  let text: string;
-  let parsed: unknown;
   try {
-    text = UTF8_FATAL.decode(input);
-    parsed = JSON.parse(text);
+    return parseRfc64FlatCanonicalJsonV1(input, expectedKeys, maxBytes);
   } catch (cause) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message is not strict UTF-8 JSON', cause);
+    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
+      if (cause.reason === 'oversized') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message is empty or oversized', cause);
+      }
+      if (cause.reason === 'strict-json') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message is not strict UTF-8 JSON', cause);
+      }
+      if (cause.reason === 'plain-object') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain JSON object', cause);
+      }
+      if (cause.reason === 'exact-keys') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message has missing or unknown fields', cause);
+      }
+      if (cause.reason === 'noncanonical') {
+        fail('catalog-transport-wire', 'RFC-64 catalog message bytes are not canonical JCS', cause);
+      }
+    }
+    throw cause;
   }
-  if (!isPlainRecord(parsed)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain JSON object');
-  }
-  assertExactWireKeys(parsed, expectedKeys);
-  const canonical = encodeFlatCanonicalJson(parsed, maxBytes);
-  if (!bytesEqual(canonical, input)) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message bytes are not canonical JCS');
-  }
-  return parsed;
 }
 
-function assertExactWireKeys(
-  value: Record<string, unknown>,
+function snapshotExactWireRecord(
+  value: unknown,
   expectedKeys: readonly string[],
-): void {
-  const actual = Object.keys(value).sort();
-  if (
-    actual.length !== expectedKeys.length
-    || actual.some((key, index) => key !== expectedKeys[index])
-  ) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message has missing or unknown fields');
+): Readonly<Record<string, unknown>> {
+  try {
+    return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
+  } catch (cause) {
+    fail('catalog-transport-wire', 'RFC-64 catalog message has missing or unknown fields', cause);
   }
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
-  if (
-    typeof value !== 'string'
-    || !/^0x[0-9a-f]{40}$/.test(value)
-    || value === '0x0000000000000000000000000000000000000000'
-  ) {
-    fail('catalog-transport-wire', `${label} must be a canonical lowercase nonzero EVM address`);
+  try {
+    assertRfc64CanonicalEvmAddressV1(value, label);
+  } catch (cause) {
+    fail(
+      'catalog-transport-wire',
+      `${label} must be a canonical lowercase nonzero EVM address`,
+      cause,
+    );
   }
 }
 
 function snapshotPeerId(value: unknown): string {
-  if (typeof value !== 'string') {
-    fail('catalog-transport-input', 'remotePeerId must be a string');
+  try {
+    return snapshotRfc64PeerIdV1(value);
+  } catch (cause) {
+    fail(
+      'catalog-transport-input',
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+        && cause.reason === 'peer-id-type'
+        ? 'remotePeerId must be a string'
+        : 'remotePeerId is empty, oversized, or noncanonical',
+      cause,
+    );
   }
-  const byteLength = UTF8.encode(value).byteLength;
-  if (byteLength < 1 || byteLength > MAX_PEER_ID_BYTES || value.trim() !== value) {
-    fail('catalog-transport-input', 'remotePeerId is empty, oversized, or noncanonical');
-  }
-  return value;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function deepFreeze<T>(value: T): T {

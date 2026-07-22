@@ -30,7 +30,6 @@ import {
   type SignedControlEnvelopeV1,
   type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
-  type CountV1,
   type Digest32V1,
   type NetworkIdV1,
   type TimestampMsV1,
@@ -85,6 +84,7 @@ import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
 import {
+  deriveRfc64PublicOpenCatalogScopeV1,
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
 import type {
@@ -581,7 +581,7 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#sendOptions(signal),
     );
     if (announcement === null) return null;
-    this.#assertAcceptedOpenAnnouncement(announcement);
+    this.#assertAcceptedCatalogAnnouncement(announcement);
     const currentTrustedScope = this.#resolveTrustedCatalogScope(announcement);
     const head = await this.#transport.fetchCatalogHead(
       remotePeerId,
@@ -713,38 +713,19 @@ export class Rfc64PublicCatalogServiceV1 {
     input: Rfc64PublicCatalogCurrentHeadScopeV1,
   ): Readonly<AuthorCatalogScopeV1> {
     const record = this.#policies.lookup(input.networkId, input.contextGraphId);
-    const policy = record?.policy;
-    if (
-      record === null
-      || policy === undefined
-      || policy.accessPolicy !== 0
-      || policy.source.kind !== 'owner-signed-unregistered'
-      || policy.networkId !== input.networkId
-      || policy.contextGraphId !== input.contextGraphId
-      || policy.governanceChainId !== null
-      || policy.governanceContractAddress !== null
-      || policy.ownershipTransitionDigest !== null
-      || policy.era !== input.catalogEra
-      || input.subGraphName !== null
-      || policy.source.ownerAddress !== input.authorAddress
-    ) {
+    if (record === null) {
       throw new Error(
         'RFC-64 current-head query is not bound to the accepted public/open root policy',
       );
     }
-    const scope = Object.freeze({
-      networkId: policy.networkId,
-      contextGraphId: policy.contextGraphId,
-      governanceChainId: policy.governanceChainId,
-      governanceContractAddress: policy.governanceContractAddress,
-      ownershipTransitionDigest: policy.ownershipTransitionDigest,
-      subGraphName: null,
-      authorAddress: policy.source.ownerAddress,
-      era: policy.era,
-      bucketCount: '1' as CountV1,
-    });
-    assertAuthorCatalogScopeV1(scope);
-    return scope;
+    try {
+      return deriveRfc64PublicOpenCatalogScopeV1(input, record.policy);
+    } catch (cause) {
+      throw new Error(
+        'RFC-64 current-head query is not bound to the accepted public/open root policy',
+        { cause },
+      );
+    }
   }
 
   async #stageHeadOnly(

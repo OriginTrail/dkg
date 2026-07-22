@@ -24,7 +24,6 @@ import {
   assertSignedControlEnvelope,
   assertSubGraphNameV1,
   canonicalizeSignedControlEnvelopeBytes,
-  computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
   parseCanonicalDecimalU64,
   parseCanonicalSignedControlEnvelope,
@@ -38,7 +37,6 @@ import {
   type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 import {
-  readVerifiedControlEnvelopeIssuerSignatureV1,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 
@@ -53,6 +51,17 @@ import {
   withCurrentRfc64CatalogPolicyV1,
 } from './catalog-transport-authorization-v1.js';
 import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
+import {
+  Rfc64CatalogTransportWireUtilityErrorV1,
+  assertRfc64CanonicalEvmAddressV1,
+  assertRfc64ExactIssuerSignatureProofV1,
+  encodeRfc64FlatCanonicalJsonV1,
+  encodeRfc64FoundStatusResponseV1,
+  parseRfc64FlatCanonicalJsonV1,
+  parseRfc64StatusResponsePayloadV1,
+  snapshotRfc64ExactWireRecordV1,
+  snapshotRfc64PeerIdV1,
+} from './catalog-transport-wire-v1-internal.js';
 
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1 =
   '/dkg/catalog/1/control-object/by-digest' as const;
@@ -112,11 +121,8 @@ export function assertRfc64PublicCatalogExactSetBundleBytesV1(
 }
 
 const FETCH_NOT_FOUND = 0;
-const FETCH_FOUND = 1;
 const FETCH_DENIED = 2;
-const MAX_PEER_ID_BYTES = 256;
 const UTF8 = new TextEncoder();
-const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const SCOPE_KEYS = Object.freeze([
   'authorAddress',
@@ -496,18 +502,7 @@ export class Rfc64PublicCatalogNativeTransportV1 {
   ): Promise<VerifiedControlEnvelopeIssuerSignatureV1> {
     try {
       const proof = await this.options.verifyIssuerSignature(envelope);
-      const snapshot = readVerifiedControlEnvelopeIssuerSignatureV1(proof);
-      if (
-        snapshot.objectDigest !== envelope.objectDigest
-        || snapshot.signatureVariantDigest !== computeControlSignatureVariantDigestHex(
-          envelope.objectDigest,
-          envelope.signature,
-        )
-        || snapshot.issuer !== envelope.issuer
-        || snapshot.signatureSuite !== envelope.signatureSuite
-      ) {
-        throw new Error('issuer-signature proof identifies another envelope');
-      }
+      assertRfc64ExactIssuerSignatureProofV1(envelope, proof);
       return proof;
     } catch (cause) {
       fail('catalog-native-signature', 'catalog object issuer signature is invalid', cause);
@@ -554,39 +549,39 @@ function parseBundleRequest(input: Uint8Array): Rfc64PublicCatalogBundleFetchReq
 }
 
 function validateObjectRequest(value: unknown): Rfc64PublicCatalogObjectFetchRequestV1 {
-  const scope = validateScope(value, RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1);
-  if (!isPlainRecord(value)) throw new Error('unreachable');
-  if (typeof value.targetObjectType !== 'string' || value.targetObjectType.length < 1
-    || UTF8.encode(value.targetObjectType).byteLength > 256) {
+  const snapshot = snapshotExactWireRecord(value, OBJECT_REQUEST_KEYS);
+  const scope = validateScope(snapshot, RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1);
+  if (typeof snapshot.targetObjectType !== 'string' || snapshot.targetObjectType.length < 1
+    || UTF8.encode(snapshot.targetObjectType).byteLength > 256) {
     fail('catalog-native-wire', 'targetObjectType is empty or oversized');
   }
   try {
-    assertCanonicalDigest(value.targetObjectDigest, 'targetObjectDigest');
+    assertCanonicalDigest(snapshot.targetObjectDigest, 'targetObjectDigest');
   } catch (cause) {
     fail('catalog-native-wire', 'targetObjectDigest is invalid', cause);
   }
   return Object.freeze({
     ...scope,
     kind: RFC64_PUBLIC_CATALOG_OBJECT_FETCH_KIND_V1,
-    targetObjectType: value.targetObjectType,
-    targetObjectDigest: value.targetObjectDigest,
+    targetObjectType: snapshot.targetObjectType,
+    targetObjectDigest: snapshot.targetObjectDigest,
   }) as Rfc64PublicCatalogObjectFetchRequestV1;
 }
 
 function validateBundleRequest(value: unknown): Rfc64PublicCatalogBundleFetchRequestV1 {
-  const scope = validateScope(value, RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1);
-  if (!isPlainRecord(value)) throw new Error('unreachable');
+  const snapshot = snapshotExactWireRecord(value, BUNDLE_REQUEST_KEYS);
+  const scope = validateScope(snapshot, RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1);
   try {
-    assertCanonicalDigest(value.blobDigest, 'blobDigest');
-    assertCanonicalDecimalU64(value.byteLength, 'byteLength');
+    assertCanonicalDigest(snapshot.blobDigest, 'blobDigest');
+    assertCanonicalDecimalU64(snapshot.byteLength, 'byteLength');
   } catch (cause) {
     fail('catalog-native-wire', 'bundle request contains an invalid digest or length', cause);
   }
   return Object.freeze({
     ...scope,
     kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
-    blobDigest: value.blobDigest,
-    byteLength: value.byteLength,
+    blobDigest: snapshot.blobDigest,
+    byteLength: snapshot.byteLength,
   }) as Rfc64PublicCatalogBundleFetchRequestV1;
 }
 
@@ -623,51 +618,58 @@ function validateScope(
 }
 
 function encodeRequest(value: object): Uint8Array {
-  if (!isPlainRecord(value)) {
-    fail('catalog-native-wire', 'catalog native request must be a plain object');
-  }
-  const fields: string[] = [];
-  for (const key of Object.keys(value).sort()) {
-    const field = value[key];
-    if (field !== null && typeof field !== 'string') {
-      fail('catalog-native-wire', 'catalog native requests accept only string or null fields');
+  try {
+    return encodeRfc64FlatCanonicalJsonV1(
+      value,
+      RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
+    );
+  } catch (cause) {
+    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
+      if (cause.reason === 'plain-object') {
+        fail('catalog-native-wire', 'catalog native request must be a plain object', cause);
+      }
+      if (cause.reason === 'field-shape') {
+        fail(
+          'catalog-native-wire',
+          'catalog native requests accept only string or null fields',
+          cause,
+        );
+      }
+      if (cause.reason === 'oversized') {
+        fail('catalog-native-wire', 'catalog native request exceeds its byte ceiling', cause);
+      }
     }
-    fields.push(`${JSON.stringify(key)}:${JSON.stringify(field)}`);
+    throw cause;
   }
-  const bytes = UTF8.encode(`{${fields.join(',')}}`);
-  if (bytes.byteLength > RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1) {
-    fail('catalog-native-wire', 'catalog native request exceeds its byte ceiling');
-  }
-  return bytes;
 }
 
 function parseRequest(input: Uint8Array, expectedKeys: readonly string[]): Record<string, unknown> {
-  if (
-    !(input instanceof Uint8Array)
-    || input.byteLength < 2
-    || input.byteLength > RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1
-  ) {
-    fail('catalog-native-wire', 'catalog native request is empty or oversized');
-  }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(UTF8_FATAL.decode(input));
+    return parseRfc64FlatCanonicalJsonV1(
+      input,
+      expectedKeys,
+      RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
+    );
   } catch (cause) {
-    fail('catalog-native-wire', 'catalog native request is not strict UTF-8 JSON', cause);
+    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
+      if (cause.reason === 'oversized') {
+        fail('catalog-native-wire', 'catalog native request is empty or oversized', cause);
+      }
+      if (cause.reason === 'strict-json') {
+        fail('catalog-native-wire', 'catalog native request is not strict UTF-8 JSON', cause);
+      }
+      if (cause.reason === 'plain-object') {
+        fail('catalog-native-wire', 'catalog native request must be an object', cause);
+      }
+      if (cause.reason === 'exact-keys') {
+        fail('catalog-native-wire', 'catalog native request has missing or unknown fields', cause);
+      }
+      if (cause.reason === 'noncanonical') {
+        fail('catalog-native-wire', 'catalog native request bytes are not canonical JCS', cause);
+      }
+    }
+    throw cause;
   }
-  if (!isPlainRecord(parsed)) fail('catalog-native-wire', 'catalog native request must be an object');
-  const actual = Object.keys(parsed).sort();
-  if (
-    actual.length !== expectedKeys.length
-    || actual.some((key, index) => key !== expectedKeys[index])
-  ) {
-    fail('catalog-native-wire', 'catalog native request has missing or unknown fields');
-  }
-  const canonical = encodeRequest(parsed);
-  if (!bytesEqual(canonical, input)) {
-    fail('catalog-native-wire', 'catalog native request bytes are not canonical JCS');
-  }
-  return parsed;
 }
 
 function parseCatalogObjectResponse(input: Uint8Array): SignedControlEnvelopeV1 | null {
@@ -696,21 +698,35 @@ function parseBundleResponse(
 }
 
 function responsePayload(input: Uint8Array, maxBytes: number): Uint8Array | null {
-  if (!(input instanceof Uint8Array) || input.byteLength < 1 || input.byteLength > maxBytes) {
-    fail('catalog-native-wire', 'catalog native response is empty or oversized');
+  let framed;
+  try {
+    framed = parseRfc64StatusResponsePayloadV1(input, maxBytes);
+  } catch (cause) {
+    if (
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+      && cause.reason === 'response-trailing'
+    ) {
+      fail(
+        'catalog-native-wire',
+        input[0] === FETCH_NOT_FOUND
+          ? 'not-found response has trailing bytes'
+          : 'denied response has trailing bytes',
+        cause,
+      );
+    }
+    if (
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+      && cause.reason === 'response-status'
+    ) {
+      fail('catalog-native-wire', 'catalog native response has an invalid status', cause);
+    }
+    fail('catalog-native-wire', 'catalog native response is empty or oversized', cause);
   }
-  if (input[0] === FETCH_NOT_FOUND) {
-    if (input.byteLength !== 1) fail('catalog-native-wire', 'not-found response has trailing bytes');
-    return null;
-  }
-  if (input[0] === FETCH_DENIED) {
-    if (input.byteLength !== 1) fail('catalog-native-wire', 'denied response has trailing bytes');
+  if (framed.status === 'not-found') return null;
+  if (framed.status === 'denied') {
     fail('catalog-native-policy-denied', 'remote peer denied the catalog native fetch');
   }
-  if (input[0] !== FETCH_FOUND || input.byteLength === 1) {
-    fail('catalog-native-wire', 'catalog native response has an invalid status');
-  }
-  return input.subarray(1);
+  return framed.payload;
 }
 
 function assertCatalogObjectMatchesRequest(
@@ -750,29 +766,41 @@ function assertExactBundle(
 }
 
 function foundResponse(payload: Uint8Array): Uint8Array {
-  const result = new Uint8Array(payload.byteLength + 1);
-  result[0] = FETCH_FOUND;
-  result.set(payload, 1);
-  return result;
+  return encodeRfc64FoundStatusResponseV1(payload);
 }
 
 function assertCanonicalEvmAddress(value: unknown, label: string): asserts value is EvmAddressV1 {
-  if (
-    typeof value !== 'string'
-    || !/^0x[0-9a-f]{40}$/.test(value)
-    || value === '0x0000000000000000000000000000000000000000'
-  ) {
-    fail('catalog-native-wire', `${label} must be a lowercase nonzero EVM address`);
+  try {
+    assertRfc64CanonicalEvmAddressV1(value, label);
+  } catch (cause) {
+    fail('catalog-native-wire', `${label} must be a lowercase nonzero EVM address`, cause);
   }
 }
 
 function snapshotPeerId(value: unknown): string {
-  if (typeof value !== 'string') fail('catalog-native-input', 'remotePeerId must be a string');
-  const byteLength = UTF8.encode(value).byteLength;
-  if (byteLength < 1 || byteLength > MAX_PEER_ID_BYTES || value.trim() !== value) {
-    fail('catalog-native-input', 'remotePeerId is empty, oversized, or noncanonical');
+  try {
+    return snapshotRfc64PeerIdV1(value);
+  } catch (cause) {
+    fail(
+      'catalog-native-input',
+      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
+        && cause.reason === 'peer-id-type'
+        ? 'remotePeerId must be a string'
+        : 'remotePeerId is empty, oversized, or noncanonical',
+      cause,
+    );
   }
-  return value;
+}
+
+function snapshotExactWireRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> {
+  try {
+    return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
+  } catch (cause) {
+    fail('catalog-native-wire', 'catalog native request has missing or unknown fields', cause);
+  }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -785,14 +813,6 @@ function deepFreeze<T>(value: T): T {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
   for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
   return Object.freeze(value);
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function fail(

@@ -39,6 +39,7 @@ const CONTEXT_GRAPH_ID =
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const DELEGATION_DIGEST = `0x${'72'.repeat(32)}` as Digest32V1;
+const POLICY_DIGEST = `0x${'71'.repeat(32)}` as Digest32V1;
 
 const temporaryDirectories: string[] = [];
 const nodes: DKGNode[] = [];
@@ -122,6 +123,25 @@ async function stageHead(
   })));
   await persistence.controlObjects.stageVerifiedObjects(verified);
   return produced.head;
+}
+
+async function produceHeadWithProof(
+  scope = catalogScope(),
+  issuedAt: TimestampMsV1 = '1773900000000' as TimestampMsV1,
+) {
+  const produced = await produceEmptyAuthorCatalogGenesisV1({
+    scope,
+    catalogIssuerDelegationDigest: DELEGATION_DIGEST,
+    issuedAt,
+    signer: {
+      issuer: AUTHOR,
+      signDigest: (digest) => AUTHOR_WALLET.signMessage(digest),
+    },
+  });
+  return Object.freeze({
+    head: produced.head,
+    issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(produced.head),
+  });
 }
 
 function acceptPolicy(
@@ -400,11 +420,193 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     expect(requester.stats().receiver.scheduled).toBe(0);
   }, 20_000);
 
+  it('rejects a durable current pointer bound to a different context graph', async () => {
+    let handler: ((
+      data: Uint8Array,
+      peerId: { toString(): string },
+      options?: { signal?: AbortSignal },
+    ) => Promise<Uint8Array>) | undefined;
+    const wrongContextGraphId =
+      '0x1111111111111111111111111111111111111111/other-graph' as const;
+    const stored = await produceHeadWithProof(catalogScope(wrongContextGraphId));
+    const router = {
+      register(_protocol: string, registered: typeof handler) {
+        handler = registered;
+      },
+      unregister() {},
+    } as unknown as ProtocolRouter;
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: {
+        getVerifiedObjectByDigest: vi.fn(async () => ({
+          envelope: stored.head,
+          issuerSignature: stored.issuerSignature,
+        })),
+      },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () =>
+        stored.head.objectDigest as Digest32V1),
+      authorizeOpenCatalogOperation: vi.fn(async () => ({
+        accessPolicy: 0 as const,
+        policyDigest: POLICY_DIGEST,
+      })),
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: POLICY_DIGEST,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+
+    await expect(handler!(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(query),
+      { toString: () => 'requester-peer' },
+    )).rejects.toMatchObject({ code: 'catalog-discovery-object-mismatch' });
+    transport.stop();
+  });
+
+  it('rejects an issuer proof minted for a different head envelope', async () => {
+    let handler: ((
+      data: Uint8Array,
+      peerId: { toString(): string },
+      options?: { signal?: AbortSignal },
+    ) => Promise<Uint8Array>) | undefined;
+    const stored = await produceHeadWithProof(
+      catalogScope(),
+      '1773900000000' as TimestampMsV1,
+    );
+    const other = await produceHeadWithProof(
+      catalogScope(),
+      '1773900000001' as TimestampMsV1,
+    );
+    const router = {
+      register(_protocol: string, registered: typeof handler) {
+        handler = registered;
+      },
+      unregister() {},
+    } as unknown as ProtocolRouter;
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: {
+        getVerifiedObjectByDigest: vi.fn(async () => ({
+          envelope: stored.head,
+          issuerSignature: other.issuerSignature,
+        })),
+      },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () =>
+        stored.head.objectDigest as Digest32V1),
+      authorizeOpenCatalogOperation: vi.fn(async () => ({
+        accessPolicy: 0 as const,
+        policyDigest: POLICY_DIGEST,
+      })),
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: POLICY_DIGEST,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+
+    await expect(handler!(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(query),
+      { toString: () => 'requester-peer' },
+    )).rejects.toMatchObject({ code: 'catalog-discovery-signature' });
+    transport.stop();
+  });
+
+  it('rechecks outbound policy after the awaited remote response', async () => {
+    const authorizeOpenCatalogOperation = vi.fn()
+      .mockResolvedValueOnce({ accessPolicy: 0 as const, policyDigest: POLICY_DIGEST })
+      .mockResolvedValueOnce(null);
+    const send = vi.fn(async () => Uint8Array.of(0));
+    const router = {
+      register() {},
+      unregister() {},
+      send,
+    } as unknown as ProtocolRouter;
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: POLICY_DIGEST,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+
+    await expect(transport.discoverCurrentCatalogHead('provider-peer', query))
+      .rejects.toMatchObject({ code: 'catalog-discovery-policy-denied' });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    transport.stop();
+  });
+
+  it('returns denied when inbound policy changes after awaited state reads', async () => {
+    let handler: ((
+      data: Uint8Array,
+      peerId: { toString(): string },
+      options?: { signal?: AbortSignal },
+    ) => Promise<Uint8Array>) | undefined;
+    const authorizeOpenCatalogOperation = vi.fn()
+      .mockResolvedValueOnce({ accessPolicy: 0 as const, policyDigest: POLICY_DIGEST })
+      .mockResolvedValueOnce(null);
+    const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
+    const router = {
+      register(_protocol: string, registered: typeof handler) {
+        handler = registered;
+      },
+      unregister() {},
+    } as unknown as ProtocolRouter;
+    const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
+      controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
+      readCurrentAppliedCatalogHeadDigest,
+      authorizeOpenCatalogOperation,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    transport.start();
+    const query = Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
+      ...discoveryScope(),
+      policyDigest: POLICY_DIGEST,
+    }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
+
+    await expect(handler!(
+      encodeRfc64PublicCatalogCurrentHeadQueryV1(query),
+      { toString: () => 'requester-peer' },
+    )).resolves.toEqual(Uint8Array.of(2));
+    expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
+    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    transport.stop();
+  });
+
+  it('rejects a non-root discovery claim through the shared public scope derivation', async () => {
+    const [node, persistence] = await Promise.all([
+      startNode(),
+      openPersistence('scope-derivation'),
+    ]);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: new ProtocolRouter(node),
+      controlObjects: persistence.controlObjects,
+      currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      transportTimeoutMs: 1_000,
+    });
+    services.push(service);
+    acceptPolicy(service);
+    service.start();
+
+    await expect(service.discoverCurrentCatalogHead({
+      remotePeerId: 'unreachable-peer',
+      scope: Object.freeze({ ...discoveryScope(), subGraphName: 'nested' as const }),
+    })).rejects.toThrow(/accepted public\/open root policy/);
+  });
+
   it('round-trips only exact canonical query fields', () => {
     const query = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
       ...discoveryScope(),
-      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+      policyDigest: POLICY_DIGEST,
     }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
     const encoded = encodeRfc64PublicCatalogCurrentHeadQueryV1(query);
     expect(parseRfc64PublicCatalogCurrentHeadQueryV1(encoded)).toEqual(query);
@@ -425,7 +627,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const query = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
       ...discoveryScope(),
-      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+      policyDigest: POLICY_DIGEST,
     }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
     const expected = encodeRfc64PublicCatalogCurrentHeadQueryV1(query);
     let switchedReads = 0;
@@ -472,7 +674,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
     const authorizeOpenCatalogOperation = vi.fn(async () => ({
       accessPolicy: 0 as const,
-      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+      policyDigest: POLICY_DIGEST,
     }));
     const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
       controlObjects: {
@@ -486,7 +688,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const query = Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
       ...discoveryScope(),
-      policyDigest: `0x${'71'.repeat(32)}` as Digest32V1,
+      policyDigest: POLICY_DIGEST,
     }) satisfies Rfc64PublicCatalogCurrentHeadQueryV1;
     const controller = new AbortController();
     const reason = new Error('test stream closed');
