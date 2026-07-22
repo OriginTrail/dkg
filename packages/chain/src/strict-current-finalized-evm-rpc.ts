@@ -109,20 +109,15 @@ const MAX_U256 =
   115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
 const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
 const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
+const AUTHENTICATED_REVERT_DATA_V1 = new WeakMap<CurrentFinalizedEvmCallErrorV1, string>();
+const PRE_DEADLINE_TERMINAL_FAILURES_V1 = new WeakSet<CurrentFinalizedEvmCallErrorV1>();
 const READ_REQUEST_KEYS = Object.freeze(['calls', 'chainId', 'signal'] as const);
 const READ_CALL_KEYS = Object.freeze(['data', 'maxReturnBytes', 'to'] as const);
 
-class AuthenticatedFinalizedEvmRevertErrorV1 extends CurrentFinalizedEvmCallErrorV1 {
-  constructor(readonly revertData: string) {
-    super('revert', 'Contract call reverted at the resolved finalized anchor');
-    Object.freeze(this);
-  }
-}
-
 /** Package-internal evidence available only for errors minted by this transport. */
 export function readStrictCurrentFinalizedEvmRevertDataV1(error: unknown): string | undefined {
-  return error instanceof AuthenticatedFinalizedEvmRevertErrorV1
-    ? error.revertData
+  return error instanceof CurrentFinalizedEvmCallErrorV1
+    ? AUTHENTICATED_REVERT_DATA_V1.get(error)
     : undefined;
 }
 
@@ -219,7 +214,7 @@ export function createStrictCurrentFinalizedEvmReadV1(
               config,
               config.endpoints[index]!,
               request,
-              attemptDeadline.signal,
+              attemptDeadline,
             );
             // Close races where transport completion and abort/deadline become
             // observable in the same turn. A late response never escapes merely
@@ -278,8 +273,9 @@ async function executeEndpointAttempt(
   config: StrictRpcConfigSnapshotV1,
   endpoint: string,
   request: StrictCurrentFinalizedEvmReadRequestV1,
-  signal: AbortSignal,
+  attemptDeadline: DeadlineScope,
 ): Promise<StrictCurrentFinalizedEvmReadResultV1> {
+  const { signal } = attemptDeadline;
   let requestId = 0;
   const rpc = async (method: string, params: readonly unknown[]): Promise<unknown> => {
     requestId += 1;
@@ -310,7 +306,7 @@ async function executeEndpointAttempt(
     await settleParallelBatch(uniqueTargets.map(async (to) => {
       const code = await rpc('eth_getCode', Object.freeze([to, blockReference]));
       assertDeployedCode(code);
-    }));
+    }), attemptDeadline);
 
     return settleParallelBatch(request.calls.map(async (call) => {
       const callObject = Object.freeze({
@@ -323,7 +319,7 @@ async function executeEndpointAttempt(
         await rpc('eth_call', Object.freeze([callObject, blockReference])),
         call.maxReturnBytes,
       );
-    }));
+    }), attemptDeadline);
   };
 
   let returnData: readonly string[];
@@ -391,12 +387,44 @@ async function executeEndpointAttempt(
  * started operation settles. This prevents an early rejection from leaving a
  * sibling fetch alive after the finalized-read concurrency slot is released.
  */
-async function settleParallelBatch<T>(operations: readonly Promise<T>[]): Promise<readonly T[]> {
-  const settled = await Promise.allSettled(operations);
+async function settleParallelBatch<T>(
+  operations: readonly Promise<T>[],
+  attemptDeadline: DeadlineScope,
+): Promise<readonly T[]> {
+  let firstFailure: unknown;
+  let hasFailure = false;
+  let firstPreDeadlineTerminalFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
+  const tracked = operations.map(async (operation) => {
+    try {
+      return await operation;
+    } catch (cause) {
+      if (!hasFailure) {
+        hasFailure = true;
+        firstFailure = cause;
+      }
+      if (
+        firstPreDeadlineTerminalFailure === undefined
+        && cause instanceof CurrentFinalizedEvmCallErrorV1
+        && isTerminalAttemptFailure(cause)
+        && !attemptDeadline.timedOut()
+      ) {
+        firstPreDeadlineTerminalFailure = cause;
+        PRE_DEADLINE_TERMINAL_FAILURES_V1.add(cause);
+      }
+      throw cause;
+    }
+  });
+  const settled = await Promise.allSettled(tracked);
+  if (firstPreDeadlineTerminalFailure !== undefined) {
+    throw firstPreDeadlineTerminalFailure;
+  }
+  if (hasFailure) throw firstFailure;
   const values: T[] = [];
   for (let index = 0; index < settled.length; index += 1) {
     const result = settled[index]!;
-    if (result.status === 'rejected') throw result.reason;
+    if (result.status === 'rejected') {
+      throw unavailable('Parallel finalized-read operation failed without a recorded cause');
+    }
     values.push(result.value);
   }
   return Object.freeze(values);
@@ -659,6 +687,12 @@ function classifyAttemptFailure(
   attemptDeadline: DeadlineScope,
 ): CurrentFinalizedEvmCallErrorV1 {
   if (callerSignal.aborted) return cancelled('Current-finalized EVM call was cancelled');
+  if (
+    cause instanceof CurrentFinalizedEvmCallErrorV1
+    && PRE_DEADLINE_TERMINAL_FAILURES_V1.has(cause)
+  ) {
+    return cause;
+  }
   if (totalDeadline.timedOut()) {
     return timedOut(`Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`);
   }
@@ -863,12 +897,12 @@ function anchorDependentResourceLimited(message: string): CurrentFinalizedEvmCal
 }
 
 function revertedAtFinalizedAnchor(data?: string): CurrentFinalizedEvmCallErrorV1 {
-  return data === undefined
-    ? new CurrentFinalizedEvmCallErrorV1(
+  const error = new CurrentFinalizedEvmCallErrorV1(
     'revert',
     'Contract call reverted at the resolved finalized anchor',
-    )
-    : new AuthenticatedFinalizedEvmRevertErrorV1(data);
+  );
+  if (data !== undefined) AUTHENTICATED_REVERT_DATA_V1.set(error, data);
+  return error;
 }
 
 function isAnchorDependentResourceLimit(

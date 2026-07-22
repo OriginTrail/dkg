@@ -373,6 +373,45 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     await expect(read(request())).rejects.toMatchObject({ code: 'no-code' });
   });
 
+  it('preserves a terminal failure that precedes a slower sibling attempt timeout', async () => {
+    const siblingClosed = deferred<void>();
+    const first = await startRpcServer(async (call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber':
+          sendResult(response, call, { number: '0x7b', hash: BLOCK_HASH });
+          return;
+        case 'eth_getCode':
+          if (call.params[0] === TO) {
+            sendResult(response, call, '0x');
+            return;
+          }
+          response.on('close', () => siblingClosed.resolve(undefined));
+          return;
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    });
+    const second = await startRpcServer(successfulHandler());
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [
+        { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 },
+        { to: OTHER_TO, data: SECOND_READ_DATA, maxReturnBytes: 32 },
+      ],
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'no-code' });
+    await siblingClosed.promise;
+    expect(second.calls).toHaveLength(0);
+  }, CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1 + 4_000);
+
   it('uses the configured endpoint once, in exact EIP-1898 request order and shape', async () => {
     const server = await startRpcServer(successfulHandler());
     const configuredEndpoints = [server.url];
@@ -635,7 +674,8 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toMatchObject({ code: 'revert', revertData });
+    expect(caught).toMatchObject({ code: 'revert' });
+    expect(caught).not.toHaveProperty('revertData');
     expect(Object.isFrozen(caught)).toBe(true);
     expect(readStrictCurrentFinalizedEvmRevertDataV1(caught)).toBe(revertData);
     expect(readStrictCurrentFinalizedEvmRevertDataV1(
