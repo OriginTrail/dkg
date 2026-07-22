@@ -23,6 +23,20 @@ import {
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
 import {
+  type StrictCurrentFinalizedEvmReadCallV1,
+  type StrictCurrentFinalizedEvmReadRequestV1,
+  type StrictCurrentFinalizedEvmReadResultV1,
+  type StrictCurrentFinalizedEvmReadV1,
+} from './current-finalized-evm-read-model.js';
+import {
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
+  createCurrentFinalizedEvmSnapshotBudgetV1,
+  type StrictCurrentFinalizedEvmSnapshotRequestV1,
+  type StrictCurrentFinalizedEvmSnapshotScopeV1,
+  type StrictCurrentFinalizedEvmSnapshotSessionV1,
+} from './current-finalized-evm-snapshot.js';
+import {
   assertCanonicalNonzeroEvmAddress,
   isAbortSignal,
   snapshotDenseDataArray,
@@ -38,6 +52,13 @@ export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
 export type CurrentFinalizedEvmBlockReferenceProfileV1 =
   (typeof CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1)[number];
 
+export type {
+  StrictCurrentFinalizedEvmReadCallV1,
+  StrictCurrentFinalizedEvmReadRequestV1,
+  StrictCurrentFinalizedEvmReadResultV1,
+  StrictCurrentFinalizedEvmReadV1,
+} from './current-finalized-evm-read-model.js';
+
 export interface StrictCurrentFinalizedEvmRpcConfigV1 {
   /** Canonical decimal chain ID permanently bound to this adapter. */
   readonly chainId: ChainIdV1;
@@ -48,31 +69,6 @@ export interface StrictCurrentFinalizedEvmRpcConfigV1 {
    * chain profile for deployments whose RPC endpoints cannot execute EIP-1898.
    */
   readonly blockReferenceProfile?: CurrentFinalizedEvmBlockReferenceProfileV1;
-}
-
-/** One trusted-local ABI call in a same-finalized-anchor read. */
-export interface StrictCurrentFinalizedEvmReadCallV1 {
-  readonly to: EvmAddressV1;
-  readonly data: string;
-  readonly maxReturnBytes: number;
-}
-
-export interface StrictCurrentFinalizedEvmReadRequestV1 {
-  readonly chainId: ChainIdV1;
-  readonly calls: readonly StrictCurrentFinalizedEvmReadCallV1[];
-  readonly signal: AbortSignal;
-}
-
-export interface StrictCurrentFinalizedEvmReadResultV1 {
-  readonly chainId: ChainIdV1;
-  readonly blockNumber: BlockNumberV1;
-  readonly blockHash: Digest32V1;
-  readonly returnData: readonly string[];
-}
-
-export interface StrictCurrentFinalizedEvmReadV1 {
-  (request: StrictCurrentFinalizedEvmReadRequestV1):
-    Promise<StrictCurrentFinalizedEvmReadResultV1>;
 }
 
 interface StrictRpcConfigSnapshotV1 {
@@ -113,6 +109,7 @@ const AUTHENTICATED_REVERT_DATA_V1 = new WeakMap<CurrentFinalizedEvmCallErrorV1,
 const PRE_DEADLINE_TERMINAL_FAILURES_V1 = new WeakSet<CurrentFinalizedEvmCallErrorV1>();
 const READ_REQUEST_KEYS = Object.freeze(['calls', 'chainId', 'signal'] as const);
 const READ_CALL_KEYS = Object.freeze(['data', 'maxReturnBytes', 'to'] as const);
+const SNAPSHOT_REQUEST_KEYS = Object.freeze(['chainId', 'signal'] as const);
 
 /** Package-internal evidence available only for errors minted by this transport. */
 export function readStrictCurrentFinalizedEvmRevertDataV1(error: unknown): string | undefined {
@@ -267,6 +264,349 @@ export function createStrictCurrentFinalizedEvmReadV1(
   };
 
   return Object.freeze(read);
+}
+
+/**
+ * Build a scoped dynamic-read capability pinned to one endpoint and one
+ * finalized anchor. Endpoint failover is allowed only during preflight; once
+ * the callback begins it is never replayed on another endpoint.
+ */
+export function createStrictCurrentFinalizedEvmSnapshotScopeV1(
+  input: StrictCurrentFinalizedEvmRpcConfigV1,
+): StrictCurrentFinalizedEvmSnapshotScopeV1 {
+  const config = snapshotConfig(input);
+  const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
+    CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
+  );
+
+  const withSnapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (
+    inputRequest,
+    consume,
+  ) => {
+    const request = snapshotSnapshotRequest(inputRequest);
+    if (typeof consume !== 'function') {
+      throw unavailable('Current-finalized snapshot consumer must be callable');
+    }
+    if (request.chainId !== config.chainId) {
+      throw new CurrentFinalizedEvmCallErrorV1(
+        'chain-mismatch',
+        `Snapshot adapter is configured for chain ${config.chainId}, not ${request.chainId}`,
+      );
+    }
+    if (request.signal.aborted) {
+      throw cancelled('Current-finalized snapshot was cancelled before transport admission');
+    }
+
+    return admission.run(request.chainId, async () => {
+      const totalDeadline = createDeadlineScope(
+        request.signal,
+        CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
+        'current-finalized snapshot total deadline',
+      );
+      let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
+      try {
+        for (let index = 0; index < config.endpoints.length; index += 1) {
+          const attemptDeadline = createDeadlineScope(
+            totalDeadline.signal,
+            CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+            `current-finalized snapshot preflight ${index + 1}`,
+          );
+          let preflight: SnapshotEndpointPreflightV1 | undefined;
+          try {
+            preflight = await preflightSnapshotEndpoint(
+              config,
+              config.endpoints[index]!,
+              attemptDeadline.signal,
+            );
+            if (
+              request.signal.aborted
+              || totalDeadline.timedOut()
+              || attemptDeadline.timedOut()
+            ) {
+              throw classifySnapshotAttemptFailure(
+                new Error('Snapshot preflight completed after its lifecycle ended'),
+                request.signal,
+                totalDeadline,
+                attemptDeadline,
+              );
+            }
+          } catch (cause) {
+            const failure = classifySnapshotAttemptFailure(
+              cause,
+              request.signal,
+              totalDeadline,
+              attemptDeadline,
+            );
+            if (isTerminalAttemptFailure(failure)) throw failure;
+            lastRetryableFailure = failure;
+          } finally {
+            attemptDeadline.close();
+          }
+          if (preflight !== undefined) {
+            // This is deliberately outside the preflight catch: once trusted
+            // local consumer code begins, neither it nor its reads are replayed.
+            return await executePinnedSnapshotScope(
+              config,
+              config.endpoints[index]!,
+              preflight,
+              request,
+              consume,
+              totalDeadline,
+            );
+          }
+        }
+        throw lastRetryableFailure
+          ?? unavailable('No configured endpoint completed finalized snapshot preflight');
+      } finally {
+        totalDeadline.close();
+      }
+    }, (active) => new CurrentFinalizedEvmCallErrorV1(
+      'concurrency-saturated',
+      `Chain ${request.chainId} already has ${active} finalized snapshot in flight`,
+    ));
+  };
+
+  return Object.freeze(withSnapshot);
+}
+
+interface SnapshotEndpointPreflightV1 {
+  readonly anchor: FinalizedAnchorV1;
+  readonly lastRequestId: number;
+}
+
+async function preflightSnapshotEndpoint(
+  config: StrictRpcConfigSnapshotV1,
+  endpoint: string,
+  signal: AbortSignal,
+): Promise<SnapshotEndpointPreflightV1> {
+  let requestId = 0;
+  const rpc = async (method: string, params: readonly unknown[]): Promise<unknown> => {
+    requestId += 1;
+    return postJsonRpc(
+      endpoint,
+      requestId,
+      method,
+      params,
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+      signal,
+    );
+  };
+  const remoteChainId = parseChainId(await rpc('eth_chainId', Object.freeze([])));
+  if (remoteChainId !== config.chainId) {
+    throw new CurrentFinalizedEvmCallErrorV1(
+      'chain-mismatch',
+      `Configured snapshot endpoint reported chain ${remoteChainId}, expected ${config.chainId}`,
+    );
+  }
+  const anchor = parseFinalizedAnchor(
+    await rpc('eth_getBlockByNumber', Object.freeze(['finalized', false])),
+    'current finalized snapshot header',
+  );
+  return Object.freeze({ anchor, lastRequestId: requestId });
+}
+
+async function executePinnedSnapshotScope<T>(
+  config: StrictRpcConfigSnapshotV1,
+  endpoint: string,
+  preflight: SnapshotEndpointPreflightV1,
+  request: StrictCurrentFinalizedEvmSnapshotRequestV1,
+  consume: (session: StrictCurrentFinalizedEvmSnapshotSessionV1) => Promise<T>,
+  totalDeadline: DeadlineScope,
+): Promise<T> {
+  let requestId = preflight.lastRequestId;
+  const rpc = async (method: string, params: readonly unknown[]): Promise<unknown> => {
+    if (request.signal.aborted) throw cancelled('Current-finalized snapshot was cancelled');
+    if (totalDeadline.timedOut()) {
+      throw timedOut(
+        `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
+      );
+    }
+    const rpcDeadline = createDeadlineScope(
+      totalDeadline.signal,
+      CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+      `current-finalized snapshot JSON-RPC ${method}`,
+    );
+    requestId += 1;
+    try {
+      return await postJsonRpc(
+        endpoint,
+        requestId,
+        method,
+        params,
+        CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+        rpcDeadline.signal,
+      );
+    } catch (cause) {
+      if (request.signal.aborted) throw cancelled('Current-finalized snapshot was cancelled');
+      if (totalDeadline.timedOut()) {
+        throw timedOut(
+          `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
+        );
+      }
+      if (rpcDeadline.timedOut()) {
+        throw timedOut(
+          `Current-finalized snapshot JSON-RPC exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
+        );
+      }
+      if (cause instanceof CurrentFinalizedEvmCallErrorV1) throw cause;
+      throw unavailable('Current-finalized snapshot JSON-RPC failed closed', cause);
+    } finally {
+      rpcDeadline.close();
+    }
+  };
+
+  const budget = createCurrentFinalizedEvmSnapshotBudgetV1();
+  const deployedTargets = new Set<EvmAddressV1>();
+  let active = true;
+  let inFlight: Promise<readonly string[]> | undefined;
+  const read = Object.freeze(async (
+    inputCalls: readonly StrictCurrentFinalizedEvmReadCallV1[],
+  ): Promise<readonly string[]> => {
+    if (!active) throw unavailable('Current-finalized snapshot session is closed');
+    if (inFlight !== undefined) {
+      throw new CurrentFinalizedEvmCallErrorV1(
+        'concurrency-saturated',
+        'Current-finalized snapshot permits only one dynamic batch at a time',
+      );
+    }
+    const calls = snapshotSnapshotCalls(inputCalls);
+    try {
+      budget.consume(calls);
+    } catch {
+      throw resourceLimited('Current-finalized snapshot exceeded its fixed scan budget');
+    }
+    let operation!: Promise<readonly string[]>;
+    operation = executeSnapshotBatch(
+      config,
+      preflight.anchor,
+      calls,
+      deployedTargets,
+      rpc,
+    ).finally(() => {
+      if (inFlight === operation) inFlight = undefined;
+    });
+    inFlight = operation;
+    return operation;
+  });
+  const session = Object.freeze({
+    chainId: config.chainId,
+    blockNumber: preflight.anchor.blockNumber,
+    blockHash: preflight.anchor.blockHash,
+    read,
+  } satisfies StrictCurrentFinalizedEvmSnapshotSessionV1);
+
+  let result!: T;
+  let callbackFailure: unknown;
+  let callbackSucceeded = false;
+  try {
+    result = await consume(session);
+    callbackSucceeded = true;
+  } catch (cause) {
+    callbackFailure = cause;
+  }
+  active = false;
+
+  const danglingRead = inFlight;
+  if (danglingRead !== undefined) {
+    await danglingRead.catch(() => undefined);
+    if (callbackSucceeded) {
+      callbackSucceeded = false;
+      callbackFailure = unavailable(
+        'Current-finalized snapshot consumer settled with an unawaited read in flight',
+      );
+    }
+  }
+
+  if (!callbackSucceeded) throw callbackFailure;
+  if (config.blockReferenceProfile === 'trusted-block-number-hash-sandwich') {
+    await assertSnapshotAnchorStable(rpc, preflight.anchor);
+  }
+  if (request.signal.aborted) throw cancelled('Current-finalized snapshot was cancelled');
+  if (totalDeadline.timedOut()) {
+    throw timedOut(
+      `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
+    );
+  }
+  return result;
+}
+
+async function executeSnapshotBatch(
+  config: StrictRpcConfigSnapshotV1,
+  anchor: FinalizedAnchorV1,
+  calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
+  deployedTargets: Set<EvmAddressV1>,
+  rpc: (method: string, params: readonly unknown[]) => Promise<unknown>,
+): Promise<readonly string[]> {
+  const executeCallsAt = async (blockReference: unknown): Promise<readonly string[]> => {
+    const uncheckedTargets = [...new Set(calls.map(({ to }) => to))]
+      .filter((to) => !deployedTargets.has(to));
+    await settleParallelBatch(uncheckedTargets.map(async (to) => {
+      assertDeployedCode(await rpc('eth_getCode', Object.freeze([to, blockReference])));
+      deployedTargets.add(to);
+    }));
+    return settleParallelBatch(calls.map(async (call) => {
+      const callObject = Object.freeze({
+        from: CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+        to: call.to,
+        data: call.data,
+        gas: RPC_CALL_GAS_QUANTITY,
+      });
+      return parseContractReturn(
+        await rpc('eth_call', Object.freeze([callObject, blockReference])),
+        call.maxReturnBytes,
+      );
+    }));
+  };
+
+  if (config.blockReferenceProfile === 'eip1898') {
+    return executeCallsAt(Object.freeze({
+      blockHash: anchor.blockHash,
+      requireCanonical: true as const,
+    }));
+  }
+
+  let anchorDependentFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
+  let returnData: readonly string[] | undefined;
+  try {
+    returnData = await executeCallsAt(anchor.blockNumberQuantity);
+  } catch (cause) {
+    if (
+      cause instanceof CurrentFinalizedEvmCallErrorV1
+      && (
+        cause.code === 'no-code'
+        || cause.code === 'revert'
+        || cause.code === 'malformed-return'
+        || isAnchorDependentResourceLimit(cause)
+      )
+    ) {
+      anchorDependentFailure = cause;
+    } else {
+      throw cause;
+    }
+  }
+  await assertSnapshotAnchorStable(rpc, anchor);
+  if (anchorDependentFailure !== undefined) throw anchorDependentFailure;
+  if (returnData === undefined) throw unavailable('Finalized snapshot batch produced no results');
+  return returnData;
+}
+
+async function assertSnapshotAnchorStable(
+  rpc: (method: string, params: readonly unknown[]) => Promise<unknown>,
+  anchor: FinalizedAnchorV1,
+): Promise<void> {
+  const postAnchor = parseFinalizedAnchor(
+    await rpc('eth_getBlockByNumber', Object.freeze([anchor.blockNumberQuantity, false])),
+    'post-snapshot numbered header',
+  );
+  if (
+    postAnchor.blockNumber !== anchor.blockNumber
+    || postAnchor.blockHash !== anchor.blockHash
+  ) {
+    throw new CurrentFinalizedEvmCallErrorV1(
+      'finalized-state-unavailable',
+      'Pinned snapshot hash sandwich did not preserve the resolved finalized anchor',
+    );
+  }
 }
 
 async function executeEndpointAttempt(
@@ -703,6 +1043,27 @@ function classifyAttemptFailure(
   return unavailable('Current-finalized endpoint attempt failed closed', cause);
 }
 
+function classifySnapshotAttemptFailure(
+  cause: unknown,
+  callerSignal: AbortSignal,
+  totalDeadline: DeadlineScope,
+  attemptDeadline: DeadlineScope,
+): CurrentFinalizedEvmCallErrorV1 {
+  if (callerSignal.aborted) return cancelled('Current-finalized snapshot was cancelled');
+  if (totalDeadline.timedOut()) {
+    return timedOut(
+      `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
+    );
+  }
+  if (attemptDeadline.timedOut()) {
+    return timedOut(
+      `Current-finalized snapshot preflight exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
+    );
+  }
+  if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
+  return unavailable('Current-finalized snapshot preflight failed closed', cause);
+}
+
 function isTerminalAttemptFailure(error: CurrentFinalizedEvmCallErrorV1): boolean {
   return error.code === 'unsupported-chain'
     || error.code === 'resource-limit'
@@ -749,6 +1110,30 @@ function snapshotReadRequest(input: unknown): StrictCurrentFinalizedEvmReadReque
     });
   } catch {
     throw unavailable('Strict current-finalized read request failed the fixed local profile');
+  }
+}
+
+function snapshotSnapshotRequest(input: unknown): StrictCurrentFinalizedEvmSnapshotRequestV1 {
+  try {
+    const record = snapshotExactDataRecord(input, SNAPSHOT_REQUEST_KEYS);
+    assertCanonicalChainId(record.chainId, 'strict finalized-snapshot chainId');
+    if (!isAbortSignal(record.signal)) throw new Error('signal is not an AbortSignal');
+    return Object.freeze({
+      chainId: record.chainId,
+      signal: record.signal,
+    });
+  } catch {
+    throw unavailable('Strict current-finalized snapshot request failed the fixed local profile');
+  }
+}
+
+function snapshotSnapshotCalls(
+  input: unknown,
+): readonly StrictCurrentFinalizedEvmReadCallV1[] {
+  try {
+    return snapshotReadCalls(input);
+  } catch {
+    throw unavailable('Strict current-finalized snapshot batch failed the fixed local profile');
   }
 }
 

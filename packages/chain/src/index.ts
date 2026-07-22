@@ -35,6 +35,11 @@ export {
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
 export {
+  type StrictCurrentFinalizedEvmSnapshotRequestV1,
+  type StrictCurrentFinalizedEvmSnapshotScopeV1,
+  type StrictCurrentFinalizedEvmSnapshotSessionV1,
+} from './current-finalized-evm-snapshot.js';
+export {
   FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
   FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
   createFinalizedContextGraphRpcResolverV1,
@@ -43,13 +48,16 @@ export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
+  createStrictCurrentFinalizedEvmSnapshotScopeV1,
   type CurrentFinalizedEvmBlockReferenceProfileV1,
+  type StrictCurrentFinalizedEvmRpcConfigV1,
+} from './strict-current-finalized-evm-rpc.js';
+export {
   type StrictCurrentFinalizedEvmReadCallV1,
   type StrictCurrentFinalizedEvmReadRequestV1,
   type StrictCurrentFinalizedEvmReadResultV1,
   type StrictCurrentFinalizedEvmReadV1,
-  type StrictCurrentFinalizedEvmRpcConfigV1,
-} from './strict-current-finalized-evm-rpc.js';
+} from './current-finalized-evm-read-model.js';
 export {
   FinalizedContextGraphReadErrorV1,
   composeFinalizedContextGraphReadV1,
