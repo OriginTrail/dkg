@@ -55,6 +55,16 @@ describe('#1837 promote queue clearTerminalJob', () => {
     return jobId;
   }
 
+  // Raw stored PROMOTE_PAYLOAD literal for a subject, in the store's own return form. Comparing
+  // the value read before vs after a clear proves a rejected clear neither deleted nor altered
+  // the row (#1893: "never mutates on a reject"), and is immune to insert-vs-return re-escaping.
+  async function rawPayloadOf(jobId: string): Promise<string | undefined> {
+    const result = await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+    );
+    return result.type === 'bindings' ? result.bindings[0]?.['payload'] : undefined;
+  }
+
   it('clears an exact succeeded job (cleared); no other job changes', async () => {
     const queue = createQueue();
     const target = await enqueueSucceeded(queue, { assertionName: 'a' });
@@ -102,9 +112,11 @@ describe('#1837 promote queue clearTerminalJob', () => {
   it('is idempotent: an absent / already-cleared job returns already_absent', async () => {
     const queue = createQueue();
     expect(await queue.clearTerminalJob('never-existed')).toEqual({ outcome: 'already_absent' });
+    expect(await rawPayloadOf('never-existed')).toBeUndefined(); // clearing an absent job creates no row
     const jobId = await enqueueSucceeded(queue);
     expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' }); // repeat
+    expect(await rawPayloadOf(jobId)).toBeUndefined(); // cleared row stays gone
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {
@@ -127,7 +139,10 @@ describe('#1837 promote queue clearTerminalJob', () => {
     await store.insert([
       { subject: jobSubject('bogus-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(bogusJob)), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
     ]);
+    const before = await rawPayloadOf('bogus-1');
+    expect(before).toBeDefined();
     await expect(queue.clearTerminalJob('bogus-1')).resolves.toEqual({ outcome: 'rejected', reason: 'unknown' });
+    expect(await rawPayloadOf('bogus-1')).toBe(before); // rejected clear must NOT delete or alter the row
   });
 
   // #1893: a payload literal that is present but not a valid job is malformed, not unknown.
@@ -136,7 +151,10 @@ describe('#1837 promote queue clearTerminalJob', () => {
     await store.insert([
       { subject: jobSubject('corrupt-1'), predicate: PROMOTE_PAYLOAD, object: literal('not-a-job-json'), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
     ]);
+    const before = await rawPayloadOf('corrupt-1');
+    expect(before).toBeDefined();
     await expect(queue.clearTerminalJob('corrupt-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await rawPayloadOf('corrupt-1')).toBe(before); // rejected clear must NOT delete or alter the row
   });
 
   // #1893 (review): a payload that is otherwise well-formed but carries no string `state` is
@@ -147,7 +165,10 @@ describe('#1837 promote queue clearTerminalJob', () => {
     await store.insert([
       { subject: jobSubject('nostate-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(noState)), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
     ]);
+    const before = await rawPayloadOf('nostate-1');
+    expect(before).toBeDefined();
     await expect(queue.clearTerminalJob('nostate-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await rawPayloadOf('nostate-1')).toBe(before); // rejected clear must NOT delete or alter the row
   });
 
   it('concurrent clears of one terminal job are deterministic: one cleared, rest already_absent, no other job affected', async () => {
