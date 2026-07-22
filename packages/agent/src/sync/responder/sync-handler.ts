@@ -562,6 +562,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
       hintedPageRows > limit;
     const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
+    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
+    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
+    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
+    // suspenders response serializer and records the explicit contract.
+    const usesMetaByteBudget = !isWorkspace &&
+      phase === 'meta' &&
+      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -789,16 +796,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // this only ever truncates a pathological oversized subject.
           //
           // Pagination contract: durable meta uses byte-budget pagination where a
-          // SHORT page is NOT EOF — only an empty page is. This is a
-          // REQUESTER-SIDE default (page-fetch: syncPageSize=8192 > SYNC_PAGE_SIZE
-          // ⇒ short≠EOF for every phase), NOT wire-negotiated here. Every
-          // testnet-canary+ requester holds it, so byte-capping is safe. A
-          // byte-capped meta page is ~14000 rows (4 MiB / ~300 B) ≫ the 500-row
-          // limit, so it is never short for normal meta; a short page only arises
-          // from a hostile huge-literal subject, and only a pre-canary 500-row
-          // short=EOF requester could then end early — follow-up: negotiate meta
-          // pageMode for wire-explicitness (see the #1788/#1916 follow-up issue).
-          const serialized = serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+          // SHORT page is NOT EOF — only an empty page is. The requester's
+          // short≠EOF handling is a requester-side default (page-fetch:
+          // syncPageSize=8192 > SYNC_PAGE_SIZE), and since #1923 it is ALSO
+          // negotiated on the wire via `pageMode` (usesMetaByteBudget). The
+          // subject-atomic byte-fit in readDurableMetaPage already bounds every
+          // page ≤ budget AND to whole subjects, so both the negotiated
+          // (byte-budget serializer) and the non-negotiated (plain serializer)
+          // branches are frame-safe and never split a subject; the gate here just
+          // honours the explicit contract.
+          const serialized = usesMetaByteBudget
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);

@@ -10,7 +10,12 @@ import {
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
-import { SYNC_BYTE_BUDGET_RESPONSE_BYTES, SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
+import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_SIZE,
+} from '../src/dkg-agent-constants.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -484,53 +489,59 @@ describe('sync responder pagination interleaving', () => {
     expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
   });
 
-  it('durable-meta handler byte-caps an oversized subject under the frame and pages to completion (#1916)', async () => {
-    // Handler-level (through registerSyncHandler): prove the durable-meta branch
-    // actually uses the byte-budget serializer on the wire, not just the loader.
-    // One admitted subject whose rows total > the 4 MiB response budget (via
-    // large literals) must be served as byte-capped prefixes that each stay under
-    // the frame and page to completion — a regression back to the uncapped
-    // serializeResponderRows would emit the whole >4 MiB subject in one response
-    // (pageCount 1 + over-budget bytes) and fail here.
-    const store = new OxigraphStore();
-    const cgId = 'oversized-meta-frame';
-    const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
-    const subject = `did:dkg:activity:${cgId}-big`;
-    const bigLiteral = `"${'y'.repeat(60_000)}"`; // ~60 KB per row (under the 65535 literal cap)
-    const rows: Quad[] = Array.from({ length: 80 }, (_, i) => ({
-      graph: metaGraph,
-      subject,
-      predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
-      object: bigLiteral,
-    })); // ~4.8 MB total > the 4 MiB budget
-    await store.insert(rows);
-    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
-    const base = {
-      contextGraphId: cgId,
-      includeSharedMemory: false,
-      phase: 'meta' as const,
-      limit: SYNC_PAGE_SIZE,
-      syncSessionId: 'oversized-meta-frame-session',
-    };
+  // Handler-level (through registerSyncHandler): prove the durable-meta wire
+  // branch keeps an oversized admitted subject under the frame and pages to
+  // completion, for BOTH the negotiated (byte-budget pageMode) and the legacy
+  // (no pageMode) requester — since #1916 the subject-atomic byte-fit in
+  // readDurableMetaPage bounds every page ≤ budget for both, so neither can emit
+  // an oversized frame. A regression that returned the whole >4 MiB subject would
+  // fail (pageCount 1 + over-budget bytes).
+  for (const variant of [
+    { name: 'negotiated (byte-budget pageMode)', pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: SYNC_BYTE_BUDGET_MAX_ROWS },
+    { name: 'legacy (no pageMode)', pageMode: undefined, pageRowsHint: undefined },
+  ] as const) {
+    it(`durable-meta handler byte-caps an oversized subject under the frame and pages to completion — ${variant.name} (#1916)`, async () => {
+      const store = new OxigraphStore();
+      const cgId = `oversized-meta-frame-${variant.pageMode ? 'neg' : 'legacy'}`;
+      const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
+      const subject = `did:dkg:activity:${cgId}-big`;
+      const bigLiteral = `"${'y'.repeat(60_000)}"`; // ~60 KB per row (under the 65535 literal cap)
+      const rows: Quad[] = Array.from({ length: 80 }, (_, i) => ({
+        graph: metaGraph,
+        subject,
+        predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
+        object: bigLiteral,
+      })); // ~4.8 MB total > the 4 MiB budget
+      await store.insert(rows);
+      const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+      const base = {
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        phase: 'meta' as const,
+        limit: SYNC_PAGE_SIZE,
+        syncSessionId: `${cgId}-session`,
+        ...(variant.pageMode ? { pageMode: variant.pageMode, pageRowsHint: variant.pageRowsHint } : {}),
+      };
 
-    const enc = new TextEncoder();
-    let offset = 0;
-    let delivered = 0;
-    let pageCount = 0;
-    for (let guard = 0; guard < 100; guard += 1) {
-      const resp = await cap.invoke({ ...base, offset });
-      const n = resp === '' ? 0 : linesFromNquads(resp).length;
-      if (n === 0) break;
-      // Frame-safety: every response stays within the byte budget.
-      expect(enc.encode(resp).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
-      pageCount += 1;
-      delivered += n;
-      offset += n;
-    }
-    // Chunked (byte cap engaged, not one oversized frame) and every row delivered.
-    expect(pageCount).toBeGreaterThan(1);
-    expect(delivered).toBe(rows.length);
-  });
+      const enc = new TextEncoder();
+      let offset = 0;
+      let delivered = 0;
+      let pageCount = 0;
+      for (let guard = 0; guard < 100; guard += 1) {
+        const resp = await cap.invoke({ ...base, offset });
+        const n = resp === '' ? 0 : linesFromNquads(resp).length;
+        if (n === 0) break;
+        // Frame-safety: every response stays within the byte budget in BOTH modes.
+        expect(enc.encode(resp).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+        pageCount += 1;
+        delivered += n;
+        offset += n;
+      }
+      // Chunked (byte cap engaged, not one oversized frame) and every row delivered.
+      expect(pageCount).toBeGreaterThan(1);
+      expect(delivered).toBe(rows.length);
+    });
+  }
 
   it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
     const store = new OxigraphStore();

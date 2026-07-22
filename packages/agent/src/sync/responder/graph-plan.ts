@@ -585,14 +585,89 @@ function serializedResponderRowByteLength(row: SyncRow): number {
   return RESPONDER_ROW_ENCODER.encode(serializeResponderRow(row)).byteLength;
 }
 
-/** Serialized wire size of a row list (rows joined by single-byte `\n`), using
- * the same per-row accounting as {@link serializeResponderRowsWithinByteBudget}. */
-function serializedRowsResponseBytes(rows: readonly SyncRow[]): number {
+/**
+ * Exclusive end index of the SUBJECT-ATOMIC, BYTE-FITTING durable-meta page that
+ * starts at `start` (#1916). Walks whole `(g, s)` subjects accumulating serialized
+ * wire bytes (the same accounting the byte-budget serializer uses), and:
+ *  - a subject that would push the page over `maxBytes` is DEFERRED WHOLE to the
+ *    next page (cut on the prior subject boundary) — never split;
+ *  - ONLY when the FIRST subject alone exceeds `maxBytes` is it emitted (the
+ *    serializer then byte-caps that one subject — provably not a valid seal at
+ *    that size, so splitting it is safe and guarantees forward progress);
+ *  - so "≤ budget" and "subject-atomic" hold together, unlike a plain row-prefix
+ *    cut which splits a small seal that sits after large-literal rows.
+ *
+ * Also bounded by `rowLimit` (the requested page size): once whole subjects
+ * totalling ≥ `rowLimit` rows have been accumulated, stop at that subject
+ * boundary — so a normal small-subject page stays ~`rowLimit` rows (extended to
+ * complete the straddling subject) instead of ballooning to the full byte budget.
+ *
+ * Subjects are grouped by {@link metaSubjectKey} over `rows`, which is ONE query's
+ * result (a cached snapshot or a single store-paged window), so a blank-node
+ * subject's rows are self-consistently labelled and stay grouped (same
+ * single-query invariant as the #1788 fix). `trailingComplete` says whether the
+ * LAST subject in `rows` is fully present; when false that trailing subject is
+ * treated as incomplete and the function returns -1 ("need more rows") so the
+ * caller grows the window to complete it.
+ */
+function subjectAtomicBudgetEnd(
+  rows: readonly SyncRow[],
+  start: number,
+  maxBytes: number,
+  rowLimit: number,
+  trailingComplete: boolean,
+): number {
+  const n = rows.length;
+  if (start >= n) return start;
+  const safeMax = Math.max(1, Math.floor(maxBytes));
+  const safeRowLimit = Math.max(1, Math.floor(rowLimit));
   let bytes = 0;
-  for (let i = 0; i < rows.length; i += 1) {
-    bytes += serializedResponderRowByteLength(rows[i]) + (i > 0 ? 1 : 0);
+  let lastBoundary = start;
+  let i = start;
+  while (i < n) {
+    let j = i;
+    let runBytes = 0;
+    const key = metaSubjectKey(rows[i]);
+    while (j < n && metaSubjectKey(rows[j]) === key) {
+      runBytes += serializedResponderRowByteLength(rows[j]) + (i === start && j === i ? 0 : 1);
+      j += 1;
+    }
+    // The subject is fully present iff a later subject follows it in `rows`, or
+    // the caller says the tail is complete.
+    const complete = j < n || trailingComplete;
+    if (bytes + runBytes > safeMax) {
+      // This whole subject won't fit within the budget.
+      if (lastBoundary > start) return lastBoundary; // defer it WHOLE; keep prior subjects
+      // ESCAPE HATCH: the FIRST subject alone exceeds the budget. It is provably
+      // not a valid seal at that size, so split it — return a byte-FITTING row
+      // prefix (≥ 1 row for forward progress) so the page is ≤ budget under BOTH
+      // the byte-budget and the plain serializer. This is the ONLY place a
+      // subject is split.
+      let k = start;
+      let prefixBytes = 0;
+      while (k < j) {
+        const rowBytes = serializedResponderRowByteLength(rows[k]) + (k === start ? 0 : 1);
+        if (prefixBytes + rowBytes > safeMax && k > start) break;
+        prefixBytes += rowBytes;
+        k += 1;
+      }
+      return k;
+    }
+    if (!complete) {
+      // Trailing subject fits SO FAR but may continue beyond `rows`. It is not
+      // over budget, so it should be INCLUDED whole once fully read — signal
+      // "need more rows" so the caller grows the window to complete it (rather
+      // than deferring a subject that would fit).
+      return -1;
+    }
+    bytes += runBytes;
+    lastBoundary = j;
+    i = j;
+    // Requested page size reached (at a subject boundary): stop here rather than
+    // keep pulling whole subjects up to the full byte budget.
+    if (lastBoundary - start >= safeRowLimit) return lastBoundary;
   }
-  return bytes;
+  return lastBoundary;
 }
 
 /**
@@ -883,7 +958,7 @@ export async function readDurableMetaPage(params: {
       releaseOnShortPage: false,
     }
     : undefined;
-  return readResponderRowsPage(
+  const page = await readResponderRowsPage(
     cache,
     (offset, limit, signal) => readDurableMetaRowsPageSubjectAtomic(
       params.store,
@@ -916,6 +991,15 @@ export async function readDurableMetaPage(params: {
         : {}),
     },
   );
+  // Final SUBJECT-ATOMIC byte-fit (#1916): both lanes return a page that ends on
+  // a `(g, s)` boundary (cached: in-memory extend; store-paged: the loader), so
+  // its trailing subject is complete. Trim it to whole subjects within the
+  // response byte budget — deferring any subject that would not fit to the next
+  // page — so a small seal AFTER large-literal rows is never cut by the byte cap.
+  // No-op for the already-byte-fit store-paged page; bites only when the cached
+  // extend produced a > budget page. The cached extend already applied the row
+  // limit, so here we byte-cap only (unbounded rowLimit).
+  return page.slice(0, subjectAtomicBudgetEnd(page, 0, maxResponseBytes, Number.MAX_SAFE_INTEGER, true));
 }
 
 /** Response byte budget for one changelog delta page — keeps a page under the
@@ -3617,17 +3701,15 @@ async function readDurableMetaRowsPage(
  * separately.
  *
  * `_meta` subjects are small (a seal is 14 quads ≈ a few KB), so this converges
- * in about one extra read and every valid control envelope is emitted WHOLE.
- * The growth is bounded by `maxResponseBytes` (#1916): a single subject whose
- * own rows reach the response byte budget is, by that size alone, provably NOT a
- * valid seal/descriptor (those are orders of magnitude smaller) — so the extend
- * stops growing and returns the bounded window, and the caller's byte-budget
- * serialization caps the response and splits that oversized subject across
- * pages. Splitting it is safe: an oversized subject carries no batch-local
- * control envelope the receiver admits atomically (a valid seal never reaches
- * this size; a hostile `assertionVersion`+junk subject fails the receiver's seal
- * parse regardless). This guarantees forward progress instead of an un-sendable
- * oversized frame.
+ * in about one read. The returned page is BOTH subject-atomic AND ≤
+ * `maxResponseBytes` via {@link subjectAtomicBudgetEnd}: whole subjects are
+ * accumulated up to the budget and a subject that would not fit is deferred whole
+ * to the next page — so a small seal that sits AFTER large-literal rows is never
+ * cut by the byte cap (the #1916 hole). Only a FIRST subject that alone exceeds
+ * the budget is emitted and split by the serializer (provably not a valid seal at
+ * that size; safe and forward-progressing). The window grows only while its
+ * trailing subject is still incomplete AND the budget has not been reached, so
+ * memory stays bounded (~one budget) and the loop terminates at EOF.
  */
 async function readDurableMetaRowsPageSubjectAtomic(
   store: TripleStore,
@@ -3643,9 +3725,9 @@ async function readDurableMetaRowsPageSubjectAtomic(
   if (safeLimit === 0) return [];
   const safeMaxBytes = Math.max(1, Math.floor(maxResponseBytes));
   let extra = 1;
-  // Bounded by construction: `extra` at least doubles each attempt and the
-  // store is finite, so a short (exhausted) window always terminates the loop;
-  // the iteration cap is a defensive ceiling a real `_meta` graph never nears.
+  // Bounded by construction: `extra` at least doubles each attempt and the store
+  // is finite, so a short (exhausted) window always terminates the loop; the
+  // iteration cap is a defensive ceiling a real `_meta` graph never nears.
   for (let attempt = 0; attempt < 48; attempt += 1) {
     const window = await readDurableMetaRowsPage(
       store,
@@ -3655,35 +3737,17 @@ async function readDurableMetaRowsPageSubjectAtomic(
       safeLimit + extra,
       signal,
     );
-    // Fewer than `limit + 1` admitted rows remain ⇒ final page, already ends on
-    // the last subject's boundary.
-    if (window.length <= safeLimit) return window;
-    // The row just past the page begins a new subject ⇒ clean boundary.
-    if (metaSubjectKey(window[safeLimit]) !== metaSubjectKey(window[safeLimit - 1])) {
-      return window.slice(0, safeLimit);
-    }
-    // The trailing subject straddles the limit. It is fully contained once a
-    // later subject appears in this window, or the window is short (EOF).
-    const trailingKey = metaSubjectKey(window[safeLimit - 1]);
     const windowExhausted = window.length < safeLimit + extra;
-    if (metaSubjectKey(window[window.length - 1]) !== trailingKey || windowExhausted) {
-      let end = window.length;
-      while (end > 0 && metaSubjectKey(window[end - 1]) !== trailingKey) end -= 1;
-      return window.slice(0, end);
-    }
-    // The whole window is still the trailing subject. If it has already reached
-    // the response byte budget it is far too large to be a valid seal/descriptor
-    // (#1916): stop growing (bounding memory) and return the bounded window — the
-    // caller's byte-budget serialization caps the response and splits this
-    // oversized subject across pages with forward progress.
-    if (serializedRowsResponseBytes(window) >= safeMaxBytes) return window;
-    // Otherwise grow the window (roughly doubling) and re-read as one query so
-    // the boundary comparison stays self-consistent.
+    const end = subjectAtomicBudgetEnd(window, 0, safeMaxBytes, safeLimit, windowExhausted);
+    // -1 ⇒ the first subject is still incomplete and fits so far: fetch more to
+    // decide whether it completes within budget or is oversized. Otherwise `end`
+    // is the subject-atomic, byte-fitting boundary.
+    if (end !== -1) return window.slice(0, end);
     extra = extra === 1 ? safeLimit + 1 : extra * 2;
   }
   throw new Error(
     `durable-meta subject-atomic paging did not converge for "${contextGraphId}" at offset ${safeOffset} `
-    + '(trailing subject exceeded the bounded window budget)',
+    + '(first subject exceeded the bounded window budget)',
   );
 }
 

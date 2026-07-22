@@ -449,4 +449,67 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     // Boundary is clean: 5 filler + 14 seal, nothing beyond the seal.
     expect(page).toHaveLength(filler.length + SEAL_PREDICATES.length);
   });
+
+  it('store-paged path: large-literal rows BEFORE a valid seal never split it (byte-cap is subject-aware) (#1916)', async () => {
+    // The round-6 hole: a ROW-prefix byte cap would emit the large fillers + only
+    // the FIRST few seal rows once the budget is hit — splitting the seal across
+    // rounds (#1788 reintroduced). Subject-aware byte-fitting must instead DEFER
+    // the whole seal to the next page. Fillers (~2.5 KB) + seal (~0.7 KB) exceed
+    // a 3 KB budget, and limit is large so the byte budget — not the row limit —
+    // is what cuts.
+    const limit = 100;
+    const budget = 2_800; // bytes
+    const store = new OxigraphStore();
+    // One filler subject (sorts BEFORE the seal, 'a' < 'z') whose single ~2.5 KB
+    // row nearly fills the budget, leaving room for only a FEW seal rows — so the
+    // 14-row seal STRADDLES the budget boundary. A row-prefix cut would emit the
+    // filler + the first few seal rows (partial seal); subject-aware fitting must
+    // defer the whole seal instead.
+    const filler: Quad[] = [{
+      graph: META,
+      subject: 'did:dkg:activity:a-fill',
+      predicate: `${DKG_NS}label`,
+      object: `"${'x'.repeat(2_450)}"`,
+    }];
+    const seal = 'did:dkg:activity:z-seal';
+    const sealQuads: Quad[] = SEAL_PREDICATES.map((name, i) => ({
+      graph: META,
+      subject: seal,
+      predicate: `${DKG_NS}${name}`,
+      object: i === 1 ? '"1"' : `"s-${i}"`, // small seal literals; keep assertionVersion
+    }));
+    await store.insert([...filler, ...sealQuads]);
+
+    const enc = new TextEncoder();
+    const pages = await pageThrough(
+      async (offset, pageLimit) => {
+        const page = await readDurableMetaPage({
+          store,
+          contextGraphId: CG,
+          registeredSubGraphNames: [],
+          offset,
+          limit: pageLimit,
+          maxResponseBytes: budget,
+        });
+        // Each page is subject-atomic AND within budget, so the wire serializer
+        // emits it whole (no truncation) — frame-safe.
+        expect(enc.encode(serializeResponderRowsWithinByteBudget(page, budget)).byteLength)
+          .toBeLessThanOrEqual(budget);
+        return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
+      },
+      limit,
+    );
+
+    const sealCount = (page: readonly Row[]) => page.filter((row) => row.s === seal).length;
+    // 0-or-all: the seal is NEVER partially emitted despite the large fillers
+    // consuming the budget ahead of it.
+    for (const page of pages) expect([0, SEAL_PREDICATES.length]).toContain(sealCount(page));
+    const sealRows = pages.flat().filter((row) => row.s === seal);
+    expect(sealRows).toHaveLength(SEAL_PREDICATES.length);
+    expect(sealRows.some((row) => row.p === ASSERTION_VERSION)).toBe(true);
+    // Progress + completeness: every row delivered once, seal deferred to a later page.
+    assertNoDuplicatesOrGaps(pages);
+    expect(pages.flat()).toHaveLength(filler.length + SEAL_PREDICATES.length);
+    expect(pages.length).toBeGreaterThan(1);
+  });
 });
