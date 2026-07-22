@@ -24,6 +24,7 @@ export {
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
   assertCanonicalDigest,
+  assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
   assertCanonicalKaId,
   assertCanonicalTimestampMs,

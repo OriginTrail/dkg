@@ -41,6 +41,18 @@ export {
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from './strict-current-finalized-evm-rpc.js';
 export {
+  FinalizedContextGraphReadErrorV1,
+  composeFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadV1,
+  validateFinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphBindingV1,
+  type FinalizedContextGraphReadErrorCodeV1,
+  type FinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadV1,
+  type UntrustedFinalizedContextGraphFieldsV1,
+} from './finalized-context-graph-read.js';
+export {
   resolveQuotedPublisherCandidatePricing,
   resolveLegacyPublisherCandidatePricing,
   type QuotedPublisherCandidatePricing,
