@@ -564,6 +564,10 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
           return;
         case 'eth_call': {
           const request = call.params[0] as { readonly data?: string };
+          if (request.data === '0x') {
+            sendJsonRpcResult(response, call, '0x');
+            return;
+          }
           const selector = request.data?.slice(0, 10);
           switch (selector) {
             case CG.getFunction('getContextGraph')!.selector:
