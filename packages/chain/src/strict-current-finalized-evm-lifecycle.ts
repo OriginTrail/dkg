@@ -314,6 +314,61 @@ export async function assertStrictFinalizedAnchorStableV1(
   }
 }
 
+/**
+ * One resolved anchor's complete block-reference policy. Snapshot transport
+ * owns phase orchestration; this capability owns every profile-specific
+ * decision for preflight probing, dynamic batch execution, and scope exit.
+ */
+export interface StrictFinalizedAnchorProfilePolicyV1 {
+  readonly anchor: FinalizedAnchorV1;
+  readonly blockReferenceForProbe: unknown;
+  readonly executeBatchAtAnchor: <T>(options: Readonly<{
+    executeAtReference: (blockReference: unknown) => Promise<T>;
+    readPostAnchor: () => Promise<FinalizedAnchorV1>;
+    anchorMismatchMessage: string;
+  }>) => Promise<T>;
+  readonly assertScopeStillPinned: (
+    readPostAnchor: () => Promise<FinalizedAnchorV1>,
+    anchorMismatchMessage: string,
+  ) => Promise<void>;
+}
+
+export function createStrictFinalizedAnchorProfilePolicyV1(
+  blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1,
+  anchor: FinalizedAnchorV1,
+): StrictFinalizedAnchorProfilePolicyV1 {
+  const usesNumberedHashSandwich =
+    blockReferenceProfile === 'trusted-block-number-hash-sandwich';
+  const blockReferenceForProbe = blockReferenceProfile === 'eip1898'
+    ? Object.freeze({ blockHash: anchor.blockHash, requireCanonical: true as const })
+    : anchor.blockNumberQuantity;
+  const assertScopeStillPinned = async (
+    readPostAnchor: () => Promise<FinalizedAnchorV1>,
+    anchorMismatchMessage: string,
+  ): Promise<void> => {
+    if (!usesNumberedHashSandwich) return;
+    await assertStrictFinalizedAnchorStableV1(
+      anchor,
+      readPostAnchor,
+      anchorMismatchMessage,
+    );
+  };
+  return Object.freeze({
+    anchor,
+    blockReferenceForProbe,
+    executeBatchAtAnchor: <T>(options: Readonly<{
+      executeAtReference: (blockReference: unknown) => Promise<T>;
+      readPostAnchor: () => Promise<FinalizedAnchorV1>;
+      anchorMismatchMessage: string;
+    }>): Promise<T> => executeStrictFinalizedAnchorPolicyV1({
+      blockReferenceProfile,
+      anchor,
+      ...options,
+    }),
+    assertScopeStillPinned,
+  });
+}
+
 export async function settleStrictFinalizedParallelBatchV1<T>(
   operations: readonly Promise<T>[],
   attemptDeadline: DeadlineScopeV1,

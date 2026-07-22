@@ -27,11 +27,11 @@ import {
   unavailable,
 } from './strict-current-finalized-evm-errors.js';
 import {
-  assertStrictFinalizedAnchorStableV1,
   createDeadlineScopeV1,
+  createStrictFinalizedAnchorProfilePolicyV1,
   createStrictFinalizedEndpointRunnerV1,
-  executeStrictFinalizedAnchorPolicyV1,
   settleStrictFinalizedParallelBatchV1,
+  type StrictFinalizedAnchorProfilePolicyV1,
   type StrictFinalizedEndpointRunnerMessagesV1,
   unwrapStrictFinalizedParallelBatchFailureV1,
 } from './strict-current-finalized-evm-lifecycle.js';
@@ -48,12 +48,11 @@ import {
 } from './strict-current-finalized-evm-read-operations.js';
 import type {
   DeadlineScopeV1,
-  FinalizedAnchorV1,
   StrictRpcConfigSnapshotV1,
 } from './strict-current-finalized-evm-types.js';
 
 interface SnapshotEndpointPreflightV1 {
-  readonly anchor: FinalizedAnchorV1;
+  readonly anchorPolicy: StrictFinalizedAnchorProfilePolicyV1;
   readonly lastRequestId: number;
 }
 
@@ -170,24 +169,22 @@ async function preflightSnapshotEndpoint(
     await rpc('eth_getBlockByNumber', Object.freeze(['finalized', false])),
     'current finalized snapshot header',
   );
-  const blockReference = config.blockReferenceProfile === 'eip1898'
-    ? Object.freeze({ blockHash: anchor.blockHash, requireCanonical: true as const })
-    : anchor.blockNumberQuantity;
-  await probeSnapshotReadProfile(rpc, blockReference);
-  if (config.blockReferenceProfile === 'trusted-block-number-hash-sandwich') {
-    await assertStrictFinalizedAnchorStableV1(
-      anchor,
-      async () => parseStrictFinalizedAnchorV1(
-        await rpc(
-          'eth_getBlockByNumber',
-          Object.freeze([anchor.blockNumberQuantity, false]),
-        ),
-        'post-preflight numbered header',
+  const anchorPolicy = createStrictFinalizedAnchorProfilePolicyV1(
+    config.blockReferenceProfile,
+    anchor,
+  );
+  await probeSnapshotReadProfile(rpc, anchorPolicy.blockReferenceForProbe);
+  await anchorPolicy.assertScopeStillPinned(
+    async () => parseStrictFinalizedAnchorV1(
+      await rpc(
+        'eth_getBlockByNumber',
+        Object.freeze([anchor.blockNumberQuantity, false]),
       ),
-      'Snapshot read-profile preflight did not preserve the resolved finalized anchor',
-    );
-  }
-  return Object.freeze({ anchor, lastRequestId: requestId });
+      'post-preflight numbered header',
+    ),
+    'Snapshot read-profile preflight did not preserve the resolved finalized anchor',
+  );
+  return Object.freeze({ anchorPolicy, lastRequestId: requestId });
 }
 
 async function probeSnapshotReadProfile(
@@ -239,15 +236,15 @@ async function executePinnedSnapshotScope<T>(
     totalDeadline,
   );
   const deployedTargets = new Set<EvmAddressV1>();
+  const { anchorPolicy } = preflight;
   const session = Object.freeze({
     chainId: config.chainId,
-    blockNumber: preflight.anchor.blockNumber,
-    blockHash: preflight.anchor.blockHash,
+    blockNumber: anchorPolicy.anchor.blockNumber,
+    blockHash: anchorPolicy.anchor.blockHash,
     read: (
       calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
     ) => executeSnapshotBatch(
-      config,
-      preflight.anchor,
+      anchorPolicy,
       calls,
       deployedTargets,
       rpc,
@@ -255,19 +252,16 @@ async function executePinnedSnapshotScope<T>(
     ),
   } satisfies StrictFinalizedSnapshotTransportSessionV1);
   const result = await consume(session);
-  if (config.blockReferenceProfile === 'trusted-block-number-hash-sandwich') {
-    await assertStrictFinalizedAnchorStableV1(
-      preflight.anchor,
-      async () => parseStrictFinalizedAnchorV1(
-        await rpc(
-          'eth_getBlockByNumber',
-          Object.freeze([preflight.anchor.blockNumberQuantity, false]),
-        ),
-        'post-snapshot numbered header',
+  await anchorPolicy.assertScopeStillPinned(
+    async () => parseStrictFinalizedAnchorV1(
+      await rpc(
+        'eth_getBlockByNumber',
+        Object.freeze([anchorPolicy.anchor.blockNumberQuantity, false]),
       ),
-      'Pinned snapshot hash sandwich did not preserve the resolved finalized anchor',
-    );
-  }
+      'post-snapshot numbered header',
+    ),
+    'Pinned snapshot hash sandwich did not preserve the resolved finalized anchor',
+  );
   if (request.signal.aborted) {
     throw cancelled('Current-finalized snapshot was cancelled');
   }
@@ -343,8 +337,7 @@ function assertPinnedSnapshotRpcLifecycleV1(
 }
 
 async function executeSnapshotBatch(
-  config: StrictRpcConfigSnapshotV1,
-  anchor: FinalizedAnchorV1,
+  anchorPolicy: StrictFinalizedAnchorProfilePolicyV1,
   calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
   deployedTargets: Set<EvmAddressV1>,
   rpc: SnapshotRpcV1,
@@ -360,12 +353,13 @@ async function executeSnapshotBatch(
 
   let batch: Readonly<StrictFinalizedEvmBatchExecutorResultV1>;
   try {
-    batch = await executeStrictFinalizedAnchorPolicyV1({
-      blockReferenceProfile: config.blockReferenceProfile,
-      anchor,
+    batch = await anchorPolicy.executeBatchAtAnchor({
       executeAtReference: executeCallsAt,
       readPostAnchor: async () => parseStrictFinalizedAnchorV1(
-        await rpc('eth_getBlockByNumber', Object.freeze([anchor.blockNumberQuantity, false])),
+        await rpc(
+          'eth_getBlockByNumber',
+          Object.freeze([anchorPolicy.anchor.blockNumberQuantity, false]),
+        ),
         'post-snapshot numbered header',
       ),
       anchorMismatchMessage:
