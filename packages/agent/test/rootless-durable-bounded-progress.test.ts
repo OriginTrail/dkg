@@ -55,7 +55,7 @@ function asset(kaNumber: number, tripleCount = 4): AssetFixture {
     publicTripleCount: payload.length,
     privateTripleCount: 0,
     assertionGraph: graph,
-  }, 'tentative');
+  }, { status: 'tentative' });
   return { graph, payload, meta };
 }
 

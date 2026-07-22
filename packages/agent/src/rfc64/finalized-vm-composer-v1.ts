@@ -1,9 +1,11 @@
 import {
   FinalizedVmSetAccumulatorV1,
+  assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSubGraphNameV1,
   readVerifiedCatalogSealBindingV1,
   type ContextGraphIdV1,
+  type EvmAddressV1,
   type FinalizedVmSetEvidenceV1,
   type FinalizedVmSetRowV1,
   type SubGraphNameV1,
@@ -25,6 +27,7 @@ import {
 import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 
 const COMPOSITION_KEYS = [
+  'assertedAtKav10Address',
   'catalogLane',
   'finalizedContextGraph',
   'inventory',
@@ -45,6 +48,8 @@ export interface FinalizedVmPlacementEvidenceV1 {
 }
 
 export interface ComposeFinalizedVmSetRequestV1 {
+  /** Trusted lifecycle/KAV10 deployment address against which catalog seals were authored. */
+  readonly assertedAtKav10Address: EvmAddressV1;
   readonly catalogLane: FinalizedVmCatalogLaneV1;
   readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
@@ -54,12 +59,21 @@ export interface ComposeFinalizedVmSetRequestV1 {
 interface ResolvedFinalizedVmPlacementV1 {
   readonly authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>;
   readonly sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>;
+  readonly placement: Readonly<FinalizedVmPlacementEvidenceV1>;
+}
+
+export interface FinalizedVmMaterializationPlanRowV1 {
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+  readonly placement: Readonly<FinalizedVmPlacementEvidenceV1>;
+  readonly row: Readonly<FinalizedVmSetRowV1>;
 }
 
 export interface ComposedFinalizedVmSetV1 {
   readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
   readonly evidence: Readonly<FinalizedVmSetEvidenceV1>;
   readonly rows: readonly Readonly<FinalizedVmSetRowV1>[];
+  /** Exact placement/inventory join in authoritative finalized ordinal order. */
+  readonly materializations: readonly Readonly<FinalizedVmMaterializationPlanRowV1>[];
 }
 
 export type FinalizedVmCompositionErrorCodeV1 =
@@ -97,9 +111,15 @@ export function composeFinalizedVmSetV1(
     'finalized-vm-composition-input',
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
+  let assertedAtKav10Address: EvmAddressV1;
   let inventory: Readonly<FinalizedVmChainInventoryV1>;
   let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   try {
+    assertCanonicalEvmAddress(
+      request.assertedAtKav10Address,
+      'finalized VM assertedAtKav10Address',
+    );
+    assertedAtKav10Address = request.assertedAtKav10Address;
     inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
     finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
       request.finalizedContextGraph,
@@ -177,7 +197,11 @@ export function composeFinalizedVmSetV1(
         `catalog lane contains duplicate placement evidence for KA ${sealBinding.kaId}`,
       );
     }
-    placementsByKaId.set(sealBinding.kaId, Object.freeze({ authorship, sealBinding }));
+    placementsByKaId.set(sealBinding.kaId, Object.freeze({
+      authorship,
+      sealBinding,
+      placement: Object.freeze(placement),
+    }));
   }
 
   const scope = Object.freeze({
@@ -186,13 +210,14 @@ export function composeFinalizedVmSetV1(
     contractAddress: inventory.contractAddress,
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
-  const rows: Readonly<FinalizedVmSetRowV1>[] = [];
+  const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) continue;
     assertCandidateMatchesPlacement(
       candidate,
       inventory,
+      assertedAtKav10Address,
       placement.authorship,
       placement.sealBinding,
     );
@@ -213,7 +238,11 @@ export function composeFinalizedVmSetV1(
       placementEvidenceDigest: placement.authorship.catalogRowDigest,
     } satisfies FinalizedVmSetRowV1);
     accumulator.append(row);
-    rows.push(row);
+    materializations.push(Object.freeze({
+      candidate,
+      placement: placement.placement,
+      row,
+    }));
   }
   if (placementsByKaId.size !== 0) {
     const [missingKaId] = placementsByKaId.keys();
@@ -223,23 +252,27 @@ export function composeFinalizedVmSetV1(
     );
   }
 
+  const frozenMaterializations = Object.freeze(materializations);
   return Object.freeze({
     catalogLane,
     evidence: accumulator.finalize(),
-    rows: Object.freeze(rows),
+    // Backward-compatible evidence view derived from the canonical ordered plan.
+    rows: Object.freeze(frozenMaterializations.map(({ row }) => row)),
+    materializations: frozenMaterializations,
   });
 }
 
 function assertCandidateMatchesPlacement(
   candidate: Readonly<FinalizedVmChainCandidateV1>,
   inventory: Readonly<FinalizedVmChainInventoryV1>,
+  assertedAtKav10Address: EvmAddressV1,
   authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>,
   sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>,
 ): void {
   const seal = sealBinding.seal;
   if (
     candidate.chainId !== seal.assertedAtChainId
-    || candidate.knowledgeAssetStorageAddress !== seal.assertedAtKav10Address
+    || assertedAtKav10Address !== seal.assertedAtKav10Address
     || candidate.kaId !== sealBinding.kaId
     || candidate.ual !== seal.kaUal
     || candidate.authorAddress !== sealBinding.authorAddress
@@ -309,10 +342,10 @@ function snapshotPlacement(input: unknown, index: number): FinalizedVmPlacementE
     `finalized VM placement ${index}`,
     'finalized-vm-composition-placement',
   );
-  return {
+  return Object.freeze({
     authorship: record.authorship as VerifiedAuthorCatalogRowAuthorshipV1,
     sealBinding: record.sealBinding as VerifiedCatalogSealBindingV1,
-  };
+  });
 }
 
 function snapshotDenseArray(

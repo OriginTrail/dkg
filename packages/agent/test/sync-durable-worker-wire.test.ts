@@ -45,7 +45,7 @@ function graphScopedAsset(ual: string, name: string, batchId?: bigint) {
       privateTripleCount: 0,
       assertionGraph,
     },
-    'tentative',
+    { status: 'tentative' },
   );
   if (batchId !== undefined) {
     meta.push({

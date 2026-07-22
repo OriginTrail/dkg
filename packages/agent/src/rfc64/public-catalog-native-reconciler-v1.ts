@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Production scheduler adapter for the bounded RFC-64 public/open native lane.
+ * Production scheduler adapter for the bounded RFC-64 public root native lane.
  *
  * The scheduler reasons about durable semantic application, while the native
  * receiver owns fetch, verification, activation, exact post-read, and the
@@ -34,43 +34,43 @@ import type {
   Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
 
-export type Rfc64PublicOpenCatalogNativeReceiverClientV1 = Pick<
+export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
   Rfc64PublicCatalogNativeReceiverV1,
-  'synchronizePublicOpenCatalog'
+  'synchronizeBoundedPublicRootCatalog'
 >;
 
-export type Rfc64PublicOpenCatalogDeploymentResolverV1 = (
+export type Rfc64BoundedPublicRootCatalogDeploymentResolverV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   signal: AbortSignal,
 ) => Promise<CatalogSealDeploymentProfileV1>;
 
 /** Resolve the exact catalog scope from independently accepted local policy state. */
-export type Rfc64PublicOpenCatalogTrustedScopeResolverV1 = (
+export type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ) => Readonly<AuthorCatalogScopeV1>;
 
 /** Exact verified signature variant loaded from the durable control-object store. */
-export interface Rfc64PublicOpenCatalogStagedHeadV1 {
+export interface Rfc64BoundedPublicRootCatalogStagedHeadV1 {
   readonly envelope: SignedAuthorCatalogHeadEnvelopeV1;
   readonly signatureVariantDigest: Digest32V1;
 }
 
-export type Rfc64PublicOpenCatalogStagedHeadReaderV1 = (
+export type Rfc64BoundedPublicRootCatalogStagedHeadReaderV1 = (
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-) => Promise<Rfc64PublicOpenCatalogStagedHeadV1 | null>;
+) => Promise<Rfc64BoundedPublicRootCatalogStagedHeadV1 | null>;
 
-export interface Rfc64PublicOpenCatalogNativeReconcilerOptionsV1 {
-  readonly nativeReceiver: Rfc64PublicOpenCatalogNativeReceiverClientV1;
+export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
+  readonly nativeReceiver: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1;
   readonly inventory: Pick<Rfc64InventoryV1OperationsV1, 'readAppliedCatalogHeadV1'>;
   /** Resolve from accepted policy state; never reconstruct authority from wire fields alone. */
-  readonly resolveTrustedCatalogScope: Rfc64PublicOpenCatalogTrustedScopeResolverV1;
+  readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
   /** Resolve the locally trusted deployment tuple; never copy it from the wire. */
-  readonly resolveDeployment: Rfc64PublicOpenCatalogDeploymentResolverV1;
+  readonly resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1;
   /**
    * Read the exact verified signature variant staged by the native receiver.
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
-  readonly readStagedCatalogHead?: Rfc64PublicOpenCatalogStagedHeadReaderV1;
+  readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
 }
 
 /**
@@ -112,13 +112,13 @@ export function deriveRfc64PublicOpenCatalogScopeV1(
   });
 }
 
-export class Rfc64PublicOpenCatalogNativeReconcilerV1
+export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
   implements Rfc64PublicCatalogReceiverReconcilerV1 {
   constructor(
-    private readonly options: Rfc64PublicOpenCatalogNativeReconcilerOptionsV1,
+    private readonly options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
   ) {
     if (
-      typeof options?.nativeReceiver?.synchronizePublicOpenCatalog !== 'function'
+      typeof options?.nativeReceiver?.synchronizeBoundedPublicRootCatalog !== 'function'
       || typeof options?.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options?.resolveTrustedCatalogScope !== 'function'
       || typeof options?.resolveDeployment !== 'function'
@@ -127,7 +127,7 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
         && typeof options.readStagedCatalogHead !== 'function'
       )
     ) {
-      throw new TypeError('RFC-64 public/open native reconciler dependencies are incomplete');
+      throw new TypeError('RFC-64 bounded public root native reconciler dependencies are incomplete');
     }
   }
 
@@ -205,7 +205,7 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
     const deployment = await this.options.resolveDeployment(announcement, signal);
     throwIfAborted(signal);
     try {
-      await this.options.nativeReceiver.synchronizePublicOpenCatalog(
+      await this.options.nativeReceiver.synchronizeBoundedPublicRootCatalog(
         remotePeerId,
         announcement,
         trustedCatalogScope,
@@ -226,10 +226,10 @@ export class Rfc64PublicOpenCatalogNativeReconcilerV1
 }
 
 /** Construct the production scheduler adapter around one native receiver. */
-export function createRfc64PublicOpenCatalogNativeReconcilerV1(
-  options: Rfc64PublicOpenCatalogNativeReconcilerOptionsV1,
+export function createRfc64BoundedPublicRootCatalogNativeReconcilerV1(
+  options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
 ): Rfc64PublicCatalogReceiverReconcilerV1 {
-  return new Rfc64PublicOpenCatalogNativeReconcilerV1(options);
+  return new Rfc64BoundedPublicRootCatalogNativeReconcilerV1(options);
 }
 
 function throwIfAborted(signal: AbortSignal): void {

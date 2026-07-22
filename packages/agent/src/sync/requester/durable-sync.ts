@@ -5,7 +5,11 @@ import {
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import {
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  readGraphKnowledgeAssetConfirmationKindV1,
+  type PhaseCallback,
+} from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
@@ -46,6 +50,7 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
   `${DKG_NS}contextGraph`,
   `${DKG_NS}subGraphName`,
   TRANSACTION_HASH,
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
 ]);
 
 export interface DurableSyncSummary {
@@ -720,9 +725,10 @@ function partitionVerifiedGraphScopedAssets(
       throw new Error(`Verified graph-scoped assertion ${assertionGraph} has ${owners?.size ?? 0} metadata owners`);
     }
     const [ual] = owners;
-    // Only persist structural fields used to verify and locate the exact
-    // assertion. ACLs, status, timestamps and provenance are not Merkle-bound
-    // by V2 data and must never become trusted local controls from a peer.
+    // Carry only structural fields plus the bounded provenance discriminator
+    // and receipt claim consumed by the chain authenticator below. ACLs,
+    // status, timestamps, and local ordering are never accepted as trusted
+    // controls from a peer.
     const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
       (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
     );
@@ -737,6 +743,14 @@ function partitionVerifiedGraphScopedAssets(
     const [versionRaw] = versions;
     if (!versionRaw || !/^\d+$/.test(versionRaw)) {
       throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
+    }
+    try {
+      readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
+    } catch (cause) {
+      throw new Error(
+        `Verified graph-scoped KA ${ual} has invalid confirmation metadata`,
+        { cause },
+      );
     }
     const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
     if (metaGraphs.size !== 1) {

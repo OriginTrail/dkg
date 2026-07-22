@@ -55,7 +55,7 @@ describe('durable sync control metadata admission', () => {
       assertionVersion: '1',
       publicTripleCount: data.length,
       assertionGraph,
-    }, 'tentative');
+    }, { status: 'tentative' });
     const authenticatedBatch = quad(UAL, `${DKG}batchId`, integer(41n));
     const poison = 'urn:unverified:delta-control';
     const unverifiedControls = [
@@ -108,7 +108,7 @@ describe('durable sync control metadata admission', () => {
       assertionVersion: '1',
       publicTripleCount: data.length,
       assertionGraph,
-    }, 'tentative');
+    }, { status: 'tentative' });
     const lifecycle = `urn:dkg:assertion:${CONTEXT_GRAPH_ID}:0x00000000000000000000000000000000000000AB:asset`;
     const lifecycleRows = [
       quad(lifecycle, `${DKG}contentScopeVersion`, integer(2n)),
@@ -144,7 +144,7 @@ describe('durable sync control metadata admission', () => {
       assertionVersion: '1',
       publicTripleCount: data.length,
       assertionGraph,
-    }, 'tentative');
+    }, { status: 'tentative' });
     const lifecycle = 'urn:dkg:assertion:conflicting-owner';
     const descriptiveRows = [
       quad(lifecycle, `${DKG}contentScopeVersion`, integer(2n)),
@@ -201,7 +201,7 @@ describe('durable sync control metadata admission', () => {
         assertionVersion: '1',
         publicTripleCount: payload.length,
         assertionGraph,
-      }, 'tentative'),
+      }, { status: 'tentative' }),
       quad(UAL, `${DKG}batchId`, integer(5n)),
     ];
     const selection = selectVerifiedDurableSyncQuads(

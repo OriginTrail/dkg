@@ -9,8 +9,13 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   produceDirectAuthorCatalogIssuerDelegationV1,
   produceEmptyAuthorCatalogGenesisV1,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
 } from '@origintrail-official/dkg-agent';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  verifyControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import {
   assertAssertionCoordinateV1,
   assertAuthorCatalogScopeV1,
@@ -41,12 +46,20 @@ import {
   GATE2_AGENT_EVENT_PREFIX,
   GATE2_REAL_DKG_AGENT_ADAPTER_ID,
 } from './model.js';
+import {
+  RFC64_GATE2_DEPLOYMENT,
+  parseFinalizedVmHarnessConfigV1,
+  startFinalizedVmHarnessRuntimeV1,
+  type FinalizedVmHarnessRuntimeV1,
+} from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
 
 const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
 const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
+const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
+const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
 if (role !== 'author' && role !== 'receiver') throw new Error('adapter role is required');
 if (!dataDirInput) throw new Error('DKG_RFC64_GATE2_ADAPTER_DATA_DIR is required');
 if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
@@ -58,12 +71,8 @@ if (!runtimeBuildManifestDigest || !/^0x[0-9a-f]{64}$/u.test(runtimeBuildManifes
 
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
-const RFC64_GATE2_DEPLOYMENT = Object.freeze({
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
-});
 let agent: DKGAgent | undefined;
+let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
 
@@ -117,6 +126,26 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
+  const finalizedVmConfig = finalizedVmConfigInput === undefined
+    ? null
+    : parseFinalizedVmHarnessConfigV1(finalizedVmConfigInput);
+  if (finalizedVmConfig !== null && role !== 'receiver') {
+    throw new Error('finalized VM harness runtime is receiver-only');
+  }
+  if (networkChainIdInput !== undefined) {
+    assertNetworkIdV1(networkChainIdInput);
+  }
+  if (
+    finalizedVmConfig !== null
+    && networkChainIdInput !== RFC64_GATE2_DEPLOYMENT.networkId
+  ) {
+    throw new Error('finalized VM harness network chain id differs from its deployment');
+  }
+  if (finalizedVmConfig !== null) {
+    finalizedVmRuntime = await startFinalizedVmHarnessRuntimeV1(finalizedVmConfig);
+  }
+  const networkChainAdapter = finalizedVmRuntime?.chainAdapter
+    ?? (networkChainIdInput === undefined ? undefined : new MockChainAdapter(networkChainIdInput));
   const created = await DKGAgent.create({
     name: `RFC64Gate2${role}`,
     dataDir,
@@ -131,9 +160,25 @@ async function boot(): Promise<void> {
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: RFC64_GATE2_DEPLOYMENT as never,
+    ...(networkChainAdapter === undefined ? {} : { chainAdapter: networkChainAdapter }),
+    ...(finalizedVmRuntime === undefined ? {} : {
+      chainConfig: {
+        rpcUrl: finalizedVmRuntime.rpcUrl,
+        hubAddress: '0x3333333333333333333333333333333333333333',
+        operationalKeys: [`0x${'12'.repeat(32)}`],
+      },
+    }),
+    ...(finalizedVmConfig === null ? {} : {
+      contextGraphSubscriptionStore: createHarnessSubscriptionStore(
+        finalizedVmConfig.contextGraphId,
+      ),
+    }),
   });
   agent = created;
   await created.start();
+  if (finalizedVmConfig !== null) {
+    await created.awaitInitialChainPoll();
+  }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
   emit({
@@ -145,9 +190,32 @@ async function boot(): Promise<void> {
     multiaddr: tcp,
     peerId: created.peerId,
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
+    processId: process.pid,
     runtimeBuildManifestDigest,
+    finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
   });
+}
+
+/** Model an already-durable subscription through the production restore boundary. */
+function createHarnessSubscriptionStore(
+  contextGraphId: string,
+): ContextGraphSubscriptionStore {
+  const records = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
+    id: contextGraphId,
+    subscribed: true,
+    synced: false,
+    syncScoped: true,
+  }]]);
+  return {
+    loadAll: async () => [...records.values()].map((record) => ({ ...record })),
+    load: async (id) => {
+      const record = records.get(id);
+      return record === undefined ? null : { ...record };
+    },
+    save: async (record) => { records.set(record.id, { ...record }); },
+    delete: async (id) => { records.delete(id); },
+  };
 }
 
 async function handle(command: Command): Promise<void> {
@@ -287,6 +355,49 @@ async function handle(command: Command): Promise<void> {
         activatedQuadCount: quads.length,
         projectionNQuads: `${quadsToNQuads(quads)}\n`,
         swmGraph,
+      });
+      return;
+    }
+    case 'contextGraphOnChainIdReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'contextGraphOnChainIdReadback input');
+      const contextGraphId = requiredString(
+        input.contextGraphId,
+        'contextGraphOnChainIdReadback.contextGraphId',
+      );
+      assertContextGraphIdV1(contextGraphId);
+      const output = await currentAgent.getContextGraphOnChainId(contextGraphId);
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'vmGraphReadback': {
+      requireRole('receiver');
+      const input = plainRecord(command.input, 'vmGraphReadback input');
+      const vmGraph = safeHarnessIri(input.vmGraph, 'vmGraphReadback.vmGraph');
+      const metaGraph = safeHarnessIri(input.metaGraph, 'vmGraphReadback.metaGraph');
+      const ual = safeHarnessIri(input.ual, 'vmGraphReadback.ual');
+      const graphResult = await currentAgent.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+        { source: 'rfc64-m2-public-vm-graph-readback' },
+      );
+      if (graphResult.type !== 'quads') {
+        throw new Error('VM graph readback did not return quads');
+      }
+      const projection = [...graphResult.quads]
+        .map((quad): Quad => ({ ...quad, graph: '' }))
+        .sort(compareQuad);
+      const metadataResult = await currentAgent.store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${ual}> ?p ?o } } ORDER BY ?p ?o`,
+        { source: 'rfc64-m2-public-vm-metadata-readback' },
+      );
+      if (metadataResult.type !== 'bindings') {
+        throw new Error('VM metadata readback did not return bindings');
+      }
+      emitOperationResult(command, {
+        metadataBindings: metadataResult.bindings,
+        projectionNQuads: `${quadsToNQuads(projection)}\n`,
+        tripleCount: projection.length,
+        vmGraph,
       });
       return;
     }
@@ -886,6 +997,8 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
   stopping = true;
   try {
     await agent?.stop();
+    await finalizedVmRuntime?.close();
+    finalizedVmRuntime = undefined;
     if (requestId !== undefined) {
       await emitAndFlush({
         event: 'stopped',
@@ -898,6 +1011,14 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
     process.exit(1);
   }
+}
+
+function safeHarnessIri(value: unknown, label: string): string {
+  const iri = requiredString(value, label);
+  if (!/^did:dkg:[A-Za-z0-9:._/-]+$/u.test(iri)) {
+    throw new TypeError(`${label} is not a safe DKG IRI`);
+  }
+  return iri;
 }
 
 function requireAgent(): DKGAgent {

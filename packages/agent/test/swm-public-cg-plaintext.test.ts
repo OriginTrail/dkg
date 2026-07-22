@@ -274,6 +274,38 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([5n]);
   });
 
+  it('keeps a hash-shaped cleartext subscription bound to keccak(utf8(id)), not its raw reverse-index key', async () => {
+    const hexCleartext = '0x' + 'bc'.repeat(32);
+    const committed = ethers.keccak256(ethers.toUtf8Bytes(hexCleartext)).toLowerCase();
+    const matching = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: committed,
+    });
+    matching.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    // setContextGraphSubscription maintains this general reverse lookup for
+    // every subscription. It is routing metadata, not proof that the local id
+    // is host-only/wire-keyed.
+    matching.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(matching, hexCleartext)).resolves.toBe(true);
+
+    const rawOnly = makeAgentLike({
+      onChainId: '5',
+      accessPolicy: 0,
+      onChainNameHash: hexCleartext,
+    });
+    rawOnly.subscribedContextGraphs.set(hexCleartext, {
+      subscribed: true,
+      synced: false,
+    });
+    rawOnly.wireIdToLocalCgId.set(hexCleartext, hexCleartext);
+    await expect(isPublic(rawOnly, hexCleartext)).resolves.toBe(false);
+    expect((rawOnly.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
+  });
+
   it('fails closed when the name-hash getter is PRESENT but REJECTS — identity unverifiable (#884 review GZ8L_)', async () => {
     // The adapter exposes getContextGraphNameHash, so an RPC rejection means we
     // cannot prove the local mapping still points at this CG. A transient flake

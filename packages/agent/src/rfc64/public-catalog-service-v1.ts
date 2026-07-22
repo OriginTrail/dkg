@@ -76,7 +76,7 @@ import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
 import {
-  type Rfc64PublicOpenCatalogTrustedScopeResolverV1,
+  type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
@@ -132,7 +132,7 @@ export type Rfc64PublicCatalogContentFetchClientV1 = Pick<
 export interface Rfc64PublicCatalogReconcilerClientsV1 {
   readonly headTransport: Rfc64PublicCatalogHeadFetchClientV1;
   readonly contentTransport: Rfc64PublicCatalogContentFetchClientV1;
-  readonly resolveTrustedCatalogScope: Rfc64PublicOpenCatalogTrustedScopeResolverV1;
+  readonly resolveTrustedCatalogScope: Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1;
   readonly transportTimeoutMs: number;
 }
 

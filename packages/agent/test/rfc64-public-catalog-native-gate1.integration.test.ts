@@ -6,6 +6,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   DKGNode,
   ProtocolRouter,
   assertAuthorCatalogRowV1,
@@ -27,6 +28,7 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
+  type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -48,7 +50,10 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverV1,
   rfc64CatalogSignatureVariantDigestV1,
+  type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
+import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -891,7 +896,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 
   it('rejects a locally resolved deployment for another network before head fetch', async () => {
     const fixture = await setupLiveReceiver();
-    await expect(fixture.receiver.bootstrapEmptyPublicOpenCatalog(
+    await expect(fixture.receiver.bootstrapEmptyBoundedPublicRootCatalog(
       'peer-unused',
       fixture.genesisAnnouncement,
       fixture.scope,
@@ -1198,6 +1203,181 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('retries a partially materialized two-row precommit before committing the head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const materializedKaIds = new Set<string>();
+    const materializationAttempts: string[] = [];
+    let failSecondRow = true;
+    const partialPrecommit = vi.fn<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1>(
+      async (plan) => {
+        for (const row of plan.rows) {
+          const kaId = readVerifiedAuthorCatalogRowAuthorshipV1(row.authorship).row.kaId;
+          if (materializedKaIds.has(kaId)) {
+            materializationAttempts.push(`${kaId}:existing`);
+            continue;
+          }
+          if (kaId === fixture.secondRowBundle.row.kaId && failSecondRow) {
+            failSecondRow = false;
+            materializationAttempts.push(`${kaId}:failed`);
+            throw new Error('simulated second-row finalized VM materialization failure');
+          }
+          materializedKaIds.add(kaId);
+          materializationAttempts.push(`${kaId}:materialized`);
+        }
+      },
+    );
+    const rejectingReceiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, partialPrecommit);
+
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      rejectingReceiver,
+    )).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('finalized VM precommit rejected'),
+    });
+    expect(partialPrecommit).toHaveBeenCalledOnce();
+    const [rejectedPlan, rejectedSignal] = partialPrecommit.mock.calls[0]!;
+    expect(rejectedPlan).toMatchObject({
+      catalogScope: fixture.scope,
+      catalogHeadDigest: fixture.multiAssetSuccessor.head.objectDigest,
+    });
+    expect(rejectedPlan.rows.map((row) =>
+      readVerifiedAuthorCatalogRowAuthorshipV1(row.authorship).row.kaId)).toEqual([
+      fixture.rowBundle.row.kaId,
+      fixture.secondRowBundle.row.kaId,
+    ]);
+    expect(rejectedPlan.rows.every((row) => !('placement' in row))).toBe(true);
+    expect(Object.isFrozen(rejectedPlan)).toBe(true);
+    expect(Object.isFrozen(rejectedPlan.rows)).toBe(true);
+    expect(rejectedPlan.rows.every(Object.isFrozen)).toBe(true);
+    expect(rejectedSignal).toBeInstanceOf(AbortSignal);
+    expect(materializationAttempts).toEqual([
+      `${fixture.rowBundle.row.kaId}:materialized`,
+      `${fixture.secondRowBundle.row.kaId}:failed`,
+    ]);
+    expect(materializedKaIds).toEqual(new Set([fixture.rowBundle.row.kaId]));
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+
+    const repaired = await fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      fixture.createReceiver(
+        fixture.receiverPersistence.inventory,
+        undefined,
+        undefined,
+        fixture.receiverStore,
+        partialPrecommit,
+      ),
+    );
+    expect(partialPrecommit).toHaveBeenCalledTimes(2);
+    expect(materializationAttempts).toEqual([
+      `${fixture.rowBundle.row.kaId}:materialized`,
+      `${fixture.secondRowBundle.row.kaId}:failed`,
+      `${fixture.rowBundle.row.kaId}:existing`,
+      `${fixture.secondRowBundle.row.kaId}:materialized`,
+    ]);
+    expect(materializedKaIds).toEqual(new Set([
+      fixture.rowBundle.row.kaId,
+      fixture.secondRowBundle.row.kaId,
+    ]));
+    expect(repaired.appliedHeadStatus).toBe('applied');
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.multiAssetSuccessor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+  }, 30_000);
+
+  it('keeps the governed successor head unapplied when the production VM precommit lacks RPC', async () => {
+    const fixture = await setupLiveReceiver();
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const getOnChainContextGraphId = vi.fn(async () => '14');
+    const getEvmChainId = vi.fn(async () => 20_430n);
+    const getKnowledgeAssetStorageAddress = vi.fn(async () => KAV10);
+    const policy = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: GOVERNANCE_CONTRACT,
+      ownershipTransitionDigest: fixture.governedScope.ownershipTransitionDigest,
+      era: '0',
+      version: '0',
+      previousPolicyDigest: null,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+      administrativeDelegationDigest: null,
+      source: {
+        kind: 'finalized-chain',
+        chainId: '20430',
+        contractAddress: GOVERNANCE_CONTRACT,
+        blockNumber: '123',
+        blockHash: `0x${'77'.repeat(32)}`,
+      },
+      effectiveAt: '1773900000000',
+      issuedAt: '1773900000000',
+    } satisfies ContextGraphPolicyV1);
+    const precommit = createRfc64FinalizedVmAgentPrecommitV1({
+      acceptedPolicySnapshotForCatalogScope: () => Object.freeze({
+        policy,
+        policyDigest: POLICY_DIGEST,
+        roster: null,
+      }),
+      rpcEndpoints: [],
+      getOnChainContextGraphId,
+      getEvmChainId,
+      getKnowledgeAssetStorageAddress,
+      getKnowledgeAssetsLifecycleAddress: async () => KAV10,
+      store: fixture.receiverStore,
+    });
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, precommit);
+
+    await fixture.bootstrapGoverned(receiver);
+    compareAndSwapAppliedCatalogHeadV1.mockClear();
+    await expect(fixture.synchronizeGoverned(receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('finalized VM precommit rejected'),
+    });
+
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+    expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      computeAuthorCatalogScopeDigestV1(fixture.governedScope),
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.governedGenesis.head.objectDigest);
   }, 30_000);
 });
 
@@ -1626,12 +1806,14 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       fetchKaBundle: receiverBundleFetch,
     },
     store: TripleStore = receiverStore,
+    beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
     controlObjects,
     inventory,
     store,
+    beforeAppliedHeadCommit,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<
     Rfc64PublicCatalogNativeTransportV1,
@@ -1680,6 +1862,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     genesisAnnouncement,
     governedGenesis,
     governedGenesisAnnouncement,
+    governedScope,
     governedSuccessor,
     governedSuccessorAnnouncement,
     invalidGenesisAnnouncement,
@@ -1709,10 +1892,20 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = genesisAnnouncement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
+    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
+      DEPLOYMENT,
+      signal,
+    ),
+    bootstrapGoverned: (
+      selectedReceiver = receiver,
+      signal?: AbortSignal,
+    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
+      authorNode.peerId,
+      governedGenesisAnnouncement,
+      governedScope,
       DEPLOYMENT,
       signal,
     ),
@@ -1720,7 +1913,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeOnePublicOpenRow(
+    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
@@ -1731,10 +1924,20 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.synchronizePublicOpenCatalog(
+    ) => selectedReceiver.synchronizeBoundedPublicRootCatalog(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
+      DEPLOYMENT,
+      signal,
+    ),
+    synchronizeGoverned: (
+      selectedReceiver = receiver,
+      signal?: AbortSignal,
+    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
+      authorNode.peerId,
+      governedSuccessorAnnouncement,
+      governedScope,
       DEPLOYMENT,
       signal,
     ),

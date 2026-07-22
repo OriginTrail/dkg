@@ -1936,6 +1936,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
 
+          // Bind an already-explicit cleartext subscription directly from the
+          // chain event's name commitment. Public CGs do not enter the curated
+          // host-mode block below, so without this store-free comparison a cold
+          // receiver could know the right graph name yet remain dependent on an
+          // ontology triple that durable sync has not materialized.
+          if (nameHash) {
+            this.bindOnChainContextGraphIdFromNameHash(nameHash, contextGraphId);
+          }
+
           // Track the numeric on-chain id for dedup.
           const alreadyKnown = this.seenOnChainIds.has(contextGraphId)
             || [...this.subscribedContextGraphs.values()].some(s => s.onChainId === contextGraphId);
@@ -1997,27 +2006,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
             // RPC round-trip per envelope.
-            const hashLower = nameHash.toLowerCase();
+            const hashLower = this.contextGraphWireId(nameHash);
+            const indexedLocalId = this.wireIdToLocalCgId.get(hashLower);
+            const localId = indexedLocalId ?? hashLower;
             // Stage a synthetic subscription record for the host-only
             // case: cores hosting CGs they never joined have no
             // cleartext; the hash IS their local id. `recordCgWireId`
             // would no-op on this without a pre-existing record, so
             // upsert a minimal stub first.
-            if (!this.subscribedContextGraphs.has(hashLower)) {
-              this.setContextGraphSubscription(hashLower, {
+            if (!this.subscribedContextGraphs.has(localId)) {
+              this.setContextGraphSubscription(localId, {
                 subscribed: false,
                 synced: false,
-                onChainId: contextGraphId,
                 onChainHash: hashLower,
                 pendingMeta: true,
               }, { persist: false });
-            } else {
-              const next = { ...this.subscribedContextGraphs.get(hashLower)! };
-              this.bindSubscriptionOnChainId(hashLower, next, contextGraphId);
-              next.onChainHash = hashLower;
-              this.setContextGraphSubscription(hashLower, next, { persist: false });
+            } else if (indexedLocalId === undefined) {
+              // A local subscription already uses the event's hash as its
+              // cleartext id, but did not explicitly claim wire-id identity.
+              // Treat this as an ambiguous hash-shaped-name collision instead
+              // of rebinding or auto-hosting the unrelated on-chain graph.
+              this.log.warn(
+                ctx,
+                `Skipping host-mode auto-subscribe for ${hashLower.slice(0, 18)}…: ` +
+                  'the same string is already used by an uncommitted local CG id',
+              );
+              return;
             }
-            this.recordCgWireId(hashLower, hashLower);
+            this.bindOnChainContextGraphIdFromNameHash(
+              hashLower,
+              contextGraphId,
+              { persist: false },
+            );
 
             // Delegate to the host-mode reconciler — it owns the
             // sharding-table check, swmHostMode flag, and the wire-up
@@ -2025,7 +2045,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // the periodic reconciler covers the timer-driven fallback
             // path, so a missed event here heals on the next sweep.
             void this.reconcileSwmHostModeSubscription(
-              hashLower,
+              localId,
               SUBSCRIPTION_SOURCES.CHAIN_EVENT,
             ).catch((err) => {
               this.log.warn(
@@ -2049,7 +2069,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       });
-      this.chainPoller.start();
+      await this.chainPoller.start();
       this.log.info(ctx, `Chain event poller started`);
     }
 
@@ -5911,6 +5931,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
         let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
         let registrationChanged = false;
+        let nextOnChainHash = current.onChainHash;
         if (confirmedOnChainId && current.onChainId !== confirmedOnChainId) {
           this.bindSubscriptionOnChainId(contextGraphId, current, confirmedOnChainId);
           registrationChanged = true;
@@ -5919,11 +5940,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           confirmedOnChainHash
           && current.onChainHash?.toLowerCase() !== confirmedOnChainHash
         ) {
-          this.recordCgWireId(contextGraphId, confirmedOnChainHash);
+          nextOnChainHash = confirmedOnChainHash;
           registrationChanged = true;
         }
         if (registrationChanged) {
-          this.setContextGraphSubscription(contextGraphId, { ...current });
+          this.setContextGraphSubscription(contextGraphId, {
+            ...current,
+            onChainHash: nextOnChainHash,
+          });
           current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
         }
 
@@ -5953,8 +5977,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
-    this.subscribedContextGraphs.set(contextGraphId, next);
-    if (!next.subscribed && !next.coreHosted) {
+    const previous = this.subscribedContextGraphs.get(contextGraphId);
+    // A local id is always cleartext unless the subscription explicitly says
+    // otherwise through `onChainHash`. This distinction matters for a valid
+    // user-chosen id that happens to match the 0x+64-hex wire-id shape.
+    const localWireId = this.contextGraphNameCommitment(contextGraphId);
+    const previousWireId = previous?.onChainHash
+      ? this.contextGraphWireId(previous.onChainHash)
+      : localWireId;
+    const nextOnChainHash = next.onChainHash
+      ? this.contextGraphWireId(next.onChainHash)
+      : undefined;
+    const nextWireId = nextOnChainHash ?? localWireId;
+    const canonicalNext = next.onChainHash === nextOnChainHash
+      ? next
+      : { ...next, onChainHash: nextOnChainHash };
+    if (
+      previousWireId !== nextWireId
+      && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
+    ) {
+      this.wireIdToLocalCgId.delete(previousWireId);
+    }
+    this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
+    this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     if (options?.persist !== false) {
@@ -5968,13 +6014,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      if (next.subscribed) {
+      if (canonicalNext.subscribed) {
         this.persistLocalNodeMembership(contextGraphId);
       } else {
         this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
       }
     }
-    return next;
+    return canonicalNext;
   }
 
   markContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string, patch: Partial<ContextGraphSub>): void {
@@ -6700,9 +6746,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastReconciledOrdinal: row.lastReconciledOrdinal,
           coreHosted: row.coreHosted,
         }, { persist: false });
-        if (row.onChainHash) {
-          this.recordCgWireId(row.id, row.onChainHash);
-        }
         if (row.syncScoped) {
           this.trackSyncContextGraph(row.id);
         }

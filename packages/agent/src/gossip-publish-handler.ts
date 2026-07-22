@@ -586,17 +586,22 @@ export class GossipPublishHandler {
               : {}),
             assertionGraph: dataGraph,
           },
-          verified ? 'confirmed' : 'tentative',
           verified
             ? {
-                txHash,
-                blockNumber,
-                blockTimestamp: Math.floor(Date.now() / 1000),
-                publisherAddress: request.publisherAddress,
-                batchId: startKAId,
-                chainId: request.chainId,
+                status: 'confirmed',
+                confirmation: {
+                  kind: 'transaction',
+                  provenance: {
+                    txHash,
+                    blockNumber,
+                    blockTimestamp: Math.floor(Date.now() / 1000),
+                    publisherAddress: request.publisherAddress,
+                    batchId: startKAId,
+                    chainId: request.chainId,
+                  },
+                },
               }
-            : undefined,
+            : { status: 'tentative' },
         );
         const metaGraph = contextGraphMetaGraphUri(request.contextGraphId);
         const incomingVersion = {

@@ -86,6 +86,11 @@ export class Gate2AgentChild {
     return this.options.role;
   }
 
+  /** Bounded child output for a parent-side protocol assertion failure. */
+  diagnosticTail(): string {
+    return `stdout tail:\n${this.#stdout}\nstderr tail:\n${this.#stderr}`;
+  }
+
   waitFor(expectedEvent: string, requestId: string | null = null): Promise<Gate2AgentEvent> {
     const existing = this.#events.find((event) =>
       event.event === expectedEvent && (requestId === null || event.requestId === requestId));

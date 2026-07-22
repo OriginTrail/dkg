@@ -82,3 +82,15 @@ node --experimental-strip-types src/cli/verify.ts raw.json > verdict.json
 
 Two identical generator invocations must produce byte-identical raw artifacts;
 two verifier invocations over them must produce byte-identical verdicts.
+
+## M2 public finalized-VM process proof
+
+`pnpm live:public-vm` clean-builds the exact repository HEAD, then starts an
+author and receiver as distinct real `DKGAgent` OS processes. The receiver
+learns numeric Context Graph id `14` from a production `ContextGraphCreated`
+poller event, receives one policy-bound public catalog successor over the
+production router, reads one finalized on-chain inventory snapshot, writes the
+exact projection to VM, and only then commits the catalog head. The emitted
+`artifacts/m2-public-vm-result.json` proves exact projection/count, confirmed
+metadata, no synthetic transaction hash, durable head equality, peer/process
+identity separation, and the clean-build runtime manifest.

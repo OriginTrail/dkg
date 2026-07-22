@@ -18,12 +18,29 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE as GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE_V1,
+  generateGraphKnowledgeAssetMetadata as generateGraphKnowledgeAssetMetadataV1,
+  mergeSameVersionGraphKnowledgeAssetMetadataV1 as mergeSameVersionGraphKnowledgeAssetMetadata,
+  normalizeGraphKnowledgeAssetConfirmationKindV1 as normalizeGraphKnowledgeAssetConfirmationKind,
+  preserveGraphKnowledgeAssetReceiptProvenanceV1 as preserveGraphKnowledgeAssetReceiptProvenance,
+  readGraphKnowledgeAssetConfirmationKindV1 as readGraphKnowledgeAssetConfirmationKind,
+  readGraphKnowledgeAssetReceiptProvenanceV1 as readGraphKnowledgeAssetReceiptProvenance,
+} from './graph-knowledge-asset-metadata.js';
+import type {
+  GraphKnowledgeAssetConfirmation as GraphKnowledgeAssetConfirmationV1,
+  GraphKnowledgeAssetConfirmationKind as GraphKnowledgeAssetConfirmationKindV1,
+  GraphKnowledgeAssetMetadata as GraphKnowledgeAssetMetadataV1,
+  GraphKnowledgeAssetMetadataState as GraphKnowledgeAssetMetadataStateV1,
+  GraphKnowledgeAssetReceiptProvenanceV1 as GraphKnowledgeAssetReceiptProvenance,
+} from './graph-knowledge-asset-metadata.js';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
+const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
 const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
   `${DKG}allowedPeer`,
@@ -106,13 +123,73 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
-export interface GraphKnowledgeAssetMetadata extends KCMetadata {
-  assertionVersion: string | number | bigint;
-  publicTripleCount: number;
-  privateTripleCount?: number;
-  privateMerkleRoot?: Uint8Array;
-  assertionGraph: string;
+export const GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE =
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE_V1;
+
+export type GraphKnowledgeAssetConfirmationKind = GraphKnowledgeAssetConfirmationKindV1;
+export type GraphKnowledgeAssetConfirmation = GraphKnowledgeAssetConfirmationV1;
+export type GraphKnowledgeAssetMetadataState = GraphKnowledgeAssetMetadataStateV1;
+
+/**
+ * Parse the graph-scoped confirmation discriminator shared by metadata writers
+ * and durable-sync readers. Missing metadata is the rolling-compatible legacy
+ * receipt-backed shape; every explicit value must name exactly one supported
+ * confirmation lane.
+ */
+export function normalizeGraphKnowledgeAssetConfirmationKindV1(
+  raw: string | undefined,
+): GraphKnowledgeAssetConfirmationKind {
+  return normalizeGraphKnowledgeAssetConfirmationKind(raw);
 }
+
+/** Read and validate the confirmation state from one KA's structural metadata. */
+export function readGraphKnowledgeAssetConfirmationKindV1(
+  metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
+): GraphKnowledgeAssetConfirmationKind {
+  return readGraphKnowledgeAssetConfirmationKind(metadataQuads);
+}
+
+export type GraphKnowledgeAssetReceiptProvenanceV1 = GraphKnowledgeAssetReceiptProvenance;
+
+/**
+ * Read the locally authenticated, receipt-backed part of graph-scoped KA
+ * metadata. This is the canonical parser used when a receiptless finalized
+ * replay must preserve stronger local transaction provenance.
+ *
+ * Invalid, tentative, or finalized-materialization metadata is not eligible
+ * for preservation and returns null. A missing confirmationKind is accepted as
+ * the rolling-compatible legacy transaction shape.
+ */
+export function readGraphKnowledgeAssetReceiptProvenanceV1(
+  metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
+): GraphKnowledgeAssetReceiptProvenanceV1 | null {
+  return readGraphKnowledgeAssetReceiptProvenance(metadataQuads);
+}
+
+/**
+ * Preserve valid local receipt provenance while accepting an otherwise exact
+ * same-version metadata replacement from the receiptless finalized lane.
+ */
+export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
+  incomingMetadata: readonly Quad[],
+  currentMetadata: readonly Pick<Quad, 'predicate' | 'object'>[],
+): Quad[] {
+  return preserveGraphKnowledgeAssetReceiptProvenance(incomingMetadata, currentMetadata);
+}
+
+/**
+ * Canonically merge metadata for an exact same-assertion replay. Stable local
+ * receive time is retained for every lane; a receiptless finalized replay also
+ * retains stronger, valid transaction provenance already authenticated here.
+ */
+export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
+  incomingMetadata: readonly Quad[],
+  currentMetadata: readonly Quad[],
+): Quad[] {
+  return mergeSameVersionGraphKnowledgeAssetMetadata(incomingMetadata, currentMetadata);
+}
+
+export type GraphKnowledgeAssetMetadata = GraphKnowledgeAssetMetadataV1;
 
 function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
   if (/[<>"{}|^`\\\s]/.test(contextGraphId)) {
@@ -329,51 +406,9 @@ export function generateConfirmedFullMetadata(
  */
 export function generateGraphKnowledgeAssetMetadata(
   meta: GraphKnowledgeAssetMetadata,
-  status: 'tentative' | 'confirmed',
-  provenance?: OnChainProvenance,
+  state: GraphKnowledgeAssetMetadataState,
 ): Quad[] {
-  const scope = createGraphKnowledgeAssetScope(meta.ual, meta.assertionVersion);
-  if (!Number.isSafeInteger(meta.publicTripleCount) || meta.publicTripleCount < 0) {
-    throw new Error(`Invalid graph-scoped KA public triple count: ${meta.publicTripleCount}`);
-  }
-  const privateTripleCount = meta.privateTripleCount ?? 0;
-  if (!Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0) {
-    throw new Error(`Invalid graph-scoped KA private triple count: ${privateTripleCount}`);
-  }
-  if (privateTripleCount > 0 && meta.privateMerkleRoot?.length !== 32) {
-    throw new Error('Graph-scoped KA private content requires one 32-byte private Merkle root');
-  }
-  if (privateTripleCount === 0 && meta.privateMerkleRoot !== undefined) {
-    throw new Error('Graph-scoped KA private Merkle root requires a positive private triple count');
-  }
-  if (meta.publicTripleCount === 0 && privateTripleCount === 0) {
-    throw new Error('Graph-scoped KA metadata cannot describe an empty asset');
-  }
-  assertSafeGraphIriForSparql(meta.assertionGraph);
-  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const quads = [
-    ...generateKCMetadata({ ...meta, ual: scope.ual }, []),
-    mq(scope.ual, `${DKG}contentScopeVersion`, intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), metaGraph),
-    mq(scope.ual, `${DKG}kaUal`, scope.ual, metaGraph),
-    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), metaGraph),
-    mq(scope.ual, `${DKG}publicTripleCount`, intLit(meta.publicTripleCount), metaGraph),
-    mq(scope.ual, `${DKG}privateTripleCount`, intLit(privateTripleCount), metaGraph),
-    mq(scope.ual, `${DKG}assertionGraph`, meta.assertionGraph, metaGraph),
-  ];
-  if (meta.privateMerkleRoot) {
-    quads.push(
-      mq(scope.ual, `${DKG}privateMerkleRoot`, lit(toHex(meta.privateMerkleRoot)), metaGraph),
-    );
-  }
-  if (status === 'confirmed') {
-    if (!provenance) {
-      throw new Error('Confirmed graph-scoped KA metadata requires on-chain provenance');
-    }
-    quads.push(...generateConfirmedMetadata(scope.ual, meta.contextGraphId, provenance));
-  } else {
-    quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
-  }
-  return quads;
+  return generateGraphKnowledgeAssetMetadataV1(meta, state);
 }
 
 export interface ConfirmedGraphKnowledgeAssetMetadataEnvelope {
@@ -1171,7 +1206,6 @@ const SKOLEM_INFIX = '/.well-known/genid/';
 // writes, and have every writer refuse to apply a state OLDER than what is
 // already materialised. This gives the projection the same ordering guarantee
 // the chain log already has, regardless of interleaving.
-const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
 const ASSERTION_VERSION_PRED = `${DKG}assertionVersion`;
 
 export interface MaterializedVersion {

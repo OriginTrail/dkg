@@ -1582,6 +1582,11 @@ export class DKGAgent extends DKGAgentBase {
     };
   }
 
+  /** Wait for the chain scan launched during `start()` through a stable public boundary. */
+  async awaitInitialChainPoll(): Promise<void> {
+    await this.chainPoller?.waitForCurrentPoll();
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     if (this.chainPoller) {
