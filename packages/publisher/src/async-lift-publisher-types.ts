@@ -17,6 +17,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -122,6 +123,18 @@ export interface VmPublishAdmissionJournalReader {
   readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
   /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
   readJournalByJob(jobId: string): Promise<JournalReadResult>;
+}
+
+/**
+ * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
+ * #1828/#1829 capabilities); a MUTATION/admin capability, not a query. Clears the exact
+ * job ONLY when it is in a native terminal state, rejects otherwise without mutation,
+ * and is idempotent for an absent job. Never broadens to other jobs. On the lift side
+ * this preserves the #1829 append-only journal by construction (subject-scoped delete
+ * in the control-plane graph only).
+ */
+export interface VmPublishTerminalJobClearer {
+  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
 }
 
 /**

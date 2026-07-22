@@ -798,6 +798,13 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
+  // #1837 — atomic by-exact-jobId TERMINAL record removal (idempotent). Distinct from
+  // knowledgeAssetCancelShareJob (DELETE = queued cancellation that retains the row).
+  // cleared / already_absent resolve normally (200); rejected throws via post().
+  async knowledgeAssetClearShareJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/clear`, {});
+  }
+
   /** Publish to VM (mint or update on chain; git push origin main). */
   async knowledgeAssetPublish(
     contextGraphId: string,
@@ -1277,6 +1284,14 @@ export class ApiClient {
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
+  }
+
+  // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
+  // status-scoped publisherClear). cleared / already_absent resolve normally (200);
+  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // carrying { outcome:'rejected', reason } in the response body.
+  async publisherClearJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', { jobId });
   }
 
   // ------------------------- EPCIS -------------------------------------
