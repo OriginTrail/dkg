@@ -4,11 +4,13 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
+  computeContextGraphPolicyObjectDigestV1,
   contextGraphLayerUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -20,6 +22,7 @@ import {
   type MemberRosterV1,
   type NetworkIdV1,
   type TimestampMsV1,
+  type UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
@@ -1743,27 +1746,32 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
         publishPolicy: 0,
         nameHash,
       });
-      return startNativeAgent(
+      return startNativeAgentWithOptions({
         name,
-        NATIVE_DEPLOYMENT,
-        dataDir,
-        undefined,
-        {
+        existingDataDir: dataDir,
+        finalizedRuntime: {
           rpcUrl: rpc.url,
           chainAdapter,
           initialSubscription: CONTEXT_GRAPH_ID,
         },
-        undefined,
-        bootstrapConfig,
-        storePath,
-      );
+        bootstrap: bootstrapConfig,
+        persistentStorePath: storePath,
+      });
     };
 
     // The warm receiver exists before the publisher and before any catalog head.
     let warm = await startReleaseReceiver('release-proof-warm', warmDataDir, warmStorePath);
+    const policyEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
     warm.acceptRfc64CatalogAccessSnapshotV1({
       policy,
-      policyDigest: FINALIZED_POLICY_DIGEST,
+      policyDigest,
       roster: null,
     });
     const author = await startNativeAgent(
@@ -1785,20 +1793,13 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     );
     author.acceptRfc64CatalogAccessSnapshotV1({
       policy,
-      policyDigest: FINALIZED_POLICY_DIGEST,
+      policyDigest,
       roster: null,
     });
     const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
-      acceptedPublicPolicies: [{ policy, policyDigest: FINALIZED_POLICY_DIGEST }],
-      targets: [{
-        scope: {
-          networkId: NETWORK_ID,
-          contextGraphId: CONTEXT_GRAPH_ID,
-          subGraphName: null,
-          authorAddress: AUTHOR,
-          catalogEra: policy.era,
-        },
-        providers: [author.peerId],
+      acceptedPublicPolicies: [{
+        policyEnvelope,
+        targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
       }],
       retryIntervalMs: 1_000,
     };
