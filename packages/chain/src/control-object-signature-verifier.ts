@@ -14,20 +14,43 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
+import {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
+  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  CurrentFinalizedEvmCallErrorV1,
+  type CurrentFinalizedEvmCallErrorCodeV1,
+} from './current-finalized-evm-read-profile.js';
+
+export {
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  CurrentFinalizedEvmCallErrorV1,
+  type CurrentFinalizedEvmCallErrorCodeV1,
+} from './current-finalized-evm-read-profile.js';
+
 export const EIP1271_MAGIC_VALUE_V1 = '0x1626ba7e' as const;
 export const EIP1271_CANONICAL_ABI_RETURN_V1 =
   `0x${EIP1271_MAGIC_VALUE_V1.slice(2)}${'00'.repeat(28)}` as const;
-export const CONTROL_EIP1271_GAS_LIMIT_V1 = 1_000_000n;
+export const CONTROL_EIP1271_GAS_LIMIT_V1 = CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1;
 export const CONTROL_EIP1271_MAX_RETURN_BYTES_V1 = 32;
-export const CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 = 64 * 1024;
-export const CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 = 4_000;
-export const CONTROL_EIP1271_MAX_ATTEMPTS_V1 = 2;
-export const CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 = 10_000;
-export const CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1 = 4;
+export const CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 =
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1;
+export const CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 =
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1;
+export const CONTROL_EIP1271_MAX_ATTEMPTS_V1 = CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1;
+export const CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 =
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1;
+export const CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1 =
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1;
 export const CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1 =
-  'distinct-configured-endpoints-no-same-endpoint-retry' as const;
-export const CONTROL_EIP1271_CALL_FROM_V1 =
-  '0x0000000000000000000000000000000000000000' as const;
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1;
+export const CONTROL_EIP1271_CALL_FROM_V1 = CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1;
 
 const SECP256K1_N = BigInt(
   '0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
@@ -39,41 +62,6 @@ const EIP1271_INTERFACE = new ethers.Interface([
   'function isValidSignature(bytes32,bytes) view returns (bytes4)',
 ]);
 declare const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1: unique symbol;
-
-export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
-  'unsupported-chain',
-  'chain-mismatch',
-  'finalized-state-unavailable',
-  'rpc-unavailable',
-  'rpc-timeout',
-  'concurrency-saturated',
-  'resource-limit',
-  'revert',
-  'no-code',
-  'malformed-return',
-] as const);
-
-export type CurrentFinalizedEvmCallErrorCodeV1 =
-  (typeof CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1)[number];
-
-/** Closed failure vocabulary implemented by the finalized-state RPC gateway. */
-export class CurrentFinalizedEvmCallErrorV1 extends Error {
-  readonly code: CurrentFinalizedEvmCallErrorCodeV1;
-
-  constructor(
-    code: CurrentFinalizedEvmCallErrorCodeV1,
-    message: string,
-    options: { readonly cause?: unknown } = {},
-  ) {
-    if (!CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1.includes(code)) {
-      throw new TypeError(`Unsupported current-finalized EVM call error code: ${String(code)}`);
-    }
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
-    this.name = 'CurrentFinalizedEvmCallErrorV1';
-    this.code = code;
-    Object.freeze(this);
-  }
-}
 
 export interface CurrentFinalizedEvmCallRequestV1 {
   readonly chainId: ChainIdV1;

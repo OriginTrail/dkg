@@ -20,6 +20,16 @@ import {
   type CurrentFinalizedEvmCallRequestV1,
 } from '../src/control-object-signature-verifier.js';
 import {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
+  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+} from '../src/current-finalized-evm-read-profile.js';
+import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
@@ -28,6 +38,7 @@ import {
 const CHAIN_ID = '20430' as ChainIdV1;
 const CHAIN_QUANTITY = '0x4fce';
 const TO = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
+const OTHER_TO = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const BLOCK_HASH = `0x${'22'.repeat(32)}`;
 const OTHER_BLOCK_HASH = `0x${'23'.repeat(32)}`;
 const OBJECT_DIGEST = `${'33'.repeat(32)}`;
@@ -63,6 +74,23 @@ afterEach(async () => {
 });
 
 describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
+  it('keeps the EIP-1271 specialization pinned to the generic finalized-read profile', () => {
+    expect(CONTROL_EIP1271_CALL_FROM_V1).toBe(CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1);
+    expect(CONTROL_EIP1271_GAS_LIMIT_V1).toBe(CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1);
+    expect(CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1);
+    expect(CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1);
+    expect(CONTROL_EIP1271_MAX_ATTEMPTS_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1);
+    expect(CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1);
+    expect(CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1);
+    expect(CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1)
+      .toBe(CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1);
+  });
+
   it('executes multiple ABI reads at one EIP-1898 anchor and checks shared code once', async () => {
     const server = await startRpcServer((call, response) => {
       switch (call.method) {
@@ -155,6 +183,97 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(server.calls[3]!.params[1]).toBe('0x7b');
     expect(server.calls[4]!.params[1]).toBe('0x7b');
     expect(server.calls[5]!.params).toEqual(['0x7b', false]);
+  });
+
+  it('checks every distinct target before executing any call', async () => {
+    const server = await startRpcServer((call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber':
+          sendResult(response, call, { number: '0x7b', hash: BLOCK_HASH });
+          return;
+        case 'eth_getCode':
+          sendResult(response, call, call.params[0] === TO ? '0x6000' : '0x');
+          return;
+        case 'eth_call':
+          sendResult(response, call, MAGIC_RETURN);
+          return;
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [
+        { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 },
+        { to: OTHER_TO, data: SECOND_READ_DATA, maxReturnBytes: 32 },
+      ],
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'no-code' });
+    expect(server.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_getCode',
+    ]);
+    expect(server.calls[2]!.params[0]).toBe(TO);
+    expect(server.calls[3]!.params[0]).toBe(OTHER_TO);
+  });
+
+  it('rejects an oversized generic return only after a stable fallback sandwich', async () => {
+    const server = await startRpcServer(successfulHandler({ returnData: '0xaaaaaa' }));
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [{ to: TO, data: FIRST_READ_DATA, maxReturnBytes: 2 }],
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'malformed-return' });
+    expect(server.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_getBlockByNumber',
+    ]);
+  });
+
+  it('fails hostile generic read shapes closed before transport', async () => {
+    const server = await startRpcServer(successfulHandler());
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+    const validCall = { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 };
+    const sparse = new Array(1);
+    const accessor = { to: TO, data: FIRST_READ_DATA } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'maxReturnBytes', {
+      enumerable: true,
+      get() {
+        throw new Error('must not execute');
+      },
+    });
+
+    for (const request of [
+      { chainId: CHAIN_ID, calls: sparse, signal: new AbortController().signal },
+      { chainId: CHAIN_ID, calls: [accessor], signal: new AbortController().signal },
+      { chainId: CHAIN_ID, calls: [validCall], signal: {} },
+      { chainId: CHAIN_ID, calls: [validCall], signal: new AbortController().signal, rpcUrl: server.url },
+    ]) {
+      await expect(read(request as never)).rejects.toMatchObject({ code: 'rpc-unavailable' });
+    }
+    expect(server.calls).toHaveLength(0);
   });
 
   it('rejects a fifth concurrent generic read without queueing it', async () => {

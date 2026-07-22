@@ -13,12 +13,20 @@ import {
   CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
   CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
-  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
-  CurrentFinalizedEvmCallErrorV1,
   type CurrentFinalizedEvmCallRequestV1,
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
 } from './control-object-signature-verifier.js';
+import {
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  CurrentFinalizedEvmCallErrorV1,
+} from './current-finalized-evm-read-profile.js';
+import {
+  assertCanonicalNonzeroEvmAddress,
+  isAbortSignal,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+} from './strict-local-data.js';
 
 const REQUEST_KEYS = Object.freeze([
   'attemptTimeoutMs',
@@ -36,7 +44,6 @@ const REQUEST_KEYS = Object.freeze([
   'to',
   'totalDeadlineMs',
 ] as const);
-const CANONICAL_NONZERO_EVM_ADDRESS = /^0x(?!0{40}$)[0-9a-f]{40}$/;
 
 /**
  * Per-chain trusted-local adapter seam. A later transport implementation owns
@@ -123,52 +130,12 @@ function snapshotAdapterRegistry(
 
 function snapshotDenseArray(input: unknown): readonly unknown[] {
   try {
-    if (!Array.isArray(input)) throw new Error('not an array');
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-    if (
-      lengthDescriptor === undefined
-      || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-      || typeof lengthDescriptor.value !== 'number'
-      || !Number.isSafeInteger(lengthDescriptor.value)
-      || lengthDescriptor.value < 0
-    ) {
-      throw new Error('invalid array length');
-    }
-
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(input);
-    if (
-      ownKeys.length !== length + 1
-      || ownKeys.some((key) => (
-        typeof key !== 'string'
-        || (key !== 'length' && !isCanonicalArrayIndex(key, length))
-      ))
-    ) {
-      throw new Error('registrations must be a dense ordinary array');
-    }
-
-    const snapshot: unknown[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-      if (
-        descriptor === undefined
-        || !descriptor.enumerable
-        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-      ) {
-        throw new Error('registration entry must be an enumerable data property');
-      }
-      snapshot.push(descriptor.value);
-    }
-    return Object.freeze(snapshot);
+    return snapshotDenseDataArray(input, {
+      label: 'Current-finalized adapter registrations',
+    });
   } catch {
     throw new TypeError('Current-finalized adapter registrations must be a dense data-only array');
   }
-}
-
-function isCanonicalArrayIndex(key: string, length: number): boolean {
-  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return false;
-  const index = Number(key);
-  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
 }
 
 function snapshotRegistration(input: unknown): Readonly<CurrentFinalizedEvmChainAdapterRegistrationV1> {
@@ -203,12 +170,7 @@ export function snapshotCurrentFinalizedEvmCallRequestV1(
   try {
     const record = snapshotExactDataRecord(input, REQUEST_KEYS);
     assertCanonicalChainId(record.chainId, 'current-finalized request chainId');
-    if (
-      typeof record.to !== 'string'
-      || !CANONICAL_NONZERO_EVM_ADDRESS.test(record.to)
-    ) {
-      throw new Error('to is not a canonical nonzero EVM address');
-    }
+    assertCanonicalNonzeroEvmAddress(record.to, 'current-finalized request to');
     if (record.from !== CONTROL_EIP1271_CALL_FROM_V1) throw new Error('wrong from');
     if (typeof record.data !== 'string') throw new Error('call data is not a string');
     assertCanonicalEip1271CallData(record.data);
@@ -297,51 +259,6 @@ function assertCanonicalEip1271CallData(data: string): void {
   const signatureHexLength = Number(signatureLength) * 2;
   if (!/^0*$/.test(tail.slice(signatureHexLength))) {
     throw new Error('EIP-1271 signature tail has nonzero ABI padding');
-  }
-}
-
-function snapshotExactDataRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-): Record<string, unknown> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new Error('not a record');
-  }
-  const prototype = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
-  const actualKeys = Reflect.ownKeys(input);
-  if (
-    actualKeys.some((key) => typeof key !== 'string')
-    || actualKeys.length !== expectedKeys.length
-    || (actualKeys as string[]).sort().some((key, index) => key !== expectedKeys[index])
-  ) {
-    throw new Error('unknown or missing fields');
-  }
-
-  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (
-      descriptor === undefined
-      || !descriptor.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    ) {
-      throw new Error('fields must be enumerable data properties');
-    }
-    snapshot[key] = descriptor.value;
-  }
-  return snapshot;
-}
-
-function isAbortSignal(value: unknown): value is AbortSignal {
-  if (value === null || typeof value !== 'object') return false;
-  try {
-    const abortedGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get;
-    if (abortedGetter === undefined) return false;
-    abortedGetter.call(value);
-    return true;
-  } catch {
-    return false;
   }
 }
 

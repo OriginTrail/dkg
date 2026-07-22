@@ -7,20 +7,30 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
-  CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
-  CONTROL_EIP1271_CALL_FROM_V1,
-  CONTROL_EIP1271_GAS_LIMIT_V1,
-  CONTROL_EIP1271_MAX_ATTEMPTS_V1,
-  CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
-  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
-  CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
-  CurrentFinalizedEvmCallErrorV1,
 } from './control-object-signature-verifier.js';
+import {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+  CurrentFinalizedEvmCallErrorV1,
+} from './current-finalized-evm-read-profile.js';
 import {
   snapshotCurrentFinalizedEvmCallRequestV1,
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
+import {
+  assertCanonicalNonzeroEvmAddress,
+  isAbortSignal,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+} from './strict-local-data.js';
 
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
@@ -41,11 +51,6 @@ export interface StrictCurrentFinalizedEvmRpcConfigV1 {
    */
   readonly blockReferenceProfile?: CurrentFinalizedEvmBlockReferenceProfileV1;
 }
-
-export const STRICT_CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1 = 4;
-// ContextGraphStorage.getContextGraph includes a participant array capped at
-// 256 entries on chain; its maximal canonical ABI result is about 8.5 KiB.
-export const STRICT_CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1 = 16 * 1024;
 
 /** One trusted-local ABI call in a same-finalized-anchor read. */
 export interface StrictCurrentFinalizedEvmReadCallV1 {
@@ -100,11 +105,10 @@ const CONFIG_OPTIONAL_KEYS = Object.freeze(['blockReferenceProfile'] as const);
 const CANONICAL_LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
 const CANONICAL_LOWER_QUANTITY = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
 const CANONICAL_DIGEST_32 = /^0x[0-9a-f]{64}$/;
-const CANONICAL_NONZERO_EVM_ADDRESS = /^0x(?!0{40}$)[0-9a-f]{40}$/;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const MAX_U256 =
   115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
-const RPC_CALL_GAS_QUANTITY = `0x${CONTROL_EIP1271_GAS_LIMIT_V1.toString(16)}`;
+const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
 const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
 const READ_REQUEST_KEYS = Object.freeze(['calls', 'chainId', 'signal'] as const);
 const READ_CALL_KEYS = Object.freeze(['data', 'maxReturnBytes', 'to'] as const);
@@ -169,7 +173,7 @@ export function createStrictCurrentFinalizedEvmReadV1(
     if (request.signal.aborted) {
       throw cancelled('Current-finalized EVM call was cancelled before transport admission');
     }
-    if (activeReads >= CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1) {
+    if (activeReads >= CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1) {
       throw new CurrentFinalizedEvmCallErrorV1(
         'concurrency-saturated',
         `Chain ${request.chainId} already has ${activeReads} finalized reads in flight`,
@@ -179,7 +183,7 @@ export function createStrictCurrentFinalizedEvmReadV1(
 
     const totalDeadline = createDeadlineScope(
       request.signal,
-      CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+      CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
       'current-finalized total deadline',
     );
     let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
@@ -191,13 +195,13 @@ export function createStrictCurrentFinalizedEvmReadV1(
         }
         if (totalDeadline.timedOut()) {
           throw timedOut(
-            `Current-finalized total deadline exceeded ${CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1}ms`,
+            `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
           );
         }
 
         const attemptDeadline = createDeadlineScope(
           totalDeadline.signal,
-          CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+          CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
           `current-finalized endpoint attempt ${index + 1}`,
         );
         try {
@@ -215,12 +219,12 @@ export function createStrictCurrentFinalizedEvmReadV1(
           }
           if (totalDeadline.timedOut()) {
             throw timedOut(
-              `Current-finalized total deadline exceeded ${CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1}ms`,
+              `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
             );
           }
           if (attemptDeadline.timedOut()) {
             throw timedOut(
-              `Current-finalized endpoint attempt exceeded ${CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1}ms`,
+              `Current-finalized endpoint attempt exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
             );
           }
           return result;
@@ -243,7 +247,7 @@ export function createStrictCurrentFinalizedEvmReadV1(
       }
       if (totalDeadline.timedOut()) {
         throw timedOut(
-          `Current-finalized total deadline exceeded ${CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1}ms`,
+          `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
         );
       }
       throw lastRetryableFailure ?? unavailable('No configured current-finalized endpoint succeeded');
@@ -270,7 +274,7 @@ async function executeEndpointAttempt(
       requestId,
       method,
       params,
-      CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
       signal,
     );
   };
@@ -288,26 +292,24 @@ async function executeEndpointAttempt(
     'current finalized header',
   );
   const executeCallsAt = async (blockReference: unknown): Promise<readonly string[]> => {
-    const codeChecked = new Set<EvmAddressV1>();
-    const results: string[] = [];
-    for (const call of request.calls) {
-      if (!codeChecked.has(call.to)) {
-        const code = await rpc('eth_getCode', Object.freeze([call.to, blockReference]));
-        assertDeployedCode(code);
-        codeChecked.add(call.to);
-      }
+    const uniqueTargets = [...new Set(request.calls.map(({ to }) => to))];
+    await settleParallelBatch(uniqueTargets.map(async (to) => {
+      const code = await rpc('eth_getCode', Object.freeze([to, blockReference]));
+      assertDeployedCode(code);
+    }));
+
+    return settleParallelBatch(request.calls.map(async (call) => {
       const callObject = Object.freeze({
-        from: CONTROL_EIP1271_CALL_FROM_V1,
+        from: CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
         to: call.to,
         data: call.data,
         gas: RPC_CALL_GAS_QUANTITY,
       });
-      results.push(parseContractReturn(
+      return parseContractReturn(
         await rpc('eth_call', Object.freeze([callObject, blockReference])),
         call.maxReturnBytes,
-      ));
-    }
-    return Object.freeze(results);
+      );
+    }));
   };
 
   let returnData: readonly string[];
@@ -368,6 +370,22 @@ async function executeEndpointAttempt(
     blockHash: anchor.blockHash,
     returnData,
   });
+}
+
+/**
+ * Execute one bounded phase concurrently but retain the permit until every
+ * started operation settles. This prevents an early rejection from leaving a
+ * sibling fetch alive after the finalized-read concurrency slot is released.
+ */
+async function settleParallelBatch<T>(operations: readonly Promise<T>[]): Promise<readonly T[]> {
+  const settled = await Promise.allSettled(operations);
+  const values: T[] = [];
+  for (let index = 0; index < settled.length; index += 1) {
+    const result = settled[index]!;
+    if (result.status === 'rejected') throw result.reason;
+    values.push(result.value);
+  }
+  return Object.freeze(values);
 }
 
 async function postJsonRpc(
@@ -634,10 +652,10 @@ function classifyAttemptFailure(
 ): CurrentFinalizedEvmCallErrorV1 {
   if (callerSignal.aborted) return cancelled('Current-finalized EVM call was cancelled');
   if (totalDeadline.timedOut()) {
-    return timedOut(`Current-finalized total deadline exceeded ${CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1}ms`);
+    return timedOut(`Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`);
   }
   if (attemptDeadline.timedOut()) {
-    return timedOut(`Current-finalized endpoint attempt exceeded ${CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1}ms`);
+    return timedOut(`Current-finalized endpoint attempt exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`);
   }
   if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
   return unavailable('Current-finalized endpoint attempt failed closed', cause);
@@ -693,45 +711,16 @@ function snapshotReadRequest(input: unknown): StrictCurrentFinalizedEvmReadReque
 }
 
 function snapshotReadCalls(input: unknown): readonly StrictCurrentFinalizedEvmReadCallV1[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    throw new Error('finalized read calls must be an ordinary array');
-  }
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-  if (
-    lengthDescriptor === undefined
-    || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-    || typeof lengthDescriptor.value !== 'number'
-    || !Number.isSafeInteger(lengthDescriptor.value)
-    || lengthDescriptor.value < 1
-    || lengthDescriptor.value > STRICT_CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1
-  ) {
-    throw new Error('finalized read call count is outside the fixed profile');
-  }
-  const length = lengthDescriptor.value;
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.length !== length + 1
-    || keys.some((key) => (
-      typeof key !== 'string'
-      || (key !== 'length' && !isCanonicalArrayIndex(key, length))
-    ))
-  ) {
-    throw new Error('finalized read calls must be a dense ordinary array');
-  }
+  const entries = snapshotDenseDataArray(input, {
+    label: 'Current-finalized read calls',
+    minLength: 1,
+    maxLength: CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+  });
 
   const calls: StrictCurrentFinalizedEvmReadCallV1[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error('finalized read calls must contain data properties');
-    }
-    const record = snapshotExactDataRecord(descriptor.value, READ_CALL_KEYS);
-    if (
-      typeof record.to !== 'string'
-      || !CANONICAL_NONZERO_EVM_ADDRESS.test(record.to)
-    ) {
-      throw new Error(`finalized read calls[${index}].to is not canonical`);
-    }
+  for (let index = 0; index < entries.length; index += 1) {
+    const record = snapshotExactDataRecord(entries[index], READ_CALL_KEYS);
+    assertCanonicalNonzeroEvmAddress(record.to, `current-finalized read calls[${index}].to`);
     if (
       typeof record.data !== 'string'
       || !/^0x[0-9a-f]{8}(?:[0-9a-f]{2})*$/.test(record.data)
@@ -742,7 +731,7 @@ function snapshotReadCalls(input: unknown): readonly StrictCurrentFinalizedEvmRe
       typeof record.maxReturnBytes !== 'number'
       || !Number.isSafeInteger(record.maxReturnBytes)
       || record.maxReturnBytes < 1
-      || record.maxReturnBytes > STRICT_CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1
+      || record.maxReturnBytes > CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1
     ) {
       throw new Error(`finalized read calls[${index}].maxReturnBytes is outside the fixed cap`);
     }
@@ -753,42 +742,6 @@ function snapshotReadCalls(input: unknown): readonly StrictCurrentFinalizedEvmRe
     }));
   }
   return Object.freeze(calls);
-}
-
-function snapshotExactDataRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-): Record<string, unknown> {
-  if (!isPlainRecord(input)) throw new Error('not a plain record');
-  const actualKeys = Reflect.ownKeys(input);
-  if (
-    actualKeys.some((key) => typeof key !== 'string')
-    || actualKeys.length !== expectedKeys.length
-    || (actualKeys as string[]).sort().some((key, index) => key !== expectedKeys[index])
-  ) {
-    throw new Error('unknown or missing fields');
-  }
-  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error('fields must be enumerable data properties');
-    }
-    snapshot[key] = descriptor.value;
-  }
-  return snapshot;
-}
-
-function isAbortSignal(value: unknown): value is AbortSignal {
-  if (value === null || typeof value !== 'object') return false;
-  try {
-    const getter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get;
-    if (getter === undefined) return false;
-    getter.call(value);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function snapshotConfig(input: StrictCurrentFinalizedEvmRpcConfigV1): StrictRpcConfigSnapshotV1 {
@@ -871,9 +824,9 @@ function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
     if (cause instanceof TypeError) throw cause;
     throw new TypeError('Strict current-finalized endpoints must be a dense data-only array');
   }
-  if (normalized.length === 0 || normalized.length > CONTROL_EIP1271_MAX_ATTEMPTS_V1) {
+  if (normalized.length === 0 || normalized.length > CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1) {
     throw new TypeError(
-      `Strict current-finalized RPC requires 1..${CONTROL_EIP1271_MAX_ATTEMPTS_V1} distinct endpoints`,
+      `Strict current-finalized RPC requires 1..${CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1} distinct endpoints`,
     );
   }
   return Object.freeze(normalized);

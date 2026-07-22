@@ -30,14 +30,24 @@ export {
   type VerifyControlEnvelopeIssuerSignatureOptionsV1,
 } from './control-object-signature-verifier.js';
 export {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
+  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
+  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+} from './current-finalized-evm-read-profile.js';
+export {
   createCurrentFinalizedEvmCallRouterV1,
   type CurrentFinalizedEvmChainAdapterRegistrationV1,
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
 export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
-  STRICT_CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
-  STRICT_CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
   type CurrentFinalizedEvmBlockReferenceProfileV1,
