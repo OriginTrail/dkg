@@ -83,12 +83,14 @@ function readStub(
 }
 
 describe('RFC-64 finalized Context Graph RPC resolver', () => {
+  const signal = (): AbortSignal => new AbortController().signal;
+
   it('executes the two ABI reads at one transport anchor and decodes the policy tuple', async () => {
     const read = readStub();
     const resolver = createFinalizedContextGraphRpcResolverV1(read);
-    const signal = new AbortController().signal;
+    const requestSignal = signal();
 
-    const raw = await resolver(binding(), signal);
+    const raw = await resolver(binding(), requestSignal);
 
     expect(Object.isFrozen(resolver)).toBe(true);
     expect(Object.isFrozen(raw)).toBe(true);
@@ -107,7 +109,7 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
           maxReturnBytes: FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
         },
       ],
-      signal,
+      signal: requestSignal,
     });
     expect(raw).toEqual({
       blockNumber: '123',
@@ -123,8 +125,10 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
   });
 
   it('feeds the concrete RPC result through the validated finalized read seam', async () => {
-    const resolver = createFinalizedContextGraphRpcResolverV1(readStub());
+    const read = readStub();
+    const resolver = createFinalizedContextGraphRpcResolverV1(read);
     const result = await resolveFinalizedContextGraphReadV1(resolver, binding());
+    const normalizedSignal = read.mock.calls[0]?.[0].signal;
 
     expect(result).toEqual({
       ...binding(),
@@ -138,6 +142,8 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
       publishAuthorityAccountId: '7',
       nameHash: NAME_HASH,
     });
+    expect(normalizedSignal?.aborted).toBe(false);
+    expect(typeof normalizedSignal?.addEventListener).toBe('function');
   });
 
   it('preserves the chain zero-hash sentinel for canonical null normalization', async () => {
@@ -159,7 +165,7 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
     const resolver = createFinalizedContextGraphRpcResolverV1(
       readStub(contextGraphResult(), nameHashResult(), '1' as ChainIdV1),
     );
-    await expect(resolver(binding())).rejects.toMatchObject({ code: 'chain-mismatch' });
+    await expect(resolver(binding(), signal())).rejects.toMatchObject({ code: 'chain-mismatch' });
   });
 
   it('rejects missing, trailing, or non-canonical ABI result bytes', async () => {
@@ -170,7 +176,7 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
     ];
     for (const read of cases) {
       const resolver = createFinalizedContextGraphRpcResolverV1(read);
-      await expect(resolver(binding())).rejects.toMatchObject({ code: 'malformed-return' });
+      await expect(resolver(binding(), signal())).rejects.toMatchObject({ code: 'malformed-return' });
     }
   });
 
@@ -182,7 +188,7 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
       returnData: [contextGraphResult()],
     }));
     const resolver = createFinalizedContextGraphRpcResolverV1(read);
-    await expect(resolver(binding())).rejects.toMatchObject({ code: 'malformed-return' });
+    await expect(resolver(binding(), signal())).rejects.toMatchObject({ code: 'malformed-return' });
   });
 
   it('rejects a non-function transport at construction', () => {

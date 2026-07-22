@@ -94,7 +94,7 @@ export type FinalizedContextGraphReadV1 = {
 export interface FinalizedContextGraphReadResolverV1 {
   (
     binding: FinalizedContextGraphBindingV1,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<UntrustedFinalizedContextGraphFieldsV1>;
 }
 

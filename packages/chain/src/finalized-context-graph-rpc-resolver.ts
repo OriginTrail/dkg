@@ -37,7 +37,7 @@ export function createFinalizedContextGraphRpcResolverV1(
 
   const resolver: FinalizedContextGraphReadResolverV1 = async (
     binding,
-    signal = new AbortController().signal,
+    signal,
   ) => {
     const contextGraphId = BigInt(binding.contextGraphId);
     const result = await read({
@@ -94,15 +94,27 @@ function decodeFinalizedContextGraphResult(
     assertCanonicalAbiResult('getContextGraph', contextGraph, result.returnData[0]!);
     assertCanonicalAbiResult('getNameHash', nameHash, result.returnData[1]!);
 
+    const [
+      owner,
+      _participantAgents,
+      _metadataBatchId,
+      active,
+      _createdAt,
+      accessPolicy,
+      publishPolicy,
+      publishAuthority,
+      publishAuthorityAccountId,
+    ] = contextGraph;
+
     return Object.freeze({
       blockNumber: result.blockNumber,
       blockHash: result.blockHash,
-      owner: lowerAddress(contextGraph[0]),
-      active: contextGraph[3],
-      accessPolicy: Number(contextGraph[5]),
-      publishPolicy: Number(contextGraph[6]),
-      publishAuthority: lowerAddress(contextGraph[7]),
-      publishAuthorityAccountId: decimal(contextGraph[8]),
+      owner: lowerAddress(owner),
+      active,
+      accessPolicy: Number(accessPolicy),
+      publishPolicy: Number(publishPolicy),
+      publishAuthority: lowerAddress(publishAuthority),
+      publishAuthorityAccountId: decimal(publishAuthorityAccountId),
       nameHash: String(nameHash[0]).toLowerCase(),
     });
   } catch (cause) {
