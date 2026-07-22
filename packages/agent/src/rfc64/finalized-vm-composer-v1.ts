@@ -199,7 +199,6 @@ export function composeFinalizedVmSetV1(
     contractAddress: inventory.contractAddress,
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
-  const rows: Readonly<FinalizedVmSetRowV1>[] = [];
   const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
@@ -227,7 +226,6 @@ export function composeFinalizedVmSetV1(
       placementEvidenceDigest: placement.authorship.catalogRowDigest,
     } satisfies FinalizedVmSetRowV1);
     accumulator.append(row);
-    rows.push(row);
     materializations.push(Object.freeze({
       candidate,
       placement: placement.placement,
@@ -242,11 +240,13 @@ export function composeFinalizedVmSetV1(
     );
   }
 
+  const frozenMaterializations = Object.freeze(materializations);
   return Object.freeze({
     catalogLane,
     evidence: accumulator.finalize(),
-    rows: Object.freeze(rows),
-    materializations: Object.freeze(materializations),
+    // Backward-compatible evidence view derived from the canonical ordered plan.
+    rows: Object.freeze(frozenMaterializations.map(({ row }) => row)),
+    materializations: frozenMaterializations,
   });
 }
 

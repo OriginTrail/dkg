@@ -39,7 +39,7 @@ import {
   FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
-} from '../../../devnet/rfc64-gate2-multi-asset-completeness/finalized-vm-loopback-fixture.js';
+} from './support/rfc64-finalized-vm-loopback-fixture.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -541,6 +541,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       })]),
       blockHash: FINALIZED_BLOCK_HASH,
       blockNumberQuantity: '0x7b',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
       nameHash: nameHash as Digest32V1,
       networkId: NETWORK_ID,
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
@@ -548,6 +549,16 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       publishPolicy: 1,
     } satisfies FinalizedVmLoopbackFixtureConfigV1);
     const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
+    const contextGraphInterface = new ethers.Interface([
+      'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
+    ]);
+    expect(() => finalizedRpc.respond('eth_call', [{
+      to: KAV10,
+      data: contextGraphInterface.encodeFunctionData(
+        'getNameHash',
+        [BigInt(ON_CHAIN_CONTEXT_GRAPH_ID)],
+      ),
+    }, 'finalized'])).toThrow('context graph target');
     const rpc = await rpcHarness.start((call, response) => {
       try {
         sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
@@ -675,7 +686,11 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       currentCatalogHeadDigest: successor.headObjectDigest,
       inventoryRowCount: '1',
     });
-    expect(finalizedRpc.calls.some(({ method }) => method === 'eth_call')).toBe(true);
+    const finalizedCallTargets = finalizedRpc.calls
+      .filter(({ method }) => method === 'eth_call')
+      .map(({ params }) => (params[0] as { readonly to?: string }).to?.toLowerCase());
+    expect(finalizedCallTargets).toContain(CONTEXT_GRAPH_STORAGE);
+    expect(finalizedCallTargets).toContain(KAV10);
   }, 60_000);
 
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {

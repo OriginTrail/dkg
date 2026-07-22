@@ -77,6 +77,10 @@ describe('RFC-64 finalized public VM runtime', () => {
     const result = await runtime(request(placement));
 
     expect(transport.reads()).toBe(4);
+    expect(new Set(transport.targets())).toEqual(new Set([
+      RFC64_VM_CG_STORAGE,
+      RFC64_VM_KA_STORAGE,
+    ]));
     expect(materialize).toHaveBeenCalledTimes(1);
     expect(result.composed.evidence).toMatchObject({
       rowCount: '1',
@@ -346,6 +350,7 @@ function snapshotTransport(options: {
   const kaNumbers = options.kaNumbers ?? [1n];
   let open = false;
   let readCount = 0;
+  const targets: string[] = [];
   const snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (snapshotRequest, consume) => {
     expect(snapshotRequest.chainId).toBe(RFC64_VM_CHAIN_ID);
     open = true;
@@ -357,6 +362,7 @@ function snapshotTransport(options: {
         read: async (calls) => {
           if (!open) throw new Error('snapshot session escaped its scope');
           readCount += 1;
+          targets.push(...calls.map(({ to }) => to.toLowerCase()));
           return Object.freeze(calls.map(encodeCallResult));
         },
       }));
@@ -368,10 +374,16 @@ function snapshotTransport(options: {
     snapshot,
     isOpen: () => open,
     reads: () => readCount,
+    targets: () => [...targets],
   };
 
   function encodeCallResult(call: StrictCurrentFinalizedEvmReadCallV1): string {
     const selector = call.data.slice(0, 10);
+    if (CG_SELECTORS.has(selector)) {
+      expect(call.to.toLowerCase()).toBe(RFC64_VM_CG_STORAGE);
+    } else if (KA_SELECTORS.has(selector)) {
+      expect(call.to.toLowerCase()).toBe(RFC64_VM_KA_STORAGE);
+    }
     switch (selector) {
       case CG.getFunction('getContextGraph')!.selector:
         return CG.encodeFunctionResult('getContextGraph', [
@@ -408,3 +420,18 @@ function snapshotTransport(options: {
     }
   }
 }
+
+const CG_SELECTORS = new Set([
+  'getContextGraph',
+  'getNameHash',
+  'isContextGraphActive',
+  'getContextGraphKaCount',
+  'getContextGraphKaAt',
+].map((method) => CG.getFunction(method)!.selector));
+
+const KA_SELECTORS = new Set([
+  'getKnowledgeAssetUpdateContext',
+  'getLatestMerkleRoot',
+  'getLatestMerkleRootAuthor',
+  'getLatestMerkleRootPublisher',
+].map((method) => KA.getFunction(method)!.selector));

@@ -22,6 +22,7 @@ export interface FinalizedVmLoopbackFixtureConfigV1 {
   readonly assets: readonly FinalizedVmLoopbackAssetV1[];
   readonly blockHash: Digest32V1;
   readonly blockNumberQuantity: string;
+  readonly contextGraphStorageAddress: EvmAddressV1;
   readonly nameHash: Digest32V1;
   readonly networkId: NetworkIdV1;
   readonly onChainContextGraphId: string;
@@ -76,8 +77,8 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
 }
 
 /**
- * One protocol-shaped finalized RPC table shared by the integration test and
- * the separate-process devnet proof. Callers own only fixture data and I/O.
+ * Package-owned protocol-shaped finalized RPC test support shared by the
+ * integration suite and separate-process devnet proof. Callers own I/O only.
  */
 export function createFinalizedVmLoopbackRpcV1(
   fixture: FinalizedVmLoopbackFixtureConfigV1,
@@ -108,9 +109,15 @@ function finalizedVmEthCallResult(
   assets: ReadonlyMap<string, FinalizedVmLoopbackAssetV1>,
 ): string {
   const call = plainRecord(params[0], 'finalized VM eth_call object');
+  const target = requiredString(call.to, 'finalized VM eth_call target').toLowerCase();
   const data = requiredString(call.data, 'finalized VM eth_call data');
   if (data === '0x') return '0x';
   const selector = data.slice(0, 10);
+  if (CONTEXT_GRAPH_SELECTORS.has(selector)) {
+    assertCallTarget(target, fixture.contextGraphStorageAddress, 'context graph');
+  } else if (KNOWLEDGE_ASSET_SELECTORS.has(selector)) {
+    assertCallTarget(target, fixture.assertedAtKav10Address, 'knowledge asset');
+  }
   switch (selector) {
     case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph')!.selector:
       assertContextGraphCall('getContextGraph', data, fixture.onChainContextGraphId);
@@ -183,6 +190,29 @@ function finalizedVmEthCallResult(
     }
     default:
       throw new Error(`unexpected finalized VM eth_call selector ${selector}`);
+  }
+}
+
+const CONTEXT_GRAPH_SELECTORS = new Set([
+  'getContextGraph',
+  'getNameHash',
+  'isContextGraphActive',
+  'getContextGraphKaCount',
+  'getContextGraphKaAt',
+].map((method) => CONTEXT_GRAPH_INTERFACE.getFunction(method)!.selector));
+
+const KNOWLEDGE_ASSET_SELECTORS = new Set([
+  'getKnowledgeAssetUpdateContext',
+  'getLatestMerkleRoot',
+  'getLatestMerkleRootAuthor',
+  'getLatestMerkleRootPublisher',
+].map((method) => KNOWLEDGE_ASSET_INTERFACE.getFunction(method)!.selector));
+
+function assertCallTarget(actual: string, expected: EvmAddressV1, label: string): void {
+  if (actual !== expected.toLowerCase()) {
+    throw new Error(
+      `unexpected finalized VM ${label} target ${actual}; expected ${expected.toLowerCase()}`,
+    );
   }
 }
 

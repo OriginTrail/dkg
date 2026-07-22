@@ -72,6 +72,24 @@ describe('RFC-64 finalized VM agent precommit', () => {
       'policy differs from the configured chain id',
     );
   });
+
+  it('canonicalizes chain-service scalar responses at the precommit boundary', async () => {
+    const noncanonicalContextGraphId = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      getOnChainContextGraphId: async () => '01',
+    });
+    await expect(
+      noncanonicalContextGraphId(plan(), new AbortController().signal),
+    ).rejects.toThrow('on-chain context graph id must be a canonical unsigned decimal');
+
+    const noncanonicalKnowledgeAssetStorage = createRfc64FinalizedVmAgentPrecommitV1({
+      ...baseOptions(),
+      getKnowledgeAssetStorageAddress: async () => '0x1234',
+    });
+    await expect(
+      noncanonicalKnowledgeAssetStorage(plan(), new AbortController().signal),
+    ).rejects.toThrow('knowledge asset storage address must be a lowercase 20-byte');
+  });
 });
 
 function baseOptions() {

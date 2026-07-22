@@ -1,9 +1,8 @@
-import type {
-  AuthorCatalogScopeV1,
-  ChainIdV1,
-  ContextGraphIdV1,
-  DecimalU256V1,
-  EvmAddressV1,
+import {
+  assertCanonicalDecimalU256,
+  assertCanonicalEvmAddress,
+  type AuthorCatalogScopeV1,
+  type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -64,12 +63,21 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       throw new Error('RFC-64 finalized VM policy differs from the configured chain id');
     }
 
-    const chainId = policy.governanceChainId as ChainIdV1;
+    assertCanonicalDecimalU256(
+      onChainContextGraphId,
+      'RFC-64 finalized VM on-chain context graph id',
+    );
+    const canonicalKnowledgeAssetStorageAddress = knowledgeAssetStorageAddress.toLowerCase();
+    assertCanonicalEvmAddress(
+      canonicalKnowledgeAssetStorageAddress,
+      'RFC-64 finalized VM knowledge asset storage address',
+    );
+    const chainId = policy.governanceChainId;
     const runtime = createFinalizedVmRuntimeV1({
       networkId: plan.catalogScope.networkId,
       chainId,
       contextGraphStorageAddress: policy.governanceContractAddress,
-      knowledgeAssetStorageAddress: knowledgeAssetStorageAddress.toLowerCase() as EvmAddressV1,
+      knowledgeAssetStorageAddress: canonicalKnowledgeAssetStorageAddress,
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
         chainId,
         endpoints: options.rpcEndpoints,
@@ -81,7 +89,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
         contextGraphId: plan.catalogScope.contextGraphId,
         subGraphName: plan.catalogScope.subGraphName,
       }),
-      onChainContextGraphId: onChainContextGraphId as DecimalU256V1,
+      onChainContextGraphId,
       acceptedPolicy,
       placements: Object.freeze(plan.rows.map((row) => Object.freeze({
         authorship: row.authorship,

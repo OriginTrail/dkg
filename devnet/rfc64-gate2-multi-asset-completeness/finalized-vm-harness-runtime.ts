@@ -12,13 +12,16 @@ import {
   FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
-} from './finalized-vm-loopback-fixture.js';
+} from '../../packages/agent/test/support/rfc64-finalized-vm-loopback-fixture.js';
 
 export const RFC64_GATE2_DEPLOYMENT = Object.freeze({
   networkId: 'otp:20430',
   assertedAtChainId: '20430',
   assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
 });
+
+const RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS =
+  '0x3333333333333333333333333333333333333333' as EvmAddressV1;
 
 export interface FinalizedVmHarnessConfigV1 {
   readonly assertionRoot: Digest32V1;
@@ -94,6 +97,7 @@ export async function startFinalizedVmHarnessRuntimeV1(
     })]),
     blockHash: FINALIZED_BLOCK_HASH as Digest32V1,
     blockNumberQuantity: '0x7b',
+    contextGraphStorageAddress: RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS,
     nameHash: config.nameHash,
     networkId: RFC64_GATE2_DEPLOYMENT.networkId as NetworkIdV1,
     onChainContextGraphId: config.onChainContextGraphId,
