@@ -519,7 +519,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       },
       readCurrentAppliedCatalogHeadDigest: vi.fn(async () =>
         stored.head.objectDigest as Digest32V1),
-      authorizeOpenCatalogOperation: vi.fn(async () => ({
+      authorizeCatalogOperation: vi.fn(async () => ({
         ...directAuthorization(),
       })),
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
@@ -567,7 +567,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       },
       readCurrentAppliedCatalogHeadDigest: vi.fn(async () =>
         stored.head.objectDigest as Digest32V1),
-      authorizeOpenCatalogOperation: vi.fn(async () => ({
+      authorizeCatalogOperation: vi.fn(async () => ({
         ...directAuthorization(),
       })),
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
@@ -587,7 +587,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
   });
 
   it('rechecks outbound policy after the awaited remote response', async () => {
-    const authorizeOpenCatalogOperation = vi.fn()
+    const authorizeCatalogOperation = vi.fn()
       .mockResolvedValueOnce(directAuthorization())
       .mockResolvedValueOnce(null);
     const send = vi.fn(async () => Uint8Array.of(0));
@@ -599,7 +599,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
       controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
       readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
-      authorizeOpenCatalogOperation,
+      authorizeCatalogOperation,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
     transport.start();
@@ -612,7 +612,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     await expect(transport.discoverCurrentCatalogHead('provider-peer', query))
       .rejects.toMatchObject({ code: 'catalog-discovery-policy-denied' });
     expect(send).toHaveBeenCalledTimes(1);
-    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    expect(authorizeCatalogOperation).toHaveBeenCalledTimes(2);
     transport.stop();
   });
 
@@ -622,7 +622,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       peerId: { toString(): string },
       options?: { signal?: AbortSignal },
     ) => Promise<Uint8Array>) | undefined;
-    const authorizeOpenCatalogOperation = vi.fn()
+    const authorizeCatalogOperation = vi.fn()
       .mockResolvedValueOnce(directAuthorization())
       .mockResolvedValueOnce(null);
     const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
@@ -635,7 +635,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
       controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
       readCurrentAppliedCatalogHeadDigest,
-      authorizeOpenCatalogOperation,
+      authorizeCatalogOperation,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
     transport.start();
@@ -650,7 +650,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       { toString: () => 'requester-peer' },
     )).resolves.toEqual(Uint8Array.of(2));
     expect(readCurrentAppliedCatalogHeadDigest).toHaveBeenCalledTimes(2);
-    expect(authorizeOpenCatalogOperation).toHaveBeenCalledTimes(2);
+    expect(authorizeCatalogOperation).toHaveBeenCalledTimes(2);
     transport.stop();
   });
 
@@ -701,7 +701,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
       controlObjects: { getVerifiedObjectByDigest: vi.fn(async () => null) },
       readCurrentAppliedCatalogHeadDigest: vi.fn(async () => null),
-      authorizeOpenCatalogOperation: vi.fn(async () => directAuthorization()),
+      authorizeCatalogOperation: vi.fn(async () => directAuthorization()),
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
     transport.start();
@@ -786,7 +786,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       unregister() {},
     } as unknown as ProtocolRouter;
     const readCurrentAppliedCatalogHeadDigest = vi.fn(async () => null);
-    const authorizeOpenCatalogOperation = vi.fn(async () => ({
+    const authorizeCatalogOperation = vi.fn(async () => ({
       ...directAuthorization(),
     }));
     const transport = new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(router, {
@@ -794,7 +794,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
         getVerifiedObjectByDigest: vi.fn(async () => null),
       },
       readCurrentAppliedCatalogHeadDigest,
-      authorizeOpenCatalogOperation,
+      authorizeCatalogOperation,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
     transport.start();
@@ -812,7 +812,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
       { toString: () => 'test-peer' },
       { signal: controller.signal },
     )).rejects.toBe(reason);
-    expect(authorizeOpenCatalogOperation).not.toHaveBeenCalled();
+    expect(authorizeCatalogOperation).not.toHaveBeenCalled();
     expect(readCurrentAppliedCatalogHeadDigest).not.toHaveBeenCalled();
     transport.stop();
   });

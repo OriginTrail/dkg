@@ -76,8 +76,6 @@ import {
 } from './public-catalog-current-head-discovery-v1.js';
 import {
   Rfc64PublicCatalogNativeTransportV1,
-  type Rfc64PublicCatalogNativeAuthorizationInputV1,
-  type Rfc64PublicCatalogNativeAuthorizationV1,
   type Rfc64PublicCatalogNativeTransportOptionsV1,
 } from './public-catalog-native-transport-v1.js';
 import {
@@ -164,7 +162,7 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
 export interface Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1 {
   /**
    * Resolve the durable semantically applied head for one locally trusted
-   * public/open root scope. Staged-only and candidate heads must not be returned.
+   * public-root scope. Staged-only and candidate heads must not be returned.
    */
   readonly readCurrentAppliedCatalogHeadDigest: (
     trustedScope: Readonly<AuthorCatalogScopeV1>,
@@ -269,7 +267,7 @@ export class Rfc64PublicCatalogServiceV1 {
 
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
-      authorizeOpenCatalogOperation: this.#policies.authorize,
+      authorizeCatalogOperation: this.#policies.authorize,
       verifyIssuerSignature: this.#verifyIssuerSignature,
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
@@ -284,7 +282,7 @@ export class Rfc64PublicCatalogServiceV1 {
         controlObjects: this.#controlObjects,
         readCurrentAppliedCatalogHeadDigest:
           options.currentHeadDiscovery.readCurrentAppliedCatalogHeadDigest,
-        authorizeOpenCatalogOperation: (input) =>
+        authorizeCatalogOperation: (input) =>
           this.#authorizeCurrentHeadDiscovery(input),
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
@@ -294,7 +292,7 @@ export class Rfc64PublicCatalogServiceV1 {
       : new Rfc64PublicCatalogNativeTransportV1(options.router, {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
-        authorizeOpenCatalogOperation: (input) => this.#authorizeNativeOperation(input),
+        authorizeCatalogOperation: this.#policies.authorize,
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const reconciler = options.native === undefined
@@ -554,7 +552,7 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 
   /**
-   * Pull and authenticate one provider's semantically current public/open head.
+   * Pull and authenticate one provider's semantically current public-root head.
    * The discovery response is treated as a hint: this method exact-fetches the
    * named signed head, re-verifies it, and binds it to local accepted policy
    * before returning. It intentionally does not stage, schedule, or activate.
@@ -604,7 +602,7 @@ export class Rfc64PublicCatalogServiceV1 {
       assertAuthorCatalogHeadScopeBindingV1(head.envelope.payload, currentTrustedScope);
     } catch (cause) {
       throw new Error(
-        'RFC-64 discovered head differs from the accepted public/open policy scope',
+        'RFC-64 discovered head differs from the accepted public policy scope',
         { cause },
       );
     }
@@ -612,7 +610,7 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 
   /**
-   * Discover one provider's current public/open head, enqueue that exact
+   * Discover one provider's current public-root head, enqueue that exact
    * authenticated head through the ordinary receiver, and wait for all
    * scheduled reconciliation work to drain. A caller must still inspect the
    * durable applied-head record: receiver failures are reported through its
@@ -726,12 +724,6 @@ export class Rfc64PublicCatalogServiceV1 {
     });
   }
 
-  async #authorizeNativeOperation(
-    input: Rfc64PublicCatalogNativeAuthorizationInputV1,
-  ): Promise<Rfc64PublicCatalogNativeAuthorizationV1 | null> {
-    return this.#policies.authorize(input);
-  }
-
   #resolveTrustedCatalogScope(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Readonly<AuthorCatalogScopeV1> {
@@ -759,7 +751,7 @@ export class Rfc64PublicCatalogServiceV1 {
     const record = this.#policies.lookup(input.networkId, input.contextGraphId);
     if (record === null) {
       throw new Error(
-        'RFC-64 current-head query is not bound to the accepted public/open root policy',
+        'RFC-64 current-head query is not bound to the accepted public root policy',
       );
     }
     try {
@@ -807,7 +799,7 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     } catch (cause) {
       throw new Error(
-        'RFC-64 fetched head differs from the accepted public/open policy scope',
+        'RFC-64 fetched head differs from the accepted public policy scope',
         { cause },
       );
     }
