@@ -128,7 +128,7 @@ describe('RFC-64 finalized Context Graph chain read', () => {
     expect(read.publishAuthorityAccountId).toBe('0');
   });
 
-  it('rejects impossible curated and open publish-authority combinations', () => {
+  it('rejects a curated policy without a non-zero authority', () => {
     expectFailure(
       () => composeFinalizedContextGraphReadV1(validRequest(), {
         ...validRaw(),
@@ -137,10 +137,22 @@ describe('RFC-64 finalized Context Graph chain read', () => {
       }),
       'inconsistent-publish-policy',
     );
+  });
+
+  it('independently rejects both invalid fields in an open policy', () => {
     expectFailure(
       () => composeFinalizedContextGraphReadV1(validRequest(), {
         ...validRaw(),
         publishPolicy: 1,
+        publishAuthorityAccountId: '0',
+      }),
+      'inconsistent-publish-policy',
+    );
+    expectFailure(
+      () => composeFinalizedContextGraphReadV1(validRequest(), {
+        ...validRaw(),
+        publishPolicy: 1,
+        publishAuthority: ZERO,
       }),
       'inconsistent-publish-policy',
     );

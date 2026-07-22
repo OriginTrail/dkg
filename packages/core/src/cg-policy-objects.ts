@@ -51,8 +51,10 @@ export const MEMBER_ROSTER_ROLES_V1 = Object.freeze([
 export const CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 export const CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 
-export type ContextGraphAccessPolicyV1 = 0 | 1;
-export type ContextGraphPublishPolicyV1 = 0 | 1;
+export type ContextGraphAccessPolicyV1 =
+  (typeof CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1)[number];
+export type ContextGraphPublishPolicyV1 =
+  (typeof CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1)[number];
 export type MemberRosterRoleV1 = (typeof MEMBER_ROSTER_ROLES_V1)[number];
 
 export interface FinalizedChainPolicySourceV1 {
@@ -161,14 +163,14 @@ export function assertContextGraphAccessPolicyV1(
   value: unknown,
   label = 'accessPolicy',
 ): asserts value is ContextGraphAccessPolicyV1 {
-  assertPolicyEnum(value, label);
+  assertPolicyEnum(value, label, CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1);
 }
 
 export function assertContextGraphPublishPolicyV1(
   value: unknown,
   label = 'publishPolicy',
 ): asserts value is ContextGraphPublishPolicyV1 {
-  assertPolicyEnum(value, label);
+  assertPolicyEnum(value, label, CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1);
 }
 
 export function canonicalizeContextGraphPolicyPayloadV1(
@@ -709,8 +711,14 @@ function assertGovernancePair(chainId: unknown, contractAddress: unknown): void 
   }
 }
 
-function assertPolicyEnum(value: unknown, label: string): asserts value is 0 | 1 {
-  if (value !== 0 && value !== 1) fail('cg-policy-scalar', `${label} must be JSON number 0 or 1`);
+function assertPolicyEnum<Values extends readonly number[]>(
+  value: unknown,
+  label: string,
+  allowed: Values,
+): asserts value is Values[number] {
+  if (typeof value !== 'number' || !(allowed as readonly number[]).includes(value)) {
+    fail('cg-policy-scalar', `${label} must be JSON number ${allowed.join(' or ')}`);
+  }
 }
 
 function optionalDigest(value: unknown, label: string): void {
