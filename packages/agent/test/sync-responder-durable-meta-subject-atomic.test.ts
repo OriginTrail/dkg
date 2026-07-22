@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  DurableMetaPageFrameError,
   readDurableMetaPage,
   serializeResponderRowsWithinByteBudget,
   type SyncRowListMemo,
@@ -511,5 +512,139 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     assertNoDuplicatesOrGaps(pages);
     expect(pages.flat()).toHaveLength(filler.length + SEAL_PREDICATES.length);
     expect(pages.length).toBeGreaterThan(1);
+  });
+
+  it('cached path: a large-literal filler before a seal never splits the seal (byte-cap is subject-aware) (#1916)', async () => {
+    // The cached-trim counterpart to the store-paged large-filler test above:
+    // readDurableMetaPage's FINAL byte-fit runs on the snapshot-derived (cached)
+    // page too, so it must likewise DEFER a straddling seal WHOLE rather than emit
+    // a row-prefix that tears it. A row-prefix cut here would split the seal
+    // across rounds (#1788 reintroduced on the cached path).
+    const limit = 100; // large ⇒ the byte budget, not the row limit, does the cut
+    const budget = 2_800; // bytes
+    // One ~2.5 KB filler subject (sorts before the seal) nearly fills the budget,
+    // leaving room for only a few seal rows, so the 14-row seal straddles.
+    const filler: Row[] = [{
+      s: 'urn:aaa-fill', p: `${DKG_NS}label`, o: `"${'x'.repeat(2_450)}"`, g: META,
+    }];
+    const seal = 'urn:zzz-seal';
+    const snapshot: Row[] = [...filler, ...sealRows(seal, META)];
+    const memo: SyncRowListMemo = { get: async () => snapshot, release: () => {} };
+
+    const enc = new TextEncoder();
+    const pages = await pageThrough(
+      async (offset, pageLimit) => {
+        const page = await readDurableMetaPage({
+          store: {} as OxigraphStore,
+          contextGraphId: CG,
+          registeredSubGraphNames: [],
+          offset,
+          limit: pageLimit,
+          rowListMemo: memo,
+          rowListCacheKey: 'durable-meta:1916:cached-filler',
+          maxResponseBytes: budget,
+        });
+        // Each cached page is subject-atomic AND ≤ budget (frame-safe).
+        expect(enc.encode(serializeResponderRowsWithinByteBudget(page, budget)).byteLength)
+          .toBeLessThanOrEqual(budget);
+        return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
+      },
+      limit,
+    );
+
+    const sealCount = (page: readonly Row[]) => page.filter((row) => row.s === seal).length;
+    // 0-or-all: the seal is never partially emitted despite the filler ahead of it.
+    for (const page of pages) expect([0, SEAL_PREDICATES.length]).toContain(sealCount(page));
+    const sealRowsSeen = pages.flat().filter((row) => row.s === seal);
+    expect(sealRowsSeen).toHaveLength(SEAL_PREDICATES.length);
+    expect(sealRowsSeen.some((row) => row.p === ASSERTION_VERSION)).toBe(true);
+    assertNoDuplicatesOrGaps(pages);
+    expect(pages.flat()).toHaveLength(snapshot.length);
+    // The filler alone filled page 1; the seal was deferred whole to a later page.
+    expect(pages.length).toBeGreaterThan(1);
+    expect(sealCount(pages[0])).toBe(0);
+  });
+
+  it('legacy (non-negotiated) path: normal meta paginates in row-limit subject-atomic pages, short only at EOF (#1788)', async () => {
+    // A pre-testnet-canary requester (oversizedSubjectPolicy='fail-loud') never
+    // receives a byte-fit short page: normal-sized meta paginates by the row
+    // limit, extended to a subject boundary, and is short only on the final EOF
+    // page — the legacy short=EOF contract stays correct. No throw.
+    const limit = 5;
+    const store = new OxigraphStore();
+    const quads: Quad[] = Array.from({ length: 12 }, (_, i) => ({
+      graph: META,
+      subject: `did:dkg:activity:s${String(i).padStart(2, '0')}`,
+      predicate: `${DKG_NS}label`,
+      object: `"row-${i}"`,
+    }));
+    await store.insert(quads);
+
+    const pages = await pageThrough(
+      async (offset, pageLimit) => {
+        const page = await readDurableMetaPage({
+          store,
+          contextGraphId: CG,
+          registeredSubGraphNames: [],
+          offset,
+          limit: pageLimit,
+          oversizedSubjectPolicy: 'fail-loud',
+        });
+        return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
+      },
+      limit,
+    );
+
+    // Row-limit-bound pages of exactly 5, 5, 2 — no short non-EOF page, no throw.
+    expect(pages.map((page) => page.length)).toEqual([5, 5, 2]);
+    assertNoDuplicatesOrGaps(pages);
+    expect(pages.flat()).toHaveLength(12);
+    await store.close();
+  });
+
+  it('legacy (non-negotiated) path: an oversized _meta subject fails LOUD, never a silent short page (#1788)', async () => {
+    // fail-loud must NOT byte-fit an oversized subject into a short page a legacy
+    // requester reads as EOF (silent partial-metadata loss + #1788 split). Two
+    // shapes throw DurableMetaPageFrameError: (a) a single subject alone over
+    // budget, and (b) a cumulative row-limit-bound page over budget where each
+    // subject individually fits.
+    // (a) single oversized subject
+    const singleStore = new OxigraphStore();
+    const hostile = 'did:dkg:activity:oversized';
+    await singleStore.insert(Array.from({ length: 60 }, (_, i) => ({
+      graph: META,
+      subject: hostile,
+      predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
+      object: `"junk-${i}"`,
+    })));
+    await expect(readDurableMetaPage({
+      store: singleStore,
+      contextGraphId: CG,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 5,
+      maxResponseBytes: 1_200,
+      oversizedSubjectPolicy: 'fail-loud',
+    })).rejects.toBeInstanceOf(DurableMetaPageFrameError);
+    await singleStore.close();
+
+    // (b) cumulative: two ~2.1 KB single-row subjects each fit a 3 KB budget
+    // alone, but together exceed it. A legacy page cannot include both frame-safe
+    // and cannot drop one (short=EOF loss), so it fails loud.
+    const cumulativeStore = new OxigraphStore();
+    await cumulativeStore.insert([
+      { graph: META, subject: 'did:dkg:activity:a-big', predicate: `${DKG_NS}label`, object: `"${'x'.repeat(2_000)}"` },
+      { graph: META, subject: 'did:dkg:activity:b-big', predicate: `${DKG_NS}label`, object: `"${'y'.repeat(2_000)}"` },
+    ]);
+    await expect(readDurableMetaPage({
+      store: cumulativeStore,
+      contextGraphId: CG,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 5,
+      maxResponseBytes: 3_000,
+      oversizedSubjectPolicy: 'fail-loud',
+    })).rejects.toBeInstanceOf(DurableMetaPageFrameError);
+    await cumulativeStore.close();
   });
 });

@@ -25,6 +25,7 @@ import {
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  DurableMetaPageFrameError,
   readCatalogPage,
   readDurableDataPage,
   readDurableMetaPage,
@@ -786,6 +787,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshGeneration: session?.refreshGeneration,
             assetUals,
             maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+            // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
+            // loud on an oversized `_meta` subject rather than receive a byte-fit
+            // SHORT page they would read as EOF — silent metadata loss + a #1788
+            // seal split. Negotiated (testnet-canary+) requesters keep the
+            // verified byte-fit behavior (empty=EOF pagination, so short≠EOF).
+            oversizedSubjectPolicy: usesMetaByteBudget ? 'byte-fit' : 'fail-loud',
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -934,6 +941,21 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           `bytesEstimate=${err.bytesEstimate}, key=${err.key})`,
         );
         throw new QuietRetryableHandlerError(err.message);
+      }
+      if (err instanceof DurableMetaPageFrameError) {
+        // Loud, non-retryable failure (#1788/#1916): an oversized `_meta` subject
+        // cannot be served frame-safe to a non-negotiated legacy requester, and
+        // byte-fitting it would be a silent short=EOF metadata loss. Retrying
+        // cannot help — surface it as a hard error so the round fails visibly
+        // rather than completing with partial metadata. Root fix: #1921.
+        getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
+        span.setAttribute('dkg.sync_response_outcome', 'error');
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder cannot serve durable meta frame-safe to a non-negotiated (legacy) `
+          + `requester for "${contextGraphId}" from peer ${peerId}: ${err.message}`,
+        );
+        throw err;
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;

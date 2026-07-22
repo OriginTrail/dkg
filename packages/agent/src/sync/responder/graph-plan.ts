@@ -586,6 +586,56 @@ function serializedResponderRowByteLength(row: SyncRow): number {
 }
 
 /**
+ * How a durable-meta page handles an admitted subject (or cumulative page) that
+ * cannot fit the frame-safe response budget:
+ *  - `'byte-fit'` — NEGOTIATED (testnet-canary+) requesters: byte-cap the page,
+ *    splitting a LONE oversized FIRST subject into a byte-fitting prefix. The
+ *    requester paginates via empty=EOF, so a short page is NOT EOF — no metadata
+ *    loss and forward progress is guaranteed. This is the verified, bot-accepted
+ *    #1916 behavior.
+ *  - `'fail-loud'` — NON-NEGOTIATED / pre-`testnet-canary` legacy requesters:
+ *    NEVER byte-fit. A legacy requester reads a short page as EOF, so a
+ *    byte-fitting prefix would silently drop the rest of the metadata AND split a
+ *    seal (#1788 reintroduced). Emit whole subjects up to the row limit; if the
+ *    resulting page still cannot be produced frame-safe — a single oversized
+ *    subject OR the cumulative row-limit-bound page — throw
+ *    {@link DurableMetaPageFrameError} rather than return a silent short page or
+ *    an un-sendable over-frame page. Subject atomicity (#1788) holds identically
+ *    on both branches; only this oversized-handling differs.
+ */
+type MetaOversizedSubjectPolicy = 'byte-fit' | 'fail-loud';
+
+/**
+ * A non-negotiated (legacy) durable-meta request cannot be served frame-safe:
+ * the subject-atomic, row-limit-bound page — a single admitted subject alone or
+ * the cumulative page — exceeds the frame-safe response budget, and byte-fitting
+ * it would return a SHORT page a legacy requester reads as EOF (silent
+ * partial-metadata loss + a #1788 seal split). Failing loud is strictly better
+ * than silent loss here: a byte-budget-negotiating requester never hits this (it
+ * uses empty=EOF pagination), and the oversized `_meta` subject itself is only
+ * reachable via unverified peer-ingest, fixed at the root by #1921.
+ */
+export class DurableMetaPageFrameError extends Error {
+  readonly contextGraphId: string;
+  readonly bytes: number;
+  readonly limit: number;
+
+  constructor(params: { contextGraphId: string; bytes: number; limit: number }) {
+    super(
+      `Durable-meta page for "${params.contextGraphId}" cannot be served frame-safe to a `
+      + `non-negotiated (legacy) requester: a subject-atomic page of ${params.bytes} bytes `
+      + `exceeds the ${params.limit}-byte frame budget. A byte-budget-negotiating requester `
+      + `(testnet-canary+) paginates this via empty=EOF; upgrade the requester or reject the `
+      + `oversized _meta subject at ingest (#1921).`,
+    );
+    this.name = 'DurableMetaPageFrameError';
+    this.contextGraphId = params.contextGraphId;
+    this.bytes = params.bytes;
+    this.limit = params.limit;
+  }
+}
+
+/**
  * Exclusive end index of the SUBJECT-ATOMIC, BYTE-FITTING durable-meta page that
  * starts at `start` (#1916). Walks whole `(g, s)` subjects accumulating serialized
  * wire bytes (the same accounting the byte-budget serializer uses), and:
@@ -616,6 +666,8 @@ function subjectAtomicBudgetEnd(
   maxBytes: number,
   rowLimit: number,
   trailingComplete: boolean,
+  oversizedPolicy: MetaOversizedSubjectPolicy = 'byte-fit',
+  contextGraphId = '',
 ): number {
   const n = rows.length;
   if (start >= n) return start;
@@ -636,13 +688,27 @@ function subjectAtomicBudgetEnd(
     // the caller says the tail is complete.
     const complete = j < n || trailingComplete;
     if (bytes + runBytes > safeMax) {
-      // This whole subject won't fit within the budget.
+      // This whole subject won't fit within the budget. `bytes + runBytes` is the
+      // frame size of every prior (whole) subject plus this one — the smallest
+      // page that keeps this subject atomic.
+      if (oversizedPolicy === 'fail-loud') {
+        // NON-NEGOTIATED legacy path: we cannot byte-fit (a short page reads as
+        // EOF → silent metadata loss + a #1788 split) and cannot over-fill the
+        // frame. Whether the FIRST subject alone (`lastBoundary === start`) or the
+        // CUMULATIVE page (`lastBoundary > start`) overflows, the page is
+        // unservable frame-safe — fail LOUD instead of returning a short page.
+        throw new DurableMetaPageFrameError({
+          contextGraphId,
+          bytes: bytes + runBytes,
+          limit: safeMax,
+        });
+      }
       if (lastBoundary > start) return lastBoundary; // defer it WHOLE; keep prior subjects
       // ESCAPE HATCH: the FIRST subject alone exceeds the budget. It is provably
       // not a valid seal at that size, so split it — return a byte-FITTING row
       // prefix (≥ 1 row for forward progress) so the page is ≤ budget under BOTH
       // the byte-budget and the plain serializer. This is the ONLY place a
-      // subject is split.
+      // subject is split, and only on the NEGOTIATED ('byte-fit') path.
       let k = start;
       let prefixBytes = 0;
       while (k < j) {
@@ -921,8 +987,20 @@ export async function readDurableMetaPage(params: {
    * tests.
    */
   maxResponseBytes?: number;
+  /**
+   * Oversized-subject policy (#1916/#1923). NEGOTIATED (testnet-canary+)
+   * requesters use `'byte-fit'` — the verified byte-budget behavior. A
+   * NON-NEGOTIATED legacy requester uses `'fail-loud'` so an oversized `_meta`
+   * subject fails loudly ({@link DurableMetaPageFrameError}) instead of returning
+   * a short page the requester would read as EOF (silent metadata loss + a #1788
+   * split). Defaults to the negotiated behavior; the production caller
+   * (sync-handler) always spells it out from the wire `pageMode`. Subject
+   * atomicity holds on both branches. See {@link MetaOversizedSubjectPolicy}.
+   */
+  oversizedSubjectPolicy?: MetaOversizedSubjectPolicy;
 }): Promise<SyncRow[]> {
   const maxResponseBytes = params.maxResponseBytes ?? SYNC_BYTE_BUDGET_RESPONSE_BYTES;
+  const oversizedSubjectPolicy = params.oversizedSubjectPolicy ?? 'byte-fit';
   if (params.assetUals !== undefined) {
     if (params.assetUals.length === 0) return [];
     const manifest = await readGraphScopedVmManifest(
@@ -967,6 +1045,7 @@ export async function readDurableMetaPage(params: {
       offset,
       limit,
       maxResponseBytes,
+      oversizedSubjectPolicy,
       signal,
     ),
     params.offset,
@@ -991,15 +1070,26 @@ export async function readDurableMetaPage(params: {
         : {}),
     },
   );
-  // Final SUBJECT-ATOMIC byte-fit (#1916): both lanes return a page that ends on
-  // a `(g, s)` boundary (cached: in-memory extend; store-paged: the loader), so
-  // its trailing subject is complete. Trim it to whole subjects within the
-  // response byte budget — deferring any subject that would not fit to the next
-  // page — so a small seal AFTER large-literal rows is never cut by the byte cap.
-  // No-op for the already-byte-fit store-paged page; bites only when the cached
-  // extend produced a > budget page. The cached extend already applied the row
-  // limit, so here we byte-cap only (unbounded rowLimit).
-  return page.slice(0, subjectAtomicBudgetEnd(page, 0, maxResponseBytes, Number.MAX_SAFE_INTEGER, true));
+  // Final SUBJECT-ATOMIC pass (#1916): both lanes return a page that ends on a
+  // `(g, s)` boundary (cached: in-memory extend; store-paged: the loader), so its
+  // trailing subject is complete. On the NEGOTIATED path this trims to whole
+  // subjects within the response byte budget — deferring any subject that would
+  // not fit to the next page — so a small seal AFTER large-literal rows is never
+  // cut by the byte cap (no-op for the already-byte-fit store-paged page; bites
+  // only when the cached extend produced a > budget page). On the NON-NEGOTIATED
+  // ('fail-loud') path it does NOT trim (that would be a short page a legacy
+  // requester reads as EOF); with an unbounded row limit it walks every subject
+  // and throws {@link DurableMetaPageFrameError} if the whole page exceeds the
+  // frame budget, otherwise returns the page unchanged.
+  return page.slice(0, subjectAtomicBudgetEnd(
+    page,
+    0,
+    maxResponseBytes,
+    Number.MAX_SAFE_INTEGER,
+    true,
+    oversizedSubjectPolicy,
+    params.contextGraphId,
+  ));
 }
 
 /** Response byte budget for one changelog delta page — keeps a page under the
@@ -3709,7 +3799,10 @@ async function readDurableMetaRowsPage(
  * the budget is emitted and split by the serializer (provably not a valid seal at
  * that size; safe and forward-progressing). The window grows only while its
  * trailing subject is still incomplete AND the budget has not been reached, so
- * memory stays bounded (~one budget) and the loop terminates at EOF.
+ * memory stays bounded (~one budget) and the loop terminates at EOF. When
+ * `oversizedPolicy` is `'fail-loud'` (a non-negotiated legacy requester) the
+ * page is NOT byte-fit — an oversized or cumulative-over-budget page throws
+ * {@link DurableMetaPageFrameError} instead (see {@link MetaOversizedSubjectPolicy}).
  */
 async function readDurableMetaRowsPageSubjectAtomic(
   store: TripleStore,
@@ -3718,6 +3811,7 @@ async function readDurableMetaRowsPageSubjectAtomic(
   offset: number,
   limit: number,
   maxResponseBytes: number,
+  oversizedPolicy: MetaOversizedSubjectPolicy,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
@@ -3738,7 +3832,7 @@ async function readDurableMetaRowsPageSubjectAtomic(
       signal,
     );
     const windowExhausted = window.length < safeLimit + extra;
-    const end = subjectAtomicBudgetEnd(window, 0, safeMaxBytes, safeLimit, windowExhausted);
+    const end = subjectAtomicBudgetEnd(window, 0, safeMaxBytes, safeLimit, windowExhausted, oversizedPolicy, contextGraphId);
     // -1 ⇒ the first subject is still incomplete and fits so far: fetch more to
     // decide whether it completes within budget or is oversized. Otherwise `end`
     // is the subject-atomic, byte-fitting boundary.
