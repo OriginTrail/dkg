@@ -117,13 +117,16 @@ export function createFinalizedVmStoreMaterializerV1(
       ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
       assertionGraph: vmGraph,
       ...(subGraphName ? { subGraphName } : {}),
-    }, 'confirmed', {
-      kind: 'finalized-materialization',
-      provenance: {
-        batchId: BigInt(request.candidate.kaId),
-        materializedVersion: {
-          blockNumber: boundedMaterializedBlockNumber(request.candidate.finalizedBlockNumber),
-          txIndex: 0,
+    }, {
+      status: 'confirmed',
+      confirmation: {
+        kind: 'finalized-materialization',
+        provenance: {
+          batchId: BigInt(request.candidate.kaId),
+          materializedVersion: {
+            blockNumber: boundedMaterializedBlockNumber(request.candidate.finalizedBlockNumber),
+            txIndex: 0,
+          },
         },
       },
     });

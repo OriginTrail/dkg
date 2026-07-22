@@ -119,6 +119,13 @@ export type GraphKnowledgeAssetConfirmation =
       }>;
     }>;
 
+export type GraphKnowledgeAssetMetadataState =
+  | Readonly<{ readonly status: 'tentative' }>
+  | Readonly<{
+      readonly status: 'confirmed';
+      readonly confirmation: GraphKnowledgeAssetConfirmation;
+    }>;
+
 export interface GraphKnowledgeAssetMetadata extends KCMetadata {
   assertionVersion: string | number | bigint;
   publicTripleCount: number;
@@ -342,14 +349,11 @@ export function generateConfirmedFullMetadata(
  */
 export function generateGraphKnowledgeAssetMetadata(
   meta: GraphKnowledgeAssetMetadata,
-  status: 'tentative' | 'confirmed',
-  confirmation?: GraphKnowledgeAssetConfirmation,
+  state: GraphKnowledgeAssetMetadataState,
 ): Quad[] {
   const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
-  if (status === 'confirmed') {
-    if (!confirmation) {
-      throw new Error('Confirmed graph-scoped KA metadata requires confirmation provenance');
-    }
+  if (state.status === 'confirmed') {
+    const { confirmation } = state;
     if (confirmation.kind === 'transaction') {
       quads.push(...generateConfirmedMetadata(
         scope.ual,
@@ -368,9 +372,6 @@ export function generateGraphKnowledgeAssetMetadata(
       );
     }
   } else {
-    if (confirmation !== undefined) {
-      throw new Error('Tentative graph-scoped KA metadata cannot carry confirmation provenance');
-    }
     quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
   }
   return quads;

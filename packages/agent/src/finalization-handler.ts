@@ -1543,8 +1543,10 @@ export class FinalizationHandler {
           privateTripleCount,
           assertionGraph: vmGraph,
         },
-        'confirmed',
-        { kind: 'transaction', provenance },
+        {
+          status: 'confirmed',
+          confirmation: { kind: 'transaction', provenance },
+        },
       );
       await this.store.deleteByPattern({ graph: metaGraph, subject: scope.ual });
       await this.store.insert(metadata);
