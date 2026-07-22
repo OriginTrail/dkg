@@ -244,37 +244,74 @@ function isCommitMarker(value: unknown): value is PromoteCommitMarker {
 }
 
 /**
- * Parse a `payload` binding back into a full `PromoteJob`. Returns null
- * if the literal is malformed (corrupted payload) — the queue logs and
- * skips such rows rather than crashing.
+ * Bounded classification of a `payload` binding. Distinguishes an absent row, a corrupt
+ * payload, and a structurally-valid job whose `state` is not a recognized enum value — a
+ * distinction {@link parseJobPayload} deliberately collapses into `null`. The by-jobId
+ * terminal clear reads through this so it can classify `already_absent` / `malformed` /
+ * `unknown` from a SINGLE canonical payload read (matching the lift sibling), rather than
+ * reading a secondary state-index triple. Never throws.
  */
-export function parseJobPayload(binding: string | undefined): PromoteJob | null {
-  if (!binding) return null;
+/**
+ * A payload that parsed as a structurally complete job whose `state` has been validated only
+ * as a non-empty string — the PROMOTE_JOB_STATES enum-membership check is deliberately deferred
+ * to the caller (so the by-jobId clear can report a well-formed-but-unrecognized state as
+ * `unknown`, distinct from a corrupt payload). Exposing `state: string` keeps the classifier
+ * boundary honest: it never types a value as `PromoteJobState` before that has been checked.
+ */
+export type StructurallyValidPromoteJobPayload = Omit<PromoteJob, 'state'> & { readonly state: string };
+
+export type PromoteJobParseResult =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'malformed' }
+  | { readonly kind: 'job'; readonly job: StructurallyValidPromoteJobPayload };
+
+export function classifyJobPayload(binding: string | undefined): PromoteJobParseResult {
+  if (!binding) return { kind: 'absent' };
   try {
     const payload = parseLiteral(binding);
-    if (typeof payload !== 'string') return null;
+    if (typeof payload !== 'string') return { kind: 'malformed' };
     const parsed = JSON.parse(payload);
-    if (!isRecord(parsed)) return null;
-    if (typeof parsed['jobId'] !== 'string' || parsed['jobId'].length === 0) return null;
-    if (!(PROMOTE_JOB_STATES as readonly string[]).includes(String(parsed['state']))) return null;
-    if (!isPromoteRequest(parsed['request'])) return null;
-    if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return null;
-    if (!isRecord(parsed['attempt'])) return null;
+    if (!isRecord(parsed)) return { kind: 'malformed' };
+    if (typeof parsed['jobId'] !== 'string' || parsed['jobId'].length === 0) return { kind: 'malformed' };
+    // `state` is structurally validated as a non-empty string here, but the PROMOTE_JOB_STATES
+    // enum-membership check is intentionally NOT applied: a well-formed job carrying an
+    // unrecognized state *string* is `kind: 'job'` so the terminal clear can report it as
+    // `unknown`. A missing or non-string `state` is structural corruption (not an unrecognized
+    // state), so — like every other malformed field — it is `malformed`, never `unknown`.
+    if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
+    if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
+    if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
+    if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['attempt']['count']) || !isFiniteNumber(parsed['attempt']['maxRetries'])) {
-      return null;
+      return { kind: 'malformed' };
     }
     if (
       parsed['attempt']['nextRetryAt'] !== undefined &&
       !isFiniteNumber(parsed['attempt']['nextRetryAt'])
     ) {
-      return null;
+      return { kind: 'malformed' };
     }
-    if (parsed['lease'] !== undefined && !isLease(parsed['lease'])) return null;
-    if (parsed['commitMarker'] !== undefined && !isCommitMarker(parsed['commitMarker'])) return null;
-    return parsed as unknown as PromoteJob;
+    if (parsed['lease'] !== undefined && !isLease(parsed['lease'])) return { kind: 'malformed' };
+    if (parsed['commitMarker'] !== undefined && !isCommitMarker(parsed['commitMarker'])) return { kind: 'malformed' };
+    return { kind: 'job', job: parsed as unknown as StructurallyValidPromoteJobPayload };
   } catch {
-    return null;
+    return { kind: 'malformed' };
   }
+}
+
+/**
+ * Parse a `payload` binding back into a full `PromoteJob`, or null when the payload is
+ * absent, malformed, or carries an unrecognized `state`. A strict view over
+ * {@link classifyJobPayload} (it re-applies the enum drop), so the read/list/conflict paths
+ * skip such rows rather than crashing.
+ */
+export function parseJobPayload(binding: string | undefined): PromoteJob | null {
+  const result = classifyJobPayload(binding);
+  if (result.kind !== 'job') return null;
+  // Re-apply the enum drop classifyJobPayload defers: a well-formed job whose state string is
+  // not a recognized value is skipped by the list/read/conflict paths. The cast is honest only
+  // once the membership check has passed (state is provably a PromoteJobState here).
+  return (PROMOTE_JOB_STATES as readonly string[]).includes(result.job.state) ? (result.job as PromoteJob) : null;
 }
 
 /**

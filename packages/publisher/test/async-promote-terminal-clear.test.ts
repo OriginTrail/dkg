@@ -7,7 +7,7 @@ import {
   type PromoteTerminalJobClearer,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_STATE, jobSubject, literal } from '../src/async-promote-queue-utils.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, parseJobPayload } from '../src/async-promote-queue-utils.js';
 
 // #1837 — atomic by-exact-jobId TERMINAL clear for the SWM promote queue.
 describe('#1837 promote queue clearTerminalJob', () => {
@@ -53,6 +53,16 @@ describe('#1837 promote queue clearTerminalJob', () => {
       message: 'permanent', retryable: false, classification: 'permanent', recordedAt: now,
     });
     return jobId;
+  }
+
+  // Raw stored PROMOTE_PAYLOAD literal for a subject, in the store's own return form. Comparing
+  // the value read before vs after a clear proves a rejected clear neither deleted nor altered
+  // the row (#1893: "never mutates on a reject"), and is immune to insert-vs-return re-escaping.
+  async function rawPayloadOf(jobId: string): Promise<string | undefined> {
+    const result = await store.query(
+      `SELECT ?payload WHERE { GRAPH <${DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+    );
+    return result.type === 'bindings' ? result.bindings[0]?.['payload'] : undefined;
   }
 
   it('clears an exact succeeded job (cleared); no other job changes', async () => {
@@ -102,9 +112,11 @@ describe('#1837 promote queue clearTerminalJob', () => {
   it('is idempotent: an absent / already-cleared job returns already_absent', async () => {
     const queue = createQueue();
     expect(await queue.clearTerminalJob('never-existed')).toEqual({ outcome: 'already_absent' });
+    expect(await rawPayloadOf('never-existed')).toBeUndefined(); // clearing an absent job creates no row
     const jobId = await enqueueSucceeded(queue);
     expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'already_absent' }); // repeat
+    expect(await rawPayloadOf(jobId)).toBeUndefined(); // cleared row stays gone
   });
 
   it('rejects an empty or SPARQL-unsafe jobId as malformed without querying/mutating', async () => {
@@ -115,14 +127,48 @@ describe('#1837 promote queue clearTerminalJob', () => {
     expect(await queue.clearTerminalJob('bad>id')).toEqual({ outcome: 'rejected', reason: 'malformed' });
   });
 
-  // #1883 review (🟡): a state triple present but not a recognized enum value must be a
-  // bounded reject (unknown), never throw — and the parse itself is now try/catch-guarded.
-  it('rejects a subject whose state is not a known enum value as unknown, without throwing', async () => {
+  // #1893: a structurally-valid payload whose `state` is not a recognized enum value must be
+  // a bounded reject (unknown) — classified from the single canonical payload read.
+  it('rejects a job whose payload state is not a known enum value as unknown, without throwing', async () => {
+    const queue = createQueue();
+    const bogusJob = {
+      jobId: 'bogus-1', state: 'bogus_state',
+      request: makeRequest(), enqueuedAt: now, updatedAt: now,
+      attempt: { count: 0, maxRetries: 3 },
+    };
+    await store.insert([
+      { subject: jobSubject('bogus-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(bogusJob)), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
+    ]);
+    const before = await rawPayloadOf('bogus-1');
+    expect(before).toBeDefined();
+    await expect(queue.clearTerminalJob('bogus-1')).resolves.toEqual({ outcome: 'rejected', reason: 'unknown' });
+    expect(await rawPayloadOf('bogus-1')).toBe(before); // rejected clear must NOT delete or alter the row
+  });
+
+  // #1893: a payload literal that is present but not a valid job is malformed, not unknown.
+  it('rejects a subject with a corrupt payload literal as malformed', async () => {
     const queue = createQueue();
     await store.insert([
-      { subject: jobSubject('bogus-1'), predicate: PROMOTE_STATE, object: literal('bogus_state'), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
+      { subject: jobSubject('corrupt-1'), predicate: PROMOTE_PAYLOAD, object: literal('not-a-job-json'), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
     ]);
-    await expect(queue.clearTerminalJob('bogus-1')).resolves.toEqual({ outcome: 'rejected', reason: 'unknown' });
+    const before = await rawPayloadOf('corrupt-1');
+    expect(before).toBeDefined();
+    await expect(queue.clearTerminalJob('corrupt-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await rawPayloadOf('corrupt-1')).toBe(before); // rejected clear must NOT delete or alter the row
+  });
+
+  // #1893 (review): a payload that is otherwise well-formed but carries no string `state` is
+  // structural corruption → malformed (HTTP 400), NOT the unknown-state path (HTTP 409).
+  it('rejects a payload with a missing/non-string state as malformed, not unknown', async () => {
+    const queue = createQueue();
+    const noState = { jobId: 'nostate-1', request: makeRequest(), enqueuedAt: now, updatedAt: now, attempt: { count: 0, maxRetries: 3 } };
+    await store.insert([
+      { subject: jobSubject('nostate-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(noState)), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI },
+    ]);
+    const before = await rawPayloadOf('nostate-1');
+    expect(before).toBeDefined();
+    await expect(queue.clearTerminalJob('nostate-1')).resolves.toEqual({ outcome: 'rejected', reason: 'malformed' });
+    expect(await rawPayloadOf('nostate-1')).toBe(before); // rejected clear must NOT delete or alter the row
   });
 
   it('concurrent clears of one terminal job are deterministic: one cleared, rest already_absent, no other job affected', async () => {
@@ -135,5 +181,56 @@ describe('#1837 promote queue clearTerminalJob', () => {
     expect(results.filter((r) => r.outcome === 'cleared')).toHaveLength(1);
     expect(results.filter((r) => r.outcome === 'already_absent')).toHaveLength(2);
     expect((await queue.getStatus(other))?.state).toBe('succeeded'); // never affected
+  });
+});
+
+// #1893 — the bounded classifier the single-read clear is built on.
+describe('classifyJobPayload', () => {
+  const validJob = {
+    jobId: 'j1', state: 'queued',
+    request: { contextGraphId: 'g', assertionName: 'a', entities: 'all' },
+    enqueuedAt: 1, updatedAt: 1, attempt: { count: 0, maxRetries: 3 },
+  };
+  // Mirror serializeJob's PROMOTE_PAYLOAD encoding: literal(JSON.stringify(job)).
+  const bind = (v: unknown) => literal(JSON.stringify(v));
+
+  it('absent for an undefined or empty binding', () => {
+    expect(classifyJobPayload(undefined)).toEqual({ kind: 'absent' });
+    expect(classifyJobPayload('')).toEqual({ kind: 'absent' });
+  });
+
+  it('malformed for a non-JSON or structurally-invalid payload', () => {
+    expect(classifyJobPayload(literal('not-json')).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, jobId: '' })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, request: {} })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, enqueuedAt: 'x' })).kind).toBe('malformed');
+  });
+
+  // #1893 (review): a missing or non-string `state` is structural corruption — it must be
+  // `malformed`, NOT `unknown` (which is reserved for a well-formed but non-enum state string).
+  it('malformed for a missing or non-string state', () => {
+    expect(classifyJobPayload(bind({ ...validJob, state: undefined })).kind).toBe('malformed'); // JSON.stringify drops the key
+    expect(classifyJobPayload(bind({ ...validJob, state: '' })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, state: 42 })).kind).toBe('malformed');
+    expect(classifyJobPayload(bind({ ...validJob, state: null })).kind).toBe('malformed');
+  });
+
+  it('job for a structurally-valid payload, INCLUDING a non-enum state string', () => {
+    expect(classifyJobPayload(bind(validJob))).toMatchObject({ kind: 'job' });
+    const result = classifyJobPayload(bind({ ...validJob, state: 'bogus_state' }));
+    expect(result.kind).toBe('job');
+    if (result.kind === 'job') expect(result.job.state).toBe('bogus_state');
+  });
+
+  // #1893 (review round 2): the classifier deliberately accepts a non-enum state string as
+  // `kind: 'job'` (so the terminal clear can report `unknown`), which makes parseJobPayload the
+  // ONLY runtime guard that keeps ordinary readers (list/getStatus/conflict) from surfacing a
+  // row with an impossible state. Lock that strict enum-drop directly here: were it removed from
+  // parseJobPayload, this asserts red even though the classifier tests above stay green.
+  it('parseJobPayload re-applies the enum drop the classifier defers', () => {
+    const nonEnum = bind({ ...validJob, state: 'bogus_state' });
+    expect(classifyJobPayload(nonEnum).kind).toBe('job'); // classifier accepts it for terminal-clear classification
+    expect(parseJobPayload(nonEnum)).toBeNull();          // strict wrapper rejects it for read/list/conflict callers
+    expect(parseJobPayload(bind(validJob))).not.toBeNull(); // a valid enum state is returned unchanged
   });
 });
