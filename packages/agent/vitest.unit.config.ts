@@ -69,6 +69,7 @@ export default defineConfig({
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery.test.ts",
+      "test/dkg-agent-snapshot-store-injection.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
