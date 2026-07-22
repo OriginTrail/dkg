@@ -18,7 +18,7 @@ import {
 } from '../src/finalized-context-graph-rpc-resolver.js';
 import {
   FinalizedContextGraphReadErrorV1,
-  resolveFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadWithSignalV1,
   type FinalizedContextGraphBindingV1,
 } from '../src/finalized-context-graph-read.js';
 import {
@@ -145,7 +145,11 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
   it('feeds the concrete RPC result through the validated finalized read seam', async () => {
     const read = readStub();
     const resolver = createFinalizedContextGraphRpcResolverV1(read);
-    const result = await resolveFinalizedContextGraphReadV1(resolver, binding());
+    const result = await resolveFinalizedContextGraphReadWithSignalV1(
+      resolver,
+      binding(),
+      signal(),
+    );
     const normalizedSignal = read.mock.calls[0]?.[0].signal;
 
     expect(result).toEqual({
@@ -173,7 +177,11 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
       }), nameHashResult(ZERO_HASH)),
     );
 
-    const result = await resolveFinalizedContextGraphReadV1(resolver, binding());
+    const result = await resolveFinalizedContextGraphReadWithSignalV1(
+      resolver,
+      binding(),
+      signal(),
+    );
     expect(result.publishAuthority).toBeNull();
     expect(result.publishAuthorityAccountId).toBe('0');
     expect(result.nameHash).toBeNull();
@@ -224,7 +232,11 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
 
       let caught: unknown;
       try {
-        await resolveFinalizedContextGraphReadV1(resolver, binding());
+        await resolveFinalizedContextGraphReadWithSignalV1(
+          resolver,
+          binding(),
+          signal(),
+        );
       } catch (cause) {
         caught = cause;
       }

@@ -4,7 +4,7 @@ import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-pro
 import {
   FinalizedContextGraphReadErrorV1,
   type FinalizedContextGraphBindingV1,
-  type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadResolverWithSignalV1,
   type UntrustedFinalizedContextGraphFieldsV1,
 } from './finalized-context-graph-read.js';
 import {
@@ -32,12 +32,12 @@ const ERC721_FINALIZED_READ_ERROR_INTERFACE = new ethers.Interface([
  */
 export function createFinalizedContextGraphRpcResolverV1(
   read: StrictCurrentFinalizedEvmReadV1,
-): FinalizedContextGraphReadResolverV1 {
+): FinalizedContextGraphReadResolverWithSignalV1 {
   if (typeof read !== 'function') {
     throw new TypeError('Finalized Context Graph RPC resolver requires a read function');
   }
 
-  const resolver: FinalizedContextGraphReadResolverV1 = async (
+  const resolver: FinalizedContextGraphReadResolverWithSignalV1 = async (
     binding,
     signal,
   ) => {

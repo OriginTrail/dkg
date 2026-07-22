@@ -92,6 +92,11 @@ export type FinalizedContextGraphReadV1 = {
 };
 
 export interface FinalizedContextGraphReadResolverV1 {
+  (binding: FinalizedContextGraphBindingV1): Promise<UntrustedFinalizedContextGraphFieldsV1>;
+}
+
+/** Signal-aware resolver used by transports that own cancellable I/O. */
+export interface FinalizedContextGraphReadResolverWithSignalV1 {
   (
     binding: FinalizedContextGraphBindingV1,
     signal: AbortSignal,
@@ -304,7 +309,17 @@ function composeValidatedFinalizedContextGraphReadV1(
 export async function resolveFinalizedContextGraphReadV1(
   resolver: FinalizedContextGraphReadResolverV1,
   request: FinalizedContextGraphReadRequestV1,
-  signal: AbortSignal = new AbortController().signal,
+): Promise<FinalizedContextGraphReadV1> {
+  const binding = validateFinalizedContextGraphReadRequestV1(request);
+  const raw = await resolver(binding);
+  return composeValidatedFinalizedContextGraphReadV1(binding, raw);
+}
+
+/** Resolve through a signal-aware transport without manufacturing cancellation ownership. */
+export async function resolveFinalizedContextGraphReadWithSignalV1(
+  resolver: FinalizedContextGraphReadResolverWithSignalV1,
+  request: FinalizedContextGraphReadRequestV1,
+  signal: AbortSignal,
 ): Promise<FinalizedContextGraphReadV1> {
   const binding = validateFinalizedContextGraphReadRequestV1(request);
   const raw = await resolver(binding, signal);
