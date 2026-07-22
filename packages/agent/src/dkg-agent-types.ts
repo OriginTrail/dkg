@@ -35,6 +35,7 @@ import type {
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
 import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
@@ -1117,6 +1118,8 @@ export interface DKGAgentConfig {
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-Oxigraph immutable public SWM operation snapshots. Defaults on when dataDir is set. */
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
+  /** Optional caller-owned snapshot store, used by the daemon to inject durable page indexing. */
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * Max automatic-retry budget stamped onto async VM-publish jobs admitted
    * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors

@@ -94,6 +94,7 @@ export default defineConfig({
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
+          'test/publisher-runtime-snapshot-store-injection.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
@@ -104,8 +105,12 @@ export default defineConfig({
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
+          // Public snapshot paging — one SQLite-indexed store must reach the
+          // agent sync responder, admission publisher, and background runtime.
+          'test/daemon-snapshot-page-index-wiring.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
+          'test/snapshot-page-index-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
