@@ -64,7 +64,6 @@ export interface StrictFinalizedSnapshotTransportSessionV1 {
   readonly blockHash: Digest32V1;
   readonly read: (
     calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
-    deployedTargets: Set<EvmAddressV1>,
   ) => Promise<readonly string[]>;
 }
 
@@ -205,14 +204,13 @@ async function probeSnapshotReadProfile(
     const probeCall = Object.freeze({
       to: SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
       data: '0x',
-      maxReturnBytes: CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
-    } satisfies StrictCurrentFinalizedEvmReadCallV1);
+    });
     parseStrictFinalizedEvmCallResultV1(
       await rpc(
         'eth_call',
         createStrictFinalizedEvmCallParamsV1(probeCall, blockReference),
       ),
-      probeCall.maxReturnBytes,
+      CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
     );
   } catch (cause) {
     throw unavailable(
@@ -236,13 +234,13 @@ async function executePinnedSnapshotScope<T>(
     request,
     totalDeadline,
   );
+  const deployedTargets = new Set<EvmAddressV1>();
   const session = Object.freeze({
     chainId: config.chainId,
     blockNumber: preflight.anchor.blockNumber,
     blockHash: preflight.anchor.blockHash,
     read: (
       calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
-      deployedTargets: Set<EvmAddressV1>,
     ) => executeSnapshotBatch(
       config,
       preflight.anchor,

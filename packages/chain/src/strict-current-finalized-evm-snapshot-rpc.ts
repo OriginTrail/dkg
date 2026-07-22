@@ -1,5 +1,3 @@
-import type { EvmAddressV1 } from '@origintrail-official/dkg-core';
-
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
 import {
@@ -51,7 +49,6 @@ function createSnapshotReadSession(
   transportSession: StrictFinalizedSnapshotTransportSessionV1,
 ): Readonly<SnapshotReadSessionControllerV1> {
   const budget = createCurrentFinalizedEvmSnapshotBudgetV1();
-  const deployedTargets = new Set<EvmAddressV1>();
   let active = true;
   let inFlight: Promise<readonly string[]> | undefined;
   const read = Object.freeze((
@@ -79,7 +76,7 @@ function createSnapshotReadSession(
         'Current-finalized snapshot exceeded its fixed scan budget',
       ));
     }
-    const operation = transportSession.read(calls, deployedTargets);
+    const operation = transportSession.read(calls);
     const clearInFlight = () => {
       if (inFlight === operation) inFlight = undefined;
     };

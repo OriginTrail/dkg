@@ -5,10 +5,14 @@ import {
   CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
-import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
 import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
 
 const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
+
+interface StrictFinalizedEvmCallParamsInputV1 {
+  readonly to: EvmAddressV1;
+  readonly data: string;
+}
 
 /** Canonical eth_getCode parameters for every strict finalized read surface. */
 export function createStrictFinalizedEvmCodeParamsV1(
@@ -42,7 +46,7 @@ export function assertStrictFinalizedEvmCodeResultV1(
 
 /** Canonical eth_call object and pinned block reference for strict reads. */
 export function createStrictFinalizedEvmCallParamsV1(
-  call: StrictCurrentFinalizedEvmReadCallV1,
+  call: StrictFinalizedEvmCallParamsInputV1,
   blockReference: unknown,
 ): readonly unknown[] {
   return Object.freeze([
