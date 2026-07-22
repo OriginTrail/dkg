@@ -11,7 +11,7 @@ import {
   readStrictCurrentFinalizedEvmRevertDataV1,
   type StrictCurrentFinalizedEvmReadResultV1,
   type StrictCurrentFinalizedEvmReadV1,
-} from './strict-current-finalized-evm-rpc.js';
+} from './strict-current-finalized-evm-transport.js';
 
 // getContextGraph has nine fixed words plus a chain-capped 256-address array:
 // its maximal canonical ABI result is 8,512 bytes, below this domain ceiling.

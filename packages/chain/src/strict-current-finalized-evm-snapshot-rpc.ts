@@ -19,27 +19,28 @@ import {
   type StrictCurrentFinalizedEvmSnapshotScopeV1,
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from './current-finalized-evm-snapshot.js';
-import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
+import {
+  snapshotCurrentFinalizedEvmSnapshotCallsV1,
+  snapshotCurrentFinalizedEvmSnapshotRequestV1,
+} from './current-finalized-evm-read-validation.js';
 import {
   assertStrictFinalizedAnchorStableV1,
   cancelled,
   createDeadlineScope,
+  createStrictFinalizedEndpointRunnerV1,
   executeStrictFinalizedAnchorPolicyV1,
-  isTerminalAttemptFailure,
   parseChainId,
   parseFinalizedAnchor,
   postJsonRpc,
   resourceLimited,
   settleParallelBatch,
-  snapshotSnapshotCalls,
-  snapshotSnapshotRequest,
   timedOut,
   unavailable,
   type CurrentFinalizedEvmBlockReferenceProfileV1,
   type DeadlineScope,
   type FinalizedAnchorV1,
-} from './strict-current-finalized-evm-rpc.js';
+} from './strict-current-finalized-evm-transport.js';
 
 export interface StrictFinalizedSnapshotRpcConfigV1 {
   readonly chainId: ChainIdV1;
@@ -72,97 +73,52 @@ const CANONICAL_LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
 export function createStrictFinalizedSnapshotRpcRuntimeV1(
   config: StrictFinalizedSnapshotRpcConfigV1,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
-  const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
-    CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
-  );
+  const runEndpoint = createStrictFinalizedEndpointRunnerV1({
+    chainId: config.chainId,
+    endpoints: config.endpoints,
+    maxConcurrentPerChain: CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
+    totalDeadlineMs: CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
+    attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+    chainMismatchMessage: (requested) =>
+      `Snapshot adapter is configured for chain ${config.chainId}, not ${requested}`,
+    cancelledBeforeAdmissionMessage:
+      'Current-finalized snapshot was cancelled before transport admission',
+    cancelledMessage: 'Current-finalized snapshot was cancelled',
+    totalDeadlineLabel: 'current-finalized snapshot total deadline',
+    totalDeadlineMessage: (timeoutMs) =>
+      `Current-finalized snapshot deadline exceeded ${timeoutMs}ms`,
+    attemptDeadlineLabel: (attempt) =>
+      `current-finalized snapshot preflight ${attempt}`,
+    attemptDeadlineMessage: (timeoutMs) =>
+      `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
+    attemptFailureMessage: 'Current-finalized snapshot preflight failed closed',
+    noEndpointMessage: 'No configured endpoint completed finalized snapshot preflight',
+    saturatedMessage: (active) =>
+      `Chain ${config.chainId} already has ${active} finalized snapshot in flight`,
+  });
   const withSnapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (
     inputRequest,
     consume,
   ) => {
-    const request = snapshotSnapshotRequest(inputRequest);
+    const request = snapshotCurrentFinalizedEvmSnapshotRequestV1(inputRequest);
     if (typeof consume !== 'function') {
       throw unavailable('Current-finalized snapshot consumer must be callable');
     }
-    if (request.chainId !== config.chainId) {
-      throw new CurrentFinalizedEvmCallErrorV1(
-        'chain-mismatch',
-        `Snapshot adapter is configured for chain ${config.chainId}, not ${request.chainId}`,
-      );
-    }
-    if (request.signal.aborted) {
-      throw cancelled(
-        'Current-finalized snapshot was cancelled before transport admission',
-      );
-    }
-
-    return admission.run(request.chainId, async () => {
-      const totalDeadline = createDeadlineScope(
-        request.signal,
-        CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
-        'current-finalized snapshot total deadline',
-      );
-      let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
-      try {
-        for (let index = 0; index < config.endpoints.length; index += 1) {
-          const attemptDeadline = createDeadlineScope(
-            totalDeadline.signal,
-            CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-            `current-finalized snapshot preflight ${index + 1}`,
-          );
-          let preflight: SnapshotEndpointPreflightV1 | undefined;
-          try {
-            preflight = await preflightSnapshotEndpoint(
-              config,
-              config.endpoints[index]!,
-              attemptDeadline.signal,
-            );
-            if (
-              request.signal.aborted
-              || totalDeadline.timedOut()
-              || attemptDeadline.timedOut()
-            ) {
-              throw classifySnapshotAttemptFailure(
-                new Error('Snapshot preflight completed after its lifecycle ended'),
-                request.signal,
-                totalDeadline,
-                attemptDeadline,
-              );
-            }
-          } catch (cause) {
-            const failure = classifySnapshotAttemptFailure(
-              cause,
-              request.signal,
-              totalDeadline,
-              attemptDeadline,
-            );
-            if (isTerminalAttemptFailure(failure)) throw failure;
-            lastRetryableFailure = failure;
-          } finally {
-            attemptDeadline.close();
-          }
-          if (preflight !== undefined) {
-            // Once trusted local consumer code begins, it is never replayed.
-            return await executePinnedSnapshotScope(
-              config,
-              config.endpoints[index]!,
-              preflight,
-              request,
-              consume,
-              totalDeadline,
-            );
-          }
-        }
-        throw lastRetryableFailure
-          ?? unavailable(
-            'No configured endpoint completed finalized snapshot preflight',
-          );
-      } finally {
-        totalDeadline.close();
-      }
-    }, (active) => new CurrentFinalizedEvmCallErrorV1(
-      'concurrency-saturated',
-      `Chain ${request.chainId} already has ${active} finalized snapshot in flight`,
-    ));
+    return runEndpoint({
+      chainId: request.chainId,
+      signal: request.signal,
+      attempt: (endpoint, _attempt, deadline) =>
+        preflightSnapshotEndpoint(config, endpoint, deadline.signal),
+      // This runs outside the runner's retry catch, so consumer code is never replayed.
+      accept: (endpoint, preflight, totalDeadline) => executePinnedSnapshotScope(
+        config,
+        endpoint,
+        preflight,
+        request,
+        consume,
+        totalDeadline,
+      ),
+    });
   };
   return Object.freeze(withSnapshot);
 }
@@ -371,7 +327,7 @@ function createSnapshotReadSession(
     }
     let calls: readonly StrictCurrentFinalizedEvmReadCallV1[];
     try {
-      calls = snapshotSnapshotCalls(inputCalls);
+      calls = snapshotCurrentFinalizedEvmSnapshotCallsV1(inputCalls);
     } catch (cause) {
       return handledRejectedRead(cause);
     }
@@ -475,27 +431,4 @@ async function executeSnapshotBatch(
   });
   for (const target of batch.verifiedTargets) deployedTargets.add(target);
   return batch.returnData;
-}
-
-function classifySnapshotAttemptFailure(
-  cause: unknown,
-  callerSignal: AbortSignal,
-  totalDeadline: DeadlineScope,
-  attemptDeadline: DeadlineScope,
-): CurrentFinalizedEvmCallErrorV1 {
-  if (callerSignal.aborted) {
-    return cancelled('Current-finalized snapshot was cancelled');
-  }
-  if (totalDeadline.timedOut()) {
-    return timedOut(
-      `Current-finalized snapshot deadline exceeded ${CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1}ms`,
-    );
-  }
-  if (attemptDeadline.timedOut()) {
-    return timedOut(
-      `Current-finalized snapshot preflight exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
-    );
-  }
-  if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
-  return unavailable('Current-finalized snapshot preflight failed closed', cause);
 }

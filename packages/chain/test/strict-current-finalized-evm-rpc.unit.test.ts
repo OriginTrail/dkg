@@ -32,11 +32,13 @@ import {
 import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
+  type StrictCurrentFinalizedEvmRpcConfigV1,
+} from '../src/strict-current-finalized-evm-rpc.js';
+import {
   executeStrictFinalizedAnchorPolicyV1,
   parseFinalizedAnchor,
   readStrictCurrentFinalizedEvmRevertDataV1,
-  type StrictCurrentFinalizedEvmRpcConfigV1,
-} from '../src/strict-current-finalized-evm-rpc.js';
+} from '../src/strict-current-finalized-evm-transport.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,

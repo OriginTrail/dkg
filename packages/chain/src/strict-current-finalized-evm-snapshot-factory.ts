@@ -1,8 +1,6 @@
 import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
-import {
-  snapshotConfig,
-  type StrictCurrentFinalizedEvmRpcConfigV1,
-} from './strict-current-finalized-evm-rpc.js';
+import type { StrictCurrentFinalizedEvmRpcConfigV1 } from './strict-current-finalized-evm-rpc.js';
+import { snapshotConfig } from './strict-current-finalized-evm-transport.js';
 import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-finalized-evm-snapshot-rpc.js';
 
 /**
