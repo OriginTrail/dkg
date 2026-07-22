@@ -50,27 +50,16 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
     expect(await store.countQuads(GRAPH)).toBe(2);
   });
 
-  it('re-asserts a co-located subject idempotently when it rides along in the insert set', async () => {
-    const store = new OxigraphStore();
-    await store.insert([
-      quad(SUBJECT_A, 'urn:test:status', '"accepted"'),
-      quad(SUBJECT_B, 'urn:test:kind', '"request"'),
-    ]);
-
-    // Mirrors writeJob: DELETE only SUBJECT_A, but INSERT the full set (the
-    // immutable request subject B rides along) — B must not duplicate.
-    await store.update(
+  it('rejects a co-located subject in the insert set — it is a STRICT single-subject primitive', () => {
+    // The delete scope and the insert scope must be the same single subject, so
+    // the helper name never diverges from behaviour. A caller needing to write
+    // another subject must do it as a separate write.
+    expect(() =>
       buildAtomicSubjectReplaceUpdate(GRAPH, SUBJECT_A, [
         quad(SUBJECT_A, 'urn:test:status', '"claimed"'),
         quad(SUBJECT_B, 'urn:test:kind', '"request"'),
       ]),
-    );
-
-    const b = await store.query(
-      `SELECT ?o WHERE { GRAPH <${GRAPH}> { <${SUBJECT_B}> <urn:test:kind> ?o } }`,
-    );
-    expect(b.type === 'bindings' ? b.bindings : []).toEqual([{ o: '"request"' }]);
-    expect(await store.countQuads(GRAPH)).toBe(2);
+    ).toThrow(/must target subject/);
   });
 
   it('round-trips a JSON-payload literal bearing quotes, backslashes and newlines', async () => {
@@ -114,7 +103,7 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
       buildAtomicSubjectReplaceUpdate(GRAPH, SUBJECT_A, [
         { subject: SUBJECT_A, predicate: 'urn:test:status', object: '"x"', graph: 'urn:test:other' },
       ]),
-    ).toThrow(/targets "urn:test:other"/);
+    ).toThrow(/must target subject .* in graph/);
   });
 
   it('returns a bare DELETE when the insert set is empty', () => {

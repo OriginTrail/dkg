@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  CHANGELOG_GRAPH,
   createTripleStore,
   tryReplaceSubjectAtomically,
   type Quad,
@@ -30,6 +31,15 @@ const REQ = 'urn:dkg:publisher:lift-request:job-1';
 
 function quad(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: GRAPH };
+}
+
+/** Stable snapshot of the reserved changelog plane, to prove a mutation recorded a marker. */
+async function changelogSnapshot(store: TripleStore): Promise<string> {
+  const result = await store.query(
+    `SELECT ?s ?p ?o WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+  );
+  if (result.type !== 'bindings') return '';
+  return result.bindings.map((b) => `${b['s']} ${b['p']} ${b['o']}`).join('\n');
 }
 
 describe('#1863 replaceSubject through the agent store wrapper', () => {
@@ -62,24 +72,25 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       // The direct regression: the wrapper forwards the optional capability.
       expect(typeof agentStore.replaceSubject).toBe('function');
 
+      // Seed the job subject + a co-located request subject (separate subject).
       await agentStore.insert([
         quad(JOB, 'urn:dkg:publisher:status', '"accepted"'),
         quad(JOB, 'urn:dkg:publisher:retry', '"0"'),
         quad(REQ, 'urn:dkg:publisher:kind', '"request"'),
       ]);
       const invalidationsBefore = invalidations;
+      const changelogBefore = await changelogSnapshot(agentStore);
 
-      // Exactly what persistJobRecord runs with this.store = agentStore. If the
-      // wrapper dropped replaceSubject this returns false and the publisher would
-      // silently fall back — the prod no-op #1919 exists to prevent.
+      // Exactly what persistJobRecord runs with this.store = agentStore. STRICT
+      // single-subject payload (JOB only). If the wrapper dropped replaceSubject
+      // this returns false → the publisher silently falls back (the prod no-op).
       const replaced = await tryReplaceSubjectAtomically(agentStore, GRAPH, JOB, [
         quad(JOB, 'urn:dkg:publisher:status', '"validated"'),
-        quad(REQ, 'urn:dkg:publisher:kind', '"request"'),
       ]);
       expect(replaced).toBe(true);
 
-      // The replace was atomic: JOB's stale retry row is gone, status is new, and
-      // the co-located REQ subject is untouched (not duplicated).
+      // Atomic: JOB's stale retry row is gone, status is new, and the co-located
+      // REQ subject is untouched (never in the replace scope; not duplicated).
       const jobRows = await agentStore.query(
         `SELECT ?p ?o WHERE { GRAPH <${GRAPH}> { <${JOB}> ?p ?o } } ORDER BY ?p`,
       );
@@ -88,10 +99,24 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       ]);
       expect(await agentStore.countQuads(GRAPH)).toBe(2);
 
-      // The wrapper's listGraphs-cache invalidation + projection-dirty hooks fire
-      // on replaceSubject, just like replaceGraph / update.
+      // Each decorator's side effect fires through the full production stack:
+      // - agent wrapper: listGraphs-cache invalidation + projection-dirty hooks.
       expect(invalidations).toBeGreaterThan(invalidationsBefore);
       expect(projectionDirty).toBeGreaterThan(0);
+      // - ChangelogStore: the mutation was recorded (changelog plane changed).
+      expect(await changelogSnapshot(agentStore)).not.toBe(changelogBefore);
+      // - GraphSetIndexStore: enumeration includes the non-empty control-plane graph.
+      expect(await agentStore.listGraphs()).toContain(GRAPH);
+
+      // GraphSetIndexStore enumeration also DROPS a graph when replaceSubject
+      // empties it (remove-last-row → disappears without a rebuild scan).
+      const removable = 'urn:dkg:publisher:control-plane-removable';
+      await agentStore.insert([
+        { subject: 'urn:s:only', predicate: 'urn:p:v', object: '"v"', graph: removable },
+      ]);
+      expect(await agentStore.listGraphs()).toContain(removable);
+      expect(await tryReplaceSubjectAtomically(agentStore, removable, 'urn:s:only', [])).toBe(true);
+      expect(await agentStore.listGraphs()).not.toContain(removable);
     } finally {
       await agentStore.close();
     }

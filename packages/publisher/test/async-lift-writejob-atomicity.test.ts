@@ -8,7 +8,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import { DEFAULT_CONTROL_GRAPH_URI } from '../src/async-lift-control-plane.js';
+import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, requestSubject } from '../src/async-lift-control-plane.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
 
 // #1863 — writeJob persists a job transition via the atomic
@@ -173,5 +173,58 @@ describe('#1863 async-lift writeJob atomicity', () => {
     // The capability was attempted (and refused), then the fallback ran.
     expect(replaceSubjectCalls).toBeGreaterThan(0);
     expect(jobGraphDeletes).toBeGreaterThan(0);
+  });
+
+  it('at creation, the request row is present before the job subject becomes observable', async () => {
+    // #1863 ordering invariant: persistJobRecord inserts the request rows BEFORE
+    // the atomic job-subject replace, so a lock-free reader at creation never sees
+    // a job referencing an absent request (dangling requestRef). Gate the creation
+    // replaceSubject and observe the store at the moment the job is about to become
+    // observable: the request must already be present, the job subject must not.
+    const inner = new OxigraphStore();
+    let armed = false;
+    let reachedGate!: () => void;
+    const reached = new Promise<void>((resolve) => { reachedGate = resolve; });
+    let releaseGate!: () => void;
+    const released = new Promise<void>((resolve) => { releaseGate = resolve; });
+
+    const store = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === 'replaceSubject') {
+          return async (graphUri: string, subject: string, quads: unknown, options?: unknown) => {
+            if (armed) { armed = false; reachedGate(); await released; }
+            return (target as unknown as {
+              replaceSubject: (g: string, s: string, q: unknown, o?: unknown) => Promise<void>;
+            }).replaceSubject(graphUri, subject, quads, options);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as TripleStore;
+
+    const publisher = makePublisher(store);
+    armed = true;
+    const creation = publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await reached; // parked at the creation replaceSubject, AFTER the request insert
+
+    // Request present; job subject not yet observable.
+    const reqRows = await inner.query(
+      `SELECT ?p WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${requestSubject('job-1')}> ?p ?o } }`,
+    );
+    expect(reqRows.type === 'bindings' ? reqRows.bindings.length : 0).toBeGreaterThan(0);
+    const jobBefore = await inner.query(
+      `SELECT ?p WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject('job-1')}> ?p ?o } }`,
+    );
+    expect(jobBefore.type === 'bindings' ? jobBefore.bindings.length : -1).toBe(0);
+
+    releaseGate();
+    await creation;
+
+    // After creation both are present.
+    const jobAfter = await inner.query(
+      `SELECT ?p WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject('job-1')}> ?p ?o } }`,
+    );
+    expect(jobAfter.type === 'bindings' ? jobAfter.bindings.length : 0).toBeGreaterThan(0);
   });
 });

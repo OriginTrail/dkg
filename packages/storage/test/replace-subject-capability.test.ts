@@ -42,10 +42,10 @@ describe('#1863 tryReplaceSubjectAtomically capability', () => {
       quad(REQ, 'urn:dkg:publisher:kind', '"request"'),
     ]);
 
+    // Strict single-subject payload (JOB only). The co-located REQ subject was
+    // seeded separately and must be left untouched by the replace.
     const ok = await tryReplaceSubjectAtomically(store, GRAPH, JOB, [
       quad(JOB, 'urn:dkg:publisher:status', '"validated"'),
-      // The immutable request subject rides along and re-asserts idempotently.
-      quad(REQ, 'urn:dkg:publisher:kind', '"request"'),
     ]);
 
     expect(ok).toBe(true);
@@ -56,7 +56,7 @@ describe('#1863 tryReplaceSubjectAtomically capability', () => {
     expect(jobRows.type === 'bindings' ? jobRows.bindings : []).toEqual([
       { p: 'urn:dkg:publisher:status', o: '"validated"' },
     ]);
-    // REQ untouched and not duplicated.
+    // REQ untouched (never in the replace scope) and not duplicated.
     expect(await store.countQuads(GRAPH)).toBe(2);
   });
 
@@ -109,7 +109,6 @@ describe('#1863 tryReplaceSubjectAtomically capability', () => {
       const ok = await tryReplaceSubjectAtomically(store, GRAPH, JOB, [
         quad(JOB, 'urn:dkg:publisher:status', '"validated"'),
         quad(JOB, 'urn:dkg:publisher:refersTo', `<${CHANGELOG_GRAPH}>`),
-        quad(REQ, 'urn:dkg:publisher:kind', '"request"'),
       ]);
       expect(ok).toBe(true);
 

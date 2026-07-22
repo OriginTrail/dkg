@@ -134,13 +134,16 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
  * miss). A failed/malformed INSERT DATA aborts the whole request, so the DELETE
  * rolls back too; no staging graph is needed because there is no MOVE.
  *
- * Only `subject`'s rows are cleared. `insertQuads` MAY carry additional
- * co-located subjects (e.g. an immutable request record re-asserted alongside a
- * mutable job record): those are inserted idempotently without being cleared
- * first, so re-asserting byte-identical rows is a no-op union. All quads must
- * target `graphUri` and be blank-node free. Object terms are validated/escaped
- * through the same `formatObject` path as `buildAtomicGraphReplaceUpdate`, so
- * callers pass already-serialized RDF terms rather than hand-escaping literals.
+ * This is a STRICT single-subject primitive: every quad in `insertQuads` must
+ * target `graphUri` AND carry `subject` as its subject (enforced via
+ * `assertSubjectReplacementPayload`, shared with `replaceGraphAndSubject`). A
+ * caller that also needs to write co-located rows for another subject (e.g. an
+ * immutable request record) must do that as its own separate write — the delete
+ * scope and the insert scope are the same single subject, so the name never
+ * diverges from the behaviour. Quads must be blank-node free; object terms are
+ * validated/escaped through the same `formatObject` path as
+ * `buildAtomicGraphReplaceUpdate`, so callers pass already-serialized RDF terms
+ * rather than hand-escaping literals.
  */
 export function buildAtomicSubjectReplaceUpdate(
   graphUri: string,
@@ -149,7 +152,7 @@ export function buildAtomicSubjectReplaceUpdate(
 ): string {
   const target = assertSafeIri(graphUri);
   const safeSubject = assertSafeIri(subject);
-  assertReplacementPayload(graphUri, insertQuads);
+  assertSubjectReplacementPayload(graphUri, subject, insertQuads);
   const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
   if (insertQuads.length === 0) return del;
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;

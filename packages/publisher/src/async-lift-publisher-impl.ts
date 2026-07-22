@@ -1100,26 +1100,46 @@ export class TripleStoreAsyncLiftPublisher
    * externalization, graph-set-index and changelog bookkeeping, and — crucially —
    * the reserved-plane guard applies to the TARGET GRAPH structurally instead of
    * scanning a serialized SPARQL string (a raw update would false-reject a job
-   * whose quads merely reference a reserved IRI). A store that cannot guarantee
-   * one commit boundary (no `replaceSubject`, or a non-transactional SPARQL
-   * endpoint that refuses it) returns `false`, and we take the BOUNDED pre-#1863
-   * delete-then-insert fallback: it still has the transient window, but
+   * whose quads merely reference a reserved IRI). `replaceSubject` is a STRICT
+   * single-subject primitive (it rejects co-located subjects), so the two
+   * subjects `serializeJob` emits — the mutable job subject and the immutable
+   * request subject — are persisted separately:
+   *
+   *   1. INSERT the request rows FIRST (idempotent — the request is immutable,
+   *      so this is a no-op re-assert on every transition after creation, and the
+   *      defensive re-assert legacy/partial re-persist relies on).
+   *   2. THEN atomically replace the job subject.
+   *
+   * The ordering is load-bearing: the request must be present before the job
+   * subject becomes observable, or a lock-free reader at CREATION could see a job
+   * referencing an absent request (dangling requestRef). The job-replace must
+   * never land first. A store that cannot guarantee one commit boundary (no
+   * `replaceSubject`, or a non-transactional SPARQL endpoint that refuses it)
+   * takes the BOUNDED pre-#1863 delete-then-insert fallback (job subject only —
+   * the request stays present): it still has the transient job window, but
    * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
    * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
    * `recordDurableBroadcastBeforeSend`, not here.
    */
   private async persistJobRecord(job: LiftJob): Promise<void> {
-    const quads = serializeJob(job, this.graphUri);
+    const jobRef = jobSubject(job.jobId);
+    const requestRef = requestSubject(job.jobId);
+    const allQuads = serializeJob(job, this.graphUri);
+    const requestQuads = allQuads.filter((quad) => quad.subject === requestRef);
+    const jobQuads = allQuads.filter((quad) => quad.subject === jobRef);
+    // (1) Request present BEFORE the job subject is observable — ordering matters.
+    await this.store.insert(requestQuads);
+    // (2) Atomically replace the mutable job subject.
     const replaced = await tryReplaceSubjectAtomically(
       this.store,
       this.graphUri,
-      jobSubject(job.jobId),
-      quads,
+      jobRef,
+      jobQuads,
       { source: 'publisher.asyncLift.writeJob' },
     );
     if (replaced) return;
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(quads);
+    await this.store.deleteByPattern({ subject: jobRef, graph: this.graphUri });
+    await this.store.insert(jobQuads);
   }
 
   /**
