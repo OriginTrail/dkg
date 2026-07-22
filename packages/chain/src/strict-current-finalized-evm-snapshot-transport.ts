@@ -17,7 +17,10 @@ import {
   CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
   type StrictCurrentFinalizedEvmSnapshotRequestV1,
 } from './current-finalized-evm-snapshot.js';
-import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
+import {
+  executeStrictFinalizedEvmBatchV1,
+  type StrictFinalizedEvmBatchExecutorResultV1,
+} from './strict-current-finalized-evm-batch-executor.js';
 import {
   cancelled,
   timedOut,
@@ -30,6 +33,7 @@ import {
   executeStrictFinalizedAnchorPolicyV1,
   settleStrictFinalizedParallelBatchV1,
   type StrictFinalizedEndpointRunnerMessagesV1,
+  unwrapStrictFinalizedParallelBatchFailureV1,
 } from './strict-current-finalized-evm-lifecycle.js';
 import {
   parseStrictFinalizedAnchorV1,
@@ -344,17 +348,22 @@ async function executeSnapshotBatch(
     settle: (operations) => settleStrictFinalizedParallelBatchV1(operations, totalDeadline),
   });
 
-  const batch = await executeStrictFinalizedAnchorPolicyV1({
-    blockReferenceProfile: config.blockReferenceProfile,
-    anchor,
-    executeAtReference: executeCallsAt,
-    readPostAnchor: async () => parseStrictFinalizedAnchorV1(
-      await rpc('eth_getBlockByNumber', Object.freeze([anchor.blockNumberQuantity, false])),
-      'post-snapshot numbered header',
-    ),
-    anchorMismatchMessage:
-      'Pinned snapshot hash sandwich did not preserve the resolved finalized anchor',
-  });
+  let batch: Readonly<StrictFinalizedEvmBatchExecutorResultV1>;
+  try {
+    batch = await executeStrictFinalizedAnchorPolicyV1({
+      blockReferenceProfile: config.blockReferenceProfile,
+      anchor,
+      executeAtReference: executeCallsAt,
+      readPostAnchor: async () => parseStrictFinalizedAnchorV1(
+        await rpc('eth_getBlockByNumber', Object.freeze([anchor.blockNumberQuantity, false])),
+        'post-snapshot numbered header',
+      ),
+      anchorMismatchMessage:
+        'Pinned snapshot hash sandwich did not preserve the resolved finalized anchor',
+    });
+  } catch (cause) {
+    throw unwrapStrictFinalizedParallelBatchFailureV1(cause);
+  }
   for (const target of batch.verifiedTargets) deployedTargets.add(target);
   return batch.returnData;
 }

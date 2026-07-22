@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   type ChainIdV1,
@@ -6,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
 } from '../src/current-finalized-evm-read-profile.js';
@@ -13,6 +14,7 @@ import {
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_DECLARED_RETURN_BYTES_V1,
+  CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
   createCurrentFinalizedEvmSnapshotBudgetV1,
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from '../src/current-finalized-evm-snapshot.js';
@@ -30,6 +32,7 @@ import {
 const CHAIN_ID = '20430' as ChainIdV1;
 const CHAIN_QUANTITY = '0x4fce';
 const TO = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
+const OTHER_TO = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const PREFLIGHT_PROBE_TO = '0x0000000000000000000000000000000000000000';
 const BLOCK_HASH = `0x${'22'.repeat(32)}`;
 const OTHER_BLOCK_HASH = `0x${'23'.repeat(32)}`;
@@ -603,8 +606,94 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     await started.promise;
     controller.abort(new Error('caller stopped'));
 
+    await expect(Promise.race([
+      operation.then(() => 'settled', () => 'settled'),
+      delay(500).then(() => 'still-pending'),
+    ])).resolves.toBe('settled');
     await expect(operation).rejects.toMatchObject({ code: 'rpc-unavailable' });
     await closed.promise;
+  });
+
+  it('aborts an in-flight RPC when the total snapshot deadline expires', async () => {
+    const consumerEntered = deferred<void>();
+    const started = deferred<void>();
+    const closed = deferred<void>();
+    const baseHandler = successfulHandler();
+    const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
+      if (rpcCall.method !== 'eth_call' || isPreflightProbe(rpcCall)) {
+        return baseHandler(rpcCall, response, rawRequest);
+      }
+      response.on('close', () => closed.resolve(undefined));
+      started.resolve(undefined);
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const operation = withSnapshot(
+        request(),
+        async (session) => {
+          consumerEntered.resolve(undefined);
+          await delay(CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1 - 1_000);
+          return session.read([call(FIRST_DATA)]);
+        },
+      );
+      const outcome = operation.then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+      await consumerEntered.promise;
+      await vi.advanceTimersByTimeAsync(
+        CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1 - 1_000,
+      );
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(await outcome).toMatchObject({ code: 'rpc-timeout' });
+      await closed.promise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves a terminal batch failure that precedes a sibling RPC deadline', async () => {
+    const siblingStarted = deferred<void>();
+    const siblingClosed = deferred<void>();
+    const baseHandler = successfulHandler();
+    const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
+      if (rpcCall.method !== 'eth_getCode' || rpcCall.params[0] === PREFLIGHT_PROBE_TO) {
+        return baseHandler(rpcCall, response, rawRequest);
+      }
+      if (rpcCall.params[0] === TO) {
+        sendJsonRpcResult(response, rpcCall, '0x');
+        return;
+      }
+      response.on('close', () => siblingClosed.resolve(undefined));
+      siblingStarted.resolve(undefined);
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const operation = withSnapshot(request(), async (session) => session.read([
+        call(FIRST_DATA),
+        Object.freeze({ to: OTHER_TO, data: SECOND_DATA, maxReturnBytes: 2 }),
+      ]));
+      const rejection = expect(operation).rejects.toMatchObject({ code: 'no-code' });
+      await siblingStarted.promise;
+      await vi.advanceTimersByTimeAsync(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1);
+
+      await rejection;
+      await siblingClosed.promise;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects forged block selectors, hostile batches, and non-callable consumers pre-I/O', async () => {
@@ -755,4 +844,8 @@ function deferred<T>(): {
     resolve = fulfill;
   });
   return { promise, resolve };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

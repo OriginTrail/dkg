@@ -5,9 +5,7 @@ import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 import {
   cancelled,
   isAnchorDependentResourceLimit,
-  isPreDeadlineTerminalFailure,
   isTerminalAttemptFailure,
-  markPreDeadlineTerminalFailure,
   timedOut,
   unavailable,
 } from './strict-current-finalized-evm-errors.js';
@@ -137,11 +135,20 @@ export function createStrictFinalizedEndpointRunnerV1(
             attemptDeadline.close();
           }
           if (accepted) {
-            return input.accept(
-              profile.endpoints[index]!,
-              attemptResult,
-              totalDeadline,
-            );
+            try {
+              return await input.accept(
+                profile.endpoints[index]!,
+                attemptResult,
+                totalDeadline,
+              );
+            } catch (cause) {
+              rethrowEndpointAcceptanceFailureV1(
+                cause,
+                input.signal,
+                totalDeadline,
+                profile,
+              );
+            }
           }
         }
         throw classifyEndpointAttemptFailureV1(
@@ -162,6 +169,22 @@ export function createStrictFinalizedEndpointRunnerV1(
   return Object.freeze(run);
 }
 
+function rethrowEndpointAcceptanceFailureV1(
+  cause: unknown,
+  callerSignal: AbortSignal,
+  totalDeadline: DeadlineScopeV1,
+  profile: StrictFinalizedEndpointRunnerProfileV1,
+): never {
+  if (callerSignal.aborted) throw cancelled(profile.messages.cancelled);
+  if (cause instanceof StrictFinalizedPreDeadlineTerminalBatchFailureV1) {
+    throw cause.failure;
+  }
+  if (totalDeadline.timedOut()) {
+    throw timedOut(profile.messages.totalDeadline(profile.totalDeadlineMs));
+  }
+  throw cause;
+}
+
 function classifyEndpointAttemptFailureV1(
   cause: unknown,
   callerSignal: AbortSignal,
@@ -171,11 +194,8 @@ function classifyEndpointAttemptFailureV1(
 ): CurrentFinalizedEvmCallErrorV1 {
   const { messages } = profile;
   if (callerSignal.aborted) return cancelled(messages.cancelled);
-  if (
-    cause instanceof CurrentFinalizedEvmCallErrorV1
-    && isPreDeadlineTerminalFailure(cause)
-  ) {
-    return cause;
+  if (cause instanceof StrictFinalizedPreDeadlineTerminalBatchFailureV1) {
+    return cause.failure;
   }
   if (totalDeadline.timedOut()) {
     return timedOut(messages.totalDeadline(profile.totalDeadlineMs));
@@ -185,6 +205,22 @@ function classifyEndpointAttemptFailureV1(
   }
   if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
   return unavailable(messages.attemptFailure, cause);
+}
+
+/**
+ * Explicit package-internal batch outcome. A terminal failure observed before
+ * the batch deadline must retain priority while slower siblings drain, without
+ * mutating or side-registering the public error object.
+ */
+class StrictFinalizedPreDeadlineTerminalBatchFailureV1 extends Error {
+  public constructor(
+    public readonly failure: CurrentFinalizedEvmCallErrorV1,
+  ) {
+    super('A terminal finalized-read batch operation failed before its deadline', {
+      cause: failure,
+    });
+    this.name = 'StrictFinalizedPreDeadlineTerminalBatchFailureV1';
+  }
 }
 
 /** Inputs for the shared EIP-1898 or authenticated-numbered-anchor policy. */
@@ -209,23 +245,36 @@ export async function executeStrictFinalizedAnchorPolicyV1<T>(
 
   let provisionalExecution:
     | Readonly<{ readonly ok: true; readonly value: T }>
-    | Readonly<{ readonly ok: false; readonly failure: CurrentFinalizedEvmCallErrorV1 }>;
+    | Readonly<{
+      readonly ok: false;
+      readonly failure:
+        | CurrentFinalizedEvmCallErrorV1
+        | StrictFinalizedPreDeadlineTerminalBatchFailureV1;
+    }>;
   try {
     provisionalExecution = Object.freeze({
       ok: true,
       value: await options.executeAtReference(options.anchor.blockNumberQuantity),
     });
   } catch (cause) {
+    const classifiedCause = cause instanceof StrictFinalizedPreDeadlineTerminalBatchFailureV1
+      ? cause.failure
+      : cause;
     if (
-      cause instanceof CurrentFinalizedEvmCallErrorV1
+      classifiedCause instanceof CurrentFinalizedEvmCallErrorV1
       && (
-        cause.code === 'no-code'
-        || cause.code === 'revert'
-        || cause.code === 'malformed-return'
-        || isAnchorDependentResourceLimit(cause)
+        classifiedCause.code === 'no-code'
+        || classifiedCause.code === 'revert'
+        || classifiedCause.code === 'malformed-return'
+        || isAnchorDependentResourceLimit(classifiedCause)
       )
     ) {
-      provisionalExecution = Object.freeze({ ok: false, failure: cause });
+      provisionalExecution = Object.freeze({
+        ok: false,
+        failure: cause instanceof StrictFinalizedPreDeadlineTerminalBatchFailureV1
+          ? cause
+          : classifiedCause,
+      });
     } else {
       throw cause;
     }
@@ -237,6 +286,15 @@ export async function executeStrictFinalizedAnchorPolicyV1<T>(
   );
   if (!provisionalExecution.ok) throw provisionalExecution.failure;
   return provisionalExecution.value;
+}
+
+/** Package-internal boundary helper for scoped snapshot reads. */
+export function unwrapStrictFinalizedParallelBatchFailureV1(
+  cause: unknown,
+): unknown {
+  return cause instanceof StrictFinalizedPreDeadlineTerminalBatchFailureV1
+    ? cause.failure
+    : cause;
 }
 
 export async function assertStrictFinalizedAnchorStableV1(
@@ -278,14 +336,15 @@ export async function settleStrictFinalizedParallelBatchV1<T>(
         && !attemptDeadline.timedOut()
       ) {
         firstPreDeadlineTerminalFailure = cause;
-        markPreDeadlineTerminalFailure(cause);
       }
       throw cause;
     }
   });
   const settled = await Promise.allSettled(tracked);
   if (firstPreDeadlineTerminalFailure !== undefined) {
-    throw firstPreDeadlineTerminalFailure;
+    throw new StrictFinalizedPreDeadlineTerminalBatchFailureV1(
+      firstPreDeadlineTerminalFailure,
+    );
   }
   if (hasFailure) throw firstFailure;
   const values: T[] = [];

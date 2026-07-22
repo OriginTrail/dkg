@@ -2,7 +2,6 @@ import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-pro
 
 const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
 const AUTHENTICATED_REVERT_DATA_V1 = new WeakMap<CurrentFinalizedEvmCallErrorV1, string>();
-const PRE_DEADLINE_TERMINAL_FAILURES_V1 = new WeakSet<CurrentFinalizedEvmCallErrorV1>();
 
 /** Package-internal evidence available only for errors minted by this transport. */
 export function readStrictCurrentFinalizedEvmRevertDataV1(error: unknown): string | undefined {
@@ -57,18 +56,6 @@ export function isTerminalAttemptFailure(error: CurrentFinalizedEvmCallErrorV1):
     || error.code === 'revert'
     || error.code === 'no-code'
     || error.code === 'malformed-return';
-}
-
-export function markPreDeadlineTerminalFailure(
-  error: CurrentFinalizedEvmCallErrorV1,
-): void {
-  PRE_DEADLINE_TERMINAL_FAILURES_V1.add(error);
-}
-
-export function isPreDeadlineTerminalFailure(
-  error: CurrentFinalizedEvmCallErrorV1,
-): boolean {
-  return PRE_DEADLINE_TERMINAL_FAILURES_V1.has(error);
 }
 
 export function cancelled(message: string): CurrentFinalizedEvmCallErrorV1 {
