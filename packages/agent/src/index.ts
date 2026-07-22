@@ -38,7 +38,6 @@ export * from './rfc64/catalog-row-authorship.js';
 export * from './rfc64/finalized-vm-composer-v1.js';
 export {
   RecoverableAuthorAttestationErrorV1,
-  assertRecoverableAuthorAttestationV1,
 } from './rfc64/recoverable-author-attestation-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/public-catalog-transport-v1.js';
@@ -48,6 +47,24 @@ export * from './rfc64/public-catalog-service-v1.js';
 export * from './rfc64/public-catalog-issuer-delegation-v1.js';
 export * from './rfc64/public-catalog-native-transport-v1.js';
 export * from './rfc64/public-catalog-native-receiver-v1.js';
+
+/** Preserve the pre-refactor package-root receiver error contract. */
+export function assertRecoverableAuthorAttestationV1(
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): void {
+  try {
+    assertRecoverableAuthorAttestationCapabilityV1(binding);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
+    throw new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-transfer',
+      cause instanceof Error
+        ? cause.message
+        : 'author attestation does not recover the catalog author',
+      { cause },
+    );
+  }
+}
 export {
   computeRfc64AppliedInventoryDigestV1,
   type ComputeRfc64AppliedInventoryDigestInputV1,
@@ -314,3 +331,7 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+import type { VerifiedCatalogSealBindingSnapshotV1 } from '@origintrail-official/dkg-core';
+
+import { assertRecoverableAuthorAttestationV1 as assertRecoverableAuthorAttestationCapabilityV1 } from './rfc64/recoverable-author-attestation-v1.js';
+import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './rfc64/public-catalog-native-receiver-v1.js';

@@ -20,12 +20,13 @@ import {
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
 import {
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
   type StrictCurrentFinalizedEvmSnapshotScopeV1,
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from './current-finalized-evm-snapshot.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
 import {
-  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   snapshotFinalizedVmChainInventoryV1,
   type FinalizedVmChainCandidateV1,
   type FinalizedVmChainInventoryV1,
@@ -56,6 +57,16 @@ const REQUEST_KEYS = Object.freeze(['contextGraphId', 'signal'] as const);
 const UINT256_RETURN_BYTES = 32;
 const UPDATE_CONTEXT_RETURN_BYTES = 7 * 32;
 const FIXED_SCAN_CALLS = 2;
+const ID_CALLS_PER_ROW = 1;
+const ASSERTION_CALLS_PER_ROW = 4;
+const TOTAL_CALLS_PER_ROW = ID_CALLS_PER_ROW + ASSERTION_CALLS_PER_ROW;
+
+/** Exact row ceiling owned by pinned-snapshot scanner orchestration. */
+export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = deriveFinalizedVmScanMaxRows(
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+);
 
 export interface FinalizedVmChainSessionScannerConfigV1 {
   readonly networkId: NetworkIdV1;
@@ -249,17 +260,21 @@ async function scanPinnedInventory(
   const highestFinalizedOrdinal = rowCount === 0n
     ? null
     : (rowCount - 1n).toString(10) as DecimalU64V1;
-  return snapshotFinalizedVmChainInventoryV1({
-    networkId: config.networkId,
-    contextGraphId,
-    chainId: config.chainId,
-    contractAddress: config.contextGraphStorageAddress,
-    knowledgeAssetStorageAddress: config.knowledgeAssetStorageAddress,
-    finalizedBlockNumber: session.blockNumber,
-    finalizedBlockHash: session.blockHash,
-    highestFinalizedOrdinal,
-    rows: Object.freeze(rows),
-  });
+  try {
+    return snapshotFinalizedVmChainInventoryV1({
+      networkId: config.networkId,
+      contextGraphId,
+      chainId: config.chainId,
+      contractAddress: config.contextGraphStorageAddress,
+      knowledgeAssetStorageAddress: config.knowledgeAssetStorageAddress,
+      finalizedBlockNumber: session.blockNumber,
+      finalizedBlockHash: session.blockHash,
+      highestFinalizedOrdinal,
+      rows: Object.freeze(rows),
+    }, { maxRows: FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 });
+  } catch (cause) {
+    throw malformedReturn('Finalized VM scanner produced a non-canonical inventory', cause);
+  }
 }
 
 async function readFinalizedVmAssertions(
@@ -510,4 +525,43 @@ function malformedReturn(
     message,
     cause === undefined ? {} : { cause },
   );
+}
+
+function deriveFinalizedVmScanMaxRows(
+  maxCalls: number,
+  maxBatches: number,
+  maxCallsPerBatch: number,
+): number {
+  const fits = (rows: number): boolean => (
+    FIXED_SCAN_CALLS + (rows * TOTAL_CALLS_PER_ROW) <= maxCalls
+    && 1
+      + Math.ceil((rows * ID_CALLS_PER_ROW) / maxCallsPerBatch)
+      + Math.ceil((rows * ASSERTION_CALLS_PER_ROW) / maxCallsPerBatch)
+      <= maxBatches
+  );
+  let lower = 0;
+  let upper = Math.max(0, Math.floor((maxCalls - FIXED_SCAN_CALLS) / TOTAL_CALLS_PER_ROW));
+  while (lower < upper) {
+    const candidate = Math.ceil((lower + upper) / 2);
+    if (fits(candidate)) lower = candidate;
+    else upper = candidate - 1;
+  }
+  return lower;
+}
+
+if (
+  1
+    + Math.ceil(
+      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ID_CALLS_PER_ROW)
+      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+    )
+    + Math.ceil(
+      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ASSERTION_CALLS_PER_ROW)
+      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+    )
+  > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1
+  || FIXED_SCAN_CALLS + (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * TOTAL_CALLS_PER_ROW)
+    > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1
+) {
+  throw new Error('Finalized VM scan row bound exceeds a pinned-snapshot resource budget');
 }

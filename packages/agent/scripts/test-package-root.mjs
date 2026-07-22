@@ -27,6 +27,19 @@ if (
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
+try {
+  root.assertRecoverableAuthorAttestationV1({
+    seal: { authorSchemeVersion: 'unsupported' },
+  });
+  throw new Error('package-root author attestation guard accepted an unsupported scheme');
+} catch (error) {
+  if (
+    !(error instanceof root.Rfc64PublicCatalogNativeReceiverErrorV1)
+    || error.code !== 'catalog-native-receiver-transfer'
+  ) {
+    throw new Error('package-root author attestation guard changed its receiver error contract');
+  }
+}
 const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',

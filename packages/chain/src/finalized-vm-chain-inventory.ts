@@ -17,14 +17,6 @@ import {
 import { ethers } from 'ethers';
 
 import {
-  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
-  CurrentFinalizedEvmCallErrorV1,
-} from './current-finalized-evm-read-profile.js';
-import {
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
-} from './current-finalized-evm-snapshot.js';
-import {
   assertCanonicalNonzeroEvmAddress,
   snapshotDenseDataArray,
   snapshotExactDataRecord,
@@ -56,18 +48,6 @@ const CANDIDATE_KEYS = Object.freeze([
   'publisherAddress',
   'ual',
 ] as const);
-const FIXED_SCAN_CALLS = 2;
-const ID_CALLS_PER_ROW = 1;
-const ASSERTION_CALLS_PER_ROW = 4;
-const TOTAL_CALLS_PER_ROW = ID_CALLS_PER_ROW + ASSERTION_CALLS_PER_ROW;
-
-/** Exact dense-row ceiling shared by scanner orchestration and the model boundary. */
-export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = deriveFinalizedVmScanMaxRows(
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
-  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
-);
-
 /** Chain-authenticated assertion identity before subgraph placement is joined. */
 export interface FinalizedVmChainCandidateV1 {
   readonly chainId: ChainIdV1;
@@ -97,6 +77,18 @@ export interface FinalizedVmChainInventoryV1 {
   readonly rows: readonly Readonly<FinalizedVmChainCandidateV1>[];
 }
 
+export interface FinalizedVmChainInventorySnapshotOptionsV1 {
+  /** Optional caller-owned resource ceiling; not part of the inventory model. */
+  readonly maxRows?: number;
+}
+
+export class FinalizedVmChainInventoryValidationErrorV1 extends TypeError {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = 'FinalizedVmChainInventoryValidationErrorV1';
+  }
+}
+
 interface FinalizedVmChainInventoryHeaderSnapshotV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: DecimalU256V1;
@@ -111,8 +103,18 @@ interface FinalizedVmChainInventoryHeaderSnapshotV1 {
 /** Canonical chain-owned boundary for scanner output consumed across packages. */
 export function snapshotFinalizedVmChainInventoryV1(
   input: unknown,
+  options: FinalizedVmChainInventorySnapshotOptionsV1 = {},
 ): Readonly<FinalizedVmChainInventoryV1> {
   try {
+    if (
+      options.maxRows !== undefined
+      && (
+        !Number.isSafeInteger(options.maxRows)
+        || options.maxRows < 0
+      )
+    ) {
+      throw new Error('maxRows must be a nonnegative safe integer');
+    }
     const record = snapshotExactDataRecord(input, INVENTORY_KEYS);
     assertNetworkIdV1(record.networkId, 'finalized VM inventory networkId');
     assertCanonicalDecimalU256(record.contextGraphId, 'finalized VM inventory contextGraphId');
@@ -147,7 +149,7 @@ export function snapshotFinalizedVmChainInventoryV1(
     } satisfies FinalizedVmChainInventoryHeaderSnapshotV1);
     const untrustedRows = snapshotDenseDataArray(record.rows, {
       label: 'finalized VM inventory rows',
-      maxLength: FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+      ...(options.maxRows === undefined ? {} : { maxLength: options.maxRows }),
     });
     const rows = Object.freeze(untrustedRows.map((row, index) =>
       snapshotInventoryCandidate(row, index, header)));
@@ -157,8 +159,11 @@ export function snapshotFinalizedVmChainInventoryV1(
     }
     return Object.freeze({ ...header, rows } satisfies FinalizedVmChainInventoryV1);
   } catch (cause) {
-    if (cause instanceof CurrentFinalizedEvmCallErrorV1) throw cause;
-    throw malformedReturn('Finalized VM chain inventory is not canonical', cause);
+    if (cause instanceof FinalizedVmChainInventoryValidationErrorV1) throw cause;
+    throw new FinalizedVmChainInventoryValidationErrorV1(
+      'Finalized VM chain inventory is not canonical',
+      { cause },
+    );
   }
 }
 
@@ -235,56 +240,4 @@ function assertNullableInventoryAddress(
   label: string,
 ): asserts value is EvmAddressV1 | null {
   if (value !== null) assertCanonicalNonzeroEvmAddress(value, label);
-}
-
-function deriveFinalizedVmScanMaxRows(
-  maxCalls: number,
-  maxBatches: number,
-  maxCallsPerBatch: number,
-): number {
-  const fits = (rows: number): boolean => (
-    FIXED_SCAN_CALLS + (rows * TOTAL_CALLS_PER_ROW) <= maxCalls
-    && 1
-      + Math.ceil((rows * ID_CALLS_PER_ROW) / maxCallsPerBatch)
-      + Math.ceil((rows * ASSERTION_CALLS_PER_ROW) / maxCallsPerBatch)
-      <= maxBatches
-  );
-  let lower = 0;
-  let upper = Math.max(0, Math.floor((maxCalls - FIXED_SCAN_CALLS) / TOTAL_CALLS_PER_ROW));
-  while (lower < upper) {
-    const candidate = Math.ceil((lower + upper) / 2);
-    if (fits(candidate)) lower = candidate;
-    else upper = candidate - 1;
-  }
-  return lower;
-}
-
-function malformedReturn(
-  message: string,
-  cause?: unknown,
-): CurrentFinalizedEvmCallErrorV1 {
-  return new CurrentFinalizedEvmCallErrorV1(
-    'malformed-return',
-    message,
-    cause === undefined ? {} : { cause },
-  );
-}
-
-// Keep the derived public bound tied to the two snapshot budgets if either is
-// tightened later; this assertion is module-load local and performs no I/O.
-if (
-  1
-    + Math.ceil(
-      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ID_CALLS_PER_ROW)
-      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
-    )
-    + Math.ceil(
-      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ASSERTION_CALLS_PER_ROW)
-      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
-    )
-  > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1
-  || FIXED_SCAN_CALLS + (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * TOTAL_CALLS_PER_ROW)
-    > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1
-) {
-  throw new Error('Finalized VM scan row bound exceeds a pinned-snapshot resource budget');
 }
