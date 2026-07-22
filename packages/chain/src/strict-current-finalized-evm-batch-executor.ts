@@ -6,9 +6,9 @@ import {
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
+import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
 
 const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
-const CANONICAL_LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
 
 export interface StrictFinalizedEvmBatchExecutorInputV1 {
   readonly calls: readonly StrictCurrentFinalizedEvmReadCallV1[];
@@ -60,7 +60,7 @@ export async function executeStrictFinalizedEvmBatchV1(
 }
 
 function assertDeployedCode(input: unknown): void {
-  if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
+  if (!isCanonicalLowerHexBytesV1(input)) {
     throw new CurrentFinalizedEvmCallErrorV1(
       'rpc-unavailable',
       'eth_getCode returned malformed code bytes',
@@ -75,7 +75,7 @@ function assertDeployedCode(input: unknown): void {
 }
 
 function parseContractReturn(input: unknown, maxBytes: number): string {
-  if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
+  if (!isCanonicalLowerHexBytesV1(input)) {
     throw new CurrentFinalizedEvmCallErrorV1(
       'malformed-return',
       'Finalized eth_call returned malformed bytes',

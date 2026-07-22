@@ -30,6 +30,7 @@ import {
 import { snapshotCurrentFinalizedEvmReadRequestV1 } from './current-finalized-evm-read-validation.js';
 import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
+import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
 
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
@@ -76,22 +77,15 @@ export interface DeadlineScope {
   readonly close: () => void;
 }
 
+export type StrictFinalizedEndpointRunnerModeV1 = 'read' | 'snapshot-preflight';
+
 export interface StrictFinalizedEndpointRunnerProfileV1 {
+  readonly mode: StrictFinalizedEndpointRunnerModeV1;
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
   readonly maxConcurrentPerChain: number;
   readonly totalDeadlineMs: number;
   readonly attemptTimeoutMs: number;
-  readonly chainMismatchMessage: (requestedChainId: ChainIdV1) => string;
-  readonly cancelledBeforeAdmissionMessage: string;
-  readonly cancelledMessage: string;
-  readonly totalDeadlineLabel: string;
-  readonly totalDeadlineMessage: (timeoutMs: number) => string;
-  readonly attemptDeadlineLabel: (attempt: number) => string;
-  readonly attemptDeadlineMessage: (timeoutMs: number) => string;
-  readonly attemptFailureMessage: string;
-  readonly noEndpointMessage: string;
-  readonly saturatedMessage: (active: number) => string;
 }
 
 export interface StrictFinalizedEndpointRunInputV1<AttemptResult, Result> {
@@ -124,7 +118,6 @@ interface RpcErrorEnvelopeV1 {
 
 const CONFIG_REQUIRED_KEYS = Object.freeze(['chainId', 'endpoints'] as const);
 const CONFIG_OPTIONAL_KEYS = Object.freeze(['blockReferenceProfile'] as const);
-const CANONICAL_LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
 const CANONICAL_LOWER_QUANTITY = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
 const CANONICAL_DIGEST_32 = /^0x[0-9a-f]{64}$/;
 const MAX_U64 = 18_446_744_073_709_551_615n;
@@ -192,26 +185,12 @@ export function createStrictCurrentFinalizedEvmReadV1(
 ): StrictCurrentFinalizedEvmReadV1 {
   const config = snapshotConfig(input);
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
+    mode: 'read',
     chainId: config.chainId,
     endpoints: config.endpoints,
     maxConcurrentPerChain: CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
     totalDeadlineMs: CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-    chainMismatchMessage: (requested) =>
-      `Adapter is configured for chain ${config.chainId}, not ${requested}`,
-    cancelledBeforeAdmissionMessage:
-      'Current-finalized EVM call was cancelled before transport admission',
-    cancelledMessage: 'Current-finalized EVM call was cancelled',
-    totalDeadlineLabel: 'current-finalized total deadline',
-    totalDeadlineMessage: (timeoutMs) =>
-      `Current-finalized total deadline exceeded ${timeoutMs}ms`,
-    attemptDeadlineLabel: (attempt) => `current-finalized endpoint attempt ${attempt}`,
-    attemptDeadlineMessage: (timeoutMs) =>
-      `Current-finalized endpoint attempt exceeded ${timeoutMs}ms`,
-    attemptFailureMessage: 'Current-finalized endpoint attempt failed closed',
-    noEndpointMessage: 'No configured current-finalized endpoint succeeded',
-    saturatedMessage: (active) =>
-      `Chain ${config.chainId} already has ${active} finalized reads in flight`,
   });
 
   const read: StrictCurrentFinalizedEvmReadV1 = async (inputRequest) => {
@@ -237,6 +216,7 @@ export function createStrictCurrentFinalizedEvmReadV1(
 export function createStrictFinalizedEndpointRunnerV1(
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): StrictFinalizedEndpointRunnerV1 {
+  const messages = endpointRunnerMessages(profile.mode, profile.chainId);
   const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
     profile.maxConcurrentPerChain,
   );
@@ -246,17 +226,17 @@ export function createStrictFinalizedEndpointRunnerV1(
     if (input.chainId !== profile.chainId) {
       throw new CurrentFinalizedEvmCallErrorV1(
         'chain-mismatch',
-        profile.chainMismatchMessage(input.chainId),
+        messages.chainMismatch(input.chainId),
       );
     }
     if (input.signal.aborted) {
-      throw cancelled(profile.cancelledBeforeAdmissionMessage);
+      throw cancelled(messages.cancelledBeforeAdmission);
     }
     return admission.run(input.chainId, async () => {
       const totalDeadline = createDeadlineScope(
         input.signal,
         profile.totalDeadlineMs,
-        profile.totalDeadlineLabel,
+        messages.totalDeadlineLabel,
       );
       let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
       try {
@@ -265,7 +245,7 @@ export function createStrictFinalizedEndpointRunnerV1(
           const attemptDeadline = createDeadlineScope(
             totalDeadline.signal,
             profile.attemptTimeoutMs,
-            profile.attemptDeadlineLabel(attemptNumber),
+            messages.attemptDeadlineLabel(attemptNumber),
           );
           let attemptResult!: AttemptResult;
           let accepted = false;
@@ -311,7 +291,7 @@ export function createStrictFinalizedEndpointRunnerV1(
           }
         }
         throw classifyEndpointAttemptFailureV1(
-          lastRetryableFailure ?? unavailable(profile.noEndpointMessage),
+          lastRetryableFailure ?? unavailable(messages.noEndpoint),
           input.signal,
           totalDeadline,
           null,
@@ -322,7 +302,7 @@ export function createStrictFinalizedEndpointRunnerV1(
       }
     }, (active) => new CurrentFinalizedEvmCallErrorV1(
       'concurrency-saturated',
-      profile.saturatedMessage(active),
+      messages.saturated(active),
     ));
   };
   return Object.freeze(run);
@@ -335,7 +315,8 @@ function classifyEndpointAttemptFailureV1(
   attemptDeadline: DeadlineScope | null,
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): CurrentFinalizedEvmCallErrorV1 {
-  if (callerSignal.aborted) return cancelled(profile.cancelledMessage);
+  const messages = endpointRunnerMessages(profile.mode, profile.chainId);
+  if (callerSignal.aborted) return cancelled(messages.cancelled);
   if (
     cause instanceof CurrentFinalizedEvmCallErrorV1
     && PRE_DEADLINE_TERMINAL_FAILURES_V1.has(cause)
@@ -343,13 +324,69 @@ function classifyEndpointAttemptFailureV1(
     return cause;
   }
   if (totalDeadline.timedOut()) {
-    return timedOut(profile.totalDeadlineMessage(profile.totalDeadlineMs));
+    return timedOut(messages.totalDeadline(profile.totalDeadlineMs));
   }
   if (attemptDeadline?.timedOut()) {
-    return timedOut(profile.attemptDeadlineMessage(profile.attemptTimeoutMs));
+    return timedOut(messages.attemptDeadline(profile.attemptTimeoutMs));
   }
   if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
-  return unavailable(profile.attemptFailureMessage, cause);
+  return unavailable(messages.attemptFailure, cause);
+}
+
+interface StrictFinalizedEndpointRunnerMessagesV1 {
+  readonly chainMismatch: (requested: ChainIdV1) => string;
+  readonly cancelledBeforeAdmission: string;
+  readonly cancelled: string;
+  readonly totalDeadlineLabel: string;
+  readonly totalDeadline: (timeoutMs: number) => string;
+  readonly attemptDeadlineLabel: (attempt: number) => string;
+  readonly attemptDeadline: (timeoutMs: number) => string;
+  readonly attemptFailure: string;
+  readonly noEndpoint: string;
+  readonly saturated: (active: number) => string;
+}
+
+function endpointRunnerMessages(
+  mode: StrictFinalizedEndpointRunnerModeV1,
+  chainId: ChainIdV1,
+): StrictFinalizedEndpointRunnerMessagesV1 {
+  if (mode === 'snapshot-preflight') {
+    return Object.freeze({
+      chainMismatch: (requested: ChainIdV1) =>
+        `Snapshot adapter is configured for chain ${chainId}, not ${requested}`,
+      cancelledBeforeAdmission:
+        'Current-finalized snapshot was cancelled before transport admission',
+      cancelled: 'Current-finalized snapshot was cancelled',
+      totalDeadlineLabel: 'current-finalized snapshot total deadline',
+      totalDeadline: (timeoutMs: number) =>
+        `Current-finalized snapshot deadline exceeded ${timeoutMs}ms`,
+      attemptDeadlineLabel: (attempt: number) =>
+        `current-finalized snapshot preflight ${attempt}`,
+      attemptDeadline: (timeoutMs: number) =>
+        `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
+      attemptFailure: 'Current-finalized snapshot preflight failed closed',
+      noEndpoint: 'No configured endpoint completed finalized snapshot preflight',
+      saturated: (active: number) =>
+        `Chain ${chainId} already has ${active} finalized snapshot in flight`,
+    });
+  }
+  return Object.freeze({
+    chainMismatch: (requested: ChainIdV1) =>
+      `Adapter is configured for chain ${chainId}, not ${requested}`,
+    cancelledBeforeAdmission:
+      'Current-finalized EVM call was cancelled before transport admission',
+    cancelled: 'Current-finalized EVM call was cancelled',
+    totalDeadlineLabel: 'current-finalized total deadline',
+    totalDeadline: (timeoutMs: number) =>
+      `Current-finalized total deadline exceeded ${timeoutMs}ms`,
+    attemptDeadlineLabel: (attempt: number) => `current-finalized endpoint attempt ${attempt}`,
+    attemptDeadline: (timeoutMs: number) =>
+      `Current-finalized endpoint attempt exceeded ${timeoutMs}ms`,
+    attemptFailure: 'Current-finalized endpoint attempt failed closed',
+    noEndpoint: 'No configured current-finalized endpoint succeeded',
+    saturated: (active: number) =>
+      `Chain ${chainId} already has ${active} finalized reads in flight`,
+  });
 }
 
 async function executeEndpointAttempt(
@@ -698,8 +735,7 @@ function parseRpcError(input: unknown): RpcErrorEnvelopeV1 | undefined {
   ) {
     return undefined;
   }
-  const data = typeof input.data === 'string'
-    && CANONICAL_LOWER_HEX_BYTES.test(input.data)
+  const data = isCanonicalLowerHexBytesV1(input.data)
     ? input.data
     : undefined;
   return Object.freeze({

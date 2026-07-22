@@ -9,6 +9,7 @@ export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
+  readStrictCurrentFinalizedEvmRevertDataV1,
   type CurrentFinalizedEvmBlockReferenceProfileV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from './strict-current-finalized-evm-transport.js';

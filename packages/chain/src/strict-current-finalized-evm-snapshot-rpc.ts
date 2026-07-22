@@ -1,7 +1,4 @@
-import type {
-  ChainIdV1,
-  EvmAddressV1,
-} from '@origintrail-official/dkg-core';
+import type { EvmAddressV1 } from '@origintrail-official/dkg-core';
 
 import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
@@ -37,16 +34,11 @@ import {
   settleParallelBatch,
   timedOut,
   unavailable,
-  type CurrentFinalizedEvmBlockReferenceProfileV1,
   type DeadlineScope,
   type FinalizedAnchorV1,
+  type StrictRpcConfigSnapshotV1,
 } from './strict-current-finalized-evm-transport.js';
-
-export interface StrictFinalizedSnapshotRpcConfigV1 {
-  readonly chainId: ChainIdV1;
-  readonly endpoints: readonly string[];
-  readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
-}
+import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
 
 interface SnapshotEndpointPreflightV1 {
   readonly anchor: FinalizedAnchorV1;
@@ -67,34 +59,17 @@ const SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1 =
   '0x0000000000000000000000000000000000000000' as EvmAddressV1;
 const SNAPSHOT_PREFLIGHT_PROBE_GAS_QUANTITY_V1 =
   `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
-const CANONICAL_LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
-
 /** Package-internal runtime for a scoped, pinned finalized snapshot. */
 export function createStrictFinalizedSnapshotRpcRuntimeV1(
-  config: StrictFinalizedSnapshotRpcConfigV1,
+  config: StrictRpcConfigSnapshotV1,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
+    mode: 'snapshot-preflight',
     chainId: config.chainId,
     endpoints: config.endpoints,
     maxConcurrentPerChain: CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
     totalDeadlineMs: CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-    chainMismatchMessage: (requested) =>
-      `Snapshot adapter is configured for chain ${config.chainId}, not ${requested}`,
-    cancelledBeforeAdmissionMessage:
-      'Current-finalized snapshot was cancelled before transport admission',
-    cancelledMessage: 'Current-finalized snapshot was cancelled',
-    totalDeadlineLabel: 'current-finalized snapshot total deadline',
-    totalDeadlineMessage: (timeoutMs) =>
-      `Current-finalized snapshot deadline exceeded ${timeoutMs}ms`,
-    attemptDeadlineLabel: (attempt) =>
-      `current-finalized snapshot preflight ${attempt}`,
-    attemptDeadlineMessage: (timeoutMs) =>
-      `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
-    attemptFailureMessage: 'Current-finalized snapshot preflight failed closed',
-    noEndpointMessage: 'No configured endpoint completed finalized snapshot preflight',
-    saturatedMessage: (active) =>
-      `Chain ${config.chainId} already has ${active} finalized snapshot in flight`,
   });
   const withSnapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (
     inputRequest,
@@ -124,7 +99,7 @@ export function createStrictFinalizedSnapshotRpcRuntimeV1(
 }
 
 async function preflightSnapshotEndpoint(
-  config: StrictFinalizedSnapshotRpcConfigV1,
+  config: StrictRpcConfigSnapshotV1,
   endpoint: string,
   signal: AbortSignal,
 ): Promise<SnapshotEndpointPreflightV1> {
@@ -182,7 +157,7 @@ async function probeSnapshotReadProfile(
       SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
       blockReference,
     ]));
-    if (typeof code !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(code)) {
+    if (!isCanonicalLowerHexBytesV1(code)) {
       throw new Error('eth_getCode capability probe returned malformed bytes');
     }
     const callResult = await rpc('eth_call', Object.freeze([
@@ -194,7 +169,7 @@ async function probeSnapshotReadProfile(
       }),
       blockReference,
     ]));
-    if (typeof callResult !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(callResult)) {
+    if (!isCanonicalLowerHexBytesV1(callResult)) {
       throw new Error('eth_call capability probe returned malformed bytes');
     }
   } catch (cause) {
@@ -206,7 +181,7 @@ async function probeSnapshotReadProfile(
 }
 
 async function executePinnedSnapshotScope<T>(
-  config: StrictFinalizedSnapshotRpcConfigV1,
+  config: StrictRpcConfigSnapshotV1,
   endpoint: string,
   preflight: SnapshotEndpointPreflightV1,
   request: StrictCurrentFinalizedEvmSnapshotRequestV1,
@@ -304,7 +279,7 @@ function createPinnedSnapshotRpcClient(
 }
 
 function createSnapshotReadSession(
-  config: StrictFinalizedSnapshotRpcConfigV1,
+  config: StrictRpcConfigSnapshotV1,
   anchor: FinalizedAnchorV1,
   rpc: SnapshotRpcV1,
   totalDeadline: DeadlineScope,
@@ -403,7 +378,7 @@ function handledRejectedRead(cause: unknown): Promise<never> {
 }
 
 async function executeSnapshotBatch(
-  config: StrictFinalizedSnapshotRpcConfigV1,
+  config: StrictRpcConfigSnapshotV1,
   anchor: FinalizedAnchorV1,
   calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
   deployedTargets: Set<EvmAddressV1>,
