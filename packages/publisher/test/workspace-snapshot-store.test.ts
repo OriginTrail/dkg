@@ -1,11 +1,14 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, rename, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { describe, expect, it, vi } from 'vitest';
 import {
   FileWorkspacePublicSnapshotStore,
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
+  workspacePublicQuadsDigest,
 } from '../src/workspace-snapshot-store.js';
 
 const DIGEST = `sha256:${'b'.repeat(64)}`;
@@ -54,6 +57,181 @@ function decodeOffsets(blob: Uint8Array): number[] {
   return Array.from({ length: blob.byteLength / 8 }, (_, index) =>
     Number(buffer.readBigUInt64BE(index * 8)));
 }
+
+// Compatibility oracle copied from the production implementation before the
+// serialization optimization. Keep this test-only copy unchanged.
+function oldWorkspacePublicQuadsDigest(quads: readonly Quad[]): string {
+  const canonical = quads
+    .map((quad) => [quad.subject, quad.predicate, quad.object, ''])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify(canonical));
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function digestQuad(
+  subject: string,
+  predicate = 'https://schema.org/value',
+  object = '"value"',
+  graph = 'urn:ignored:graph',
+): Quad {
+  return { subject, predicate, object, graph };
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+function shuffled<T>(values: readonly T[], seed: number): T[] {
+  const random = seededRandom(seed);
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+  return result;
+}
+
+function randomizedQuads(seed: number, count: number): Quad[] {
+  const random = seededRandom(seed);
+  const fragments = [
+    'plain',
+    'café',
+    '東京',
+    '🚀',
+    'quote"',
+    'slash\\',
+    'line\nbreak',
+    '\tcontrol',
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    const fragment = fragments[Math.floor(random() * fragments.length)];
+    const value = Math.floor(random() * 10_000).toString(36);
+    return digestQuad(
+      `urn:random:${seed}:${index}:${fragment}`,
+      `https://example.com/predicate/${fragments[Math.floor(random() * fragments.length)]}`,
+      `"${fragment}:${value}"`,
+      `urn:graph:${Math.floor(random() * 5)}`,
+    );
+  });
+}
+
+describe('workspacePublicQuadsDigest compatibility', () => {
+  it.each([
+    { name: 'empty', quads: [] },
+    { name: 'single row', quads: [digestQuad('urn:single')] },
+    {
+      name: 'duplicate rows',
+      quads: [
+        digestQuad('urn:duplicate'),
+        digestQuad('urn:other'),
+        digestQuad('urn:duplicate'),
+        digestQuad('urn:duplicate'),
+      ],
+    },
+    {
+      name: 'Unicode and emoji',
+      quads: [
+        digestQuad(
+          'https://例え.テスト/咖啡/🚀',
+          'https://schema.org/naïve',
+          '"Zażółć gęślą jaźń — こんにちは 👩🏽‍🚀"@pl',
+        ),
+        digestQuad('urn:unicode:é', 'urn:predicate:ß', '"Привет мир"'),
+      ],
+    },
+    {
+      name: 'JSON-escaped characters',
+      quads: [
+        digestQuad(
+          'urn:escaped:"quote"\\backslash\nline',
+          'urn:predicate:\tcontrol',
+          '"backspace:\b form-feed:\f newline:\n carriage-return:\r tab:\t slash:\\ quote:\" null:\u0000 unit-separator:\u001f"',
+        ),
+      ],
+    },
+    {
+      name: 'long values',
+      quads: [
+        digestQuad(
+          `urn:long:${'subject'.repeat(10_000)}`,
+          `urn:predicate:${'path/'.repeat(10_000)}`,
+          `"${'long value 🚀 '.repeat(10_000)}"`,
+        ),
+      ],
+    },
+  ])('matches the old digest for $name input', ({ quads }) => {
+    expect(workspacePublicQuadsDigest(quads)).toBe(oldWorkspacePublicQuadsDigest(quads));
+  });
+
+  it('is identical for differently ordered copies of the same dataset', () => {
+    const quads = randomizedQuads(17, 250);
+    const permutations = [
+      quads,
+      [...quads].reverse(),
+      shuffled(quads, 101),
+      shuffled(quads, 202),
+    ];
+    const expected = oldWorkspacePublicQuadsDigest(quads);
+
+    for (const permutation of permutations) {
+      expect(oldWorkspacePublicQuadsDigest(permutation)).toBe(expected);
+      expect(workspacePublicQuadsDigest(permutation)).toBe(expected);
+    }
+  });
+
+  it('matches the old digest for deterministic randomized datasets and permutations', () => {
+    for (let seed = 1; seed <= 20; seed += 1) {
+      const quads = randomizedQuads(seed, 40 + seed * 7);
+      for (let permutation = 0; permutation < 4; permutation += 1) {
+        const input = shuffled(quads, seed * 100 + permutation);
+        expect(workspacePublicQuadsDigest(input)).toBe(oldWorkspacePublicQuadsDigest(input));
+      }
+    }
+  });
+
+  it('matches the old digest for a shuffled 100,000-row dataset', { timeout: 120_000 }, () => {
+    const quads = shuffled(
+      Array.from({ length: 100_000 }, (_, index) => digestQuad(
+        `urn:large:${index.toString().padStart(6, '0')}`,
+        `https://example.com/predicate/${index % 97}`,
+        `"large value ${index} ${'x'.repeat(index % 41)}"`,
+        `urn:graph:${index % 11}`,
+      )),
+      100_000,
+    );
+
+    expect(workspacePublicQuadsDigest(quads)).toBe(oldWorkspacePublicQuadsDigest(quads));
+  });
+
+  it('does not mutate the input array or rows', () => {
+    const quads = Object.freeze([
+      Object.freeze(digestQuad('urn:z')),
+      Object.freeze(digestQuad('urn:a')),
+      Object.freeze(digestQuad('urn:m')),
+    ]);
+    const before = structuredClone(quads);
+
+    workspacePublicQuadsDigest(quads);
+
+    expect(quads).toEqual(before);
+  });
+
+  it('serializes each canonical row exactly once', () => {
+    const quads = randomizedQuads(99, 64);
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    workspacePublicQuadsDigest(quads);
+    const serializationCount = stringify.mock.calls.length;
+    stringify.mockRestore();
+
+    expect(serializationCount).toBe(quads.length);
+  });
+});
 
 describe('FileWorkspacePublicSnapshotStore paging', () => {
   it('persists one binary page index for a new snapshot without creating an idx file', async () => {
