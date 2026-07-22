@@ -21,7 +21,7 @@
  * `swmHostModeSubscribed` / `swmHostModeHandlers` maps holding exactly
  * one entry keyed by the wire hash.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -94,6 +94,17 @@ interface AgentInternals {
   enqueueHostModePersistence(contextGraphId: string, subscribe: boolean): void;
   awaitHostModePersistence(contextGraphId: string): Promise<void>;
   hostModePersistenceStoreKey(rawCgId: string): string;
+  contextGraphWireId(contextGraphId: string): string;
+  bindOnChainContextGraphIdFromNameHash(
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null;
+  setContextGraphSubscription(
+    contextGraphId: string,
+    next: { subscribed: boolean; synced: boolean },
+    options?: { persist?: boolean },
+  ): void;
 }
 
 async function installHostModeStore(core: DKGAgent, dataDir: string): Promise<SwmHostModeStore> {
@@ -228,6 +239,31 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     expect(internals.swmHostModeHandlers.size).toBe(1);
     expect(internals.swmHostModeSubscribed.has(wireHash)).toBe(true);
     expect(internals.swmHostModeHandlers.has(wireHash)).toBe(true);
+  });
+
+  it('uses one indexed wire-id helper for event binding and store-free registry lookup', async () => {
+    const { core } = await makeCore();
+    const internals = core as unknown as AgentInternals;
+    const cleartext = 'canon-cg-event-binding';
+    const wireHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+    internals.setContextGraphSubscription(
+      cleartext,
+      { subscribed: true, synced: false },
+      { persist: false },
+    );
+
+    expect(internals.contextGraphWireId(cleartext)).toBe(wireHash);
+    expect(internals.contextGraphWireId(wireHash.toUpperCase().replace('0X', '0x'))).toBe(wireHash);
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      wireHash,
+      '14',
+      { persist: false },
+    )).toBe(cleartext);
+
+    const storeQuery = vi.spyOn(core.store, 'query');
+    await expect(core.getContextGraphOnChainId(cleartext)).resolves.toBe('14');
+    await expect(core.getContextGraphOnChainId(wireHash)).resolves.toBe('14');
+    expect(storeQuery).not.toHaveBeenCalled();
   });
 
   it('exactly one gossip handler is wired on the underlying topic regardless of subscribe shape', async () => {

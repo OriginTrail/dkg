@@ -1942,7 +1942,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // receiver could know the right graph name yet remain dependent on an
           // ontology triple that durable sync has not materialized.
           if (nameHash) {
-            this.bindContextGraphCreatedNameHashV1(nameHash, contextGraphId);
+            this.bindOnChainContextGraphIdFromNameHash(nameHash, contextGraphId);
           }
 
           // Track the numeric on-chain id for dedup.
@@ -2006,8 +2006,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
             // RPC round-trip per envelope.
-            const hashLower = nameHash.toLowerCase();
-            const localId = this.wireIdToLocalCgId.get(hashLower) ?? hashLower;
+            const hashLower = this.contextGraphWireId(nameHash);
+            const localId = this.localCgIdForWireId(hashLower);
             // Stage a synthetic subscription record for the host-only
             // case: cores hosting CGs they never joined have no
             // cleartext; the hash IS their local id. `recordCgWireId`
@@ -2017,17 +2017,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               this.setContextGraphSubscription(localId, {
                 subscribed: false,
                 synced: false,
-                onChainId: contextGraphId,
-                onChainHash: hashLower,
                 pendingMeta: true,
               }, { persist: false });
-            } else {
-              const next = { ...this.subscribedContextGraphs.get(localId)! };
-              this.bindSubscriptionOnChainId(localId, next, contextGraphId);
-              next.onChainHash = hashLower;
-              this.setContextGraphSubscription(localId, next, { persist: false });
             }
-            this.recordCgWireId(localId, hashLower);
+            this.bindOnChainContextGraphIdFromNameHash(
+              hashLower,
+              contextGraphId,
+              { persist: false },
+            );
 
             // Delegate to the host-mode reconciler — it owns the
             // sharding-table check, swmHostMode flag, and the wire-up
@@ -5964,6 +5961,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     this.subscribedContextGraphs.set(contextGraphId, next);
+    this.indexContextGraphWireId(
+      contextGraphId,
+      next.onChainHash ?? this.contextGraphWireId(contextGraphId),
+    );
     if (!next.subscribed && !next.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
@@ -5985,24 +5986,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     return next;
-  }
-
-  /** Store-free binding used by the ContextGraphCreated event callback. */
-  protected bindContextGraphCreatedNameHashV1(
-    this: DKGAgent,
-    nameHash: string,
-    onChainContextGraphId: string,
-  ): void {
-    const hashLower = nameHash.toLowerCase();
-    for (const [localId, current] of [...this.subscribedContextGraphs]) {
-      const computed = ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
-      if (computed !== hashLower) continue;
-      const next = { ...current };
-      this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
-      next.onChainHash = hashLower;
-      this.setContextGraphSubscription(localId, next);
-      this.recordCgWireId(localId, hashLower);
-    }
   }
 
   markContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string, patch: Partial<ContextGraphSub>): void {

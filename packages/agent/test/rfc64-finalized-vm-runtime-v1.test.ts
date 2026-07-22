@@ -22,6 +22,7 @@ import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-
 import {
   FinalizedVmRuntimeErrorV1,
   createFinalizedVmRuntimeV1,
+  type FinalizedVmMaterializationReceiptV1,
   type FinalizedVmMaterializerV1,
 } from '../src/rfc64/finalized-vm-runtime-v1.js';
 import { createFinalizedVmStoreMaterializerV1 } from '../src/rfc64/finalized-vm-store-materializer-v1.js';
@@ -85,6 +86,32 @@ describe('RFC-64 finalized public VM runtime', () => {
     expect(result.acceptedPolicyDigest).toBe(RFC64_VM_POLICY_DIGEST);
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.receipts)).toBe(true);
+  });
+
+  it('materializes and returns two reversed placements in finalized ordinal order', async () => {
+    const [first, second] = await Promise.all([
+      createRfc64FinalizedVmPlacementFixture({ kaNumber: 1n }),
+      createRfc64FinalizedVmPlacementFixture({ kaNumber: 2n }),
+    ]);
+    const transport = snapshotTransport({ kaNumbers: [1n, 2n] });
+    const materializedOrdinals: string[] = [];
+    const materialize = vi.fn<FinalizedVmMaterializerV1>(async ({ candidate }) => {
+      materializedOrdinals.push(candidate.ordinal);
+      const kaNumber = candidate.ordinal === '0' ? 1n : 2n;
+      return receipt(kaNumber, candidate.ordinal);
+    });
+    const runtime = createFinalizedVmRuntimeV1(runtimeConfig(transport.snapshot, materialize));
+
+    const result = await runtime(request([second, first]));
+
+    expect(materializedOrdinals).toEqual(['0', '1']);
+    expect(materialize).toHaveBeenCalledTimes(2);
+    expect(result.composed.rows.map(({ ordinal }) => ordinal)).toEqual(['0', '1']);
+    expect(result.receipts.map(({ ordinal }) => ordinal)).toEqual(['0', '1']);
+    expect(result.receipts.map(({ kaId }) => kaId)).toEqual([
+      rfc64VmPackKaId(1n),
+      rfc64VmPackKaId(2n),
+    ]);
   });
 
   it('fails closed before store writes on name, policy, or placement mismatch', async () => {
@@ -217,11 +244,16 @@ function runtimeConfig(
 }
 
 function request(
-  placement: Awaited<ReturnType<typeof createRfc64FinalizedVmPlacementFixture>>,
+  placementOrPlacements:
+    | Awaited<ReturnType<typeof createRfc64FinalizedVmPlacementFixture>>
+    | readonly Awaited<ReturnType<typeof createRfc64FinalizedVmPlacementFixture>>[],
   policyOverrides: Partial<ContextGraphPolicyV1> = {},
   sourceOverrides: Partial<Extract<ContextGraphPolicyV1['source'], { kind: 'finalized-chain' }>> = {},
 ) {
   const policy = publicPolicy(policyOverrides, sourceOverrides);
+  const placements = Array.isArray(placementOrPlacements)
+    ? [...placementOrPlacements]
+    : [placementOrPlacements];
   return {
     catalogLane: { contextGraphId: RFC64_VM_CONTEXT_GRAPH_NAME, subGraphName: null },
     onChainContextGraphId: RFC64_VM_ON_CHAIN_CONTEXT_GRAPH_ID,
@@ -230,7 +262,7 @@ function request(
       policyDigest: RFC64_VM_POLICY_DIGEST,
       roster: null,
     } satisfies AcceptedRfc64CatalogAccessSnapshotV1,
-    placements: [placement],
+    placements,
     signal: new AbortController().signal,
   } as const;
 }
@@ -268,13 +300,16 @@ function publicPolicy(
   };
 }
 
-function receipt() {
+function receipt(
+  kaNumber = 1n,
+  ordinal: FinalizedVmMaterializationReceiptV1['ordinal'] = '0',
+): FinalizedVmMaterializationReceiptV1 {
   return {
-    kaId: rfc64VmPackKaId(1n),
-    ordinal: '0',
-    ual: rfc64VmUal(1n),
+    kaId: rfc64VmPackKaId(kaNumber),
+    ordinal,
+    ual: rfc64VmUal(kaNumber),
     status: 'materialized',
-    vmGraphIri: `${rfc64VmUal(1n)}/VerifiableMemory/2`,
+    vmGraphIri: `${rfc64VmUal(kaNumber)}/VerifiableMemory/2`,
     tripleCount: '10',
     postReadDigest: RECEIPT_DIGEST,
   } as const;
@@ -283,7 +318,9 @@ function receipt() {
 function snapshotTransport(options: {
   readonly nameHash?: string;
   readonly assertionRoot?: string;
+  readonly kaNumbers?: readonly bigint[];
 } = {}) {
+  const kaNumbers = options.kaNumbers ?? [1n];
   let open = false;
   let readCount = 0;
   const snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (snapshotRequest, consume) => {
@@ -322,9 +359,16 @@ function snapshotTransport(options: {
       case CG.getFunction('isContextGraphActive')!.selector:
         return CG.encodeFunctionResult('isContextGraphActive', [true]);
       case CG.getFunction('getContextGraphKaCount')!.selector:
-        return CG.encodeFunctionResult('getContextGraphKaCount', [1n]);
-      case CG.getFunction('getContextGraphKaAt')!.selector:
-        return CG.encodeFunctionResult('getContextGraphKaAt', [BigInt(rfc64VmPackKaId(1n))]);
+        return CG.encodeFunctionResult('getContextGraphKaCount', [BigInt(kaNumbers.length)]);
+      case CG.getFunction('getContextGraphKaAt')!.selector: {
+        const [, ordinal] = CG.decodeFunctionData('getContextGraphKaAt', call.data);
+        const kaNumber = kaNumbers[Number(ordinal)];
+        if (kaNumber === undefined) throw new Error(`unexpected finalized VM ordinal ${ordinal}`);
+        return CG.encodeFunctionResult(
+          'getContextGraphKaAt',
+          [BigInt(rfc64VmPackKaId(kaNumber))],
+        );
+      }
       case KA.getFunction('getKnowledgeAssetUpdateContext')!.selector:
         return KA.encodeFunctionResult('getKnowledgeAssetUpdateContext', [2n, 0n, 0n, 0n, 0n, false, 0]);
       case KA.getFunction('getLatestMerkleRoot')!.selector:

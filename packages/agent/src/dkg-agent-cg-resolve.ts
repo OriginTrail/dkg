@@ -1490,9 +1490,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   gossipWireIdFor(this: DKGAgent, localId: string): string {
     const sub = this.subscribedContextGraphs.get(localId);
-    if (sub?.onChainHash) return sub.onChainHash;
-    if (/^0x[0-9a-fA-F]{64}$/.test(localId)) return localId.toLowerCase();
-    return ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
+    if (sub?.onChainHash) return this.contextGraphWireId(sub.onChainHash);
+    return this.contextGraphWireId(localId);
+  }
+
+  /** Canonical cleartext-or-hash Context Graph identity used by every index path. */
+  contextGraphWireId(this: DKGAgent, contextGraphId: string): string {
+    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return contextGraphId.toLowerCase();
+    return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
   }
 
   /**
@@ -1601,6 +1606,39 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
+   * Index one local subscription under the same canonical identity used by
+   * event binding and registry lookup. This is deliberately store-free.
+   */
+  indexContextGraphWireId(
+    this: DKGAgent,
+    localId: string,
+    wireId = this.contextGraphWireId(localId),
+  ): string {
+    const canonicalWireId = this.contextGraphWireId(wireId);
+    this.wireIdToLocalCgId.set(canonicalWireId, localId);
+    return canonicalWireId;
+  }
+
+  /** Bind a name-hash event to its indexed cleartext or hash-only subscription. */
+  bindOnChainContextGraphIdFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    const localId = this.localCgIdForWireId(wireId);
+    const current = this.subscribedContextGraphs.get(localId);
+    if (current === undefined) return null;
+    const next = { ...current };
+    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
+    next.onChainHash = wireId;
+    this.setContextGraphSubscription(localId, next, options);
+    this.recordCgWireId(localId, wireId);
+    return localId;
+  }
+
+  /**
    * Record the curator-committed wire id for a local CG. Keeps the
    * forward (subscribedContextGraphs) and reverse (wireIdToLocalCgId)
    * mappings in lockstep. Idempotent.
@@ -1610,21 +1648,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   recordCgWireId(this: DKGAgent, localId: string, wireId: string | null): void {
     const sub = this.subscribedContextGraphs.get(localId);
-    const lower = wireId ? wireId.toLowerCase() : null;
+    const previous = sub?.onChainHash?.toLowerCase();
+    const lower = wireId ? this.contextGraphWireId(wireId) : null;
     if (sub) {
       sub.onChainHash = lower ?? undefined;
     }
     // Drop any stale reverse entry that pointed at this localId under
     // a different hash (curator rotated the wire id — currently
     // unsupported but cheap to defend against).
-    if (sub?.onChainHash && (!lower || sub.onChainHash !== lower)) {
-      const prev = sub.onChainHash;
-      if (this.wireIdToLocalCgId.get(prev) === localId) {
-        this.wireIdToLocalCgId.delete(prev);
+    if (previous && previous !== lower) {
+      if (this.wireIdToLocalCgId.get(previous) === localId) {
+        this.wireIdToLocalCgId.delete(previous);
       }
     }
+    const derived = this.contextGraphWireId(localId);
+    if (derived !== lower && this.wireIdToLocalCgId.get(derived) === localId) {
+      this.wireIdToLocalCgId.delete(derived);
+    }
     if (lower) {
-      this.wireIdToLocalCgId.set(lower, localId);
+      this.indexContextGraphWireId(localId, lower);
     }
   }
 

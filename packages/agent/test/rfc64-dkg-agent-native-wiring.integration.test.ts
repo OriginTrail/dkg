@@ -684,6 +684,9 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBe(
       ON_CHAIN_CONTEXT_GRAPH_ID,
     );
+    await expect(receiver.getContextGraphOnChainId(nameHash)).resolves.toBe(
+      ON_CHAIN_CONTEXT_GRAPH_ID,
+    );
     expect(storeQuery.mock.calls.some(([query]) => String(query).includes('OnChainId'))).toBe(false);
     storeQuery.mockRestore();
     await connectBothWays(author, receiver);

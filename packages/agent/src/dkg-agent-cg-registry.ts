@@ -123,7 +123,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -425,14 +424,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // the cleartext subscription through the in-memory reverse index before
     // consulting RDF state; this mapping is populated and persisted by the
     // chain-event lifecycle path.
-    const wireId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
-      ? contextGraphId.toLowerCase()
-      : ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
-    const mappedLocalId = this.wireIdToLocalCgId.get(wireId);
-    if (mappedLocalId !== undefined) {
-      const mapped = this.subscribedContextGraphs.get(mappedLocalId)?.onChainId;
-      if (mapped) return mapped;
-    }
+    const mappedLocalId = this.localCgIdForWireId(
+      this.contextGraphWireId(contextGraphId),
+    );
+    const mapped = this.subscribedContextGraphs.get(mappedLocalId)?.onChainId;
+    if (mapped) return mapped;
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;

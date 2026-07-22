@@ -1,6 +1,4 @@
 import { mkdir, open, readFile } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { createInterface } from 'node:readline';
@@ -46,6 +44,12 @@ import {
   GATE2_AGENT_EVENT_PREFIX,
   GATE2_REAL_DKG_AGENT_ADAPTER_ID,
 } from './model.js';
+import {
+  RFC64_GATE2_DEPLOYMENT,
+  parseFinalizedVmHarnessConfigV1,
+  startFinalizedVmHarnessRuntimeV1,
+  type FinalizedVmHarnessRuntimeV1,
+} from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
 
 const role = process.argv[2];
@@ -65,59 +69,10 @@ if (!runtimeBuildManifestDigest || !/^0x[0-9a-f]{64}$/u.test(runtimeBuildManifes
 
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
-const RFC64_GATE2_DEPLOYMENT = Object.freeze({
-  networkId: 'otp:20430',
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
-});
 let agent: DKGAgent | undefined;
-let finalizedVmRpcServer: Server | undefined;
+let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
-
-const FINALIZED_VM_CG = new ethers.Interface([
-  'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
-  'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
-  'function isContextGraphActive(uint256 contextGraphId) view returns (bool)',
-  'function getContextGraphKaCount(uint256 contextGraphId) view returns (uint256)',
-  'function getContextGraphKaAt(uint256 contextGraphId, uint256 ordinal) view returns (uint256)',
-]);
-const FINALIZED_VM_KA = new ethers.Interface([
-  'function getKnowledgeAssetUpdateContext(uint256 id) view returns (uint256 merkleRootsCount, uint256 minted, uint88 byteSize, uint40 endEpoch, uint96 tokenAmount, bool isImmutable, uint32 merkleLeafCount)',
-  'function getLatestMerkleRoot(uint256 id) view returns (bytes32)',
-  'function getLatestMerkleRootAuthor(uint256 id) view returns (address)',
-  'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
-]);
-const FINALIZED_VM_BLOCK_HASH = `0x${'77'.repeat(32)}`;
-const FINALIZED_VM_ZERO_ADDRESS = ethers.ZeroAddress.toLowerCase();
-
-interface FinalizedVmHarnessConfigV1 {
-  readonly assertionRoot: string;
-  readonly assertionVersion: string;
-  readonly authorAddress: string;
-  readonly contextGraphId: string;
-  readonly kaId: string;
-  readonly nameHash: string;
-  readonly onChainContextGraphId: string;
-}
-
-class FinalizedVmHarnessMockChainAdapter extends MockChainAdapter {
-  constructor() {
-    super(RFC64_GATE2_DEPLOYMENT.networkId);
-  }
-
-  override async getEvmChainId(): Promise<bigint> {
-    return BigInt(RFC64_GATE2_DEPLOYMENT.assertedAtChainId);
-  }
-
-  override async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
-    return RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address;
-  }
-
-  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    return RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address;
-  }
-}
 
 interface Command {
   readonly command: string;
@@ -171,7 +126,7 @@ async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
   const finalizedVmConfig = finalizedVmConfigInput === undefined
     ? null
-    : parseFinalizedVmHarnessConfig(finalizedVmConfigInput);
+    : parseFinalizedVmHarnessConfigV1(finalizedVmConfigInput);
   if (finalizedVmConfig !== null && role !== 'receiver') {
     throw new Error('finalized VM harness runtime is receiver-only');
   }
@@ -184,12 +139,8 @@ async function boot(): Promise<void> {
   ) {
     throw new Error('finalized VM harness network chain id differs from its deployment');
   }
-  let finalizedVmRuntime: Readonly<{
-    readonly chainAdapter: FinalizedVmHarnessMockChainAdapter;
-    readonly rpcUrl: string;
-  }> | null = null;
   if (finalizedVmConfig !== null) {
-    finalizedVmRuntime = await startFinalizedVmHarnessRuntime(finalizedVmConfig);
+    finalizedVmRuntime = await startFinalizedVmHarnessRuntimeV1(finalizedVmConfig);
   }
   const networkChainAdapter = finalizedVmRuntime?.chainAdapter
     ?? (networkChainIdInput === undefined ? undefined : new MockChainAdapter(networkChainIdInput));
@@ -208,7 +159,7 @@ async function boot(): Promise<void> {
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: RFC64_GATE2_DEPLOYMENT as never,
     ...(networkChainAdapter === undefined ? {} : { chainAdapter: networkChainAdapter }),
-    ...(finalizedVmRuntime === null ? {} : {
+    ...(finalizedVmRuntime === undefined ? {} : {
       chainConfig: {
         rpcUrl: finalizedVmRuntime.rpcUrl,
         hubAddress: '0x3333333333333333333333333333333333333333',
@@ -1036,7 +987,8 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
   stopping = true;
   try {
     await agent?.stop();
-    await closeFinalizedVmRpcServer();
+    await finalizedVmRuntime?.close();
+    finalizedVmRuntime = undefined;
     if (requestId !== undefined) {
       await emitAndFlush({
         event: 'stopped',
@@ -1049,191 +1001,6 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
     process.exit(1);
   }
-}
-
-function parseFinalizedVmHarnessConfig(input: string): Readonly<FinalizedVmHarnessConfigV1> {
-  if (Buffer.byteLength(input) > 16_384) {
-    throw new TypeError('finalized VM harness config exceeds 16 KiB');
-  }
-  const parsed = plainRecord(JSON.parse(input), 'finalized VM harness config');
-  const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedVm.contextGraphId');
-  assertContextGraphIdV1(contextGraphId);
-  const authorAddress = canonicalEvmAddress(parsed.authorAddress, 'finalizedVm.authorAddress');
-  const assertionRoot = requiredDigest(parsed.assertionRoot, 'finalizedVm.assertionRoot');
-  const assertionVersion = canonicalDecimalWire(
-    parsed.assertionVersion,
-    'finalizedVm.assertionVersion',
-  );
-  if (BigInt(assertionVersion) === 0n) {
-    throw new TypeError('finalized VM assertion version must be non-zero');
-  }
-  const nameHash = requiredDigest(parsed.nameHash, 'finalizedVm.nameHash');
-  const kaId = canonicalDecimalWire(parsed.kaId, 'finalizedVm.kaId');
-  const onChainContextGraphId = canonicalDecimalWire(
-    parsed.onChainContextGraphId,
-    'finalizedVm.onChainContextGraphId',
-  );
-  if (BigInt(onChainContextGraphId) === 0n) {
-    throw new TypeError('finalized VM on-chain context graph id must be non-zero');
-  }
-  return Object.freeze({
-    assertionRoot,
-    assertionVersion,
-    authorAddress,
-    contextGraphId,
-    kaId,
-    nameHash,
-    onChainContextGraphId,
-  });
-}
-
-async function startFinalizedVmHarnessRuntime(
-  config: Readonly<FinalizedVmHarnessConfigV1>,
-): Promise<Readonly<{
-  readonly chainAdapter: FinalizedVmHarnessMockChainAdapter;
-  readonly rpcUrl: string;
-}>> {
-  const chainAdapter = new FinalizedVmHarnessMockChainAdapter();
-  (chainAdapter as unknown as { nextContextGraphId: bigint }).nextContextGraphId =
-    BigInt(config.onChainContextGraphId);
-  const created = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
-    publishPolicy: 1,
-    nameHash: config.nameHash,
-  });
-  if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
-    throw new Error('mock chain created a different numeric context graph id');
-  }
-
-  const server = createServer(async (request, response) => {
-    try {
-      if (request.method !== 'POST') {
-        response.writeHead(405, { 'content-type': 'text/plain' });
-        response.end('method not allowed');
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let byteLength = 0;
-      for await (const chunk of request) {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        byteLength += bytes.byteLength;
-        if (byteLength > 1_000_000) throw new Error('JSON-RPC request exceeds 1 MiB');
-        chunks.push(bytes);
-      }
-      const call = plainRecord(
-        JSON.parse(Buffer.concat(chunks).toString('utf8')),
-        'finalized VM JSON-RPC call',
-      );
-      const method = requiredString(call.method, 'finalized VM JSON-RPC method');
-      const params = plainArray(call.params, 'finalized VM JSON-RPC params');
-      let result: unknown;
-      switch (method) {
-        case 'eth_chainId':
-          result = '0x4fce';
-          break;
-        case 'eth_getBlockByNumber':
-          result = { number: '0x7b', hash: FINALIZED_VM_BLOCK_HASH };
-          break;
-        case 'eth_getCode':
-          result = '0x6000';
-          break;
-        case 'eth_call':
-          result = finalizedVmEthCallResult(params, config);
-          break;
-        default:
-          throw new Error(`unexpected finalized VM JSON-RPC method ${method}`);
-      }
-      sendHarnessRpcResponse(response, call.id, { result });
-    } catch (error) {
-      sendHarnessRpcResponse(response, null, {
-        error: { code: -32603, message: error instanceof Error ? error.message : String(error) },
-      });
-    }
-  });
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once('error', rejectListen);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', rejectListen);
-      resolveListen();
-    });
-  });
-  finalizedVmRpcServer = server;
-  const address = server.address() as AddressInfo | null;
-  if (address === null) throw new Error('finalized VM JSON-RPC server has no address');
-  return Object.freeze({
-    chainAdapter,
-    rpcUrl: `http://127.0.0.1:${address.port}`,
-  });
-}
-
-function finalizedVmEthCallResult(
-  params: readonly unknown[],
-  config: Readonly<FinalizedVmHarnessConfigV1>,
-): string {
-  const call = plainRecord(params[0], 'finalized VM eth_call object');
-  const data = requiredString(call.data, 'finalized VM eth_call data');
-  if (data === '0x') return '0x';
-  const selector = data.slice(0, 10);
-  switch (selector) {
-    case FINALIZED_VM_CG.getFunction('getContextGraph')!.selector:
-      return FINALIZED_VM_CG.encodeFunctionResult('getContextGraph', [
-        config.authorAddress,
-        [],
-        0n,
-        true,
-        1n,
-        0,
-        1,
-        FINALIZED_VM_ZERO_ADDRESS,
-        0n,
-      ]);
-    case FINALIZED_VM_CG.getFunction('getNameHash')!.selector:
-      return FINALIZED_VM_CG.encodeFunctionResult('getNameHash', [config.nameHash]);
-    case FINALIZED_VM_CG.getFunction('isContextGraphActive')!.selector:
-      return FINALIZED_VM_CG.encodeFunctionResult('isContextGraphActive', [true]);
-    case FINALIZED_VM_CG.getFunction('getContextGraphKaCount')!.selector:
-      return FINALIZED_VM_CG.encodeFunctionResult('getContextGraphKaCount', [1n]);
-    case FINALIZED_VM_CG.getFunction('getContextGraphKaAt')!.selector:
-      return FINALIZED_VM_CG.encodeFunctionResult('getContextGraphKaAt', [BigInt(config.kaId)]);
-    case FINALIZED_VM_KA.getFunction('getKnowledgeAssetUpdateContext')!.selector:
-      return FINALIZED_VM_KA.encodeFunctionResult(
-        'getKnowledgeAssetUpdateContext',
-        [BigInt(config.assertionVersion), 0n, 0n, 0n, 0n, false, 0],
-      );
-    case FINALIZED_VM_KA.getFunction('getLatestMerkleRoot')!.selector:
-      return FINALIZED_VM_KA.encodeFunctionResult('getLatestMerkleRoot', [config.assertionRoot]);
-    case FINALIZED_VM_KA.getFunction('getLatestMerkleRootAuthor')!.selector:
-      return FINALIZED_VM_KA.encodeFunctionResult(
-        'getLatestMerkleRootAuthor',
-        [config.authorAddress],
-      );
-    case FINALIZED_VM_KA.getFunction('getLatestMerkleRootPublisher')!.selector:
-      return FINALIZED_VM_KA.encodeFunctionResult(
-        'getLatestMerkleRootPublisher',
-        ['0x6666666666666666666666666666666666666666'],
-      );
-    default:
-      throw new Error(`unexpected finalized VM eth_call selector ${selector}`);
-  }
-}
-
-function sendHarnessRpcResponse(
-  response: import('node:http').ServerResponse,
-  id: unknown,
-  payload: Readonly<{ readonly result: unknown } | { readonly error: unknown }>,
-): void {
-  response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ jsonrpc: '2.0', id, ...payload }));
-}
-
-async function closeFinalizedVmRpcServer(): Promise<void> {
-  const server = finalizedVmRpcServer;
-  finalizedVmRpcServer = undefined;
-  if (server === undefined) return;
-  await new Promise<void>((resolveClose, rejectClose) => {
-    server.close((error) => error ? rejectClose(error) : resolveClose());
-    server.closeIdleConnections();
-  });
 }
 
 function safeHarnessIri(value: unknown, label: string): string {

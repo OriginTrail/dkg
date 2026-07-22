@@ -1,5 +1,6 @@
 import {
   assertCanonicalChainId,
+  assertCanonicalDecimalU256,
   assertCanonicalDecimalU64,
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
@@ -41,32 +42,6 @@ import {
   type FinalizedVmPlacementEvidenceV1,
 } from './finalized-vm-composer-v1.js';
 
-const CONFIG_KEYS = Object.freeze([
-  'chainId',
-  'contextGraphStorageAddress',
-  'knowledgeAssetStorageAddress',
-  'materialize',
-  'networkId',
-  'snapshot',
-] as const);
-const REQUEST_KEYS = Object.freeze([
-  'acceptedPolicy',
-  'catalogLane',
-  'onChainContextGraphId',
-  'placements',
-  'signal',
-] as const);
-const ACCEPTED_POLICY_KEYS = Object.freeze(['policy', 'policyDigest', 'roster'] as const);
-const CATALOG_LANE_KEYS = Object.freeze(['contextGraphId', 'subGraphName'] as const);
-const RECEIPT_KEYS = Object.freeze([
-  'kaId',
-  'ordinal',
-  'postReadDigest',
-  'status',
-  'tripleCount',
-  'ual',
-  'vmGraphIri',
-] as const);
 const MAX_VM_GRAPH_IRI_BYTES_V1 = 8 * 1024;
 const UTF8 = new TextEncoder();
 
@@ -278,105 +253,72 @@ export function createFinalizedVmRuntimeV1(
   return Object.freeze(runtime);
 }
 
-function snapshotConfig(input: unknown): RuntimeConfigSnapshotV1 {
-  let fields: Record<string, unknown>;
+function snapshotConfig(input: FinalizedVmRuntimeConfigV1): RuntimeConfigSnapshotV1 {
   try {
-    fields = snapshotExactRecord(input, CONFIG_KEYS);
-    assertNetworkIdV1(fields.networkId, 'finalized VM runtime networkId');
-    assertCanonicalChainId(fields.chainId, 'finalized VM runtime chainId');
-    assertNonzeroAddress(fields.contextGraphStorageAddress, 'contextGraphStorageAddress');
-    assertNonzeroAddress(fields.knowledgeAssetStorageAddress, 'knowledgeAssetStorageAddress');
-    if (typeof fields.snapshot !== 'function') throw new TypeError('snapshot is not callable');
-    if (typeof fields.materialize !== 'function') throw new TypeError('materialize is not callable');
+    assertNetworkIdV1(input.networkId, 'finalized VM runtime networkId');
+    assertCanonicalChainId(input.chainId, 'finalized VM runtime chainId');
+    assertNonzeroAddress(input.contextGraphStorageAddress, 'contextGraphStorageAddress');
+    assertNonzeroAddress(input.knowledgeAssetStorageAddress, 'knowledgeAssetStorageAddress');
+    if (typeof input.snapshot !== 'function') throw new TypeError('snapshot is not callable');
+    if (typeof input.materialize !== 'function') throw new TypeError('materialize is not callable');
   } catch (cause) {
     fail('finalized-vm-runtime-config', 'runtime config is not canonical', cause);
   }
   return Object.freeze({
-    networkId: fields.networkId as NetworkIdV1,
-    chainId: fields.chainId as FinalizedVmChainInventoryV1['chainId'],
-    contextGraphStorageAddress: fields.contextGraphStorageAddress as EvmAddressV1,
-    knowledgeAssetStorageAddress: fields.knowledgeAssetStorageAddress as EvmAddressV1,
-    snapshot: fields.snapshot as StrictCurrentFinalizedEvmSnapshotScopeV1,
-    materialize: fields.materialize as FinalizedVmMaterializerV1,
+    networkId: input.networkId,
+    chainId: input.chainId,
+    contextGraphStorageAddress: input.contextGraphStorageAddress,
+    knowledgeAssetStorageAddress: input.knowledgeAssetStorageAddress,
+    snapshot: input.snapshot,
+    materialize: input.materialize,
   });
 }
 
-function snapshotRequest(input: unknown): RuntimeRequestSnapshotV1 {
-  let fields: Record<string, unknown>;
-  let accepted: Record<string, unknown>;
+function snapshotRequest(input: FinalizedVmRuntimeRequestV1): RuntimeRequestSnapshotV1 {
   try {
-    fields = snapshotExactRecord(input, REQUEST_KEYS);
-    accepted = snapshotExactRecord(fields.acceptedPolicy, ACCEPTED_POLICY_KEYS);
-    if (accepted.roster !== null) {
+    if (input.acceptedPolicy.roster !== null) {
       throw new TypeError('public finalized VM runtime forbids a private member roster');
     }
-    assertCanonicalDigest(accepted.policyDigest, 'accepted policy digest');
+    assertCanonicalDigest(input.acceptedPolicy.policyDigest, 'accepted policy digest');
     const policy = parseCanonicalContextGraphPolicyPayloadV1(
-      canonicalizeContextGraphPolicyPayloadV1(accepted.policy as ContextGraphPolicyV1),
+      canonicalizeContextGraphPolicyPayloadV1(input.acceptedPolicy.policy),
     );
-    if (!isAbortSignal(fields.signal)) throw new TypeError('signal is not an AbortSignal');
-    const catalogLane = snapshotCatalogLane(fields.catalogLane);
-    const placements = snapshotDenseArray(
-      fields.placements,
-      FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+    assertCanonicalDecimalU256(
+      input.onChainContextGraphId,
+      'finalized VM runtime onChainContextGraphId',
     );
+    if (input.onChainContextGraphId === '0') {
+      throw new TypeError('onChainContextGraphId must be nonzero');
+    }
+    const catalogLane = snapshotCatalogLane(input.catalogLane);
+    if (
+      !Array.isArray(input.placements)
+      || input.placements.length > FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1
+    ) {
+      throw new TypeError('placements exceed the finalized VM runtime bound');
+    }
     return Object.freeze({
       catalogLane,
-      onChainContextGraphId: fields.onChainContextGraphId as FinalizedVmChainInventoryV1['contextGraphId'],
+      onChainContextGraphId: input.onChainContextGraphId,
       acceptedPolicy: policy,
-      acceptedPolicyDigest: accepted.policyDigest,
-      placements: placements as readonly FinalizedVmPlacementEvidenceV1[],
-      signal: fields.signal,
+      acceptedPolicyDigest: input.acceptedPolicy.policyDigest,
+      placements: Object.freeze([...input.placements]),
+      signal: input.signal,
     });
   } catch (cause) {
     fail('finalized-vm-runtime-request', 'runtime request is not canonical', cause);
   }
 }
 
-function snapshotCatalogLane(input: unknown): FinalizedVmCatalogLaneV1 {
-  const fields = snapshotExactRecord(input, CATALOG_LANE_KEYS);
-  assertContextGraphIdV1(fields.contextGraphId, 'catalogLane.contextGraphId');
-  if (fields.subGraphName !== null) {
-    assertSubGraphNameV1(fields.subGraphName, 'catalogLane.subGraphName');
+function snapshotCatalogLane(input: FinalizedVmCatalogLaneV1): FinalizedVmCatalogLaneV1 {
+  assertContextGraphIdV1(input.contextGraphId, 'catalogLane.contextGraphId');
+  if (input.subGraphName !== null) {
+    assertSubGraphNameV1(input.subGraphName, 'catalogLane.subGraphName');
   }
   return Object.freeze({
-    contextGraphId: fields.contextGraphId as ContextGraphIdV1,
-    subGraphName: fields.subGraphName as SubGraphNameV1 | null,
+    contextGraphId: input.contextGraphId,
+    subGraphName: input.subGraphName,
   });
-}
-
-function snapshotDenseArray(input: unknown, maxLength: number): readonly unknown[] {
-  if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
-    throw new TypeError('placements must be an ordinary array');
-  }
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-  if (
-    lengthDescriptor === undefined
-    || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-    || typeof lengthDescriptor.value !== 'number'
-    || !Number.isSafeInteger(lengthDescriptor.value)
-    || lengthDescriptor.value < 0
-    || lengthDescriptor.value > maxLength
-  ) {
-    throw new TypeError('placements length is outside the runtime bound');
-  }
-  const length = lengthDescriptor.value;
-  const output: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-    if (
-      descriptor === undefined
-      || !descriptor.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    ) {
-      throw new TypeError('placements must be dense and data-only');
-    }
-    output.push(descriptor.value);
-  }
-  if (Reflect.ownKeys(input).length !== length + 1) {
-    throw new TypeError('placements must not have extra properties');
-  }
-  return Object.freeze(output);
 }
 
 function assertAcceptedPublicPolicy(
@@ -437,28 +379,25 @@ function assertExactAnchor(
 }
 
 function snapshotReceipt(
-  input: unknown,
+  input: FinalizedVmMaterializationReceiptV1,
   candidate: Readonly<FinalizedVmChainCandidateV1>,
 ): Readonly<FinalizedVmMaterializationReceiptV1> {
-  let fields: Record<string, unknown>;
   try {
-    fields = snapshotExactRecord(input, RECEIPT_KEYS);
-    assertCanonicalKaId(fields.kaId, 'materialization receipt kaId');
-    assertCanonicalDecimalU64(fields.ordinal, 'materialization receipt ordinal');
-    assertCanonicalDecimalU64(fields.tripleCount, 'materialization receipt tripleCount');
-    assertCanonicalDigest(fields.postReadDigest, 'materialization receipt postReadDigest');
-    if (fields.status !== 'materialized' && fields.status !== 'existing') {
+    assertCanonicalKaId(input.kaId, 'materialization receipt kaId');
+    assertCanonicalDecimalU64(input.ordinal, 'materialization receipt ordinal');
+    assertCanonicalDecimalU64(input.tripleCount, 'materialization receipt tripleCount');
+    assertCanonicalDigest(input.postReadDigest, 'materialization receipt postReadDigest');
+    if (input.status !== 'materialized' && input.status !== 'existing') {
       throw new TypeError('materialization receipt status is invalid');
     }
     if (
-      typeof fields.ual !== 'string'
-      || fields.ual !== candidate.ual
-      || fields.kaId !== candidate.kaId
-      || fields.ordinal !== candidate.ordinal
+      input.ual !== candidate.ual
+      || input.kaId !== candidate.kaId
+      || input.ordinal !== candidate.ordinal
     ) {
       throw new TypeError('materialization receipt does not bind the requested chain row');
     }
-    assertBoundedIri(fields.vmGraphIri);
+    assertBoundedIri(input.vmGraphIri);
   } catch (cause) {
     fail(
       'finalized-vm-runtime-materialization',
@@ -467,47 +406,14 @@ function snapshotReceipt(
     );
   }
   return Object.freeze({
-    kaId: fields.kaId as KaIdV1,
-    ordinal: fields.ordinal as DecimalU64V1,
-    ual: fields.ual as string,
-    status: fields.status as FinalizedVmMaterializationReceiptV1['status'],
-    vmGraphIri: fields.vmGraphIri as string,
-    tripleCount: fields.tripleCount as DecimalU64V1,
-    postReadDigest: fields.postReadDigest as Digest32V1,
+    kaId: input.kaId,
+    ordinal: input.ordinal,
+    ual: input.ual,
+    status: input.status,
+    vmGraphIri: input.vmGraphIri,
+    tripleCount: input.tripleCount,
+    postReadDigest: input.postReadDigest,
   });
-}
-
-function snapshotExactRecord(
-  input: unknown,
-  expectedKeys: readonly string[],
-): Record<string, unknown> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new TypeError('input is not a record');
-  }
-  const prototype = Object.getPrototypeOf(input);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError('input is not a plain record');
-  }
-  const keys = Reflect.ownKeys(input);
-  if (
-    keys.length !== expectedKeys.length
-    || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
-  ) {
-    throw new TypeError('input has unknown or missing fields');
-  }
-  const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (
-      descriptor === undefined
-      || !descriptor.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    ) {
-      throw new TypeError('input fields must be enumerable data properties');
-    }
-    output[key] = descriptor.value;
-  }
-  return output;
 }
 
 function assertNonzeroAddress(value: unknown, label: string): asserts value is EvmAddressV1 {
@@ -532,18 +438,6 @@ function assertBoundedIri(value: unknown): asserts value is string {
     throw new TypeError('vmGraphIri must be an absolute IRI');
   }
   if (parsed.protocol.length <= 1) throw new TypeError('vmGraphIri must have a scheme');
-}
-
-function isAbortSignal(value: unknown): value is AbortSignal {
-  if (value === null || typeof value !== 'object') return false;
-  try {
-    const getter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get;
-    if (getter === undefined) return false;
-    getter.call(value);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function fail(
