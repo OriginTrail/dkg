@@ -447,10 +447,14 @@ describe('sync responder pagination interleaving', () => {
     const cgId = 'oversized-durable-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
-    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    // Three DISTINCT admitted subjects (one row each), so the page boundary
+    // falls on a subject boundary and the fallback pages 2 + 1. Since #1788 a
+    // single subject is emitted atomically and would never split across pages,
+    // so distinct subjects are required to exercise paging here. Activity-prefix
+    // subjects survive readDurableMetaRows filtering.
     await store.insert(Array.from({ length: 3 }, (_, i) => ({
       graph: metaGraph,
-      subject: cgPrefix,
+      subject: `did:dkg:activity:${cgId}-${i}`,
       predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
       object: `"meta-${i.toString().padStart(3, '0')}"`,
     })));
@@ -700,11 +704,15 @@ describe('sync responder pagination interleaving', () => {
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
     const rows: Quad[] = [];
+    // 100 DISTINCT admitted subjects (one row each): since #1788 a single
+    // subject is emitted atomically, so a deep window into ONE subject is no
+    // longer meaningful — distinct subjects let the deep page address a subject
+    // boundary. Activity-prefix subjects survive durable-meta admission.
     for (let index = 0; index < 100; index++) {
       const padded = index.toString().padStart(3, '0');
       rows.push({
         graph: metaGraph,
-        subject: cgPrefix,
+        subject: `did:dkg:activity:m${padded}`,
         predicate: `http://schema.org/p${padded}`,
         object: `"meta-${padded}"`,
       });
@@ -717,9 +725,12 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    // The durable-meta read is now store-bounded (subject-membership filter
-    // pushed into the store via EXISTS), so a deep page is a paged store query.
-    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
+    // The durable-meta read is store-bounded (subject-membership filter pushed
+    // into the store via EXISTS), so a deep page is a paged store query. Durable
+    // meta reads `limit + 1` rows to detect a subject straddling the page
+    // boundary (#1788) and serves at most `limit` when the boundary is clean, so
+    // the store query's LIMIT is 6 here while the served page stays 5.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 6);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,

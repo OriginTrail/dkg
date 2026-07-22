@@ -549,6 +549,20 @@ export function compareRows(a: SyncRow, b: SyncRow): number {
   );
 }
 
+/**
+ * The `(g, s)` identity a durable `_meta` row belongs to. Durable meta is
+ * ordered by `(g, s, p, o)`; a graph-scoped assertion seal is ONE `(g, s)`
+ * subject whose rows — including the batch-local control field
+ * `dkg:assertionVersion` — MUST cross the wire together in a single round, else
+ * the receiver's per-round completeness check drops the control fields
+ * permanently (#1788). Used to snap durable-meta page boundaries to subject
+ * boundaries. The `\n` separator cannot occur inside an IRI, so distinct
+ * subjects never collide.
+ */
+function metaSubjectKey(row: SyncRow): string {
+  return `${row.g}\n${row.s}`;
+}
+
 function serializeResponderRow(row: SyncRow): string {
   return `${formatTerm(row.s)} <${assertSafeIri(row.p)}> ${formatTerm(row.o)} <${assertSafeIri(row.g)}> .`;
 }
@@ -832,7 +846,7 @@ export async function readDurableMetaPage(params: {
     : undefined;
   return readResponderRowsPage(
     cache,
-    (offset, limit, signal) => readDurableMetaRowsPage(
+    (offset, limit, signal) => readDurableMetaRowsPageSubjectAtomic(
       params.store,
       params.contextGraphId,
       params.registeredSubGraphNames,
@@ -843,16 +857,24 @@ export async function readDurableMetaPage(params: {
     params.offset,
     params.limit,
     params.signal,
-    cache
-      ? {
-        loadSnapshot: () => readBoundedDurableMetaSnapshot(
-          params.store,
-          params.contextGraphId,
-          params.registeredSubGraphNames,
-          cache,
-        ),
-      }
-      : undefined,
+    {
+      // Durable meta is the one lane whose rows carry graph-scoped seals; snap
+      // its page boundaries to `(g, s)` subject boundaries so a seal's control
+      // fields are never split across a sync round (#1788). The cached path
+      // extends via `subjectAtomic`; the store-paged loader above is itself
+      // subject-atomic.
+      subjectAtomic: true,
+      ...(cache
+        ? {
+          loadSnapshot: () => readBoundedDurableMetaSnapshot(
+            params.store,
+            params.contextGraphId,
+            params.registeredSubGraphNames,
+            cache,
+          ),
+        }
+        : {}),
+    },
   );
 }
 
@@ -1989,6 +2011,18 @@ interface ResponderRowsPageOptions {
    * (defaults to true; global budget pressure always propagates).
    */
   fallbackOnPerSnapshotBudget?: boolean;
+  /**
+   * Extend a served page forward so it ends on a `(g, s)` subject boundary,
+   * never mid-subject (#1788). Only the durable-meta lane sets this: its rows
+   * carry graph-scoped seals whose control fields (`dkg:assertionVersion`) are
+   * admitted only as a complete in-batch subject. Safe because durable meta
+   * uses byte-budget pagination (requester page size 8192 > the 500 legacy
+   * cap), so the requester never treats an over-sized page as EOF — it advances
+   * by the actual row count and the next OFFSET lands on the next subject. This
+   * option governs only the cached (snapshot) path; the store-paged loader is
+   * made subject-atomic at its call site. See {@link metaSubjectKey}.
+   */
+  subjectAtomic?: boolean;
 }
 
 async function readResponderRowsPage(
@@ -2001,9 +2035,13 @@ async function readResponderRowsPage(
 ): Promise<SyncRow[]> {
   const loadSnapshot = options?.loadSnapshot;
   const fallbackOnPerSnapshotBudget = options?.fallbackOnPerSnapshotBudget ?? true;
+  const subjectAtomic = options?.subjectAtomic ?? false;
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
+  // No session snapshot: the store-paged loader itself enforces subject
+  // atomicity where required (durable meta passes a subject-atomic loader), so
+  // this path needs no extra handling.
   if (!cache) return loadStoreBoundedPage(safeOffset, safeLimit, signal);
   try {
     return await readCachedRowsPage(
@@ -2012,6 +2050,7 @@ async function readResponderRowsPage(
       safeOffset,
       safeLimit,
       signal,
+      subjectAtomic,
     );
   } catch (error) {
     if (!isPerSnapshotBudgetError(error) || !fallbackOnPerSnapshotBudget) throw error;
@@ -2025,6 +2064,7 @@ async function readCachedRowsPage(
   offset: number,
   limit: number,
   signal?: AbortSignal,
+  subjectAtomic = false,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -2041,7 +2081,26 @@ async function readCachedRowsPage(
   // `rows` is an immutable snapshot. Slice it directly so serving a 500-row
   // page allocates only that page's backing array, never a shallow copy of the
   // complete snapshot first.
-  const page = rows.slice(safeOffset, safeOffset + safeLimit);
+  let pageEnd = Math.min(safeOffset + safeLimit, rows.length);
+  // Subject-atomic durable-meta lane (#1788): if the requested window ends
+  // mid-subject, EXTEND it forward until the subject changes (or the snapshot
+  // ends) so a graph-scoped seal is never split across a page — and therefore
+  // never across a sync round. Extending (never trimming) keeps a non-final
+  // page `>= safeLimit`, so it never trips the requester's empty-page EOF nor
+  // the release-on-short-page path below. Reads only in-page indices plus a
+  // bounded one-subject lookahead — never the whole snapshot. `_meta` subjects
+  // are small (a seal is 14 quads; KA descriptors ~10; membership/activity rows
+  // bounded), so the extension is O(one subject) and negligible against the
+  // #1868 64k-row meta snapshot ceiling; a pathologically large subject is
+  // still emitted whole rather than truncated, with the transport frame limit
+  // as the final guard.
+  if (subjectAtomic && pageEnd > safeOffset && pageEnd < rows.length) {
+    const trailingKey = metaSubjectKey(rows[pageEnd - 1]);
+    while (pageEnd < rows.length && metaSubjectKey(rows[pageEnd]) === trailingKey) {
+      pageEnd += 1;
+    }
+  }
+  const page = rows.slice(safeOffset, pageEnd);
   if (page.length === 0 || (cache.releaseOnShortPage !== false && page.length < safeLimit)) {
     cache.memo.release(cache.key, { graceMs: COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS });
   }
@@ -3490,6 +3549,103 @@ async function readDurableMetaRowsPage(
     { kind: 'page', offset: safeOffset, limit: safeLimit },
     signal,
   );
+}
+
+/**
+ * Subject-atomic wrapper over {@link readDurableMetaRowsPage} for the
+ * store-paged durable-meta lane (the no-session path and the oversized-snapshot
+ * fallback). Guarantees the returned page ENDS on a `(g, s)` subject boundary:
+ * a subject straddling `limit` is emitted in full, so a graph-scoped seal's
+ * rows (incl. `dkg:assertionVersion`) are never split across a page — and
+ * therefore never across a sync round (#1788). This mirrors the cached path's
+ * subject-atomic extend for the non-snapshot lane.
+ *
+ * A one-row lookahead (`limit + 1`) detects a straddle; the complete trailing
+ * subject is then re-read once and appended in place of its partial rows.
+ * Admission in {@link buildDurableMetaRowsQuery} is subject-level, so a subject
+ * already present in the page is fully admitted and the re-read needs no
+ * re-filtering. `_meta` subjects are small (a seal is 14 quads), so the
+ * extension is O(one subject); a pathologically large subject is emitted whole
+ * rather than truncated (truncation is exactly the #1788 defect), with the
+ * transport frame limit as the final guard.
+ */
+async function readDurableMetaRowsPageSubjectAtomic(
+  store: TripleStore,
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const rows = await readDurableMetaRowsPage(
+    store,
+    contextGraphId,
+    registeredSubGraphNames,
+    safeOffset,
+    safeLimit + 1,
+    signal,
+  );
+  // Fewer than `limit + 1` admitted rows remain ⇒ this is the final page and
+  // already ends on the last subject's boundary.
+  if (rows.length <= safeLimit) return rows;
+  const lastInPage = rows[safeLimit - 1];
+  if (metaSubjectKey(rows[safeLimit]) !== metaSubjectKey(lastInPage)) {
+    // Clean subject boundary exactly at the limit.
+    return rows.slice(0, safeLimit);
+  }
+  // The trailing subject straddles the limit: drop its partial rows and append
+  // the COMPLETE subject, read once in the same `?p ?o` order the paged query
+  // uses for a single (fixed g,s) subject. `head + complete-subject` therefore
+  // equals the paged query's prefix, so the next OFFSET lands on the next
+  // subject with no duplicate or skip.
+  const trailingKey = metaSubjectKey(lastInPage);
+  let cut = safeLimit;
+  while (cut > 0 && metaSubjectKey(rows[cut - 1]) === trailingKey) cut -= 1;
+  const trailingSubject = await readDurableMetaSubjectRows(
+    store,
+    contextGraphId,
+    lastInPage.s,
+    signal,
+  );
+  // Defensive: an empty re-read (e.g. a non-IRI subject) cannot happen for an
+  // admitted meta subject, but fall back to the raw window rather than dropping
+  // rows if it ever does.
+  if (trailingSubject.length === 0) return rows.slice(0, safeLimit);
+  return [...rows.slice(0, cut), ...trailingSubject];
+}
+
+/**
+ * Read every `_meta` row of ONE subject, ordered like the paged query
+ * (`?p ?o` within the fixed `g, s`). Completes a subject that straddles a page
+ * limit on the store-paged durable-meta lane. Admission in
+ * {@link buildDurableMetaRowsQuery} is subject-level, so a subject already
+ * present in the page is fully admitted and needs no re-filtering here. The
+ * bound subject IRI makes this a per-subject read, not a graph scan.
+ */
+async function readDurableMetaSubjectRows(
+  store: TripleStore,
+  contextGraphId: string,
+  subject: string,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  if (!isIriTerm(subject)) return [];
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const res = await store.query(
+    `
+    SELECT ?p ?o WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(subject)}> ?p ?o }
+    }
+    ORDER BY ?p ?o
+  `,
+    syncResponderStoreOptions(signal, 'sync.responder.readDurableMetaSubjectRows'),
+  );
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: subject, p: row['p'], o: row['o'], g: metaGraph }))
+    .filter((row): row is SyncRow => Boolean(row.p && row.o));
 }
 
 /**
