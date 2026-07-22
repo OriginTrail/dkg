@@ -23,6 +23,7 @@
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
 import type { RequestContext } from "./context.js";
+import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
 import {
   jsonResponse,
   readBody,
@@ -237,4 +238,15 @@ export async function handleKaShareJobRecover(ctx: RequestContext, jobId: string
     }
     throw err;
   }
+}
+
+// ── POST /api/knowledge-assets/swm/share-jobs/:jobId/clear ────────────────────
+//
+// #1837 — atomic by-exact-jobId TERMINAL record removal. DISTINCT from the DELETE
+// cancellation above (which rewrites a queued job to failed+cancelled and RETAINS the
+// row): this REMOVES a native-terminal (succeeded|failed) job record and is idempotent
+// (already_absent = 200, not 404). The caller passes the already url-decoded jobId.
+export async function handleKaShareJobClear(ctx: RequestContext, jobId: string): Promise<void> {
+  const { res, agent } = ctx;
+  return respondTerminalClearOutcome(res, await agent.assertion.clearPromoteAsync(jobId), jobId);
 }
