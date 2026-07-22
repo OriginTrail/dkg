@@ -103,6 +103,30 @@ describe('FileWorkspacePublicSnapshotStore paging', () => {
     }
   });
 
+  it('seeks persisted page indexes by UTF-8 bytes across a sparse checkpoint', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-page-'));
+    const pageIndexes = new MemoryPageIndexStore();
+    const quads = makeQuads(300, 'utf8').map((quad, index) => ({
+      ...quad,
+      object: `"café 🚀 ${index}"`,
+    }));
+
+    try {
+      await new FileWorkspacePublicSnapshotStore(directory, pageIndexes)
+        .putSnapshot({ digest: DIGEST, quads });
+
+      const reopenedStore = new FileWorkspacePublicSnapshotStore(directory, pageIndexes);
+      await expect(reopenedStore.getSnapshotPage(DIGEST, 128, 1))
+        .resolves.toEqual(quads.slice(128, 129));
+      await expect(reopenedStore.getSnapshotPage(DIGEST, 257, 12))
+        .resolves.toEqual(quads.slice(257, 269));
+      expect(pageIndexes.reads).toBe(1);
+      expect(pageIndexes.writes).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lazily builds and persists a missing page-index row on the first page request', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-page-'));
     const pageIndexes = new MemoryPageIndexStore();

@@ -97,6 +97,9 @@ export default defineConfig({
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
+          // Public snapshot paging — one SQLite-indexed store must reach the
+          // agent sync responder, admission publisher, and background runtime.
+          'test/daemon-snapshot-page-index-wiring.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           'test/snapshot-page-index-store.test.ts',
