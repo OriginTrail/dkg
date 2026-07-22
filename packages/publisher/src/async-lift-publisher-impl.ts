@@ -43,7 +43,8 @@ import type {
   VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
-import { isSafeClearJobId, type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { isSafeJobId } from './job-id.js';
 import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
@@ -1044,7 +1045,7 @@ export class TripleStoreAsyncLiftPublisher
     // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
     // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
     // instead of the bounded outcome.
-    if (!isSafeClearJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+    if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
     return this.withClaimLock(async () => {
       await this.ensureGraph();
       const rows = expectBindings(
