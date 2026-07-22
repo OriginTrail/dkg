@@ -230,4 +230,55 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     assertNoDuplicatesOrGaps(pages);
     expect(pages.flat()).toHaveLength(12);
   });
+
+  it('store-paged path: refuses (throws) a straddling blank-node subject instead of splitting it across rounds', async () => {
+    // A blank-node `_meta` subject is not produced by conforming first-party
+    // writers (metadata generators emit IRIs; the publisher rejects blank nodes)
+    // — it is reachable only via the unverified system-CG peer-ingest path.
+    // Oxigraph relabels a blank node per query, so its label AND sort position
+    // are unstable across the store-paged lane's separate queries and across
+    // sync ROUNDS: it cannot be paged atomically, and serving the raw window
+    // would split it across rounds (for a batch-local control predicate, the
+    // #1788 loss). The responder must FAIL LOUD, never emit a split page.
+    const limit = 10;
+    const store = new OxigraphStore();
+    const BNODE = '_:peerSeal';
+    // 14 rows (incl. dkg:assertionVersion) > limit ⇒ straddles a page boundary;
+    // admitted via dkg:memoryLayer != WorkingMemory.
+    const bnodeQuads: Quad[] = [
+      { graph: META, subject: BNODE, predicate: `${DKG_NS}memoryLayer`, object: '"LongTermMemory"' },
+      { graph: META, subject: BNODE, predicate: ASSERTION_VERSION, object: '"1"' },
+      ...Array.from({ length: 12 }, (_, i) => ({
+        graph: META,
+        subject: BNODE,
+        predicate: `${DKG_NS}p${String(i).padStart(2, '0')}`,
+        object: `"v-${i}"`,
+      })),
+    ];
+    const filler: Quad[] = Array.from({ length: 3 }, (_, i) => ({
+      graph: META,
+      subject: `did:dkg:activity:z${i}`,
+      predicate: `${DKG_NS}label`,
+      object: `"z-${i}"`,
+    }));
+    await store.insert([...bnodeQuads, ...filler]);
+
+    // Round-based: pageThrough re-queries the store on each fetch, like
+    // successive sync rounds. The straddling blank-node page must THROW, never
+    // return a partial (subject-split) page that a later round could not
+    // reconcile.
+    await expect(pageThrough(
+      async (offset, pageLimit) => {
+        const page = await readDurableMetaPage({
+          store,
+          contextGraphId: CG,
+          registeredSubGraphNames: [],
+          offset,
+          limit: pageLimit,
+        });
+        return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
+      },
+      limit,
+    )).rejects.toThrow(/non-IRI straddling|#1788/);
+  });
 });
