@@ -25,16 +25,20 @@ import {
   type EvmAddressV1,
   type KaIdV1,
 } from './sync-wire-scalars.js';
+import {
+  MAX_NETWORK_ID_BYTES_V1,
+  assertNetworkIdV1 as assertSharedNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
 import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
 
-declare const NETWORK_ID_V1_BRAND: unique symbol;
 declare const CONTEXT_GRAPH_ID_V1_BRAND: unique symbol;
 declare const SUBGRAPH_NAME_V1_BRAND: unique symbol;
 declare const ASSERTION_COORDINATE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SCOPE_V1_BRAND: unique symbol;
 declare const CATALOG_ASSERTION_SUBJECT_V1_BRAND: unique symbol;
 
-export type NetworkIdV1 = string & { readonly [NETWORK_ID_V1_BRAND]: true };
+export type { NetworkIdV1 } from './sync-wire-identifiers.js';
 export type ContextGraphIdV1 = string & { readonly [CONTEXT_GRAPH_ID_V1_BRAND]: true };
 export type SubGraphNameV1 = string & { readonly [SUBGRAPH_NAME_V1_BRAND]: true };
 export type AssertionCoordinateV1 = string & {
@@ -54,7 +58,7 @@ export const AUTHOR_CATALOG_KEY_DIGEST_DOMAIN_V1 =
 export const AUTHOR_CATALOG_ROW_DIGEST_DOMAIN_V1 =
   'dkg-author-catalog-row-v1\n' as const;
 
-export const MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1 = 128;
+export const MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1 = MAX_NETWORK_ID_BYTES_V1;
 export const MAX_AUTHOR_CATALOG_IDENTIFIER_BYTES_V1 = 256;
 export const MAX_AUTHOR_CATALOG_SCOPE_BYTES_V1 = 2048;
 export const MAX_AUTHOR_CATALOG_ROW_BYTES_V1 = 2048;
@@ -62,7 +66,6 @@ export const MAX_AUTHOR_CATALOG_ROW_DIGEST_INPUT_BYTES_V1 = 4096;
 export const MAX_AUTHOR_CATALOG_BUCKET_COUNT_V1 = 9_223_372_036_854_775_808n;
 export const PACKED_KA_NUMBER_BITS_V1 = 96n;
 
-const NETWORK_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const CONTEXT_GRAPH_ID_PATTERN = /^[A-Za-z0-9_:/\.@-]+$/;
 const CATALOG_IDENTIFIER_ASCII_FORBIDDEN = new Set([
   '<',
@@ -133,13 +136,13 @@ export function assertNetworkIdV1(
   value: unknown,
   label = 'networkId',
 ): asserts value is NetworkIdV1 {
-  const identifier = assertNfcUtf8Identifier(
-    value,
-    label,
-    MAX_AUTHOR_CATALOG_NETWORK_ID_BYTES_V1,
-  );
-  if (!NETWORK_ID_PATTERN.test(identifier)) {
-    fail('catalog-identifier', `${label} contains a character outside the networkId grammar`);
+  try {
+    assertSharedNetworkIdV1(value, label);
+  } catch (cause) {
+    const message = cause instanceof Error
+      ? cause.message
+      : `${label} is not a canonical networkId`;
+    fail('catalog-identifier', message, cause);
   }
 }
 
