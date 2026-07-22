@@ -7,6 +7,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
   isDefinitivePreAcceptanceSendFailure,
+  mapPublishExceptionToLiftJobFailure,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import {
@@ -358,6 +359,28 @@ describe('async lift publisher broadcast durability', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
   });
 
+  // #1867 SAFETY (throw-safe classifier) — a pathological, non-stringifiable thrown value
+  // (null-prototype object → String() TypeError) thrown AFTER the durable-broadcast record
+  // must NOT let the classifier throw: that would skip the ambiguous-recovery branch and
+  // strand the job off the recovery track. An unstringifiable error is classified
+  // non-definitive → the job stays 'broadcast' on the recovery track, never terminates,
+  // never resends.
+  it('keeps a non-stringifiable thrown value on the recovery track (throw-safe classifier)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(Object.create(null) as unknown),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
   // #1867 (deliberate, LOCKED edge) — a mined-then-reverted tx whose revert string happens
   // to contain "insufficient funds" is classified pre-acceptance terminal. This is an
   // ACCEPTED consequence of the substring match: it mirrors classifyPublishFailureCode
@@ -432,5 +455,34 @@ describe('async lift publisher broadcast durability', () => {
     expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: not authorized'))).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(new Error('ETIMEDOUT: request timed out'))).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(undefined)).toBe(false);
+
+    // Throw-safe: a non-stringifiable thrown value is classified non-definitive, not thrown.
+    expect(isDefinitivePreAcceptanceSendFailure(Object.create(null) as unknown)).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(Symbol('opaque'))).toBe(false);
+  });
+
+  // Whitelist ↔ mapper invariant — the classifier and mapPublishExceptionToLiftJobFailure are
+  // kept as SEPARATE functions on purpose (the whitelist must stay conservative-by-construction
+  // and must NOT silently widen if the mapper later gains new broadcast-phase codes; unifying
+  // via the mapper would also reintroduce the throw path the classifier deliberately avoids).
+  // This test pins their agreement without coupling: every whitelisted error maps to the
+  // terminal insufficient_funds failure from the 'broadcast' state.
+  it('every whitelisted error maps to a terminal insufficient_funds from broadcast', () => {
+    const whitelisted: unknown[] = [
+      new Error('insufficient funds for gas * price + value'),
+      Object.assign(new Error('re-wrapped'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE }),
+      new Error('No operational wallet has enough funds to publish'),
+    ];
+    for (const error of whitelisted) {
+      expect(isDefinitivePreAcceptanceSendFailure(error)).toBe(true);
+      const failure = mapPublishExceptionToLiftJobFailure({
+        error,
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:dkg:test:error',
+      });
+      expect(failure.code).toBe('insufficient_funds');
+      expect(failure.mode).toBe('terminal');
+      expect(failure.retryable).toBe(false);
+    }
   });
 });

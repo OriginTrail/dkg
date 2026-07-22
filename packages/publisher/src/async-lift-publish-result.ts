@@ -183,16 +183,30 @@ export function mapPublishExceptionToLiftJobFailure(
  * The bare `includes('insufficient funds')` mirrors `classifyPublishFailureCode` exactly; a
  * mined-then-reverted tx whose revert string contains that phrase is an accepted, intentional
  * edge (same code the mapper would assign, and a revert is a failure on either path).
+ *
+ * THROW-SAFE: this runs on the double-submit safety path — if it threw (e.g. `String()` on a
+ * pathological thrown value like `Object.create(null)`), the caller would never reach the
+ * ambiguous-recovery branch and an opaque error would strand off the recovery track. An
+ * unstringifiable value therefore falls back to an empty message → classified non-definitive
+ * → stays on recovery.
  */
 export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
+  // Property read is safe for any value (optional chaining covers null/undefined; reading a
+  // missing key off a null-prototype object yields undefined, never throws).
   const errorCode = (error as { code?: unknown } | null | undefined)?.code;
-  return (
-    errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE ||
-    messageIndicatesNoFundedPublisherWallet(lower) ||
-    lower.includes('insufficient funds')
-  );
+  if (errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
+  const lower = safeErrorMessageLowerCase(error);
+  return messageIndicatesNoFundedPublisherWallet(lower) || lower.includes('insufficient funds');
+}
+
+/** Lowercased error message that never throws — an unstringifiable value yields `''`. */
+function safeErrorMessageLowerCase(error: unknown): string {
+  try {
+    const message = error instanceof Error ? error.message : String(error);
+    return typeof message === 'string' ? message.toLowerCase() : '';
+  } catch {
+    return '';
+  }
 }
 
 function classifyPublishFailureCode(
