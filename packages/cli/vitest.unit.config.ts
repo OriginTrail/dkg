@@ -19,6 +19,10 @@ export default defineConfig({
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
           'test/publisher-clear-job-route.test.ts',
+          // #1890 — shared request-body boundary for the four publisher admin
+          // POST routes (pure handler, no hardhat). Belongs in the fast lane
+          // alongside its clear-job sibling above.
+          'test/publisher-admin-body-boundary.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',

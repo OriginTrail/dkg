@@ -76,11 +76,17 @@ describe('#1890 publisher admin POST body boundary', () => {
     it('null body → 400 (hardened, not a 500)', async () => {
       expect(await post('/api/publisher/cancel', 'null')).toEqual({ status: 400, body: { error: 'Missing jobId' } });
     });
+    it('empty body → 400 Missing jobId (hardened, not a 500)', async () => {
+      expect(await post('/api/publisher/cancel', '')).toEqual({ status: 400, body: { error: 'Missing jobId' } });
+    });
   });
 
   describe('retry', () => {
-    it('empty body → 200 retried', async () => {
+    it('empty object body {} → 200 retried', async () => {
       expect(await post('/api/publisher/retry', '{}')).toEqual({ status: 200, body: { retried: 3 } });
+    });
+    it('empty body → 200 retried (hardened, not a 500)', async () => {
+      expect(await post('/api/publisher/retry', '')).toEqual({ status: 200, body: { retried: 3 } });
     });
     it('unsupported status → 400', async () => {
       expect(await post('/api/publisher/retry', JSON.stringify({ status: 'queued' }))).toEqual({ status: 400, body: { error: 'Only status=failed is supported' } });

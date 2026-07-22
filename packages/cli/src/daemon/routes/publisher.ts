@@ -393,9 +393,7 @@ async function readSmallJsonObject(
     jsonResponse(res, 400, { error: "Invalid JSON body" });
     return null;
   }
-  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : {};
+  return isPlainRecord(parsed) ? parsed : {};
 }
 
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
