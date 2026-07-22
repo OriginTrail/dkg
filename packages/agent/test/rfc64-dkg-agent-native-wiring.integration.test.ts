@@ -416,6 +416,137 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
+  it('does not expose an empty applied head when first-asset successor staging fails', async () => {
+    const author = await startNativeAgent(
+      'auto-publish-first-asset-retry',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const publicQuads = [
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+    ];
+    const params = {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'first-asset-retry' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(60n, publicQuads)),
+    };
+    const publishSuccessor = vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+      .mockRejectedValueOnce(new Error('simulated successor staging failure'));
+    await expect(author.recordConfirmedRfc64PublicCatalogAssetV1(params))
+      .rejects.toThrow('simulated successor staging failure');
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
+    publishSuccessor.mockRestore();
+    await expect(author.recordConfirmedRfc64PublicCatalogAssetV1(params)).resolves.toMatchObject({
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+  }, 60_000);
+
+  it('atomically serializes concurrent first-asset catalog upserts without losing a row', async () => {
+    const receiver = await startNativeAgent('auto-publish-concurrent-receiver');
+    const author = await startNativeAgent(
+      'auto-publish-concurrent-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [receiver.peerId],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    for (const agent of [author, receiver]) {
+      agent.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ownerAddress: AUTHOR,
+      });
+    }
+    await connectBothWays(author, receiver);
+
+    const publicQuads = [
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+    ];
+    const kaNumbers = [61n, 62n] as const;
+    const results = await Promise.all(kaNumbers.map(async (kaNumber, index) => (
+      author.recordConfirmedRfc64PublicCatalogAssetV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate: `concurrent-confirmed-${index + 1}` as never,
+        publicQuads,
+        seal: assertionSealFromCanonical(await authorSeal(kaNumber, publicQuads)),
+      })
+    )));
+    expect(results).not.toContain(null);
+    const first = results.find((result) => result?.catalogVersion === '1');
+    const final = results.find((result) => result?.catalogVersion === '2');
+    expect(final).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    if (first === undefined || first === null || final === undefined || final === null) {
+      throw new Error('concurrent catalog upserts did not produce both successors');
+    }
+
+    const scopeDigest = catalogScopeDigest();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toEqual(final);
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: scopeDigest,
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(final.currentCatalogHeadDigest);
+    }, { timeout: 20_000, interval: 100 });
+    const evidence = receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      final.currentCatalogHeadDigest,
+    );
+    expect(evidence).toMatchObject({
+      inventoryRowCount: 2,
+      appliedHeadStatus: 'applied',
+    });
+    expect(new Set(evidence?.rows.map(({ kaId }) => kaId))).toEqual(new Set(
+      kaNumbers.map((kaNumber) => ((BigInt(AUTHOR) << 96n) | kaNumber).toString()),
+    ));
+  }, 60_000);
+
   it('serializes mixed-case projection terms in raw UTF-8 order', async () => {
     const author = await startNativeAgent(
       'auto-publish-byte-order',
