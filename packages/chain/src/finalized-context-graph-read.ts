@@ -5,11 +5,12 @@ import {
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertContextGraphAccessPolicyV1,
-  assertContextGraphPublishDomainV1,
   assertContextGraphPublishPolicyV1,
+  snapshotContextGraphPublishDomainV1,
   type BlockNumberV1,
   type ChainIdV1,
   type ContextGraphAccessPolicyV1,
+  type ContextGraphPublishDomainV1,
   type ContextGraphPublishPolicyV1,
   type DecimalU256V1,
   type Digest32V1,
@@ -259,8 +260,9 @@ function composeValidatedFinalizedContextGraphReadV1(
     );
   }
   const publishPolicy: ContextGraphPublishPolicyV1 = raw.publishPolicy;
+  let publishDomain: ContextGraphPublishDomainV1;
   try {
-    assertContextGraphPublishDomainV1(
+    publishDomain = snapshotContextGraphPublishDomainV1(
       publishPolicy,
       publishAuthority,
       publishAuthorityAccountId,
@@ -288,9 +290,9 @@ function composeValidatedFinalizedContextGraphReadV1(
     owner,
     active: raw.active,
     accessPolicy,
-    publishPolicy,
-    publishAuthority,
-    publishAuthorityAccountId,
+    publishPolicy: publishDomain.publishPolicy,
+    publishAuthority: publishDomain.publishAuthority,
+    publishAuthorityAccountId: publishDomain.publishAuthorityAccountId,
     nameHash,
   });
 }

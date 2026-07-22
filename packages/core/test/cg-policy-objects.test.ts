@@ -7,7 +7,6 @@ import {
   MAX_MEMBER_ROSTER_ENTRIES_V1,
   MEMBER_ROSTER_ROLES_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
-  assertContextGraphPublishDomainV1,
   assertContextGraphPolicyV1,
   assertMemberRosterV1,
   assertSignedContextGraphPolicyEnvelopeV1,
@@ -28,6 +27,7 @@ import {
   parseCanonicalSignedMemberRosterEnvelopeV1,
   parseCanonicalUnsignedContextGraphPolicyEnvelopeV1,
   parseCanonicalUnsignedMemberRosterEnvelopeV1,
+  snapshotContextGraphPublishDomainV1,
   type ContextGraphPolicyV1,
   type MemberRosterV1,
 } from '../src/cg-policy-objects.js';
@@ -174,17 +174,29 @@ describe('ContextGraphPolicyV1 codec', () => {
   });
 
   it('owns the normalized contribution-policy tuple invariant', () => {
-    expect(() => assertContextGraphPublishDomainV1(1, null, '0')).not.toThrow();
-    expect(() => assertContextGraphPublishDomainV1(0, ISSUER, '0')).not.toThrow();
-    expect(() => assertContextGraphPublishDomainV1(0, ISSUER, '7')).not.toThrow();
+    const open = snapshotContextGraphPublishDomainV1(1, null, '0');
+    const curated = snapshotContextGraphPublishDomainV1(0, ISSUER, '7');
+    expect(open).toEqual({
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+    });
+    expect(curated).toEqual({
+      publishPolicy: 0,
+      publishAuthority: ISSUER,
+      publishAuthorityAccountId: '7',
+    });
+    expect(Object.isFrozen(open)).toBe(true);
+    expect(Object.isFrozen(curated)).toBe(true);
+    expect(() => snapshotContextGraphPublishDomainV1(0, ISSUER, '0')).not.toThrow();
 
-    expect(() => assertContextGraphPublishDomainV1(1, ISSUER, '0'))
+    expect(() => snapshotContextGraphPublishDomainV1(1, ISSUER, '0'))
       .toThrow(/cg-policy-publish-domain/);
-    expect(() => assertContextGraphPublishDomainV1(1, null, '7'))
+    expect(() => snapshotContextGraphPublishDomainV1(1, null, '7'))
       .toThrow(/cg-policy-publish-domain/);
-    expect(() => assertContextGraphPublishDomainV1(0, null, '0'))
+    expect(() => snapshotContextGraphPublishDomainV1(0, null, '0'))
       .toThrow(/cg-policy-publish-domain/);
-    expect(() => assertContextGraphPublishDomainV1(0, `0x${'00'.repeat(20)}`, '0'))
+    expect(() => snapshotContextGraphPublishDomainV1(0, `0x${'00'.repeat(20)}`, '0'))
       .toThrow(/cg-policy-scalar/);
   });
 

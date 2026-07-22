@@ -55,6 +55,17 @@ export type ContextGraphAccessPolicyV1 =
   (typeof CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1)[number];
 export type ContextGraphPublishPolicyV1 =
   (typeof CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1)[number];
+export type ContextGraphPublishDomainV1 =
+  | {
+      readonly publishPolicy: 1;
+      readonly publishAuthority: null;
+      readonly publishAuthorityAccountId: DecimalU256V1 & '0';
+    }
+  | {
+      readonly publishPolicy: 0;
+      readonly publishAuthority: EvmAddressV1;
+      readonly publishAuthorityAccountId: DecimalU256V1;
+    };
 export type MemberRosterRoleV1 = (typeof MEMBER_ROSTER_ROLES_V1)[number];
 
 export interface FinalizedChainPolicySourceV1 {
@@ -181,29 +192,49 @@ export function assertContextGraphPublishPolicyV1(
  * producer of ContextGraphPolicyV1 the same fail-closed domain check without
  * making core aware of a storage-specific sentinel representation.
  */
-export function assertContextGraphPublishDomainV1(
+export function snapshotContextGraphPublishDomainV1(
   publishPolicy: unknown,
   publishAuthority: unknown,
   publishAuthorityAccountId: unknown,
-): asserts publishPolicy is ContextGraphPublishPolicyV1 {
+): ContextGraphPublishDomainV1 {
   assertContextGraphPublishPolicyV1(publishPolicy);
-  if (publishAuthority !== null) {
-    scalar(() => assertCanonicalEvmAddress(publishAuthority, 'publishAuthority'));
-  }
-  scalar(() => assertCanonicalDecimalU256(
-    publishAuthorityAccountId,
-    'publishAuthorityAccountId',
-  ));
+  const authority = publishAuthority === null
+    ? null
+    : scalar(() => {
+        assertCanonicalEvmAddress(publishAuthority, 'publishAuthority');
+        return publishAuthority;
+      });
+  const authorityAccountId = scalar(() => {
+    assertCanonicalDecimalU256(publishAuthorityAccountId, 'publishAuthorityAccountId');
+    return publishAuthorityAccountId;
+  });
   if (publishPolicy === 1) {
-    if (publishAuthority !== null || publishAuthorityAccountId !== '0') {
+    if (authority !== null || !isCanonicalZeroDecimalU256(authorityAccountId)) {
       fail(
         'cg-policy-publish-domain',
         'open contribution requires null publishAuthority and account ID zero',
       );
     }
-  } else if (publishAuthority === null) {
+    return Object.freeze({
+      publishPolicy,
+      publishAuthority: null,
+      publishAuthorityAccountId: authorityAccountId,
+    });
+  }
+  if (authority === null) {
     fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
   }
+  return Object.freeze({
+    publishPolicy,
+    publishAuthority: authority,
+    publishAuthorityAccountId: authorityAccountId,
+  });
+}
+
+function isCanonicalZeroDecimalU256(
+  value: DecimalU256V1,
+): value is DecimalU256V1 & '0' {
+  return value === '0';
 }
 
 export function canonicalizeContextGraphPolicyPayloadV1(
@@ -463,7 +494,7 @@ function assertContextGraphPolicyStructureV1(
   u64(value.version, 'version');
   optionalDigest(value.previousPolicyDigest, 'previousPolicyDigest');
   assertContextGraphAccessPolicyV1(value.accessPolicy);
-  assertContextGraphPublishDomainV1(
+  snapshotContextGraphPublishDomainV1(
     value.publishPolicy,
     value.publishAuthority,
     value.publishAuthorityAccountId,
@@ -753,9 +784,9 @@ function u64(value: unknown, label: string): bigint {
   }
 }
 
-function scalar(operation: () => void): void {
+function scalar<T>(operation: () => T): T {
   try {
-    operation();
+    return operation();
   } catch (cause) {
     fail('cg-policy-scalar', 'policy/roster scalar is not canonical', cause);
   }
