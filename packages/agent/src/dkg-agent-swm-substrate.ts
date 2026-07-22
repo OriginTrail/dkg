@@ -1647,20 +1647,22 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       this.finalizationHandler = new FinalizationHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
-        this.eventBus,
-        // Defensive: when a peer's finalization gossip omits
-        // `targetContextGraphId` (pre-cd68fa689 publisher in the mesh),
-        // resolve the on-chain id locally so per-cgId promotion still
-        // fires and the RS prover sees the KC.
-        (cgName: string) => this.getContextGraphOnChainId(cgName),
-        (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         {
-          localPeerId: this.peerId,
-          localNodeIdentityId: this.identityId.toString(),
+          eventBus: this.eventBus,
+          // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
+          resolveContextGraphOnChainId: (cgName: string) =>
+            this.getContextGraphOnChainId(cgName),
+          markContextGraphMetaDirtyFromQuads: (quads) => {
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          lifecycleLogOptions: {
+            localPeerId: this.peerId,
+            localNodeIdentityId: this.identityId.toString(),
+          },
+          ...(this.config.dataDir
+            ? { recoveryJournal: new FinalizationRecoveryJournal(this.config.dataDir) }
+            : {}),
         },
-        this.config.dataDir
-          ? new FinalizationRecoveryJournal(this.config.dataDir)
-          : undefined,
       );
     }
     return this.finalizationHandler;

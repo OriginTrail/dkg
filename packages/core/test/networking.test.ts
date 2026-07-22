@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DKGNode } from '../src/node.js';
 import { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
@@ -240,6 +240,42 @@ describe('GossipSubManager', () => {
       await n.stop();
     }
     nodes.length = 0;
+  });
+
+  it('contains rejected async handlers at the gossip boundary', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    let resolveLogged!: (args: unknown[]) => void;
+    const logged = new Promise<unknown[]>((resolve) => { resolveLogged = resolve; });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      resolveLogged(args);
+    });
+    try {
+      manager.onMessage(topic, async () => {
+        throw new Error('store remains busy');
+      });
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+
+      await expect(logged).resolves.toEqual([
+        `[GossipSub] handler error on topic "${topic}":`,
+        'store remains busy',
+      ]);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('publishes and receives messages', async () => {

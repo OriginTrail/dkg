@@ -395,7 +395,7 @@ describe('graph-scoped finalization handler', () => {
     try {
       const { message, vmGraph } = await stageGraph();
       const wire = encodeFinalizationMessage(message);
-      let currentRootCount = 2n;
+      let currentRootCount = 0n;
       const chain = {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => message.kcMerkleRoot,
@@ -406,11 +406,7 @@ describe('graph-scoped finalization handler', () => {
       const pressured = new FinalizationHandler(
         store,
         chain,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        journal,
+        { recoveryJournal: journal },
       );
       (pressured as unknown as {
         verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
@@ -436,17 +432,18 @@ describe('graph-scoped finalization handler', () => {
       const restarted = new FinalizationHandler(
         store,
         chain,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        new FinalizationRecoveryJournal(directory),
+        { recoveryJournal: new FinalizationRecoveryJournal(directory) },
       );
       const internals = restarted as unknown as {
         verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
         verifyChainCgBinding: () => Promise<boolean>;
       };
-      internals.verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      let receiptVerified = false;
+      let verifyCalls = 0;
+      internals.verifyOnChain = async () => {
+        verifyCalls += 1;
+        return { verified: receiptVerified, authorAddress: AUTHOR, txIndex: 4 };
+      };
       internals.verifyChainCgBinding = async () => true;
 
       const reconcileInput = {
@@ -466,6 +463,15 @@ describe('graph-scoped finalization handler', () => {
       expect(await journal.list()).toHaveLength(1);
 
       currentRootCount = 1n;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(verifyCalls).toBe(1);
+      expect(await journal.list()).toMatchObject([{ state: 'raw' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      receiptVerified = true;
       const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
       if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
       store.replaceGraphAndSubject = async () => {
@@ -499,6 +505,60 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('prunes a verified recovery envelope after chain truth supersedes it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    try {
+      const { message, vmGraph } = await stageGraph();
+      let latestRoot = message.kcMerkleRoot;
+      let rootCount = 1n;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => latestRoot,
+        getMerkleRootCount: async () => rootCount,
+        getKAContextGraphId: async () => 42n,
+      } as ChainAdapter;
+      const journal = new FinalizationRecoveryJournal(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryJournal: journal });
+      const internals = recoveryHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      internals.verifyChainCgBinding = async () => true;
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
+
+      latestRoot = Uint8Array.from(message.kcMerkleRoot, (byte) => byte ^ 0xff);
+      rootCount = 2n;
+      await recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: latestRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 124,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'));
+
+      expect(await journal.list()).toEqual([]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('never journals structurally invalid or legacy envelopes under store pressure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     try {
@@ -507,11 +567,7 @@ describe('graph-scoped finalization handler', () => {
       const pressured = new FinalizationHandler(
         store,
         undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        journal,
+        { recoveryJournal: journal },
       );
       await pressured.handleFinalizationMessage(encodeFinalizationMessage({
         ...message,

@@ -145,11 +145,10 @@ export class FinalizationRecoveryJournal {
       .map((entry) => ({ ...entry })));
   }
 
-  async matching(input: {
+  async forKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;
     ual: string;
-    merkleRoot: string;
     kaId: string;
   }): Promise<FinalizationRecoveryEntry[]> {
     const entries = await this.list();
@@ -157,7 +156,6 @@ export class FinalizationRecoveryJournal {
       entry.chainId === input.chainId
       && entry.contextGraphId === input.contextGraphId
       && entry.ual === input.ual
-      && entry.merkleRoot.toLowerCase() === input.merkleRoot.toLowerCase()
       && entry.kaId === input.kaId,
     );
   }

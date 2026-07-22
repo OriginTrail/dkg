@@ -260,9 +260,7 @@ describe('FinalizationHandler', () => {
     const localHandler = new FinalizationHandler(
       store,
       undefined,
-      undefined,
-      undefined,
-      (quads) => { dirtyQuads.push(...quads); },
+      { markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); } },
     );
 
     await (localHandler as any).promoteSharedMemoryToCanonical(
@@ -338,8 +336,7 @@ describe('FinalizationHandler', () => {
     const localHandler = new FinalizationHandler(
       localStore,
       undefined,
-      undefined,
-      resolveCtxId,
+      { resolveContextGraphOnChainId: resolveCtxId },
     );
     const entity = 'urn:remap-to-self:entity';
     const publisher = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
