@@ -25,6 +25,7 @@ import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSubGraphNameV1,
   computeControlSignatureVariantDigestHex,
+  type AuthorCatalogScopeV1,
   type ContextGraphAccessPolicyV1,
   type ContextGraphIdV1,
   type DecimalU64V1,
@@ -41,15 +42,12 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 import {
-  Rfc64CatalogTransportWireUtilityErrorV1,
-  assertRfc64CanonicalEvmAddressV1,
   assertRfc64ExactIssuerSignatureProofV1,
-  encodeRfc64FlatCanonicalJsonV1,
+  createRfc64CatalogTransportWireAdapterV1,
   encodeRfc64FoundStatusResponseV1,
-  parseRfc64FlatCanonicalJsonV1,
   parseRfc64StatusResponsePayloadV1,
-  snapshotRfc64ExactWireRecordV1,
-  snapshotRfc64PeerIdV1,
+  rethrowRfc64CatalogTransportWireUtilityErrorV1,
+  type Rfc64CatalogTransportWireAdapterV1,
 } from './catalog-transport-wire-v1-internal.js';
 
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
@@ -81,6 +79,30 @@ const QUERY_KEYS = Object.freeze([
   'subGraphName',
 ] as const);
 
+const DISCOVERY_WIRE: Rfc64CatalogTransportWireAdapterV1 =
+  createRfc64CatalogTransportWireAdapterV1({
+    fail,
+    wireCode: 'catalog-discovery-wire',
+    inputCode: 'catalog-discovery-input',
+    messages: {
+      encodePlainObject: 'RFC-64 current-head query must be a plain object',
+      encodeFieldShape: 'RFC-64 current-head query accepts only string or null fields',
+      encodeOversized: (maxBytes) => `RFC-64 current-head query exceeds ${maxBytes} bytes`,
+      parseOversized: 'RFC-64 current-head query is empty or oversized',
+      parseStrictJson: 'RFC-64 current-head query is not strict UTF-8 JSON',
+      parsePlainObject: 'RFC-64 current-head query must be a plain JSON object',
+      parseExactKeys: 'RFC-64 current-head query has missing or unknown fields',
+      parseNoncanonical: 'RFC-64 current-head query bytes are not canonical JCS',
+      snapshot: (wireError) => wireError.message.replace(
+        'RFC-64 wire',
+        'RFC-64 current-head query',
+      ),
+      evmAddress: (label) => `${label} must be a canonical lowercase nonzero EVM address`,
+      peerIdType: 'remotePeerId must be a string',
+      peerIdCanonical: 'remotePeerId is empty, oversized, or noncanonical',
+    },
+  });
+
 export interface Rfc64PublicCatalogCurrentHeadScopeV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -110,6 +132,8 @@ export interface Rfc64PublicCatalogCurrentHeadAuthorizationInputV1
 export interface Rfc64PublicCatalogCurrentHeadAuthorizationV1 {
   readonly accessPolicy: ContextGraphAccessPolicyV1;
   readonly policyDigest: Digest32V1;
+  /** Exact semantic scope derived from independently accepted local policy. */
+  readonly trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
 }
 
 export interface Rfc64PublicCatalogCurrentHeadControlObjectReaderV1 {
@@ -132,7 +156,7 @@ export interface Rfc64PublicCatalogCurrentHeadDiscoveryTransportOptionsV1 {
    * capability contract.
    */
   readonly readCurrentAppliedCatalogHeadDigest: (
-    query: Rfc64PublicCatalogCurrentHeadQueryV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
   ) => Promise<Digest32V1 | null>;
   /** Must consult accepted current policy state, never echo the wire digest. */
   readonly authorizeOpenCatalogOperation: (
@@ -251,12 +275,19 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const query = parseQuery(data);
     for (let attempt = 0; attempt < CURRENT_HEAD_SNAPSHOT_MAX_ATTEMPTS; attempt += 1) {
-      if (!await this.isOpenPolicy('current-head-discovery-inbound', remotePeerId, query)) {
+      const authorization = await this.openPolicyOrNull(
+        'current-head-discovery-inbound',
+        remotePeerId,
+        query,
+      );
+      if (authorization === null) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
       }
       throwIfAborted(signal);
 
-      const currentDigest = await this.readCurrentAppliedCatalogHeadDigest(query);
+      const currentDigest = await this.readCurrentAppliedCatalogHeadDigest(
+        authorization.trustedCatalogScope,
+      );
       throwIfAborted(signal);
       const announcement = currentDigest === null
         ? null
@@ -267,11 +298,17 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
       // the pointer immediately before responding so discovery never knowingly
       // advertises a superseded or transient snapshot. One retry admits the
       // common single-writer CAS race while keeping work per request bounded.
-      const confirmedDigest = await this.readCurrentAppliedCatalogHeadDigest(query);
+      const confirmedDigest = await this.readCurrentAppliedCatalogHeadDigest(
+        authorization.trustedCatalogScope,
+      );
       throwIfAborted(signal);
       if (confirmedDigest !== currentDigest) continue;
 
-      if (!await this.isOpenPolicy('current-head-discovery-inbound', remotePeerId, query)) {
+      if (await this.openPolicyOrNull(
+        'current-head-discovery-inbound',
+        remotePeerId,
+        query,
+      ) === null) {
         return Uint8Array.of(CURRENT_HEAD_DENIED);
       }
       throwIfAborted(signal);
@@ -287,10 +324,12 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
   }
 
   private async readCurrentAppliedCatalogHeadDigest(
-    query: Rfc64PublicCatalogCurrentHeadQueryV1,
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
   ): Promise<Digest32V1 | null> {
     try {
-      const currentDigest = await this.options.readCurrentAppliedCatalogHeadDigest(query);
+      const currentDigest = await this.options.readCurrentAppliedCatalogHeadDigest(
+        trustedCatalogScope,
+      );
       if (currentDigest !== null) {
         assertCanonicalDigest(currentDigest, 'current catalog head digest');
       }
@@ -339,19 +378,18 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     return announcementFromHead(envelope, query.policyDigest);
   }
 
-  private async isOpenPolicy(
+  private async openPolicyOrNull(
     operation: Rfc64PublicCatalogCurrentHeadDiscoveryOperationV1,
     remotePeerId: string,
     query: Rfc64PublicCatalogCurrentHeadQueryV1,
-  ): Promise<boolean> {
+  ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
     try {
-      await this.requireOpenPolicy(operation, remotePeerId, query);
-      return true;
+      return await this.requireOpenPolicy(operation, remotePeerId, query);
     } catch (cause) {
       if (
         cause instanceof Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1
         && cause.code === 'catalog-discovery-policy-denied'
-      ) return false;
+      ) return null;
       throw cause;
     }
   }
@@ -360,7 +398,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     operation: Rfc64PublicCatalogCurrentHeadDiscoveryOperationV1,
     remotePeerId: string,
     query: Rfc64PublicCatalogCurrentHeadQueryV1,
-  ): Promise<void> {
+  ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1> {
     const input = Object.freeze({
       operation,
       remotePeerId,
@@ -389,6 +427,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     if (authorization.policyDigest !== query.policyDigest) {
       fail('catalog-discovery-policy-denied', 'current-head discovery policy generation is stale or mismatched');
     }
+    return authorization;
   }
 
   private requireStarted(): void {
@@ -481,25 +520,21 @@ function parseResponse(input: Uint8Array): Rfc64PublicCatalogHeadAnnouncementV1 
       RFC64_PUBLIC_CATALOG_CURRENT_HEAD_RESPONSE_MAX_BYTES_V1,
     );
   } catch (cause) {
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-trailing'
-    ) {
-      fail(
-        'catalog-discovery-wire',
-        input[0] === CURRENT_HEAD_NOT_FOUND
+    rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+      'response-trailing': {
+        code: 'catalog-discovery-wire',
+        message: input[0] === CURRENT_HEAD_NOT_FOUND
           ? 'not-found current-head response has trailing bytes'
           : 'denied current-head response has trailing bytes',
-        cause,
-      );
-    }
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-status'
-    ) {
-      fail('catalog-discovery-wire', 'current-head discovery response has an invalid status', cause);
-    }
-    fail('catalog-discovery-wire', 'current-head discovery response is empty or oversized', cause);
+      },
+      'response-status': {
+        code: 'catalog-discovery-wire',
+        message: 'current-head discovery response has an invalid status',
+      },
+    }, {
+      code: 'catalog-discovery-wire',
+      message: 'current-head discovery response is empty or oversized',
+    });
   }
   if (framed.status === 'not-found') return null;
   if (framed.status === 'denied') {
@@ -580,38 +615,20 @@ function assertExactIssuerSignatureProof(
   try {
     assertRfc64ExactIssuerSignatureProofV1(envelope, proof);
   } catch (cause) {
-    fail(
-      'catalog-discovery-signature',
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-        && cause.reason === 'issuer-proof-unminted'
-        ? 'issuer signature proof was not minted by the verifier'
-        : 'issuer signature proof is not bound to the exact head envelope',
-      cause,
-    );
+    rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+      'issuer-proof-unminted': {
+        code: 'catalog-discovery-signature',
+        message: 'issuer signature proof was not minted by the verifier',
+      },
+    }, {
+      code: 'catalog-discovery-signature',
+      message: 'issuer signature proof is not bound to the exact head envelope',
+    });
   }
 }
 
 function encodeFlatCanonicalJson(value: object, maxBytes: number): Uint8Array {
-  try {
-    return encodeRfc64FlatCanonicalJsonV1(value, maxBytes);
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'plain-object') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query must be a plain object', cause);
-      }
-      if (cause.reason === 'field-shape') {
-        fail(
-          'catalog-discovery-wire',
-          'RFC-64 current-head query accepts only string or null fields',
-          cause,
-        );
-      }
-      if (cause.reason === 'oversized') {
-        fail('catalog-discovery-wire', `RFC-64 current-head query exceeds ${maxBytes} bytes`, cause);
-      }
-    }
-    throw cause;
-  }
+  return DISCOVERY_WIRE.encodeFlatCanonicalJson(value, maxBytes);
 }
 
 function parseFlatCanonicalJson(
@@ -619,69 +636,22 @@ function parseFlatCanonicalJson(
   expectedKeys: readonly string[],
   maxBytes: number,
 ): Record<string, unknown> {
-  try {
-    return parseRfc64FlatCanonicalJsonV1(input, expectedKeys, maxBytes);
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'oversized') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query is empty or oversized', cause);
-      }
-      if (cause.reason === 'strict-json') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query is not strict UTF-8 JSON', cause);
-      }
-      if (cause.reason === 'plain-object') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query must be a plain JSON object', cause);
-      }
-      if (cause.reason === 'exact-keys') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query has missing or unknown fields', cause);
-      }
-      if (cause.reason === 'noncanonical') {
-        fail('catalog-discovery-wire', 'RFC-64 current-head query bytes are not canonical JCS', cause);
-      }
-    }
-    throw cause;
-  }
+  return DISCOVERY_WIRE.parseFlatCanonicalJson(input, expectedKeys, maxBytes);
 }
 
 function snapshotExactWireRecord(
   value: Record<string, unknown>,
   expectedKeys: readonly string[],
 ): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      fail('catalog-discovery-wire', cause.message.replace('RFC-64 wire', 'RFC-64 current-head query'), cause);
-    }
-    throw cause;
-  }
+  return DISCOVERY_WIRE.snapshotExactWireRecord(value, expectedKeys);
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
-  try {
-    assertRfc64CanonicalEvmAddressV1(value, label);
-  } catch (cause) {
-    fail(
-      'catalog-discovery-wire',
-      `${label} must be a canonical lowercase nonzero EVM address`,
-      cause,
-    );
-  }
+  DISCOVERY_WIRE.assertCanonicalEvmAddress(value, label);
 }
 
 function snapshotPeerId(value: unknown): string {
-  try {
-    return snapshotRfc64PeerIdV1(value);
-  } catch (cause) {
-    fail(
-      'catalog-discovery-input',
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-        && cause.reason === 'peer-id-type'
-        ? 'remotePeerId must be a string'
-        : 'remotePeerId is empty, oversized, or noncanonical',
-      cause,
-    );
-  }
+  return DISCOVERY_WIRE.snapshotPeerId(value);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

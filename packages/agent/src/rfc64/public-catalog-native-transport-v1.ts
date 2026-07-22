@@ -52,15 +52,12 @@ import {
 } from './catalog-transport-authorization-v1.js';
 import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
 import {
-  Rfc64CatalogTransportWireUtilityErrorV1,
-  assertRfc64CanonicalEvmAddressV1,
   assertRfc64ExactIssuerSignatureProofV1,
-  encodeRfc64FlatCanonicalJsonV1,
+  createRfc64CatalogTransportWireAdapterV1,
   encodeRfc64FoundStatusResponseV1,
-  parseRfc64FlatCanonicalJsonV1,
   parseRfc64StatusResponsePayloadV1,
-  snapshotRfc64ExactWireRecordV1,
-  snapshotRfc64PeerIdV1,
+  rethrowRfc64CatalogTransportWireUtilityErrorV1,
+  type Rfc64CatalogTransportWireAdapterV1,
 } from './catalog-transport-wire-v1-internal.js';
 
 export const RFC64_PUBLIC_CATALOG_OBJECT_FETCH_PROTOCOL_V1 =
@@ -122,6 +119,27 @@ export function assertRfc64PublicCatalogExactSetBundleBytesV1(
 
 const FETCH_NOT_FOUND = 0;
 const FETCH_DENIED = 2;
+
+const NATIVE_WIRE: Rfc64CatalogTransportWireAdapterV1 =
+  createRfc64CatalogTransportWireAdapterV1({
+    fail,
+    wireCode: 'catalog-native-wire',
+    inputCode: 'catalog-native-input',
+    messages: {
+      encodePlainObject: 'catalog native request must be a plain object',
+      encodeFieldShape: 'catalog native requests accept only string or null fields',
+      encodeOversized: () => 'catalog native request exceeds its byte ceiling',
+      parseOversized: 'catalog native request is empty or oversized',
+      parseStrictJson: 'catalog native request is not strict UTF-8 JSON',
+      parsePlainObject: 'catalog native request must be an object',
+      parseExactKeys: 'catalog native request has missing or unknown fields',
+      parseNoncanonical: 'catalog native request bytes are not canonical JCS',
+      snapshot: 'catalog native request has missing or unknown fields',
+      evmAddress: (label) => `${label} must be a lowercase nonzero EVM address`,
+      peerIdType: 'remotePeerId must be a string',
+      peerIdCanonical: 'remotePeerId is empty, oversized, or noncanonical',
+    },
+  });
 const UTF8 = new TextEncoder();
 
 const SCOPE_KEYS = Object.freeze([
@@ -618,58 +636,18 @@ function validateScope(
 }
 
 function encodeRequest(value: object): Uint8Array {
-  try {
-    return encodeRfc64FlatCanonicalJsonV1(
-      value,
-      RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
-    );
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'plain-object') {
-        fail('catalog-native-wire', 'catalog native request must be a plain object', cause);
-      }
-      if (cause.reason === 'field-shape') {
-        fail(
-          'catalog-native-wire',
-          'catalog native requests accept only string or null fields',
-          cause,
-        );
-      }
-      if (cause.reason === 'oversized') {
-        fail('catalog-native-wire', 'catalog native request exceeds its byte ceiling', cause);
-      }
-    }
-    throw cause;
-  }
+  return NATIVE_WIRE.encodeFlatCanonicalJson(
+    value,
+    RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
+  );
 }
 
 function parseRequest(input: Uint8Array, expectedKeys: readonly string[]): Record<string, unknown> {
-  try {
-    return parseRfc64FlatCanonicalJsonV1(
-      input,
-      expectedKeys,
-      RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
-    );
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'oversized') {
-        fail('catalog-native-wire', 'catalog native request is empty or oversized', cause);
-      }
-      if (cause.reason === 'strict-json') {
-        fail('catalog-native-wire', 'catalog native request is not strict UTF-8 JSON', cause);
-      }
-      if (cause.reason === 'plain-object') {
-        fail('catalog-native-wire', 'catalog native request must be an object', cause);
-      }
-      if (cause.reason === 'exact-keys') {
-        fail('catalog-native-wire', 'catalog native request has missing or unknown fields', cause);
-      }
-      if (cause.reason === 'noncanonical') {
-        fail('catalog-native-wire', 'catalog native request bytes are not canonical JCS', cause);
-      }
-    }
-    throw cause;
-  }
+  return NATIVE_WIRE.parseFlatCanonicalJson(
+    input,
+    expectedKeys,
+    RFC64_PUBLIC_CATALOG_NATIVE_FETCH_REQUEST_MAX_BYTES_V1,
+  );
 }
 
 function parseCatalogObjectResponse(input: Uint8Array): SignedControlEnvelopeV1 | null {
@@ -702,25 +680,21 @@ function responsePayload(input: Uint8Array, maxBytes: number): Uint8Array | null
   try {
     framed = parseRfc64StatusResponsePayloadV1(input, maxBytes);
   } catch (cause) {
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-trailing'
-    ) {
-      fail(
-        'catalog-native-wire',
-        input[0] === FETCH_NOT_FOUND
+    rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+      'response-trailing': {
+        code: 'catalog-native-wire',
+        message: input[0] === FETCH_NOT_FOUND
           ? 'not-found response has trailing bytes'
           : 'denied response has trailing bytes',
-        cause,
-      );
-    }
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-status'
-    ) {
-      fail('catalog-native-wire', 'catalog native response has an invalid status', cause);
-    }
-    fail('catalog-native-wire', 'catalog native response is empty or oversized', cause);
+      },
+      'response-status': {
+        code: 'catalog-native-wire',
+        message: 'catalog native response has an invalid status',
+      },
+    }, {
+      code: 'catalog-native-wire',
+      message: 'catalog native response is empty or oversized',
+    });
   }
   if (framed.status === 'not-found') return null;
   if (framed.status === 'denied') {
@@ -770,37 +744,18 @@ function foundResponse(payload: Uint8Array): Uint8Array {
 }
 
 function assertCanonicalEvmAddress(value: unknown, label: string): asserts value is EvmAddressV1 {
-  try {
-    assertRfc64CanonicalEvmAddressV1(value, label);
-  } catch (cause) {
-    fail('catalog-native-wire', `${label} must be a lowercase nonzero EVM address`, cause);
-  }
+  NATIVE_WIRE.assertCanonicalEvmAddress(value, label);
 }
 
 function snapshotPeerId(value: unknown): string {
-  try {
-    return snapshotRfc64PeerIdV1(value);
-  } catch (cause) {
-    fail(
-      'catalog-native-input',
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-        && cause.reason === 'peer-id-type'
-        ? 'remotePeerId must be a string'
-        : 'remotePeerId is empty, oversized, or noncanonical',
-      cause,
-    );
-  }
+  return NATIVE_WIRE.snapshotPeerId(value);
 }
 
 function snapshotExactWireRecord(
   value: unknown,
   expectedKeys: readonly string[],
 ): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
-  } catch (cause) {
-    fail('catalog-native-wire', 'catalog native request has missing or unknown fields', cause);
-  }
+  return NATIVE_WIRE.snapshotExactWireRecord(value, expectedKeys);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

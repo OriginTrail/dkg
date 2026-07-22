@@ -51,6 +51,143 @@ export class Rfc64CatalogTransportWireUtilityErrorV1 extends Error {
   }
 }
 
+export interface Rfc64CatalogTransportWireErrorMappingV1<Code extends string> {
+  readonly code: Code;
+  readonly message: string | ((cause: Rfc64CatalogTransportWireUtilityErrorV1) => string);
+}
+
+/**
+ * Central adapter from package-private wire failures to one protocol's public
+ * error vocabulary. Protocol modules declare a compact reason table instead
+ * of duplicating catch ladders whenever the shared wire taxonomy evolves.
+ */
+export function rethrowRfc64CatalogTransportWireUtilityErrorV1<Code extends string>(
+  cause: unknown,
+  fail: (code: Code, message: string, cause?: unknown) => never,
+  mappings: Partial<Record<
+    Rfc64CatalogTransportWireUtilityErrorReasonV1,
+    Rfc64CatalogTransportWireErrorMappingV1<Code>
+  >>,
+  fallback?: Rfc64CatalogTransportWireErrorMappingV1<Code>,
+): never {
+  if (!(cause instanceof Rfc64CatalogTransportWireUtilityErrorV1)) throw cause;
+  const mapping = mappings[cause.reason] ?? fallback;
+  if (mapping === undefined) throw cause;
+  fail(
+    mapping.code,
+    typeof mapping.message === 'function' ? mapping.message(cause) : mapping.message,
+    cause,
+  );
+}
+
+export interface Rfc64CatalogTransportWireAdapterMessagesV1 {
+  readonly encodePlainObject: string;
+  readonly encodeFieldShape: string;
+  readonly encodeOversized: (maxBytes: number) => string;
+  readonly parseOversized: string;
+  readonly parseStrictJson: string;
+  readonly parsePlainObject: string;
+  readonly parseExactKeys: string;
+  readonly parseNoncanonical: string;
+  readonly snapshot: string | ((cause: Rfc64CatalogTransportWireUtilityErrorV1) => string);
+  readonly evmAddress: (label: string) => string;
+  readonly peerIdType: string;
+  readonly peerIdCanonical: string;
+}
+
+export interface Rfc64CatalogTransportWireAdapterV1 {
+  encodeFlatCanonicalJson(value: object, maxBytes: number): Uint8Array;
+  parseFlatCanonicalJson(
+    input: Uint8Array,
+    expectedKeys: readonly string[],
+    maxBytes: number,
+  ): Readonly<Record<string, unknown>>;
+  snapshotExactWireRecord(
+    value: unknown,
+    expectedKeys: readonly string[],
+  ): Readonly<Record<string, unknown>>;
+  assertCanonicalEvmAddress(value: unknown, label: string): asserts value is EvmAddressV1;
+  snapshotPeerId(value: unknown): string;
+}
+
+/** Build one protocol-family adapter around the shared catalog wire codec. */
+export function createRfc64CatalogTransportWireAdapterV1<Code extends string>(options: {
+  readonly fail: (code: Code, message: string, cause?: unknown) => never;
+  readonly wireCode: Code;
+  readonly inputCode: Code;
+  readonly messages: Rfc64CatalogTransportWireAdapterMessagesV1;
+}): Rfc64CatalogTransportWireAdapterV1 {
+  const { fail, wireCode, inputCode, messages } = options;
+  return Object.freeze({
+    encodeFlatCanonicalJson(value: object, maxBytes: number): Uint8Array {
+      try {
+        return encodeRfc64FlatCanonicalJsonV1(value, maxBytes);
+      } catch (cause) {
+        rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+          'plain-object': { code: wireCode, message: messages.encodePlainObject },
+          'field-shape': { code: wireCode, message: messages.encodeFieldShape },
+          oversized: { code: wireCode, message: messages.encodeOversized(maxBytes) },
+        });
+      }
+    },
+    parseFlatCanonicalJson(
+      input: Uint8Array,
+      expectedKeys: readonly string[],
+      maxBytes: number,
+    ): Readonly<Record<string, unknown>> {
+      try {
+        return parseRfc64FlatCanonicalJsonV1(input, expectedKeys, maxBytes);
+      } catch (cause) {
+        rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+          oversized: { code: wireCode, message: messages.parseOversized },
+          'strict-json': { code: wireCode, message: messages.parseStrictJson },
+          'plain-object': { code: wireCode, message: messages.parsePlainObject },
+          'exact-keys': { code: wireCode, message: messages.parseExactKeys },
+          noncanonical: { code: wireCode, message: messages.parseNoncanonical },
+        });
+      }
+    },
+    snapshotExactWireRecord(
+      value: unknown,
+      expectedKeys: readonly string[],
+    ): Readonly<Record<string, unknown>> {
+      try {
+        return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
+      } catch (cause) {
+        rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {}, {
+          code: wireCode,
+          message: messages.snapshot,
+        });
+      }
+    },
+    assertCanonicalEvmAddress(
+      value: unknown,
+      label: string,
+    ): asserts value is EvmAddressV1 {
+      try {
+        assertRfc64CanonicalEvmAddressV1(value, label);
+      } catch (cause) {
+        rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {}, {
+          code: wireCode,
+          message: messages.evmAddress(label),
+        });
+      }
+    },
+    snapshotPeerId(value: unknown): string {
+      try {
+        return snapshotRfc64PeerIdV1(value);
+      } catch (cause) {
+        rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+          'peer-id-type': { code: inputCode, message: messages.peerIdType },
+        }, {
+          code: inputCode,
+          message: messages.peerIdCanonical,
+        });
+      }
+    },
+  });
+}
+
 export function encodeRfc64FlatCanonicalJsonV1(
   value: object,
   maxBytes: number,

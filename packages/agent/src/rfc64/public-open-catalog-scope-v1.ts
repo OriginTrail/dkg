@@ -10,21 +10,22 @@
 
 import {
   type AuthorCatalogScopeV1,
+  type ContextGraphIdV1,
   type ContextGraphPolicyV1,
   type CountV1,
+  type DecimalU64V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
+  type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 
-import type {
-  Rfc64PublicCatalogHeadAnnouncementV1,
-} from './public-catalog-transport-v1.js';
-
-/** Wire fields that identify one claimed public/open root author-catalog scope. */
+/** Neutral fields that identify one claimed public/open root author-catalog scope. */
 export interface Rfc64PublicOpenCatalogScopeClaimV1 {
-  readonly networkId: Rfc64PublicCatalogHeadAnnouncementV1['networkId'];
-  readonly contextGraphId: Rfc64PublicCatalogHeadAnnouncementV1['contextGraphId'];
-  readonly subGraphName: Rfc64PublicCatalogHeadAnnouncementV1['subGraphName'];
-  readonly authorAddress: Rfc64PublicCatalogHeadAnnouncementV1['authorAddress'];
-  readonly catalogEra: Rfc64PublicCatalogHeadAnnouncementV1['catalogEra'];
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
 }
 
 /**
