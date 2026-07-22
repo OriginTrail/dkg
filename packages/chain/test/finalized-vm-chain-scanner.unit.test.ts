@@ -415,7 +415,9 @@ describe('RFC-64 finalized VM chain scanner', () => {
           const request = call.params[0] as { readonly data?: string };
           const data = request.data ?? '';
           const selector = data.slice(0, 10);
-          if (selector === CG_ABI.getFunction('isContextGraphActive')!.selector) {
+          if (data === '0x') {
+            sendResult(response, call, '0x');
+          } else if (selector === CG_ABI.getFunction('isContextGraphActive')!.selector) {
             sendResult(response, call, boolResult(true));
           } else if (selector === CG_ABI.getFunction('getContextGraphKaCount')!.selector) {
             sendResult(response, call, uintResult(2n));
@@ -463,7 +465,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`, assertionVersion: '3', assertionRoot: ROOT_B },
     ]);
     const ethCalls = rpc.calls.filter(({ method }) => method === 'eth_call');
-    expect(ethCalls).toHaveLength(12);
+    expect(ethCalls).toHaveLength(13);
     expect(ethCalls.every(({ params }) => {
       const block = params[1] as { readonly blockHash?: unknown; readonly requireCanonical?: unknown };
       return block.blockHash === BLOCK_HASH && block.requireCanonical === true;
