@@ -46,11 +46,13 @@ export {
 } from './finalized-context-graph-rpc-resolver.js';
 export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
-  createFinalizedVmChainScannerV1,
-  scanFinalizedVmChainInventoryInSnapshotV1,
   snapshotFinalizedVmChainInventoryV1,
   type FinalizedVmChainCandidateV1,
   type FinalizedVmChainInventoryV1,
+} from './finalized-vm-chain-inventory.js';
+export {
+  createFinalizedVmChainScannerV1,
+  scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedVmChainScanRequestV1,
   type FinalizedVmChainScannerConfigV1,
   type FinalizedVmChainSessionScannerConfigV1,

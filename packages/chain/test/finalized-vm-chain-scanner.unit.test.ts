@@ -11,9 +11,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  snapshotFinalizedVmChainInventoryV1,
+} from '../src/finalized-vm-chain-inventory.js';
+import {
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
-  snapshotFinalizedVmChainInventoryV1,
 } from '../src/finalized-vm-chain-scanner.js';
 import {
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
