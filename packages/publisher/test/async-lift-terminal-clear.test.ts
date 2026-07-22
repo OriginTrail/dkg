@@ -2,6 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
 import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../src/async-lift-control-plane.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_INCLUSION,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from './_helpers/ka-vm-publish.js';
 
 // #1837 — atomic by-exact-jobId TERMINAL clear for the async publisher (lift) queue.
 describe('#1837 lift publisher clearTerminalJob', () => {
@@ -24,39 +30,16 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     });
   }
 
-  function kaVmPublishRequest(overrides: Record<string, unknown> = {}) {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
-    return {
-      contextGraphId: 'music-social', name: 'albums', shareOperationId: 'share-op-1',
-      roots: [] as string[], contentScopeVersion: 2 as const, kaUal, assertionVersion: '1',
-      publicTripleCount: 2, privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: { r: (`0x${'34'.repeat(32)}`) as `0x${string}`, vs: (`0x${'56'.repeat(32)}`) as `0x${string}` },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`, sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z', sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`, wmCurrentAssertion: '12'.repeat(32), swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(), reservedUal: kaUal, ...overrides,
-    };
-  }
-  const bx = { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' };
-  const inc = { blockNumber: 10, blockHash: `0x${'aa'.repeat(32)}` as `0x${string}`, blockTimestamp: 1 };
+  const bx = KA_VM_BROADCAST_TX;
+  const inc = KA_VM_INCLUSION;
 
-  async function driveToValidated(p: TripleStoreAsyncLiftPublisher, o: Record<string, unknown> = {}): Promise<string> {
+  async function driveToValidated(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
     const jobId = await p.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(o));
     await p.claimNext('wallet-1');
-    await p.update(jobId, 'validated', {
-      validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' },
-    });
+    await p.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
     return jobId;
   }
-  async function driveToFinalized(p: TripleStoreAsyncLiftPublisher, o: Record<string, unknown> = {}): Promise<string> {
+  async function driveToFinalized(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
     const jobId = await driveToValidated(p, o);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.update(jobId, 'included', { broadcast: bx, inclusion: inc });
@@ -64,7 +47,7 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     return jobId;
   }
   // Terminal, non-retryable (tx_reverted → fail_job): clearable, retry() won't touch it.
-  async function driveToTerminalFailed(p: TripleStoreAsyncLiftPublisher, o: Record<string, unknown> = {}): Promise<string> {
+  async function driveToTerminalFailed(p: TripleStoreAsyncLiftPublisher, o: Partial<Parameters<typeof kaVmPublishRequest>[0]> = {}): Promise<string> {
     const jobId = await driveToValidated(p, o);
     await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.recordPublishFailure(jobId, { error: new Error('tx reverted on chain'), failedFromState: 'broadcast', errorPayloadRef: 'urn:err:1' });
