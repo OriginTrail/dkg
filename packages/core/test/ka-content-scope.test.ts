@@ -10,6 +10,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
   resolveKnowledgeAssetReadScope,
   resolveKnowledgeAssetWriteScope,
+  unpackDeterministicRootlessKnowledgeAssetId,
 } from '../src/index.js';
 
 const UAL = 'did:dkg:base:8453/0x70997970C51812dc3A010C7d01b50e0d17dc79C8/0007';
@@ -37,6 +38,24 @@ describe('KA content scope', () => {
 
     expect(() => parseDeterministicKnowledgeAssetUal(ual))
       .toThrow(/packed uint96 identity domain/);
+  });
+
+  it('canonically unpacks rootless ids and rejects legacy or out-of-range ids', () => {
+    const author = 0x70997970c51812dc3a010c7d01b50e0d17dc79c8n;
+    const packed = (author << 96n) | 7n;
+    expect(unpackDeterministicRootlessKnowledgeAssetId('base:8453', packed)).toEqual({
+      kaId: packed.toString(),
+      ual: CANONICAL_UAL,
+      chainId: 'base:8453',
+      agentAddress: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+      kaNumber: '7',
+    });
+    expect(() => unpackDeterministicRootlessKnowledgeAssetId('base:8453', 7n))
+      .toThrow(/packed author/);
+    expect(() => unpackDeterministicRootlessKnowledgeAssetId('base:8453', 0n))
+      .toThrow(/nonzero uint256/);
+    expect(() => unpackDeterministicRootlessKnowledgeAssetId('base:8453', 1n << 256n))
+      .toThrow(/nonzero uint256/);
   });
 
   it('derives one stable per-KA graph while assertion version remains explicit', () => {

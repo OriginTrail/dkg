@@ -4,6 +4,7 @@ import {
   assertCanonicalDecimalU64,
   assertCanonicalDigest,
   assertNetworkIdV1,
+  unpackDeterministicRootlessKnowledgeAssetId,
   type BlockNumberV1,
   type ChainIdV1,
   type DecimalU256V1,
@@ -51,21 +52,20 @@ const SESSION_CONFIG_KEYS = Object.freeze([
 const REQUEST_KEYS = Object.freeze(['contextGraphId', 'signal'] as const);
 const UINT256_RETURN_BYTES = 32;
 const UPDATE_CONTEXT_RETURN_BYTES = 7 * 32;
-const PACKED_KA_NUMBER_BITS = 96n;
-const PACKED_KA_NUMBER_MASK = (1n << PACKED_KA_NUMBER_BITS) - 1n;
+const FIXED_SCAN_CALLS = 2;
+const ID_CALLS_PER_ROW = 1;
+const ASSERTION_CALLS_PER_ROW = 4;
+const TOTAL_CALLS_PER_ROW = ID_CALLS_PER_ROW + ASSERTION_CALLS_PER_ROW;
 
 /**
- * One count read plus one indexed-ID read and four assertion reads per row.
- * The exact grouping below consumes one count batch, ceil(N/4) ID batches,
- * and N assertion batches. The exported ceiling is derived from both the
- * pinned-snapshot batch and call budgets rather than copied as a magic limit.
+ * One active/count header plus one indexed-ID read and four assertion reads
+ * per row. The exported ceiling is derived from the exact call and batching
+ * equations so transport-budget changes cannot silently invalidate it.
  */
-export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = Math.min(
-  Math.floor((CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1 - 1) / 5),
-  Math.floor(
-    ((CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1 - 1)
-      * CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1) / 5,
-  ),
+export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = deriveFinalizedVmScanMaxRows(
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
+  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
 );
 
 export interface FinalizedVmChainSessionScannerConfigV1 {
@@ -131,6 +131,13 @@ interface ScannerConfigSnapshotV1 extends ScannerSessionConfigSnapshotV1 {
   readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
 }
 
+interface FinalizedVmAssertionReadV1 {
+  readonly assertionVersion: DecimalU64V1;
+  readonly assertionRoot: Digest32V1;
+  readonly attestedAuthorAddress: EvmAddressV1 | null;
+  readonly publisherAddress: EvmAddressV1 | null;
+}
+
 /**
  * Build one bounded finalized-chain ordinal scanner.
  *
@@ -184,16 +191,35 @@ async function scanPinnedInventory(
     throw malformedReturn('Finalized VM snapshot returned a malformed anchor capability', cause);
   }
   const contextGraphIdValue = BigInt(contextGraphId);
-  const [encodedCount] = await session.read(Object.freeze([Object.freeze({
-    to: config.contextGraphStorageAddress,
-    data: CONTEXT_GRAPH_STORAGE_INTERFACE.encodeFunctionData(
-      'getContextGraphKaCount',
-      [contextGraphIdValue],
-    ),
-    maxReturnBytes: UINT256_RETURN_BYTES,
-  })]));
-  if (encodedCount === undefined) {
-    throw malformedReturn('Finalized VM count read returned no result');
+  const encodedHeader = await session.read(Object.freeze([
+    Object.freeze({
+      to: config.contextGraphStorageAddress,
+      data: CONTEXT_GRAPH_STORAGE_INTERFACE.encodeFunctionData(
+        'isContextGraphActive',
+        [contextGraphIdValue],
+      ),
+      maxReturnBytes: UINT256_RETURN_BYTES,
+    }),
+    Object.freeze({
+      to: config.contextGraphStorageAddress,
+      data: CONTEXT_GRAPH_STORAGE_INTERFACE.encodeFunctionData(
+        'getContextGraphKaCount',
+        [contextGraphIdValue],
+      ),
+      maxReturnBytes: UINT256_RETURN_BYTES,
+    }),
+  ]));
+  if (!Array.isArray(encodedHeader) || encodedHeader.length !== FIXED_SCAN_CALLS) {
+    throw malformedReturn('Finalized VM context-graph header result count is invalid');
+  }
+  const [encodedActive, encodedCount] = encodedHeader;
+  if (encodedActive === undefined || encodedCount === undefined) {
+    throw malformedReturn('Finalized VM context-graph header read returned incomplete results');
+  }
+  if (!decodeBoolean(CONTEXT_GRAPH_STORAGE_INTERFACE, 'isContextGraphActive', encodedActive)) {
+    throw malformedReturn(
+      `Finalized VM context graph ${contextGraphId} is not active at the pinned anchor`,
+    );
   }
   const rowCount = decodeUint256(
     CONTEXT_GRAPH_STORAGE_INTERFACE,
@@ -226,78 +252,28 @@ async function scanPinnedInventory(
     encoded,
   ));
 
-  const assertionCalls: StrictCurrentFinalizedEvmReadCallV1[] = [];
-  for (const kaId of kaIds) {
-    assertionCalls.push(
-      Object.freeze({
-        to: config.knowledgeAssetStorageAddress,
-        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
-          'getKnowledgeAssetUpdateContext',
-          [kaId],
-        ),
-        maxReturnBytes: UPDATE_CONTEXT_RETURN_BYTES,
-      }),
-      Object.freeze({
-        to: config.knowledgeAssetStorageAddress,
-        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
-          'getLatestMerkleRoot',
-          [kaId],
-        ),
-        maxReturnBytes: UINT256_RETURN_BYTES,
-      }),
-      Object.freeze({
-        to: config.knowledgeAssetStorageAddress,
-        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
-          'getLatestMerkleRootAuthor',
-          [kaId],
-        ),
-        maxReturnBytes: UINT256_RETURN_BYTES,
-      }),
-      Object.freeze({
-        to: config.knowledgeAssetStorageAddress,
-        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
-          'getLatestMerkleRootPublisher',
-          [kaId],
-        ),
-        maxReturnBytes: UINT256_RETURN_BYTES,
-      }),
-    );
-  }
-  const encodedAssertions = await readBatches(session, assertionCalls);
+  const assertions = await readFinalizedVmAssertions(
+    session,
+    config.knowledgeAssetStorageAddress,
+    kaIds,
+  );
   const rows = kaIds.map((kaId, ordinal) => {
-    const offset = ordinal * 4;
-    const encodedContext = encodedAssertions[offset];
-    const encodedRoot = encodedAssertions[offset + 1];
-    const encodedAuthor = encodedAssertions[offset + 2];
-    const encodedPublisher = encodedAssertions[offset + 3];
-    if (
-      encodedContext === undefined
-      || encodedRoot === undefined
-      || encodedAuthor === undefined
-      || encodedPublisher === undefined
-    ) {
+    const assertion = assertions[ordinal];
+    if (assertion === undefined) {
       throw malformedReturn(`Finalized VM ordinal ${ordinal} is missing assertion results`);
     }
-    const assertionVersion = decodeAssertionVersion(encodedContext);
-    const assertionRoot = decodeBytes32(
-      KNOWLEDGE_ASSET_STORAGE_INTERFACE,
-      'getLatestMerkleRoot',
-      encodedRoot,
-    );
-    const identity = unpackRootlessKaIdentity(kaId);
-    const attestedAuthorAddress = decodeNullableAddress(
-      KNOWLEDGE_ASSET_STORAGE_INTERFACE,
-      'getLatestMerkleRootAuthor',
-      encodedAuthor,
-    );
-    const publisherAddress = decodeNullableAddress(
-      KNOWLEDGE_ASSET_STORAGE_INTERFACE,
-      'getLatestMerkleRootPublisher',
-      encodedPublisher,
-    );
+    let identity: ReturnType<typeof unpackDeterministicRootlessKnowledgeAssetId>;
+    try {
+      identity = unpackDeterministicRootlessKnowledgeAssetId(config.networkId, kaId);
+    } catch (cause) {
+      throw malformedReturn(
+        `Finalized VM ordinal ${ordinal} does not use the canonical rootless KA identity`,
+        cause,
+      );
+    }
     if (
-      attestedAuthorAddress !== null
-      && attestedAuthorAddress !== identity.authorAddress
+      assertion.attestedAuthorAddress !== null
+      && assertion.attestedAuthorAddress !== identity.agentAddress
     ) {
       throw malformedReturn(
         `Finalized VM ordinal ${ordinal} author attestation differs from its packed KA identity`,
@@ -308,13 +284,13 @@ async function scanPinnedInventory(
       contractAddress: config.contextGraphStorageAddress,
       knowledgeAssetStorageAddress: config.knowledgeAssetStorageAddress,
       ordinal: String(ordinal) as DecimalU64V1,
-      kaId: kaId.toString(10),
-      ual: `did:dkg:${config.networkId}/${identity.authorAddress}/${identity.kaNumber}`,
-      authorAddress: identity.authorAddress,
-      attestedAuthorAddress,
-      publisherAddress,
-      assertionVersion,
-      assertionRoot,
+      kaId: identity.kaId,
+      ual: identity.ual,
+      authorAddress: identity.agentAddress as EvmAddressV1,
+      attestedAuthorAddress: assertion.attestedAuthorAddress,
+      publisherAddress: assertion.publisherAddress,
+      assertionVersion: assertion.assertionVersion,
+      assertionRoot: assertion.assertionRoot,
       finalizedBlockNumber: session.blockNumber,
       finalizedBlockHash: session.blockHash,
     } satisfies FinalizedVmChainCandidateV1);
@@ -334,6 +310,79 @@ async function scanPinnedInventory(
     highestFinalizedOrdinal,
     rows: Object.freeze(rows),
   });
+}
+
+async function readFinalizedVmAssertions(
+  session: StrictCurrentFinalizedEvmSnapshotSessionV1,
+  knowledgeAssetStorageAddress: EvmAddressV1,
+  kaIds: readonly bigint[],
+): Promise<readonly Readonly<FinalizedVmAssertionReadV1>[]> {
+  const rows: Readonly<FinalizedVmAssertionReadV1>[] = [];
+  for (const [ordinal, kaId] of kaIds.entries()) {
+    const calls = Object.freeze([
+      Object.freeze({
+        to: knowledgeAssetStorageAddress,
+        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
+          'getKnowledgeAssetUpdateContext',
+          [kaId],
+        ),
+        maxReturnBytes: UPDATE_CONTEXT_RETURN_BYTES,
+      }),
+      Object.freeze({
+        to: knowledgeAssetStorageAddress,
+        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData('getLatestMerkleRoot', [kaId]),
+        maxReturnBytes: UINT256_RETURN_BYTES,
+      }),
+      Object.freeze({
+        to: knowledgeAssetStorageAddress,
+        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
+          'getLatestMerkleRootAuthor',
+          [kaId],
+        ),
+        maxReturnBytes: UINT256_RETURN_BYTES,
+      }),
+      Object.freeze({
+        to: knowledgeAssetStorageAddress,
+        data: KNOWLEDGE_ASSET_STORAGE_INTERFACE.encodeFunctionData(
+          'getLatestMerkleRootPublisher',
+          [kaId],
+        ),
+        maxReturnBytes: UINT256_RETURN_BYTES,
+      }),
+    ] as const);
+    const encoded = await session.read(calls);
+    if (!Array.isArray(encoded) || encoded.length !== calls.length) {
+      throw malformedReturn(`Finalized VM ordinal ${ordinal} assertion batch is incomplete`);
+    }
+    const [encodedContext, encodedRoot, encodedAuthor, encodedPublisher] = encoded;
+    if (
+      encodedContext === undefined
+      || encodedRoot === undefined
+      || encodedAuthor === undefined
+      || encodedPublisher === undefined
+    ) {
+      throw malformedReturn(`Finalized VM ordinal ${ordinal} is missing assertion results`);
+    }
+    rows.push(Object.freeze({
+      assertionVersion: decodeAssertionVersion(encodedContext),
+      assertionRoot: decodeBytes32(
+        KNOWLEDGE_ASSET_STORAGE_INTERFACE,
+        'getLatestMerkleRoot',
+        encodedRoot,
+      ),
+      attestedAuthorAddress: decodeNullableAddress(
+        KNOWLEDGE_ASSET_STORAGE_INTERFACE,
+        'getLatestMerkleRootAuthor',
+        encodedAuthor,
+      ),
+      publisherAddress: decodeNullableAddress(
+        KNOWLEDGE_ASSET_STORAGE_INTERFACE,
+        'getLatestMerkleRootPublisher',
+        encodedPublisher,
+      ),
+    } satisfies FinalizedVmAssertionReadV1));
+  }
+  return Object.freeze(rows);
 }
 
 async function readBatches(
@@ -382,6 +431,18 @@ function decodeUint256(
   return BigInt(decoded[0] as bigint);
 }
 
+function decodeBoolean(
+  abi: ethers.Interface,
+  functionName: 'isContextGraphActive',
+  encoded: string,
+): boolean {
+  const decoded = decodeCanonicalResult(abi, functionName, encoded);
+  if (typeof decoded[0] !== 'boolean') {
+    throw malformedReturn(`Finalized VM ${functionName} result is not boolean`);
+  }
+  return decoded[0];
+}
+
 function decodeBytes32(
   abi: ethers.Interface,
   functionName: 'getLatestMerkleRoot',
@@ -427,19 +488,6 @@ function decodeCanonicalResult(
     if (cause instanceof CurrentFinalizedEvmCallErrorV1) throw cause;
     throw malformedReturn(`Finalized VM ${functionName} result is malformed`, cause);
   }
-}
-
-function unpackRootlessKaIdentity(kaId: bigint): Readonly<{
-  authorAddress: EvmAddressV1;
-  kaNumber: string;
-}> {
-  const authorValue = kaId >> PACKED_KA_NUMBER_BITS;
-  if (authorValue === 0n || authorValue >= (1n << 160n)) {
-    throw malformedReturn('Finalized VM row does not use the rootless packed KA identity');
-  }
-  const authorAddress = `0x${authorValue.toString(16).padStart(40, '0')}` as EvmAddressV1;
-  const kaNumber = (kaId & PACKED_KA_NUMBER_MASK).toString(10);
-  return Object.freeze({ authorAddress, kaNumber });
 }
 
 function snapshotConfig(input: unknown): ScannerConfigSnapshotV1 {
@@ -497,6 +545,7 @@ function snapshotRequest(input: unknown): Readonly<FinalizedVmChainScanRequestV1
   try {
     const record = snapshotExactDataRecord(input, REQUEST_KEYS);
     assertCanonicalDecimalU256(record.contextGraphId, 'finalized VM contextGraphId');
+    if (record.contextGraphId === '0') throw new Error('contextGraphId must be nonzero');
     if (!isAbortSignal(record.signal)) throw new Error('signal is not an AbortSignal');
     return Object.freeze({ contextGraphId: record.contextGraphId, signal: record.signal });
   } catch (cause) {
@@ -506,6 +555,28 @@ function snapshotRequest(input: unknown): Readonly<FinalizedVmChainScanRequestV1
       { cause },
     );
   }
+}
+
+function deriveFinalizedVmScanMaxRows(
+  maxCalls: number,
+  maxBatches: number,
+  maxCallsPerBatch: number,
+): number {
+  const fits = (rows: number): boolean => (
+    FIXED_SCAN_CALLS + (rows * TOTAL_CALLS_PER_ROW) <= maxCalls
+    && 1
+      + Math.ceil((rows * ID_CALLS_PER_ROW) / maxCallsPerBatch)
+      + Math.ceil((rows * ASSERTION_CALLS_PER_ROW) / maxCallsPerBatch)
+      <= maxBatches
+  );
+  let lower = 0;
+  let upper = Math.max(0, Math.floor((maxCalls - FIXED_SCAN_CALLS) / TOTAL_CALLS_PER_ROW));
+  while (lower < upper) {
+    const candidate = Math.ceil((lower + upper) / 2);
+    if (fits(candidate)) lower = candidate;
+    else upper = candidate - 1;
+  }
+  return lower;
 }
 
 function malformedReturn(
@@ -522,9 +593,18 @@ function malformedReturn(
 // Keep the derived public bound tied to the two snapshot budgets if either is
 // tightened later; this assertion is module-load local and performs no I/O.
 if (
-  1 + Math.ceil(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1)
-    + Math.ceil((FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * 4) / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1)
+  1
+    + Math.ceil(
+      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ID_CALLS_PER_ROW)
+      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+    )
+    + Math.ceil(
+      (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * ASSERTION_CALLS_PER_ROW)
+      / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+    )
   > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1
+  || FIXED_SCAN_CALLS + (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * TOTAL_CALLS_PER_ROW)
+    > CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1
 ) {
-  throw new Error('Finalized VM scan row bound exceeds the pinned-snapshot batch budget');
+  throw new Error('Finalized VM scan row bound exceeds a pinned-snapshot resource budget');
 }

@@ -55,7 +55,7 @@ afterEach(async () => {
 
 describe('RFC-64 finalized VM chain scanner', () => {
   it('pins its complete-row ceiling to both snapshot resource budgets', () => {
-    const calls = (rows: number) => 1 + (rows * 5);
+    const calls = (rows: number) => 2 + (rows * 5);
     const batches = (rows: number) => 1
       + Math.ceil(rows / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1)
       + Math.ceil((rows * 4) / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1);
@@ -72,7 +72,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
     const calls: Array<readonly { readonly to: string; readonly data: string }[]> = [];
     const snapshot = snapshotStub(async (batch) => {
       calls.push(batch);
-      if (calls.length === 1) return [uintResult(2n)];
+      if (calls.length === 1) return [boolResult(true), uintResult(2n)];
       if (calls.length === 2) return [uintResult(KA_A), uintResult(KA_B)];
       if (calls.length === 3) return [
         updateContextResult(2n),
@@ -137,7 +137,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
         },
       ],
     });
-    expect(calls.map((batch) => batch.length)).toEqual([1, 2, 4, 4]);
+    expect(calls.map((batch) => batch.length)).toEqual([2, 2, 4, 4]);
     expect(calls[0]![0]!.to).toBe(CG_STORAGE);
     expect(calls[1]!.every(({ to }) => to === CG_STORAGE)).toBe(true);
     expect(calls.slice(2).flat().every(({ to }) => to === KA_STORAGE)).toBe(true);
@@ -145,14 +145,15 @@ describe('RFC-64 finalized VM chain scanner', () => {
 
   it('returns a canonical empty inventory without issuing ordinal reads', async () => {
     let batches = 0;
+    const requestSignal = new AbortController().signal;
     const scanner = createFinalizedVmChainScannerV1(config(snapshotStub(async () => {
       batches += 1;
-      return [uintResult(0n)];
-    })));
+      return [boolResult(true), uintResult(0n)];
+    }, requestSignal)));
 
     await expect(scanner({
       contextGraphId: CG_ID,
-      signal: new AbortController().signal,
+      signal: requestSignal,
     })).resolves.toMatchObject({
       highestFinalizedOrdinal: null,
       rows: [],
@@ -160,11 +161,74 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(batches).toBe(1);
   });
 
+  it('fails closed when the pinned context graph is inactive', async () => {
+    const scanner = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
+      [boolResult(false), uintResult(0n)],
+    ])));
+    await expect(scanner({
+      contextGraphId: CG_ID,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'malformed-return' });
+  });
+
+  it('splits five rows into bounded ordered ID and assertion batches', async () => {
+    const batchSizes: number[] = [];
+    const kaIds = Array.from({ length: 5 }, (_, index) => pack(AUTHOR_A, BigInt(index + 1)));
+    const snapshot = snapshotStub(async (batch) => {
+      batchSizes.push(batch.length);
+      return batch.map(({ data }) => {
+        const selector = data.slice(0, 10);
+        if (selector === CG_ABI.getFunction('isContextGraphActive')!.selector) {
+          return boolResult(true);
+        }
+        if (selector === CG_ABI.getFunction('getContextGraphKaCount')!.selector) {
+          return uintResult(5n);
+        }
+        if (selector === CG_ABI.getFunction('getContextGraphKaAt')!.selector) {
+          const [, ordinal] = CG_ABI.decodeFunctionData('getContextGraphKaAt', data);
+          return uintResult(kaIds[Number(ordinal)]!);
+        }
+        if (selector === KA_ABI.getFunction('getKnowledgeAssetUpdateContext')!.selector) {
+          return updateContextResult(1n);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRoot')!.selector) {
+          return bytes32Result(ROOT_A);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRootAuthor')!.selector) {
+          return addressResult(AUTHOR_A);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRootPublisher')!.selector) {
+          return addressResult(PUBLISHER_A);
+        }
+        throw new Error(`Unexpected selector ${selector}`);
+      });
+    });
+    const scanner = createFinalizedVmChainScannerV1(config(snapshot));
+
+    const inventory = await scanner({
+      contextGraphId: CG_ID,
+      signal: new AbortController().signal,
+    });
+
+    expect(batchSizes).toEqual([2, 4, 1, 4, 4, 4, 4, 4]);
+    expect(batchSizes.every((size) => size <= CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1))
+      .toBe(true);
+    expect(inventory.rows.map(({ kaId, ual }) => ({ kaId, ual }))).toEqual(
+      kaIds.map((kaId, index) => ({
+        kaId: kaId.toString(),
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/${index + 1}`,
+      })),
+    );
+  });
+
   it('fails before ordinal reads when the finalized inventory exceeds the v1 scope', async () => {
     let batches = 0;
     const scanner = createFinalizedVmChainScannerV1(config(snapshotStub(async () => {
       batches += 1;
-      return [uintResult(BigInt(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1))];
+      return [
+        boolResult(true),
+        uintResult(BigInt(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1)),
+      ];
     })));
 
     await expect(scanner({
@@ -176,10 +240,10 @@ describe('RFC-64 finalized VM chain scanner', () => {
 
   it('rejects legacy sequential ids, zero versions, zero roots, and batch shape drift', async () => {
     const cases: StrictCurrentFinalizedEvmSnapshotScopeV1[] = [
-      scriptedSnapshot([[uintResult(1n)], [uintResult(7n)], assertionResults(1n, ROOT_A, AUTHOR_A, PUBLISHER_A)]),
-      scriptedSnapshot([[uintResult(1n)], [uintResult(KA_A)], assertionResults(0n, ROOT_A, AUTHOR_A, PUBLISHER_A)]),
-      scriptedSnapshot([[uintResult(1n)], [uintResult(KA_A)], assertionResults(1n, ethers.ZeroHash, AUTHOR_A, PUBLISHER_A)]),
-      scriptedSnapshot([[uintResult(1n)], []]),
+      scriptedSnapshot([activeCountResults(1n), [uintResult(7n)], assertionResults(1n, ROOT_A, AUTHOR_A, PUBLISHER_A)]),
+      scriptedSnapshot([activeCountResults(1n), [uintResult(KA_A)], assertionResults(0n, ROOT_A, AUTHOR_A, PUBLISHER_A)]),
+      scriptedSnapshot([activeCountResults(1n), [uintResult(KA_A)], assertionResults(1n, ethers.ZeroHash, AUTHOR_A, PUBLISHER_A)]),
+      scriptedSnapshot([activeCountResults(1n), []]),
     ];
     for (const snapshot of cases) {
       const scanner = createFinalizedVmChainScannerV1(config(snapshot));
@@ -192,7 +256,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
 
   it('keeps absent chain author/publisher evidence explicit and rejects identity drift', async () => {
     const noEvidence = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
-      [uintResult(1n)],
+      activeCountResults(1n),
       [uintResult(KA_A)],
       assertionResults(1n, ROOT_A, ethers.ZeroAddress, ethers.ZeroAddress),
     ])));
@@ -204,7 +268,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
     });
 
     const wrongAuthor = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
-      [uintResult(1n)],
+      activeCountResults(1n),
       [uintResult(KA_A)],
       assertionResults(1n, ROOT_A, AUTHOR_B, PUBLISHER_A),
     ])));
@@ -220,7 +284,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       blockNumber: BLOCK_NUMBER,
       blockHash: BLOCK_HASH,
       read: scriptedRead([
-        [uintResult(1n)],
+        activeCountResults(1n),
         [uintResult(KA_A)],
         assertionResults(2n, ROOT_A, AUTHOR_A, PUBLISHER_A),
       ]),
@@ -254,6 +318,10 @@ describe('RFC-64 finalized VM chain scanner', () => {
       contextGraphStorageAddress: CG_STORAGE.toUpperCase() as EvmAddressV1,
     })).toThrow(TypeError);
     await expect(malformed({
+      contextGraphId: '0' as never,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({ code: 'rpc-unavailable' });
+    await expect(malformed({
       contextGraphId: '014' as never,
       signal: new AbortController().signal,
     })).rejects.toMatchObject({ code: 'rpc-unavailable' });
@@ -279,7 +347,9 @@ describe('RFC-64 finalized VM chain scanner', () => {
           const request = call.params[0] as { readonly data?: string };
           const data = request.data ?? '';
           const selector = data.slice(0, 10);
-          if (selector === CG_ABI.getFunction('getContextGraphKaCount')!.selector) {
+          if (selector === CG_ABI.getFunction('isContextGraphActive')!.selector) {
+            sendResult(response, call, boolResult(true));
+          } else if (selector === CG_ABI.getFunction('getContextGraphKaCount')!.selector) {
             sendResult(response, call, uintResult(2n));
           } else if (selector === CG_ABI.getFunction('getContextGraphKaAt')!.selector) {
             const [, ordinal] = CG_ABI.decodeFunctionData('getContextGraphKaAt', data);
@@ -325,7 +395,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`, assertionVersion: '3', assertionRoot: ROOT_B },
     ]);
     const ethCalls = rpc.calls.filter(({ method }) => method === 'eth_call');
-    expect(ethCalls).toHaveLength(11);
+    expect(ethCalls).toHaveLength(12);
     expect(ethCalls.every(({ params }) => {
       const block = params[1] as { readonly blockHash?: unknown; readonly requireCanonical?: unknown };
       return block.blockHash === BLOCK_HASH && block.requireCanonical === true;
@@ -351,11 +421,16 @@ function sessionConfig() {
 
 function snapshotStub(
   read: StrictCurrentFinalizedEvmSnapshotSessionV1['read'],
+  expectedSignal?: AbortSignal,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
-  return Object.freeze(async <T>(request: { readonly chainId: ChainIdV1 }, consume: (
+  return Object.freeze(async <T>(request: {
+    readonly chainId: ChainIdV1;
+    readonly signal: AbortSignal;
+  }, consume: (
     session: StrictCurrentFinalizedEvmSnapshotSessionV1,
   ) => Promise<T>): Promise<T> => {
     expect(request.chainId).toBe(CHAIN_ID);
+    if (expectedSignal !== undefined) expect(request.signal).toBe(expectedSignal);
     return consume(Object.freeze({
       chainId: CHAIN_ID,
       blockNumber: BLOCK_NUMBER,
@@ -384,6 +459,14 @@ function pack(author: EvmAddressV1, number: bigint): bigint {
 
 function uintResult(value: bigint): string {
   return ABI.encode(['uint256'], [value]);
+}
+
+function boolResult(value: boolean): string {
+  return ABI.encode(['bool'], [value]);
+}
+
+function activeCountResults(count: bigint): readonly string[] {
+  return [boolResult(true), uintResult(count)];
 }
 
 function bytes32Result(value: string): string {
