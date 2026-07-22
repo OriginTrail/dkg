@@ -36,15 +36,12 @@ import {
 } from './catalog-transport-authorization-v1.js';
 import type { Rfc64AuthorizedCatalogWorkResultV1 } from './catalog-transport-authorization-v1.js';
 import {
-  Rfc64CatalogTransportWireUtilityErrorV1,
-  assertRfc64CanonicalEvmAddressV1,
   assertRfc64ExactIssuerSignatureProofV1,
-  encodeRfc64FlatCanonicalJsonV1,
+  createRfc64CatalogTransportWireAdapterV1,
   encodeRfc64FoundStatusResponseV1,
-  parseRfc64FlatCanonicalJsonV1,
   parseRfc64StatusResponsePayloadV1,
-  snapshotRfc64ExactWireRecordV1,
-  snapshotRfc64PeerIdV1,
+  rethrowRfc64CatalogTransportWireUtilityErrorV1,
+  type Rfc64CatalogTransportWireAdapterV1,
 } from './catalog-transport-wire-v1-internal.js';
 
 /**
@@ -70,6 +67,27 @@ const ACK = Uint8Array.of(1);
 const ANNOUNCEMENT_DENIED = 0;
 const FETCH_NOT_FOUND = 0;
 const FETCH_DENIED = 2;
+
+const CATALOG_WIRE: Rfc64CatalogTransportWireAdapterV1 =
+  createRfc64CatalogTransportWireAdapterV1({
+    fail,
+    wireCode: 'catalog-transport-wire',
+    inputCode: 'catalog-transport-input',
+    messages: {
+      encodePlainObject: 'RFC-64 catalog message must be a plain object',
+      encodeFieldShape: 'RFC-64 catalog messages accept only string or null fields',
+      encodeOversized: (maxBytes) => `RFC-64 catalog message exceeds ${maxBytes} bytes`,
+      parseOversized: 'RFC-64 catalog message is empty or oversized',
+      parseStrictJson: 'RFC-64 catalog message is not strict UTF-8 JSON',
+      parsePlainObject: 'RFC-64 catalog message must be a plain JSON object',
+      parseExactKeys: 'RFC-64 catalog message has missing or unknown fields',
+      parseNoncanonical: 'RFC-64 catalog message bytes are not canonical JCS',
+      snapshot: 'RFC-64 catalog message has missing or unknown fields',
+      evmAddress: (label) => `${label} must be a canonical lowercase nonzero EVM address`,
+      peerIdType: 'remotePeerId must be a string',
+      peerIdCanonical: 'remotePeerId is empty, oversized, or noncanonical',
+    },
+  });
 
 const ANNOUNCEMENT_KEYS = Object.freeze([
   'authorAddress',
@@ -606,25 +624,21 @@ function parseFetchResponse(input: Uint8Array): SignedAuthorCatalogHeadEnvelopeV
       RFC64_PUBLIC_CATALOG_HEAD_FETCH_RESPONSE_MAX_BYTES_V1,
     );
   } catch (cause) {
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-trailing'
-    ) {
-      fail(
-        'catalog-transport-wire',
-        input[0] === FETCH_NOT_FOUND
+    rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+      'response-trailing': {
+        code: 'catalog-transport-wire',
+        message: input[0] === FETCH_NOT_FOUND
           ? 'not-found author-catalog response has trailing bytes'
           : 'denied author-catalog response has trailing bytes',
-        cause,
-      );
-    }
-    if (
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-      && cause.reason === 'response-status'
-    ) {
-      fail('catalog-transport-wire', 'author-catalog head response has an invalid status', cause);
-    }
-    fail('catalog-transport-wire', 'author-catalog head response is empty or oversized', cause);
+      },
+      'response-status': {
+        code: 'catalog-transport-wire',
+        message: 'author-catalog head response has an invalid status',
+      },
+    }, {
+      code: 'catalog-transport-wire',
+      message: 'author-catalog head response is empty or oversized',
+    });
   }
   if (framed.status === 'not-found') return null;
   if (framed.status === 'denied') {
@@ -693,14 +707,15 @@ function assertExactIssuerSignatureProof(
   try {
     assertRfc64ExactIssuerSignatureProofV1(envelope, proof);
   } catch (cause) {
-    fail(
-      'catalog-transport-signature',
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-        && cause.reason === 'issuer-proof-unminted'
-        ? 'issuer signature proof was not minted by the verifier'
-        : 'issuer signature proof is not bound to the exact envelope',
-      cause,
-    );
+    rethrowRfc64CatalogTransportWireUtilityErrorV1(cause, fail, {
+      'issuer-proof-unminted': {
+        code: 'catalog-transport-signature',
+        message: 'issuer signature proof was not minted by the verifier',
+      },
+    }, {
+      code: 'catalog-transport-signature',
+      message: 'issuer signature proof is not bound to the exact envelope',
+    });
   }
 }
 
@@ -708,26 +723,7 @@ function encodeFlatCanonicalJson(
   value: object,
   maxBytes: number,
 ): Uint8Array {
-  try {
-    return encodeRfc64FlatCanonicalJsonV1(value, maxBytes);
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'plain-object') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain object', cause);
-      }
-      if (cause.reason === 'field-shape') {
-        fail(
-          'catalog-transport-wire',
-          'RFC-64 catalog messages accept only string or null fields',
-          cause,
-        );
-      }
-      if (cause.reason === 'oversized') {
-        fail('catalog-transport-wire', `RFC-64 catalog message exceeds ${maxBytes} bytes`, cause);
-      }
-    }
-    throw cause;
-  }
+  return CATALOG_WIRE.encodeFlatCanonicalJson(value, maxBytes);
 }
 
 function parseFlatCanonicalJson(
@@ -735,66 +731,22 @@ function parseFlatCanonicalJson(
   expectedKeys: readonly string[],
   maxBytes: number,
 ): Record<string, unknown> {
-  try {
-    return parseRfc64FlatCanonicalJsonV1(input, expectedKeys, maxBytes);
-  } catch (cause) {
-    if (cause instanceof Rfc64CatalogTransportWireUtilityErrorV1) {
-      if (cause.reason === 'oversized') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message is empty or oversized', cause);
-      }
-      if (cause.reason === 'strict-json') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message is not strict UTF-8 JSON', cause);
-      }
-      if (cause.reason === 'plain-object') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message must be a plain JSON object', cause);
-      }
-      if (cause.reason === 'exact-keys') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message has missing or unknown fields', cause);
-      }
-      if (cause.reason === 'noncanonical') {
-        fail('catalog-transport-wire', 'RFC-64 catalog message bytes are not canonical JCS', cause);
-      }
-    }
-    throw cause;
-  }
+  return CATALOG_WIRE.parseFlatCanonicalJson(input, expectedKeys, maxBytes);
 }
 
 function snapshotExactWireRecord(
   value: unknown,
   expectedKeys: readonly string[],
 ): Readonly<Record<string, unknown>> {
-  try {
-    return snapshotRfc64ExactWireRecordV1(value, expectedKeys);
-  } catch (cause) {
-    fail('catalog-transport-wire', 'RFC-64 catalog message has missing or unknown fields', cause);
-  }
+  return CATALOG_WIRE.snapshotExactWireRecord(value, expectedKeys);
 }
 
 function assertCanonicalEvmAddressV1(value: unknown, label: string): asserts value is EvmAddressV1 {
-  try {
-    assertRfc64CanonicalEvmAddressV1(value, label);
-  } catch (cause) {
-    fail(
-      'catalog-transport-wire',
-      `${label} must be a canonical lowercase nonzero EVM address`,
-      cause,
-    );
-  }
+  CATALOG_WIRE.assertCanonicalEvmAddress(value, label);
 }
 
 function snapshotPeerId(value: unknown): string {
-  try {
-    return snapshotRfc64PeerIdV1(value);
-  } catch (cause) {
-    fail(
-      'catalog-transport-input',
-      cause instanceof Rfc64CatalogTransportWireUtilityErrorV1
-        && cause.reason === 'peer-id-type'
-        ? 'remotePeerId must be a string'
-        : 'remotePeerId is empty, oversized, or noncanonical',
-      cause,
-    );
-  }
+  return CATALOG_WIRE.snapshotPeerId(value);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

@@ -271,10 +271,8 @@ export class Rfc64PublicCatalogServiceV1 {
       ? undefined
       : new Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1(options.router, {
         controlObjects: this.#controlObjects,
-        readCurrentAppliedCatalogHeadDigest: (query) =>
-          options.currentHeadDiscovery!.readCurrentAppliedCatalogHeadDigest(
-            this.#resolveTrustedCurrentHeadScope(query),
-          ),
+        readCurrentAppliedCatalogHeadDigest:
+          options.currentHeadDiscovery.readCurrentAppliedCatalogHeadDigest,
         authorizeOpenCatalogOperation: (input) =>
           this.#authorizeCurrentHeadDiscovery(input),
         verifyIssuerSignature: this.#verifyIssuerSignature,
@@ -669,8 +667,9 @@ export class Rfc64PublicCatalogServiceV1 {
   async #authorizeCurrentHeadDiscovery(
     input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
   ): Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
+    let trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
     try {
-      this.#resolveTrustedCurrentHeadScope(input);
+      trustedCatalogScope = this.#resolveTrustedCurrentHeadScope(input);
     } catch {
       return null;
     }
@@ -679,6 +678,7 @@ export class Rfc64PublicCatalogServiceV1 {
     return Object.freeze({
       accessPolicy: 0,
       policyDigest: record.policyDigest,
+      trustedCatalogScope,
     });
   }
 
