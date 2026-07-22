@@ -17,6 +17,7 @@ import {
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
   CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
   CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+  CurrentFinalizedEvmCallErrorV1,
   type CurrentFinalizedEvmCallRequestV1,
 } from '../src/control-object-signature-verifier.js';
 import {
@@ -34,6 +35,7 @@ import {
 import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
+  readStrictCurrentFinalizedEvmRevertDataV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
 
@@ -598,14 +600,27 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
   });
 
   it('stops on a deterministic contract revert without contacting a later endpoint', async () => {
-    const first = await startRpcServer(successfulHandler({ revert: true }));
+    const revertData = `0x7e273289${'0'.repeat(63)}1`;
+    const first = await startRpcServer(successfulHandler({
+      callError: { code: 3, message: 'execution reverted', data: revertData },
+    }));
     const second = await startRpcServer(successfulHandler());
     const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
       chainId: CHAIN_ID,
       endpoints: [first.url, second.url],
     });
 
-    await expect(adapter(fixedRequest())).rejects.toMatchObject({ code: 'revert' });
+    let caught: unknown;
+    try {
+      await adapter(fixedRequest());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ code: 'revert' });
+    expect(readStrictCurrentFinalizedEvmRevertDataV1(caught)).toBe(revertData);
+    expect(readStrictCurrentFinalizedEvmRevertDataV1(
+      new CurrentFinalizedEvmCallErrorV1('revert', 'forged'),
+    )).toBeUndefined();
     expect(second.calls).toHaveLength(0);
   });
 
@@ -766,7 +781,11 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
 
 interface SuccessfulHandlerOptions {
   readonly blockHash?: string | (() => string);
-  readonly callError?: { readonly code: number; readonly message: string };
+  readonly callError?: {
+    readonly code: number;
+    readonly message: string;
+    readonly data?: string;
+  };
   readonly code?: string;
   readonly outOfGas?: boolean;
   readonly returnData?: string;
@@ -791,7 +810,13 @@ function successfulHandler(options: SuccessfulHandlerOptions = {}): LoopbackHand
         return;
       case 'eth_call':
         if (options.callError) {
-          sendError(response, call, options.callError.code, options.callError.message);
+          sendError(
+            response,
+            call,
+            options.callError.code,
+            options.callError.message,
+            options.callError.data,
+          );
         } else if (options.outOfGas) {
           sendError(response, call, -32000, 'out of gas');
         } else if (options.revert) {
@@ -857,9 +882,14 @@ function sendError(
   request: JsonRpcRequest,
   code: number,
   message: string,
+  data?: string,
 ): void {
   response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code, message } }));
+  response.end(JSON.stringify({
+    jsonrpc: '2.0',
+    id: request.id,
+    error: { code, message, ...(data === undefined ? {} : { data }) },
+  }));
 }
 
 async function closeServer(server: Server): Promise<void> {

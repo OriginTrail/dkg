@@ -96,6 +96,7 @@ interface DeadlineScope {
 interface RpcErrorEnvelopeV1 {
   readonly code: number;
   readonly message: string;
+  readonly data?: string;
 }
 
 const CONFIG_REQUIRED_KEYS = Object.freeze(['chainId', 'endpoints'] as const);
@@ -108,8 +109,17 @@ const MAX_U256 =
   115_792_089_237_316_195_423_570_985_008_687_907_853_269_984_665_640_564_039_457_584_007_913_129_639_935n;
 const RPC_CALL_GAS_QUANTITY = `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
 const ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1 = new WeakSet<object>();
+const AUTHENTICATED_REVERT_DATA_V1 = new WeakMap<object, string>();
 const READ_REQUEST_KEYS = Object.freeze(['calls', 'chainId', 'signal'] as const);
 const READ_CALL_KEYS = Object.freeze(['data', 'maxReturnBytes', 'to'] as const);
+
+/** Package-internal evidence available only for errors minted by this transport. */
+export function readStrictCurrentFinalizedEvmRevertDataV1(error: unknown): string | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return undefined;
+  }
+  return AUTHENTICATED_REVERT_DATA_V1.get(error);
+}
 
 /**
  * Build one strict raw-JSON-RPC adapter from trusted local chain configuration.
@@ -580,7 +590,15 @@ function parseRpcError(input: unknown): RpcErrorEnvelopeV1 | undefined {
   ) {
     return undefined;
   }
-  return Object.freeze({ code: input.code, message: input.message });
+  const data = typeof input.data === 'string'
+    && CANONICAL_LOWER_HEX_BYTES.test(input.data)
+    ? input.data
+    : undefined;
+  return Object.freeze({
+    code: input.code,
+    message: input.message,
+    ...(data === undefined ? {} : { data }),
+  });
 }
 
 function classifyJsonRpcError(
@@ -595,10 +613,7 @@ function classifyJsonRpcError(
   // must win so callers cannot misclassify invalid execution evidence as merely
   // unsupported.
   if (method === 'eth_call' && (error.code === 3 || message.includes('revert'))) {
-    return new CurrentFinalizedEvmCallErrorV1(
-      'revert',
-      'Contract call reverted at the resolved finalized anchor',
-    );
+    return revertedAtFinalizedAnchor(error.data);
   }
   if (
     method === 'eth_call'
@@ -840,6 +855,15 @@ function resourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
 function anchorDependentResourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
   const error = resourceLimited(message);
   ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1.add(error);
+  return error;
+}
+
+function revertedAtFinalizedAnchor(data?: string): CurrentFinalizedEvmCallErrorV1 {
+  const error = new CurrentFinalizedEvmCallErrorV1(
+    'revert',
+    'Contract call reverted at the resolved finalized anchor',
+  );
+  if (data !== undefined) AUTHENTICATED_REVERT_DATA_V1.set(error, data);
   return error;
 }
 
