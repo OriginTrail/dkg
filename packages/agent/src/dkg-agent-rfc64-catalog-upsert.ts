@@ -12,7 +12,6 @@ import {
   parseCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
-  type CountV1,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -30,6 +29,7 @@ import {
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
+import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
@@ -72,10 +72,14 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     const queueKey = `${catalogScopeDigest}\n${params.scope.authorAddress}`;
 
     return this.runSerializedRfc64AuthorCatalogMutationV1(queueKey, async () => {
-      let current = persistence.inventory.readAppliedCatalogHeadV1(
+      const current = persistence.inventory.readAppliedCatalogHeadV1(
         catalogScopeDigest,
         params.scope.authorAddress,
       );
+      let previousHead: Rfc64StagedAuthorCatalogHeadRefV1;
+      let catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+      let assets: Rfc64CatalogSuccessorAssetInputV1[];
+      let expectedCurrentCatalogHeadDigest: Digest32V1 | null;
       if (current === null) {
         const genesis = await this.publishAuthorCatalogGenesisV1({
           scope: params.scope,
@@ -87,63 +91,64 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           catalogIssuerDelegationExpiresAt:
             params.catalogIssuerDelegationExpiresAt,
         });
-        const emptyInventoryDigest = computeRfc64AppliedInventoryDigestV1({
-          catalogScopeDigest,
-          rows: [],
+        previousHead = Object.freeze({
+          objectDigest: genesis.headObjectDigest,
+          signatureVariantDigest: genesis.signatureVariantDigest,
         });
-        current = persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
-          catalogScopeDigest,
-          authorAddress: params.scope.authorAddress,
-          currentCatalogHeadDigest: genesis.headObjectDigest,
-          appliedInventoryDigest: emptyInventoryDigest,
-          catalogVersion: genesis.announcement.catalogVersion,
-          inventoryRowCount: '0' as CountV1,
-          expectedCurrentCatalogHeadDigest: null,
-        }).snapshot;
+        catalogIssuerAuthorization = genesis.catalogIssuerAuthorization;
+        assets = [];
+        expectedCurrentCatalogHeadDigest = null;
+      } else {
+        const storedHead = await persistence.controlObjects.getVerifiedObjectByDigest({
+          objectDigest: current.currentCatalogHeadDigest,
+          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        });
+        if (storedHead === null) {
+          throw new Error('RFC-64 applied author head is not durably staged');
+        }
+        assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
+        previousHead = Object.freeze({
+          objectDigest: storedHead.envelope.objectDigest as Digest32V1,
+          signatureVariantDigest: computeControlSignatureVariantDigestHex(
+            storedHead.envelope.objectDigest,
+            storedHead.envelope.signature,
+          ) as Digest32V1,
+        });
+        const history = await loadBoundedAuthorCatalogHistoryV1(persistence, previousHead);
+        assets = await loadRfc64CatalogSuccessorAssetsV1(persistence, history);
+        const storedDelegation = await persistence.controlObjects.getVerifiedObjectByDigest({
+          objectDigest: history.previousHead.payload.catalogIssuerDelegationDigest,
+          verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+        });
+        if (storedDelegation === null) {
+          throw new Error('RFC-64 applied author head delegation is not durably staged');
+        }
+        assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
+        catalogIssuerAuthorization = Object.freeze({
+          catalogIssuerDelegation: storedDelegation.envelope,
+          parentAuthorAgentEvidence: null,
+        });
+        expectedCurrentCatalogHeadDigest = current.currentCatalogHeadDigest;
       }
-
-      const storedHead = await persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: current.currentCatalogHeadDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      });
-      if (storedHead === null) {
-        throw new Error('RFC-64 applied author head is not durably staged');
-      }
-      assertSignedAuthorCatalogHeadEnvelopeV1(storedHead.envelope);
-      const previousHead: Rfc64StagedAuthorCatalogHeadRefV1 = Object.freeze({
-        objectDigest: storedHead.envelope.objectDigest as Digest32V1,
-        signatureVariantDigest: computeControlSignatureVariantDigestHex(
-          storedHead.envelope.objectDigest,
-          storedHead.envelope.signature,
-        ) as Digest32V1,
-      });
-      const history = await loadBoundedAuthorCatalogHistoryV1(persistence, previousHead);
-      const assets = await loadRfc64CatalogSuccessorAssetsV1(persistence, history);
       const existingIndex = assets.findIndex(
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
       );
       if (
         existingIndex >= 0
         && sameRfc64SuccessorAssetV1(assets[existingIndex]!, params.asset)
-      ) return current;
+      ) {
+        if (current === null) {
+          throw new Error('RFC-64 staged genesis unexpectedly contains an ordinary asset');
+        }
+        return current;
+      }
       if (existingIndex >= 0) assets[existingIndex] = params.asset;
       else assets.push(params.asset);
 
-      const storedDelegation = await persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: history.previousHead.payload.catalogIssuerDelegationDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      });
-      if (storedDelegation === null) {
-        throw new Error('RFC-64 applied author head delegation is not durably staged');
-      }
-      assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(storedDelegation.envelope);
       const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
         previousHead,
         author: params.author,
-        catalogIssuerAuthorization: Object.freeze({
-          catalogIssuerDelegation: storedDelegation.envelope,
-          parentAuthorAgentEvidence: null,
-        }),
+        catalogIssuerAuthorization,
         assets,
         deployment: params.deployment,
         issuedAt: Date.now().toString() as TimestampMsV1,
@@ -160,7 +165,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         appliedInventoryDigest,
         catalogVersion: successor.announcement.catalogVersion,
         inventoryRowCount: successor.signedBucketRowCount,
-        expectedCurrentCatalogHeadDigest: current.currentCatalogHeadDigest,
+        expectedCurrentCatalogHeadDigest,
       }).snapshot;
       await this.announceRfc64PublicCatalogHeadV1({
         announcement: successor.announcement,

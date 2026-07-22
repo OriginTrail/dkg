@@ -4,6 +4,7 @@ import {
   ASSERTION_SEAL_PREDICATES,
   buildAssertionSealQuads,
   parseGraphScopedAssertionSealCandidate,
+  type AssertionSeal,
   type GraphScopedAssertionSealCandidate,
 } from './assertion-seal.js';
 import {
@@ -119,6 +120,48 @@ export interface CanonicalGraphScopedAuthorSealV1 {
   readonly publicTripleCount: SealTripleCountV1;
   readonly privateTripleCount: SealTripleCountV1;
   readonly privateMerkleRoot: Digest32V1 | null;
+}
+
+/**
+ * Convert the normal publication seal into the exact RFC-64 wire payload.
+ * Keeping this at the protocol boundary prevents catalog bridges from owning
+ * a second, cast-heavy encoding of the signed graph-scoped seal.
+ */
+export function canonicalGraphScopedAuthorSealFromAssertionSealV1(
+  seal: AssertionSeal,
+): Readonly<CanonicalGraphScopedAuthorSealV1> {
+  if (
+    seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+    || seal.kaUal === undefined
+    || seal.assertionVersion === undefined
+    || seal.publicTripleCount === undefined
+    || seal.privateTripleCount === undefined
+    || seal.reservedKaId === undefined
+    || seal.authorSchemeVersion !== 1
+  ) {
+    fail('canonical-seal-schema', 'conversion requires a complete graph-scoped v2 author seal');
+  }
+  const canonical: unknown = {
+    assertionMerkleRoot: bytesToLowerHex32(seal.merkleRoot, 'assertionMerkleRoot'),
+    authorAddress: seal.authorAddress.toLowerCase(),
+    authorAttestationR: bytesToLowerHex32(seal.authorAttestationR, 'authorAttestationR'),
+    authorAttestationVS: bytesToLowerHex32(seal.authorAttestationVS, 'authorAttestationVS'),
+    authorSchemeVersion: '1',
+    assertedAtChainId: seal.chainId.toString(),
+    assertedAtKav10Address: seal.kav10Address.toLowerCase(),
+    reservedKaId: seal.reservedKaId.toString(),
+    assertionFinalizedAt: seal.finalizedAtIso,
+    contentScopeVersion: '2',
+    kaUal: seal.kaUal,
+    assertionVersion: seal.assertionVersion,
+    publicTripleCount: seal.publicTripleCount.toString(),
+    privateTripleCount: seal.privateTripleCount.toString(),
+    privateMerkleRoot: seal.privateMerkleRoot === undefined
+      ? null
+      : bytesToLowerHex32(seal.privateMerkleRoot, 'privateMerkleRoot'),
+  };
+  assertCanonicalGraphScopedAuthorSealV1(canonical);
+  return Object.freeze(canonical);
 }
 
 /** Authenticated catalog coordinate used to derive subject and physical metadata graph. */
@@ -963,6 +1006,15 @@ function hex32ToBytes(value: string): Uint8Array {
     bytes[index] = Number.parseInt(value.slice(2 + (index * 2), 4 + (index * 2)), 16);
   }
   return bytes;
+}
+
+function bytesToLowerHex32(bytes: Uint8Array, label: string): string {
+  if (bytes.byteLength !== 32) {
+    fail('canonical-seal-scalar', `${label} must contain exactly 32 bytes`);
+  }
+  let result = '0x';
+  for (const byte of bytes) result += byte.toString(16).padStart(2, '0');
+  return result;
 }
 
 function bytesToDigest(bytes: Uint8Array): Digest32V1 {
