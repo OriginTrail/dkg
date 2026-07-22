@@ -60,6 +60,65 @@ describe('byte-budget sync pagination', () => {
     expect(request.requesterSignatureR).toMatch(/^0x/);
   });
 
+  // #1916: durable META now negotiates byte-budget paging exactly like durable
+  // DATA. These two cases pin the request-builder's meta advertisement directly:
+  // a regression dropping 'meta' from the useByteBudgetPage condition would
+  // silently break the wire negotiation, and the handler-level tests (which
+  // hand-craft the pageMode field) would not catch it.
+  it('advertises the byte-budget page mode for a durable meta request above the legacy cap', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const signedLimits: number[] = [];
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'meta',
+      needsAuth: true,
+      computeSyncDigest: (_cg, _offset, limit) => {
+        signedLimits.push(limit);
+        return new Uint8Array(32);
+      },
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    // The larger hint rides while the signed legacy limit stays 500-row capped,
+    // so digests remain wire-compatible with an old responder.
+    expect(signedLimits).toEqual([SYNC_PAGE_SIZE]);
+    expect(request.limit).toBe(SYNC_PAGE_SIZE);
+    expect(request.pageMode).toBe(SYNC_BYTE_BUDGET_PAGE_MODE);
+    expect(request.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
+  });
+
+  it('does not advertise byte-budget paging for a durable meta request at the legacy cap', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'meta',
+      needsAuth: true,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    // At the 500-row cap there is no larger page to negotiate, so the responder
+    // must see an unmodified legacy meta request (no pageMode field).
+    expect(request.pageMode).toBeUndefined();
+    expect(request.pageRowsHint).toBeUndefined();
+  });
+
   it('continues after an old responder returns a short legacy page', async () => {
     const requested: Array<{ offset: number; limit: number }> = [];
     let sends = 0;
