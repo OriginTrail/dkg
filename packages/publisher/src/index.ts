@@ -326,7 +326,6 @@ export {
   type ExactQuadSubtractionResult,
 } from './async-lift-subtraction.js';
 export {
-  isDefinitivePreAcceptanceSendFailure,
   mapPublishResultToLiftJobSuccess,
   mapPublishExceptionToLiftJobFailure,
   type AsyncLiftPublishSuccess,

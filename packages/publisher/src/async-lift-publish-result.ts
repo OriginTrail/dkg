@@ -184,28 +184,23 @@ export function mapPublishExceptionToLiftJobFailure(
  * mined-then-reverted tx whose revert string contains that phrase is an accepted, intentional
  * edge (same code the mapper would assign, and a revert is a failure on either path).
  *
- * THROW-SAFE: this runs on the double-submit safety path — if it threw (e.g. `String()` on a
- * pathological thrown value like `Object.create(null)`), the caller would never reach the
- * ambiguous-recovery branch and an opaque error would strand off the recovery track. An
- * unstringifiable value therefore falls back to an empty message → classified non-definitive
- * → stays on recovery.
+ * THROW-SAFE: this runs on the double-submit safety path — if it threw, the caller would
+ * never reach the ambiguous-recovery branch and the error would strand off the recovery
+ * track. ALL inspection of the arbitrary thrown value is guarded: not just `String(error)`
+ * on a pathological value (e.g. `Object.create(null)`), but also the `.code` read, which a
+ * throwing accessor or Proxy can make throw. Any failure to inspect → classified
+ * non-definitive → stays on recovery (we cannot PROVE a pre-acceptance reject, so we treat
+ * it conservatively as ambiguous).
  */
 export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
-  // Property read is safe for any value (optional chaining covers null/undefined; reading a
-  // missing key off a null-prototype object yields undefined, never throws).
-  const errorCode = (error as { code?: unknown } | null | undefined)?.code;
-  if (errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
-  const lower = safeErrorMessageLowerCase(error);
-  return messageIndicatesNoFundedPublisherWallet(lower) || lower.includes('insufficient funds');
-}
-
-/** Lowercased error message that never throws — an unstringifiable value yields `''`. */
-function safeErrorMessageLowerCase(error: unknown): string {
   try {
+    const errorCode = (error as { code?: unknown } | null | undefined)?.code;
+    if (errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
     const message = error instanceof Error ? error.message : String(error);
-    return typeof message === 'string' ? message.toLowerCase() : '';
+    const lower = typeof message === 'string' ? message.toLowerCase() : '';
+    return messageIndicatesNoFundedPublisherWallet(lower) || lower.includes('insufficient funds');
   } catch {
-    return '';
+    return false;
   }
 }
 

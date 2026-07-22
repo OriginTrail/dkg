@@ -6,10 +6,12 @@ import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core'
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
-  isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
+// Internal recovery policy — imported directly from the module, deliberately not re-exported
+// from the package barrel (kept off the public API surface).
+import { isDefinitivePreAcceptanceSendFailure } from '../src/async-lift-publish-result.js';
 import {
   DEFAULT_JOURNAL_GRAPH_URI,
   JOURNAL_SEQ,
@@ -381,6 +383,32 @@ describe('async lift publisher broadcast durability', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
   });
 
+  // #1867 SAFETY (throw-safe classifier — #1918 round-5 🔴) — inspecting the thrown value must
+  // be guarded for MORE than String(): a throwing `code` accessor (or a Proxy) makes the very
+  // first property read throw. Thrown AFTER the durable-broadcast record, that would escape the
+  // catch before it can return the persisted broadcast job, stranding the job off recovery. The
+  // classifier must treat such a value as non-definitive → the job stays 'broadcast'.
+  it('keeps a value with a throwing "code" accessor on the recovery track (throw-safe classifier)', async () => {
+    const throwingCode = Object.defineProperty(new Error('rpc timeout'), 'code', {
+      get() {
+        throw new Error('code getter failed');
+      },
+    });
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(throwingCode),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
   // #1867 (deliberate, LOCKED edge) — a mined-then-reverted tx whose revert string happens
   // to contain "insufficient funds" is classified pre-acceptance terminal. This is an
   // ACCEPTED consequence of the substring match: it mirrors classifyPublishFailureCode
@@ -456,9 +484,16 @@ describe('async lift publisher broadcast durability', () => {
     expect(isDefinitivePreAcceptanceSendFailure(new Error('ETIMEDOUT: request timed out'))).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(undefined)).toBe(false);
 
-    // Throw-safe: a non-stringifiable thrown value is classified non-definitive, not thrown.
+    // Throw-safe: an unstringifiable value, a throwing `code` accessor, and a throwing Proxy
+    // are each classified non-definitive rather than throwing out of the classifier.
     expect(isDefinitivePreAcceptanceSendFailure(Object.create(null) as unknown)).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(Symbol('opaque'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      Object.defineProperty(new Error('x'), 'code', { get() { throw new Error('boom'); } }),
+    )).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      new Proxy({}, { get() { throw new Error('proxy trap'); } }),
+    )).toBe(false);
   });
 
   // Whitelist ↔ mapper invariant — the classifier and mapPublishExceptionToLiftJobFailure are
