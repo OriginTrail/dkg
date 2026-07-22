@@ -242,35 +242,46 @@ async function executePinnedSnapshotScope<T>(
   const deployedTargets = new Set<EvmAddressV1>();
   let active = true;
   let inFlight: Promise<readonly string[]> | undefined;
-  const read = Object.freeze(async (
+  const read = Object.freeze((
     inputCalls: readonly StrictCurrentFinalizedEvmReadCallV1[],
   ): Promise<readonly string[]> => {
-    if (!active) throw unavailable('Current-finalized snapshot session is closed');
+    if (!active) {
+      return handledRejectedRead(unavailable('Current-finalized snapshot session is closed'));
+    }
     if (inFlight !== undefined) {
-      throw new CurrentFinalizedEvmCallErrorV1(
+      return handledRejectedRead(new CurrentFinalizedEvmCallErrorV1(
         'concurrency-saturated',
         'Current-finalized snapshot permits only one dynamic batch at a time',
-      );
+      ));
     }
-    const calls = snapshotSnapshotCalls(inputCalls);
+    let calls: readonly StrictCurrentFinalizedEvmReadCallV1[];
+    try {
+      calls = snapshotSnapshotCalls(inputCalls);
+    } catch (cause) {
+      return handledRejectedRead(cause);
+    }
     try {
       budget.consume(calls);
     } catch {
-      throw resourceLimited(
+      return handledRejectedRead(resourceLimited(
         'Current-finalized snapshot exceeded its fixed scan budget',
-      );
+      ));
     }
-    let operation!: Promise<readonly string[]>;
-    operation = executeSnapshotBatch(
+    const operation = executeSnapshotBatch(
       config,
       preflight.anchor,
       calls,
       deployedTargets,
       rpc,
       totalDeadline,
-    ).finally(() => {
+    );
+    const clearInFlight = () => {
       if (inFlight === operation) inFlight = undefined;
-    });
+    };
+    // Attach both handlers to the same promise exposed to the consumer. This
+    // lets the scope own/drain an unawaited rejection without creating a
+    // second rejecting wrapper promise that can surface as unhandled.
+    void operation.then(clearInFlight, clearInFlight);
     inFlight = operation;
     return operation;
   });
@@ -326,6 +337,12 @@ async function executePinnedSnapshotScope<T>(
     );
   }
   return result;
+}
+
+function handledRejectedRead(cause: unknown): Promise<never> {
+  const rejected = Promise.reject(cause);
+  void rejected.catch(() => undefined);
+  return rejected;
 }
 
 async function executeSnapshotBatch(

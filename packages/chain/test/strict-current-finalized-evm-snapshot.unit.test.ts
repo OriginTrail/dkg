@@ -377,6 +377,44 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     });
   });
 
+  it('owns the exact rejected promise returned by an unawaited snapshot read', async () => {
+    const callStarted = deferred<void>();
+    const releaseCall = deferred<void>();
+    const baseHandler = successfulHandler();
+    const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
+      if (rpcCall.method !== 'eth_call') {
+        await baseHandler(rpcCall, response, rawRequest);
+        return;
+      }
+      callStarted.resolve(undefined);
+      await releaseCall.promise;
+      sendJsonRpcError(response, rpcCall, -32000, 'forced rejection');
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (cause: unknown) => unhandled.push(cause);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scope = withSnapshot(request(), async (session) => {
+        void session.read([call(FIRST_DATA)]);
+        return 'must-not-escape';
+      });
+      await callStarted.promise;
+      releaseCall.resolve(undefined);
+      await expect(scope).rejects.toMatchObject({
+        code: 'rpc-unavailable',
+        message: expect.stringContaining('unawaited read'),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('rejects concurrent dynamic batches and more than four calls before extra I/O', async () => {
     const callStarted = deferred<void>();
     const releaseCall = deferred<void>();
