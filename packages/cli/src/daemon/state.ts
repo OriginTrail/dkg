@@ -15,6 +15,7 @@
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { DkgConfig } from '../config.js';
 import { isStandaloneInstall } from '../config.js';
+import type { StoreMonitorStats } from './store-runtime-monitor.js';
 
 export type CorsAllowlist = '*' | string[];
 
@@ -80,6 +81,10 @@ export const daemonState: {
    *  (read) and `handle-request.ts` (write after each /send round
    *  trip), so it lives here rather than inside openclaw.ts. */
   openClawBridgeHealth: { ok: boolean; ts: number } | null;
+  /** Runtime external-store monitor (store.monitor.*); set by
+   *  `runDaemonInner` when the backend is external, read by
+   *  `/api/status`. Null for local backends or pre-boot. */
+  storeMonitor: { readonly stats: StoreMonitorStats; stop(): void } | null;
 } = {
   catchupRunner: null,
   isUpdating: false,
@@ -96,6 +101,7 @@ export const daemonState: {
   promoteWorkerAvailable: false,
   promoteWorkerUnavailableReason: null,
   openClawBridgeHealth: null,
+  storeMonitor: null,
 };
 
 /**

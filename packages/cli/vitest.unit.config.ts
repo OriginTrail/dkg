@@ -26,6 +26,9 @@ export default defineConfig({
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/status-route-store-quads.test.ts',
+          // #1817 review — /api/status must actually EXPOSE the store-monitor
+          // counters the monitor units only prove are maintained.
+          'test/status-route-store-monitor.test.ts',
           'test/status-command-store.test.ts',
           'test/memory-graph-events.test.ts',
           'test/memory-turn-route.test.ts',
@@ -83,9 +86,18 @@ export default defineConfig({
           'test/chain-reset-wipe.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
           'test/store-health-check.test.ts',
+          // Store-survivability build (2026-07-18 wedge) — runtime store
+          // monitor state machine + legacy-container harden migration.
+          'test/store-monitor.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-harden.test.ts',
+          // `dkg store harden` Commander wrapper: config gating, running-
+          // daemon --yes refusal, dry-run routing, confirmation, and
+          // options.containerName persistence. Mocked config/readline/
+          // executor — no docker, no hardhat.
+          'test/store-harden-command.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
@@ -146,6 +158,11 @@ export default defineConfig({
           'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
+          // Store-survivability wiring guard: runDaemonInner actually invokes
+          // boot recovery / installs+stops daemonState.storeMonitor under the
+          // real resolveManagedBlazegraphContainer criteria. Fully mocked
+          // (agent/http/store boundary) — no hardhat, no docker.
+          'test/daemon-store-monitor-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

@@ -192,9 +192,13 @@ export async function checkExternalStoreReachable(
 // Skipped entirely for local backends (no concurrent-access risk — the
 // Oxigraph file is operator-owned).
 
-const STORE_META_GRAPH = 'urn:dkg:store-meta';
-const STORE_META_SUBJECT = 'urn:dkg:store-tag';
-const STORE_META_PREDICATE = 'urn:dkg:storeTaggedFor';
+// Exported: this vocabulary is the single source of truth for the store
+// identity tag. `dkg store harden` (blazegraph-harden.ts) probes for the
+// same triple as its data-followed-the-migration verification — it must
+// never re-hardcode these IRIs.
+export const STORE_META_GRAPH = 'urn:dkg:store-meta';
+export const STORE_META_SUBJECT = 'urn:dkg:store-tag';
+export const STORE_META_PREDICATE = 'urn:dkg:storeTaggedFor';
 
 export interface StoreIdentityTagOptions {
   storeConfig:

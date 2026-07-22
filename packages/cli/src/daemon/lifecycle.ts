@@ -316,6 +316,13 @@ import {
   formatHealthCheckFailure,
   formatIdentityTagMismatch,
 } from './store-health-check.js';
+import {
+  attemptManagedStoreBootRecovery,
+  createStoreRuntimeMonitor,
+  resolveManagedBlazegraphContainer,
+  storeBootRestartTsPath,
+  storeHardenLockPath,
+} from './store-runtime-monitor.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
@@ -1409,12 +1416,41 @@ export async function runDaemonInner(
   // wiped local files but stale remote data; we'd rather not start at
   // all and let them fix the URL.
   if (isExternalBackend(runtimeStore?.backend)) {
-    const health = await checkExternalStoreReachable({
+    let health = await checkExternalStoreReachable({
       storeConfig: runtimeStore,
     });
     if (!health.ok) {
-      log(formatHealthCheckFailure(health));
-      process.exit(1);
+      // Managed Blazegraph gets ONE docker-restart attempt before the
+      // exit(1): the 2026-07-18 wedge showed exit-looping the daemon
+      // against an alive-but-deaf store (probe fails → exit → systemd
+      // restarts the daemon → same wedged store) heals nothing, while a
+      // container restart does. Operator-managed stores keep the
+      // fail-fast behaviour unchanged.
+      const managedBlazegraphContainer = resolveManagedBlazegraphContainer(runtimeStore);
+      if (managedBlazegraphContainer) {
+        log(
+          `[STORE-HEALTH] managed Blazegraph unreachable at boot — attempting one ` +
+          `docker restart of ${managedBlazegraphContainer}`,
+        );
+        await attemptManagedStoreBootRecovery({
+          storeConfig: runtimeStore,
+          managedContainerName: managedBlazegraphContainer,
+          log,
+          // Never restart the container while `dkg store harden` holds its
+          // lock (it deliberately stopped the container mid-migration).
+          hardenLockPath: storeHardenLockPath(dkgDir()),
+          // Cross-process cooldown: under systemd Restart=always a slow
+          // cold-starting store must not be kicked back to second zero by
+          // every daemon boot — at most one container-restart per 30 min;
+          // otherwise this call only waits for the store to come up.
+          restartCooldownFilePath: storeBootRestartTsPath(dkgDir()),
+        });
+        health = await checkExternalStoreReachable({ storeConfig: runtimeStore });
+      }
+      if (!health.ok) {
+        log(formatHealthCheckFailure(health));
+        process.exit(1);
+      }
     }
     log(
       `External triple-store reachable: ${health.backend} ${health.endpoint}`,
@@ -2353,6 +2389,27 @@ export async function runDaemonInner(
     }
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
+
+  // Runtime store monitor (store.monitor.*, 2026-07-18 mainnet wedge):
+  // periodic ASK probe against the external store with a bounded
+  // auto-restart for the daemon-managed Blazegraph container. Managed
+  // oxigraph-server has its own revive lifecycle (oxigraph-managed.ts),
+  // so it — like operator-managed stores — is monitored log-only
+  // (managedContainerName stays null → docker is never touched).
+  if (isExternalBackend(runtimeStore?.backend) && process.env.DKG_STORE_MONITOR_DISABLED !== '1') {
+    const managedContainerName = resolveManagedBlazegraphContainer(runtimeStore);
+    const storeMonitor = createStoreRuntimeMonitor({
+      storeConfig: runtimeStore,
+      managedContainerName,
+      // `dkg store harden` stops the managed container for a multi-minute
+      // journal export; while its lock file exists the monitor must not
+      // issue docker restarts (store.monitor.suspended-by-harden).
+      hardenLockPath: storeHardenLockPath(dkgDir()),
+      log,
+    });
+    storeMonitor.start();
+    daemonState.storeMonitor = storeMonitor;
+  }
 
   // Version check + auto-update.
   // The resolver merges repo/branch/interval field-by-field across
@@ -3733,6 +3790,8 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        daemonState.storeMonitor?.stop();
+        daemonState.storeMonitor = null;
         logVolumePruner.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
