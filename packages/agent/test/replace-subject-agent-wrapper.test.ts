@@ -18,12 +18,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CHANGELOG_GRAPH,
+  OxigraphStore,
   createTripleStore,
   tryReplaceSubjectAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
 const GRAPH = 'urn:dkg:publisher:control-plane';
 const JOB = 'urn:dkg:publisher:lift-job:job-1';
@@ -60,12 +63,12 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       largeLiteralStorage: { enabled: true, directory: dir },
     });
     let invalidations = 0;
-    let projectionDirty = 0;
+    const projectionDirtyCalls: Array<{ quads?: readonly unknown[]; targetGraph?: string }> = [];
     // ...then the agent wrapper on top — this is the publisher's `this.store`.
     const agentStore: TripleStore = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidations += 1; },
-      () => { projectionDirty += 1; },
+      (quads, targetGraph) => { projectionDirtyCalls.push({ quads, targetGraph }); },
     );
 
     try {
@@ -100,9 +103,11 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       expect(await agentStore.countQuads(GRAPH)).toBe(2);
 
       // Each decorator's side effect fires through the full production stack:
-      // - agent wrapper: listGraphs-cache invalidation + projection-dirty hooks.
+      // - agent wrapper: listGraphs-cache invalidation fires, and the projection
+      //   is dirtied BY THE TARGET GRAPH (not the inserted quads) so a subject
+      //   replace that deletes projection-relevant metadata is still covered (#1863).
       expect(invalidations).toBeGreaterThan(invalidationsBefore);
-      expect(projectionDirty).toBeGreaterThan(0);
+      expect(projectionDirtyCalls.some((c) => c.targetGraph === GRAPH && c.quads === undefined)).toBe(true);
       // - ChangelogStore: the mutation was recorded (changelog plane changed).
       expect(await changelogSnapshot(agentStore)).not.toBe(changelogBefore);
       // - GraphSetIndexStore: enumeration includes the non-empty control-plane graph.
@@ -120,5 +125,23 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     } finally {
       await agentStore.close();
     }
+  });
+
+  it('markDirtyForGraph dirties the CG derived from its meta graph and no-ops for a non-CG graph (#1863)', () => {
+    const proj = new ContextGraphMetaProjection(new OxigraphStore());
+    const entries = (proj as unknown as { entries: Map<string, { invalidationVersion: number }> }).entries;
+
+    // Seed a cached entry for CG 'music', then dirty it via its META graph — the
+    // path a replaceSubject on that CG's meta graph takes (covers deletes the
+    // inserted quads wouldn't reveal).
+    proj.markDirty('music');
+    const before = entries.get('music')!.invalidationVersion;
+    proj.markDirtyForGraph(contextGraphMetaGraphUri('music'));
+    expect(entries.get('music')!.invalidationVersion).toBeGreaterThan(before);
+
+    // A non-CG graph (e.g. the publisher control-plane graph) is a no-op — no
+    // entry created, no whole-cache churn on the hot job-write path.
+    proj.markDirtyForGraph('urn:dkg:publisher:control-plane');
+    expect(entries.has('urn:dkg:publisher:control-plane')).toBe(false);
   });
 });

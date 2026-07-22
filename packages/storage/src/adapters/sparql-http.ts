@@ -526,11 +526,21 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceSubject',
     });
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    await this.postUpdate(
-      update,
-      { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
-      'replaceSubject',
-    );
+    try {
+      await this.postUpdate(
+        update,
+        { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
+        'replaceSubject',
+      );
+    } catch (error) {
+      // Indeterminate remote failure: a timeout / lost response can occur AFTER
+      // the endpoint committed the DELETE/INSERT (which may have added the graph's
+      // first row or removed its last). Invalidate the graph-list cache before
+      // rethrowing so a direct managed caller never serves stale membership —
+      // mirrors replaceGraph / replaceGraphAndSubject.
+      this.invalidateListGraphsCache();
+      throw error;
+    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
   }

@@ -636,6 +636,32 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(body).toContain('<http://ex.org/new> <http://ex.org/p> "new" .');
   });
 
+  it('replaceSubject sends ONE subject-scoped DELETE WHERE + INSERT DATA update (no MOVE)', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await s.replaceSubject('http://ex.org/g', 'http://ex.org/job', [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g',
+    }]);
+
+    // Exactly one update POST, application/sparql-update, subject-scoped: the
+    // DELETE clears only <job>, INSERT DATA writes the new rows, and there is NO
+    // whole-graph staging/MOVE (that would clobber other subjects in the graph).
+    expect(fetchCalls).toHaveLength(1);
+    const [, init] = fetchCalls[0];
+    const body = String(init?.body);
+    expect((init?.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/sparql-update; charset=utf-8');
+    expect(body).toContain('DELETE WHERE');
+    expect(body).toContain('<http://ex.org/job> ?p ?o');
+    expect(body).toContain('INSERT DATA');
+    expect(body).toContain('GRAPH <http://ex.org/g>');
+    expect(body).toContain('<http://ex.org/job> <http://ex.org/p> "new" .');
+    expect(body).not.toContain('MOVE GRAPH');
+    expect(body).not.toContain('atomic-graph-replace:');
+  });
+
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   OxigraphStore,
   buildAtomicSubjectReplaceUpdate,
@@ -116,6 +116,30 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
     ).toThrow(/blank node/);
     // Guarded on the empty-quads DELETE path too.
     expect(() => buildAtomicSubjectReplaceUpdate(GRAPH, '_:b1', [])).toThrow(/blank node/);
+  });
+
+  it('OxigraphStore.replaceSubject applies the mutation as ONE transactional embedded update (not delete-then-insert)', async () => {
+    // The reader-atomicity guarantee is a STORE property: the embedded oxigraph
+    // runs the whole DELETE WHERE + INSERT DATA as ONE update() (a single
+    // transaction), so a reader can never observe the subject transiently empty.
+    // White-box guard against a future regression to an internal delete-then-insert
+    // (the window a publisher-level proxy test cannot observe).
+    const store = new OxigraphStore();
+    const embedded = (store as unknown as { store: { update: (sparql: string) => void } }).store;
+    const spy = vi.spyOn(embedded, 'update');
+
+    await store.replaceSubject(GRAPH, SUBJECT_A, [
+      quad(SUBJECT_A, 'urn:test:status', '"validated"'),
+    ]);
+
+    // Exactly one mutating update, carrying BOTH the DELETE and the INSERT in a
+    // single request (not two separate calls).
+    const mutations = spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sparql) => sparql.includes('DELETE WHERE') || sparql.includes('INSERT DATA'));
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]).toContain('DELETE WHERE');
+    expect(mutations[0]).toContain('INSERT DATA');
   });
 
   it('returns a bare DELETE when the insert set is empty', () => {

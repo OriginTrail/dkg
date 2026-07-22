@@ -410,7 +410,9 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
-  markProjectionDirty?: (quads?: readonly Quad[]) => void,
+  // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
+  // dirty the projection by graph rather than by inserted quads (covers deletes).
+  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
 ): TripleStore {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
@@ -509,7 +511,12 @@ export function createListContextGraphsCacheInvalidatingStore(
           invalidateAfterMutation(
             () => innerStore.replaceSubject!(graphUri, subject, quads, options),
             () => true,
-            () => markProjectionDirty?.(quads),
+            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
+            // a subject replace can DELETE projection-relevant metadata (or insert
+            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
+            // target graph covers both delete and insert (#1863). No-op for a
+            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
+            () => markProjectionDirty?.(undefined, graphUri),
           )
       : undefined,
     listGraphs(options) {

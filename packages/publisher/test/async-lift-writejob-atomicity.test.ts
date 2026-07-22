@@ -45,7 +45,16 @@ describe('#1863 async-lift writeJob atomicity', () => {
     });
   }
 
-  it('replaces the job subject atomically — a racing reader never sees a false none', async () => {
+  it('persistJobRecord routes the transition through the atomic capability, not a publisher-level delete-then-insert', async () => {
+    // NOTE: reader-atomicity of the underlying mutation is a STORE property and
+    // is proven at the storage layer (OxigraphStore.replaceSubject issues ONE
+    // transactional embedded update; the sparql-http / blazegraph adapter tests
+    // assert ONE update request; the builder emits a single DELETE WHERE +
+    // INSERT DATA). This publisher-level test proves the ORCHESTRATION: the
+    // transition goes through replaceSubject (never deleteByPattern+insert on the
+    // job graph), and the prior job stays fully readable while the capability
+    // call is in flight — it does NOT (and cannot, gating the proxy boundary)
+    // observe the mutation's internal commit window.
     const inner = new OxigraphStore();
     let replaceSubjectCalls = 0;
     let jobGraphDeletes = 0;
@@ -59,9 +68,8 @@ describe('#1863 async-lift writeJob atomicity', () => {
       reachedGate = resolve;
     });
 
-    // Delegate to the real store, but gate the atomic replaceSubject so we can
-    // observe the store deterministically WHILE the transition is parked, before
-    // it applies.
+    // Delegate to the real store, but gate the capability call so we can observe
+    // the store deterministically WHILE the transition is parked at replaceSubject.
     const store = new Proxy(inner, {
       get(target, prop) {
         if (prop === 'replaceSubject') {
@@ -95,9 +103,10 @@ describe('#1863 async-lift writeJob atomicity', () => {
 
     armed = true;
     const transition = publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
-    await reached; // the atomic replace is parked BEFORE it applies
+    await reached; // parked at the capability call, before the publisher proceeds
 
-    // Mid-transition the store still holds the complete prior (claimed) job.
+    // The prior (claimed) job is still fully readable while the capability call
+    // is in flight (the publisher did not tear it down before replacing).
     const lookup = await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts);
     expect(lookup.kind).not.toBe('none');
     expect(await publisher.getStatus(jobId)).not.toBeNull();
@@ -105,7 +114,8 @@ describe('#1863 async-lift writeJob atomicity', () => {
     releaseGate();
     await transition;
 
-    // The atomic path never delete-then-inserts the job subject.
+    // The publisher never delete-then-inserts the job subject — it routes through
+    // the atomic capability (internal commit atomicity is a storage-layer concern).
     expect(jobGraphDeletes).toBe(0);
     expect(replaceSubjectCalls).toBeGreaterThanOrEqual(1);
     expect((await publisher.getStatus(jobId))?.status).toBe('validated');
