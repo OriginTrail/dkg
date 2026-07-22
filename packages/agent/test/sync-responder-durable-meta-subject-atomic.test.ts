@@ -3,6 +3,7 @@ import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   readDurableMetaPage,
+  serializeResponderRowsWithinByteBudget,
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import { DKG_NS } from './_helpers/sync-responder.js';
@@ -350,5 +351,102 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     // No throw, subject-atomic, and every admitted row delivered exactly once.
     assertNoDuplicatesOrGaps(pages);
     expect(pages.flat()).toHaveLength(bnodeQuads.length + filler.length);
+  });
+
+  it('store-paged path: bounds an oversized admitted subject under the byte budget with forward progress (#1916)', async () => {
+    // A single admitted subject far larger than the response budget (hostile
+    // peer-ingest shape). The subject-atomic extend must NOT serve it whole into
+    // an un-sendable oversized frame; it bounds the window and the byte-budget
+    // serialization caps the response, splitting the subject across pages with
+    // forward progress. Uses a SMALL injected budget so the case is exercised
+    // without inserting a 4 MiB subject.
+    const limit = 5;
+    const budget = 1_200; // bytes — small injected response budget
+    const store = new OxigraphStore();
+    const hostile = 'did:dkg:activity:oversized';
+    const quads: Quad[] = Array.from({ length: 60 }, (_, i) => ({
+      graph: META,
+      subject: hostile,
+      predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
+      object: `"junk-${i}"`,
+    }));
+    await store.insert(quads);
+
+    // Drive it like the responder+requester: serve a page, byte-cap it exactly
+    // as the handler does, and advance by the rows that actually crossed.
+    const enc = new TextEncoder();
+    const pages: Row[][] = [];
+    let offset = 0;
+    for (let guard = 0; guard < 1_000; guard += 1) {
+      const page = await readDurableMetaPage({
+        store,
+        contextGraphId: CG,
+        registeredSubGraphNames: [],
+        offset,
+        limit,
+        maxResponseBytes: budget,
+      });
+      // Memory bound: the extend stops growing the fetched window at the byte
+      // budget instead of pulling the whole oversized subject into memory.
+      if (guard === 0) expect(page.length).toBeLessThan(quads.length);
+      const serialized = serializeResponderRowsWithinByteBudget(page, budget);
+      // Frame-safety: the serialized response never exceeds the budget.
+      expect(enc.encode(serialized).byteLength).toBeLessThanOrEqual(budget);
+      const rowCount = serialized === '' ? 0 : serialized.split('\n').length;
+      if (rowCount === 0) break;
+      pages.push(page.slice(0, rowCount).map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g })));
+      offset += rowCount;
+    }
+    // Forward progress: it was chunked (not one oversized page), terminated
+    // (no loop), and delivered every row exactly once.
+    expect(pages.length).toBeGreaterThan(1);
+    const all = pages.flat();
+    expect(all).toHaveLength(quads.length);
+    expect(new Set(all.map((row) => `${row.p}\n${row.o}`)).size).toBe(quads.length);
+  });
+
+  it('store-paged path: a realistically-large-but-VALID seal stays whole under the byte budget (#1916)', async () => {
+    // The Lock-2 guard: a legitimate control envelope — even with max normal
+    // literal sizes — is far under the budget, so it is served WHOLE, never
+    // split. Budget sits well above the seal (~KB) and well below the frame.
+    // limit=10 so the 14-row seal (after 5 filler) STRADDLES and the extend runs.
+    const limit = 10;
+    const budget = 200_000; // bytes — >> a valid seal, << the ~10 MiB frame
+    const store = new OxigraphStore();
+    const seal = 'did:dkg:activity:seal-large';
+    const bigLiteral = `"${'x'.repeat(400)}"`; // a realistically large seal literal
+    const filler: Quad[] = Array.from({ length: 5 }, (_, i) => ({
+      graph: META,
+      subject: `did:dkg:activity:f0${i}`,
+      predicate: `${DKG_NS}label`,
+      object: `"f-${i}"`,
+    }));
+    const sealQuads: Quad[] = SEAL_PREDICATES.map((name, i) => ({
+      graph: META,
+      subject: seal,
+      predicate: `${DKG_NS}${name}`,
+      object: i === 0 ? bigLiteral : `"seal-${name}-${i}"`,
+    }));
+    await store.insert([...filler, ...sealQuads]);
+
+    const page = await readDurableMetaPage({
+      store,
+      contextGraphId: CG,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit,
+      maxResponseBytes: budget,
+    });
+    const sealRowsInPage = page.filter((row) => row.s === seal);
+    // The whole 14-row seal is in this one page (extend did not split it)…
+    expect(sealRowsInPage).toHaveLength(SEAL_PREDICATES.length);
+    // …and the byte-budget serialization does not truncate it either.
+    const serialized = serializeResponderRowsWithinByteBudget(page, budget);
+    expect(new TextEncoder().encode(serialized).byteLength).toBeLessThanOrEqual(budget);
+    for (const q of sealQuads) {
+      expect(serialized).toContain(`<${q.predicate}>`);
+    }
+    // Boundary is clean: 5 filler + 14 seal, nothing beyond the seal.
+    expect(page).toHaveLength(filler.length + SEAL_PREDICATES.length);
   });
 });

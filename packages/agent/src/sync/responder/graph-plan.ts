@@ -30,6 +30,7 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
+import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -814,7 +815,17 @@ export async function readDurableMetaPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   assetUals?: readonly string[];
+  /**
+   * Serialized-response byte budget the store-paged subject extend must not
+   * blow (#1916): a single admitted subject larger than this cannot be a valid
+   * seal/descriptor (those are ~KB), so the extend stops growing and the page is
+   * byte-capped at serialization, splitting that oversized subject with forward
+   * progress. Defaults to {@link SYNC_BYTE_BUDGET_RESPONSE_BYTES}; injectable for
+   * tests.
+   */
+  maxResponseBytes?: number;
 }): Promise<SyncRow[]> {
+  const maxResponseBytes = params.maxResponseBytes ?? SYNC_BYTE_BUDGET_RESPONSE_BYTES;
   if (params.assetUals !== undefined) {
     if (params.assetUals.length === 0) return [];
     const manifest = await readGraphScopedVmManifest(
@@ -842,6 +853,12 @@ export async function readDurableMetaPage(params: {
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
       expiredMessage: 'Durable meta sync session snapshot expired before page completion',
+      // Durable meta is byte-budget-paginated on the requester (EOF is an empty
+      // page, not a short one), and the subject-atomic extend / byte-cap can
+      // legitimately serve a page shorter than `limit`. Never release the
+      // session on a short page — only on the empty EOF page — or a byte-capped
+      // page would drop the snapshot and strand the rest of the meta (#1916).
+      releaseOnShortPage: false,
     }
     : undefined;
   return readResponderRowsPage(
@@ -852,6 +869,7 @@ export async function readDurableMetaPage(params: {
       params.registeredSubGraphNames,
       offset,
       limit,
+      maxResponseBytes,
       signal,
     ),
     params.offset,
@@ -3576,11 +3594,18 @@ async function readDurableMetaRowsPage(
  * enforcing the IRI invariant at ingest (defense-in-depth) is tracked
  * separately.
  *
- * `_meta` subjects are small (a seal is 14 quads), so this converges in about
- * one extra read; the loop is bounded (the finite store exhausts the growing
- * window) and a pathologically large subject is still emitted whole rather than
- * truncated (truncation is exactly the #1788 defect), with the transport frame
- * limit as the final guard.
+ * `_meta` subjects are small (a seal is 14 quads ≈ a few KB), so this converges
+ * in about one extra read and every valid control envelope is emitted WHOLE.
+ * The growth is bounded by `maxResponseBytes` (#1916): a single subject whose
+ * own rows reach the response byte budget is, by that size alone, provably NOT a
+ * valid seal/descriptor (those are orders of magnitude smaller) — so the extend
+ * stops growing and returns the bounded window, and the caller's byte-budget
+ * serialization caps the response and splits that oversized subject across
+ * pages. Splitting it is safe: an oversized subject carries no batch-local
+ * control envelope the receiver admits atomically (a valid seal never reaches
+ * this size; a hostile `assertionVersion`+junk subject fails the receiver's seal
+ * parse regardless). This guarantees forward progress instead of an un-sendable
+ * oversized frame.
  */
 async function readDurableMetaRowsPageSubjectAtomic(
   store: TripleStore,
@@ -3588,11 +3613,13 @@ async function readDurableMetaRowsPageSubjectAtomic(
   registeredSubGraphNames: readonly string[],
   offset: number,
   limit: number,
+  maxResponseBytes: number,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
+  const safeMaxBytes = Math.max(1, Math.floor(maxResponseBytes));
   let extra = 1;
   // Bounded by construction: `extra` at least doubles each attempt and the
   // store is finite, so a short (exhausted) window always terminates the loop;
@@ -3622,15 +3649,28 @@ async function readDurableMetaRowsPageSubjectAtomic(
       while (end > 0 && metaSubjectKey(window[end - 1]) !== trailingKey) end -= 1;
       return window.slice(0, end);
     }
-    // The whole window is still the trailing subject and more may exist: grow
-    // the window (roughly doubling) and re-read as one query so the boundary
-    // comparison stays self-consistent.
+    // The whole window is still the trailing subject. If it has already reached
+    // the response byte budget it is far too large to be a valid seal/descriptor
+    // (#1916): stop growing (bounding memory) and return the bounded window — the
+    // caller's byte-budget serialization caps the response and splits this
+    // oversized subject across pages with forward progress.
+    if (estimateRowsResponseBytes(window) >= safeMaxBytes) return window;
+    // Otherwise grow the window (roughly doubling) and re-read as one query so
+    // the boundary comparison stays self-consistent.
     extra = extra === 1 ? safeLimit + 1 : extra * 2;
   }
   throw new Error(
     `durable-meta subject-atomic paging did not converge for "${contextGraphId}" at offset ${safeOffset} `
     + '(trailing subject exceeded the bounded window budget)',
   );
+}
+
+/** Conservative estimate of a row list's serialized response size (heap-byte
+ * estimate ≥ N-Quads byte length), used to bound the subject-atomic extend. */
+function estimateRowsResponseBytes(rows: readonly SyncRow[]): number {
+  let bytes = 0;
+  for (const row of rows) bytes += estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+  return bytes;
 }
 
 /**

@@ -778,10 +778,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             assetUals,
+            maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          // Byte-cap the durable-meta response (#1916) exactly like durable data:
+          // the subject-atomic extend can return a whole (or oversized) subject,
+          // so serialize within the frame budget rather than emitting unbounded
+          // N-Quads. The extend keeps every valid seal well under the budget, so
+          // this only ever truncates a pathological oversized subject.
+          const serialized = serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
