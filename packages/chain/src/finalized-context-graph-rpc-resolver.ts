@@ -2,11 +2,13 @@ import { ethers } from 'ethers';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
 import {
+  FinalizedContextGraphReadErrorV1,
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadResolverV1,
   type UntrustedFinalizedContextGraphFieldsV1,
 } from './finalized-context-graph-read.js';
 import {
+  readStrictCurrentFinalizedEvmRevertDataV1,
   type StrictCurrentFinalizedEvmReadResultV1,
   type StrictCurrentFinalizedEvmReadV1,
 } from './strict-current-finalized-evm-rpc.js';
@@ -19,6 +21,9 @@ export const FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1 = 32;
 const CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE = new ethers.Interface([
   'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
   'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
+]);
+const ERC721_FINALIZED_READ_ERROR_INTERFACE = new ethers.Interface([
+  'error ERC721NonexistentToken(uint256 tokenId)',
 ]);
 
 /**
@@ -37,32 +42,57 @@ export function createFinalizedContextGraphRpcResolverV1(
     signal,
   ) => {
     const contextGraphId = BigInt(binding.contextGraphId);
-    const result = await read({
-      chainId: binding.chainId,
-      calls: Object.freeze([
-        Object.freeze({
-          to: binding.governanceContract,
-          data: CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE.encodeFunctionData(
-            'getContextGraph',
-            [contextGraphId],
-          ),
-          maxReturnBytes: FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
-        }),
-        Object.freeze({
-          to: binding.governanceContract,
-          data: CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE.encodeFunctionData(
-            'getNameHash',
-            [contextGraphId],
-          ),
-          maxReturnBytes: FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
-        }),
-      ]),
-      signal,
-    });
+    let result: StrictCurrentFinalizedEvmReadResultV1;
+    try {
+      result = await read({
+        chainId: binding.chainId,
+        calls: Object.freeze([
+          Object.freeze({
+            to: binding.governanceContract,
+            data: CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE.encodeFunctionData(
+              'getContextGraph',
+              [contextGraphId],
+            ),
+            maxReturnBytes: FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
+          }),
+          Object.freeze({
+            to: binding.governanceContract,
+            data: CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE.encodeFunctionData(
+              'getNameHash',
+              [contextGraphId],
+            ),
+            maxReturnBytes: FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
+          }),
+        ]),
+        signal,
+      });
+    } catch (cause) {
+      if (isAuthenticatedMissingContextGraphRevert(cause, contextGraphId)) {
+        throw new FinalizedContextGraphReadErrorV1(
+          'unregistered-context-graph',
+          `Context Graph ${binding.contextGraphId} is not registered at the finalized anchor`,
+        );
+      }
+      throw cause;
+    }
     return decodeFinalizedContextGraphResult(binding, result);
   };
 
   return Object.freeze(resolver);
+}
+
+function isAuthenticatedMissingContextGraphRevert(
+  cause: unknown,
+  contextGraphId: bigint,
+): boolean {
+  if (!(cause instanceof CurrentFinalizedEvmCallErrorV1) || cause.code !== 'revert') {
+    return false;
+  }
+  const authenticatedRevertData = readStrictCurrentFinalizedEvmRevertDataV1(cause);
+  if (authenticatedRevertData === undefined) return false;
+  return authenticatedRevertData === ERC721_FINALIZED_READ_ERROR_INTERFACE
+    .encodeErrorResult('ERC721NonexistentToken', [contextGraphId])
+    .toLowerCase();
 }
 
 function decodeFinalizedContextGraphResult(

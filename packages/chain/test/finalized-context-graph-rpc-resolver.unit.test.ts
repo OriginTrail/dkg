@@ -1,3 +1,6 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -14,10 +17,15 @@ import {
   createFinalizedContextGraphRpcResolverV1,
 } from '../src/finalized-context-graph-rpc-resolver.js';
 import {
+  FinalizedContextGraphReadErrorV1,
   resolveFinalizedContextGraphReadV1,
   type FinalizedContextGraphBindingV1,
 } from '../src/finalized-context-graph-read.js';
-import { type StrictCurrentFinalizedEvmReadV1 } from '../src/strict-current-finalized-evm-rpc.js';
+import {
+  createStrictCurrentFinalizedEvmReadV1,
+  type StrictCurrentFinalizedEvmReadV1,
+} from '../src/strict-current-finalized-evm-rpc.js';
+import { CurrentFinalizedEvmCallErrorV1 } from '../src/current-finalized-evm-read-profile.js';
 
 const CHAIN_ID = '20430' as ChainIdV1;
 const STORAGE = `0x${'11'.repeat(20)}` as EvmAddressV1;
@@ -32,6 +40,16 @@ const GET_NAME_HASH_SELECTOR = '0x8ce6a5c1';
 const ENCODED_ID_42 = `${'0'.repeat(62)}2a`;
 
 const ABI = ethers.AbiCoder.defaultAbiCoder();
+const ERC721_ERRORS = new ethers.Interface([
+  'error ERC721NonexistentToken(uint256 tokenId)',
+]);
+
+interface JsonRpcRequest {
+  readonly jsonrpc: '2.0';
+  readonly id: number;
+  readonly method: string;
+  readonly params: readonly unknown[];
+}
 
 function binding(): FinalizedContextGraphBindingV1 {
   return Object.freeze({
@@ -194,4 +212,147 @@ describe('RFC-64 finalized Context Graph RPC resolver', () => {
   it('rejects a non-function transport at construction', () => {
     expect(() => createFinalizedContextGraphRpcResolverV1(null as never)).toThrow(TypeError);
   });
+
+  it('maps an authenticated missing-token revert for the bound ID to unregistered', async () => {
+    const rpc = await startMissingContextGraphRpc(42n);
+    try {
+      const read = createStrictCurrentFinalizedEvmReadV1({
+        chainId: CHAIN_ID,
+        endpoints: [rpc.url],
+      });
+      const resolver = createFinalizedContextGraphRpcResolverV1(read);
+
+      let caught: unknown;
+      try {
+        await resolveFinalizedContextGraphReadV1(resolver, binding());
+      } catch (cause) {
+        caught = cause;
+      }
+      expect(caught).toBeInstanceOf(FinalizedContextGraphReadErrorV1);
+      expect(caught).toMatchObject({ code: 'unregistered-context-graph' });
+    } finally {
+      await rpc.stop();
+    }
+  });
+
+  it('does not map authenticated missing-token evidence for another ID', async () => {
+    const rpc = await startMissingContextGraphRpc(43n);
+    try {
+      const read = createStrictCurrentFinalizedEvmReadV1({
+        chainId: CHAIN_ID,
+        endpoints: [rpc.url],
+      });
+      const resolver = createFinalizedContextGraphRpcResolverV1(read);
+
+      await expect(resolver(binding(), signal())).rejects.toMatchObject({
+        name: 'CurrentFinalizedEvmCallErrorV1',
+        code: 'revert',
+      });
+    } finally {
+      await rpc.stop();
+    }
+  });
+
+  it('does not trust a forgeable public revert error as missing-token evidence', async () => {
+    const forged = new CurrentFinalizedEvmCallErrorV1('revert', 'forged');
+    const read = vi.fn<StrictCurrentFinalizedEvmReadV1>(async () => {
+      throw forged;
+    });
+    const resolver = createFinalizedContextGraphRpcResolverV1(read);
+
+    await expect(resolver(binding(), signal())).rejects.toBe(forged);
+  });
 });
+
+async function startMissingContextGraphRpc(missingId: bigint): Promise<{
+  readonly url: string;
+  readonly stop: () => Promise<void>;
+}> {
+  const missingData = ERC721_ERRORS.encodeErrorResult(
+    'ERC721NonexistentToken',
+    [missingId],
+  ).toLowerCase();
+  const server = createServer(async (request, response) => {
+    try {
+      const call = JSON.parse(await readRequestBody(request)) as JsonRpcRequest;
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, '0x4fce');
+          return;
+        case 'eth_getBlockByNumber':
+          sendResult(response, call, { number: '0x7b', hash: BLOCK_HASH });
+          return;
+        case 'eth_getCode':
+          sendResult(response, call, '0x6000');
+          return;
+        case 'eth_call': {
+          const callObject = call.params[0] as { readonly data?: unknown };
+          if (typeof callObject.data === 'string'
+            && callObject.data.startsWith(GET_CONTEXT_GRAPH_SELECTOR)) {
+            sendError(response, call, 3, 'execution reverted', missingData);
+          } else {
+            sendResult(response, call, nameHashResult());
+          }
+          return;
+        }
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    } catch (cause) {
+      if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain' });
+      if (!response.writableEnded) {
+        response.end(cause instanceof Error ? cause.message : 'failure');
+      }
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  let stopped = false;
+  return Object.freeze({
+    url: `http://127.0.0.1:${address.port}`,
+    stop: async () => {
+      if (stopped) return;
+      stopped = true;
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+    },
+  });
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function sendResult(
+  response: ServerResponse,
+  request: JsonRpcRequest,
+  result: unknown,
+): void {
+  response.writeHead(200, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+}
+
+function sendError(
+  response: ServerResponse,
+  request: JsonRpcRequest,
+  code: number,
+  message: string,
+  data?: string,
+): void {
+  response.writeHead(200, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({
+    jsonrpc: '2.0',
+    id: request.id,
+    error: { code, message, ...(data === undefined ? {} : { data }) },
+  }));
+}
