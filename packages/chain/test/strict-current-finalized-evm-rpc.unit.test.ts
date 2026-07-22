@@ -25,7 +25,9 @@ import {
   CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
   CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
   CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
 } from '../src/current-finalized-evm-read-profile.js';
@@ -266,6 +268,28 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     });
 
     for (const request of [
+      { chainId: CHAIN_ID, calls: [], signal: new AbortController().signal },
+      {
+        chainId: CHAIN_ID,
+        calls: Array.from(
+          { length: CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1 + 1 },
+          () => validCall,
+        ),
+        signal: new AbortController().signal,
+      },
+      {
+        chainId: CHAIN_ID,
+        calls: [{ ...validCall, maxReturnBytes: 0 }],
+        signal: new AbortController().signal,
+      },
+      {
+        chainId: CHAIN_ID,
+        calls: [{
+          ...validCall,
+          maxReturnBytes: CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1 + 1,
+        }],
+        signal: new AbortController().signal,
+      },
       { chainId: CHAIN_ID, calls: sparse, signal: new AbortController().signal },
       { chainId: CHAIN_ID, calls: [accessor], signal: new AbortController().signal },
       { chainId: CHAIN_ID, calls: [validCall], signal: {} },
@@ -299,6 +323,53 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     });
     gate.resolve(undefined);
     await expect(Promise.all(active)).resolves.toHaveLength(4);
+  });
+
+  it('holds each read permit until every started parallel code check settles', async () => {
+    const siblingGate = deferred<void>();
+    const allSiblingsStarted = deferred<void>();
+    let siblingsStarted = 0;
+    const baseHandler = successfulHandler();
+    const server = await startRpcServer(async (call, response, request) => {
+      if (call.method !== 'eth_getCode') {
+        await baseHandler(call, response, request);
+        return;
+      }
+      if (call.params[0] === TO) {
+        sendResult(response, call, '0x');
+        return;
+      }
+      siblingsStarted += 1;
+      if (siblingsStarted === CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1) {
+        allSiblingsStarted.resolve(undefined);
+      }
+      await siblingGate.promise;
+      sendResult(response, call, '0x6000');
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+    const request = () => ({
+      chainId: CHAIN_ID,
+      calls: [
+        { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 },
+        { to: OTHER_TO, data: SECOND_READ_DATA, maxReturnBytes: 32 },
+      ],
+      signal: new AbortController().signal,
+    });
+    const active = Array.from(
+      { length: CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1 },
+      () => read(request()),
+    );
+
+    await allSiblingsStarted.promise;
+    await expect(read(request())).rejects.toMatchObject({ code: 'concurrency-saturated' });
+    siblingGate.resolve(undefined);
+    await Promise.all(active.map(async (operation) => {
+      await expect(operation).rejects.toMatchObject({ code: 'no-code' });
+    }));
+    await expect(read(request())).rejects.toMatchObject({ code: 'no-code' });
   });
 
   it('uses the configured endpoint once, in exact EIP-1898 request order and shape', async () => {
@@ -580,14 +651,15 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(0);
   });
 
-  it('rejects malformed contract returns but preserves exact wrong magic for the verifier', async () => {
-    const malformed = await startRpcServer(successfulHandler({ returnData: '0x1626ba7e' }));
-    const malformedAdapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+  it('preserves bounded ABI returns, including EIP-1271 short and wrong magic, for the verifier', async () => {
+    const short = await startRpcServer(successfulHandler({ returnData: '0x1626ba7e' }));
+    const shortAdapter = createStrictCurrentFinalizedEvmChainAdapterV1({
       chainId: CHAIN_ID,
-      endpoints: [malformed.url],
+      endpoints: [short.url],
     });
-    await expect(malformedAdapter(fixedRequest()))
-      .rejects.toMatchObject({ code: 'malformed-return' });
+    await expect(shortAdapter(fixedRequest())).resolves.toMatchObject({
+      returnData: '0x1626ba7e',
+    });
 
     const wrong = await startRpcServer(successfulHandler({ returnData: WRONG_MAGIC_RETURN }));
     const wrongAdapter = createStrictCurrentFinalizedEvmChainAdapterV1({

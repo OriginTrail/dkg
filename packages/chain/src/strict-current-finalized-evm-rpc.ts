@@ -7,9 +7,6 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
-  CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
-} from './control-object-signature-verifier.js';
-import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
   CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
   CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
@@ -31,6 +28,7 @@ import {
   snapshotDenseDataArray,
   snapshotExactDataRecord,
 } from './strict-local-data.js';
+import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
@@ -137,7 +135,10 @@ export function createStrictCurrentFinalizedEvmChainAdapterV1(
       })]),
       signal: request.signal,
     });
-    const returnData = assertEip1271ReturnData(result.returnData[0]);
+    const returnData = result.returnData[0];
+    if (returnData === undefined) {
+      throw unavailable('Single-call finalized read produced no contract result');
+    }
     return Object.freeze({
       chainId: result.chainId,
       blockNumber: result.blockNumber,
@@ -160,7 +161,9 @@ export function createStrictCurrentFinalizedEvmReadV1(
   input: StrictCurrentFinalizedEvmRpcConfigV1,
 ): StrictCurrentFinalizedEvmReadV1 {
   const config = snapshotConfig(input);
-  let activeReads = 0;
+  const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
+    CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  );
 
   const read: StrictCurrentFinalizedEvmReadV1 = async (inputRequest) => {
     const request = snapshotReadRequest(inputRequest);
@@ -173,47 +176,15 @@ export function createStrictCurrentFinalizedEvmReadV1(
     if (request.signal.aborted) {
       throw cancelled('Current-finalized EVM call was cancelled before transport admission');
     }
-    if (activeReads >= CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1) {
-      throw new CurrentFinalizedEvmCallErrorV1(
-        'concurrency-saturated',
-        `Chain ${request.chainId} already has ${activeReads} finalized reads in flight`,
+    return admission.run(request.chainId, async () => {
+      const totalDeadline = createDeadlineScope(
+        request.signal,
+        CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
+        'current-finalized total deadline',
       );
-    }
-    activeReads += 1;
-
-    const totalDeadline = createDeadlineScope(
-      request.signal,
-      CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
-      'current-finalized total deadline',
-    );
-    let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
-
-    try {
-      for (let index = 0; index < config.endpoints.length; index += 1) {
-        if (request.signal.aborted) {
-          throw cancelled('Current-finalized EVM call was cancelled');
-        }
-        if (totalDeadline.timedOut()) {
-          throw timedOut(
-            `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
-          );
-        }
-
-        const attemptDeadline = createDeadlineScope(
-          totalDeadline.signal,
-          CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-          `current-finalized endpoint attempt ${index + 1}`,
-        );
-        try {
-          const result = await executeEndpointAttempt(
-            config,
-            config.endpoints[index]!,
-            request,
-            attemptDeadline.signal,
-          );
-          // Close races where transport completion and abort/deadline become
-          // observable in the same turn. A late response never escapes merely
-          // because its promise callback ran before the timer callback.
+      let lastRetryableFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
+      try {
+        for (let index = 0; index < config.endpoints.length; index += 1) {
           if (request.signal.aborted) {
             throw cancelled('Current-finalized EVM call was cancelled');
           }
@@ -222,39 +193,67 @@ export function createStrictCurrentFinalizedEvmReadV1(
               `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
             );
           }
-          if (attemptDeadline.timedOut()) {
-            throw timedOut(
-              `Current-finalized endpoint attempt exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
-            );
-          }
-          return result;
-        } catch (cause) {
-          const failure = classifyAttemptFailure(
-            cause,
-            request.signal,
-            totalDeadline,
-            attemptDeadline,
-          );
-          if (isTerminalAttemptFailure(failure)) throw failure;
-          lastRetryableFailure = failure;
-        } finally {
-          attemptDeadline.close();
-        }
-      }
 
-      if (request.signal.aborted) {
-        throw cancelled('Current-finalized EVM call was cancelled');
+          const attemptDeadline = createDeadlineScope(
+            totalDeadline.signal,
+            CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+            `current-finalized endpoint attempt ${index + 1}`,
+          );
+          try {
+            const result = await executeEndpointAttempt(
+              config,
+              config.endpoints[index]!,
+              request,
+              attemptDeadline.signal,
+            );
+            // Close races where transport completion and abort/deadline become
+            // observable in the same turn. A late response never escapes merely
+            // because its promise callback ran before the timer callback.
+            if (request.signal.aborted) {
+              throw cancelled('Current-finalized EVM call was cancelled');
+            }
+            if (totalDeadline.timedOut()) {
+              throw timedOut(
+                `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
+              );
+            }
+            if (attemptDeadline.timedOut()) {
+              throw timedOut(
+                `Current-finalized endpoint attempt exceeded ${CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1}ms`,
+              );
+            }
+            return result;
+          } catch (cause) {
+            const failure = classifyAttemptFailure(
+              cause,
+              request.signal,
+              totalDeadline,
+              attemptDeadline,
+            );
+            if (isTerminalAttemptFailure(failure)) throw failure;
+            lastRetryableFailure = failure;
+          } finally {
+            attemptDeadline.close();
+          }
+        }
+
+        if (request.signal.aborted) {
+          throw cancelled('Current-finalized EVM call was cancelled');
+        }
+        if (totalDeadline.timedOut()) {
+          throw timedOut(
+            `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
+          );
+        }
+        throw lastRetryableFailure
+          ?? unavailable('No configured current-finalized endpoint succeeded');
+      } finally {
+        totalDeadline.close();
       }
-      if (totalDeadline.timedOut()) {
-        throw timedOut(
-          `Current-finalized total deadline exceeded ${CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1}ms`,
-        );
-      }
-      throw lastRetryableFailure ?? unavailable('No configured current-finalized endpoint succeeded');
-    } finally {
-      totalDeadline.close();
-      activeReads = Math.max(0, activeReads - 1);
-    }
+    }, (active) => new CurrentFinalizedEvmCallErrorV1(
+      'concurrency-saturated',
+      `Chain ${request.chainId} already has ${active} finalized reads in flight`,
+    ));
   };
 
   return Object.freeze(read);
@@ -563,17 +562,6 @@ function parseContractReturn(input: unknown, maxBytes: number): string {
   return input;
 }
 
-function assertEip1271ReturnData(input: string | undefined): string {
-  if (input === undefined || (input.length - 2) / 2 !== CONTROL_EIP1271_MAX_RETURN_BYTES_V1) {
-    const byteLength = input === undefined ? 0 : (input.length - 2) / 2;
-    throw new CurrentFinalizedEvmCallErrorV1(
-      'malformed-return',
-      `EIP-1271 eth_call returned ${byteLength} bytes; exactly 32 are required`,
-    );
-  }
-  return input;
-}
-
 function parseCanonicalQuantity(input: unknown, maximum: bigint): bigint {
   if (typeof input !== 'string' || !CANONICAL_LOWER_QUANTITY.test(input)) {
     throw new Error('not a canonical lowercase JSON-RPC quantity');
@@ -790,34 +778,13 @@ function assertConfigDataProperties(input: Record<string, unknown>): void {
 function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
   const normalized: string[] = [];
   try {
-    if (!Array.isArray(input)) throw new Error('not an array');
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
-    if (
-      lengthDescriptor === undefined
-      || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-      || typeof lengthDescriptor.value !== 'number'
-      || !Number.isSafeInteger(lengthDescriptor.value)
-      || lengthDescriptor.value < 0
-    ) {
-      throw new Error('invalid length');
-    }
-    const length = lengthDescriptor.value;
-    const ownKeys = Reflect.ownKeys(input);
-    if (
-      ownKeys.length !== length + 1
-      || ownKeys.some((key) => (
-        typeof key !== 'string'
-        || (key !== 'length' && !isCanonicalArrayIndex(key, length))
-      ))
-    ) {
-      throw new Error('not a dense ordinary array');
-    }
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
-      if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-        throw new Error('entry is not a data property');
-      }
-      const endpoint = normalizeEndpoint(descriptor.value);
+    const endpoints = snapshotDenseDataArray(input, {
+      label: 'Strict current-finalized RPC endpoints',
+      minLength: 1,
+      maxLength: CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
+    });
+    for (const entry of endpoints) {
+      const endpoint = normalizeEndpoint(entry);
       if (!normalized.includes(endpoint)) normalized.push(endpoint);
     }
   } catch (cause) {
@@ -830,12 +797,6 @@ function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
     );
   }
   return Object.freeze(normalized);
-}
-
-function isCanonicalArrayIndex(key: string, length: number): boolean {
-  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return false;
-  const index = Number(key);
-  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === key;
 }
 
 function normalizeEndpoint(input: unknown): string {

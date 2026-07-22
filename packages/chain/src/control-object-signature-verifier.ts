@@ -15,6 +15,11 @@ import {
 import { ethers } from 'ethers';
 
 import {
+  type CurrentFinalizedEvmCallRequestV1,
+  type CurrentFinalizedEvmCallResultV1,
+  type CurrentFinalizedEvmCallV1,
+} from './current-finalized-evm-call-model.js';
+import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
   CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
   CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
@@ -33,6 +38,11 @@ export {
   CurrentFinalizedEvmCallErrorV1,
   type CurrentFinalizedEvmCallErrorCodeV1,
 } from './current-finalized-evm-read-profile.js';
+export {
+  type CurrentFinalizedEvmCallRequestV1,
+  type CurrentFinalizedEvmCallResultV1,
+  type CurrentFinalizedEvmCallV1,
+} from './current-finalized-evm-call-model.js';
 
 export const EIP1271_MAGIC_VALUE_V1 = '0x1626ba7e' as const;
 export const EIP1271_CANONICAL_ABI_RETURN_V1 =
@@ -62,39 +72,6 @@ const EIP1271_INTERFACE = new ethers.Interface([
   'function isValidSignature(bytes32,bytes) view returns (bytes4)',
 ]);
 declare const VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURE_BRAND_V1: unique symbol;
-
-export interface CurrentFinalizedEvmCallRequestV1 {
-  readonly chainId: ChainIdV1;
-  readonly to: EvmAddressV1;
-  readonly from: typeof CONTROL_EIP1271_CALL_FROM_V1;
-  readonly data: string;
-  readonly gasLimit: bigint;
-  readonly maxReturnBytes: number;
-  readonly maxRpcResponseBytes: number;
-  readonly attemptTimeoutMs: number;
-  readonly maxAttempts: number;
-  readonly endpointAttemptPolicy: typeof CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1;
-  readonly maxConcurrentCallsPerChain: number;
-  readonly totalDeadlineMs: number;
-  readonly ccipReadEnabled: false;
-  readonly signal: AbortSignal;
-}
-
-export interface CurrentFinalizedEvmCallResultV1 {
-  readonly chainId: ChainIdV1;
-  readonly blockNumber: BlockNumberV1;
-  readonly blockHash: Digest32V1;
-  readonly returnData: string;
-}
-
-/**
- * Trusted local adapter boundary. Implementations select the receiver's current
- * finalized block and execute the exact request at that block; peer data never
- * supplies an RPC URL or block selector.
- */
-export interface CurrentFinalizedEvmCallV1 {
-  (request: CurrentFinalizedEvmCallRequestV1): Promise<CurrentFinalizedEvmCallResultV1>;
-}
 
 export const CONTROL_SIGNATURE_VERIFICATION_ERROR_CODES_V1 = Object.freeze([
   'CONTROL_SIGNATURE_ENVELOPE_INVALID',

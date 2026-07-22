@@ -16,8 +16,7 @@ export const CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1 = 4;
 export const CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1 =
   'distinct-configured-endpoints-no-same-endpoint-retry' as const;
 export const CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1 = 4;
-// ContextGraphStorage.getContextGraph includes a participant array capped at
-// 256 entries on chain; its maximal canonical ABI result is about 8.5 KiB.
+// Absolute transport ceiling. Domain readers own tighter ABI-specific caps.
 export const CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1 = 16 * 1024;
 
 export const CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1 = Object.freeze([
