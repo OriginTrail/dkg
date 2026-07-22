@@ -18,12 +18,29 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { AssertionState } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE as GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE_V1,
+  generateGraphKnowledgeAssetMetadata as generateGraphKnowledgeAssetMetadataV1,
+  mergeSameVersionGraphKnowledgeAssetMetadataV1 as mergeSameVersionGraphKnowledgeAssetMetadata,
+  normalizeGraphKnowledgeAssetConfirmationKindV1 as normalizeGraphKnowledgeAssetConfirmationKind,
+  preserveGraphKnowledgeAssetReceiptProvenanceV1 as preserveGraphKnowledgeAssetReceiptProvenance,
+  readGraphKnowledgeAssetConfirmationKindV1 as readGraphKnowledgeAssetConfirmationKind,
+  readGraphKnowledgeAssetReceiptProvenanceV1 as readGraphKnowledgeAssetReceiptProvenance,
+} from './graph-knowledge-asset-metadata.js';
+import type {
+  GraphKnowledgeAssetConfirmation as GraphKnowledgeAssetConfirmationV1,
+  GraphKnowledgeAssetConfirmationKind as GraphKnowledgeAssetConfirmationKindV1,
+  GraphKnowledgeAssetMetadata as GraphKnowledgeAssetMetadataV1,
+  GraphKnowledgeAssetMetadataState as GraphKnowledgeAssetMetadataStateV1,
+  GraphKnowledgeAssetReceiptProvenanceV1 as GraphKnowledgeAssetReceiptProvenance,
+} from './graph-knowledge-asset-metadata.js';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
+const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
 const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
   `${DKG}allowedPeer`,
@@ -106,35 +123,12 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
-export const GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE = `${DKG}confirmationKind`;
-const GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE = `${DKG}status`;
-const GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE = `${DKG}transactionHash`;
-const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
-const GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE = `${DKG}publishedAt`;
+export const GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE =
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE_V1;
 
-export type GraphKnowledgeAssetConfirmationKind =
-  | 'transaction'
-  | 'finalized-materialization';
-
-export type GraphKnowledgeAssetConfirmation =
-  | Readonly<{
-      kind: Extract<GraphKnowledgeAssetConfirmationKind, 'transaction'>;
-      provenance: OnChainProvenance;
-    }>
-  | Readonly<{
-      kind: Extract<GraphKnowledgeAssetConfirmationKind, 'finalized-materialization'>;
-      provenance: Readonly<{
-        batchId: bigint;
-        materializedVersion: MaterializedVersion;
-      }>;
-    }>;
-
-export type GraphKnowledgeAssetMetadataState =
-  | Readonly<{ readonly status: 'tentative' }>
-  | Readonly<{
-      readonly status: 'confirmed';
-      readonly confirmation: GraphKnowledgeAssetConfirmation;
-    }>;
+export type GraphKnowledgeAssetConfirmationKind = GraphKnowledgeAssetConfirmationKindV1;
+export type GraphKnowledgeAssetConfirmation = GraphKnowledgeAssetConfirmationV1;
+export type GraphKnowledgeAssetMetadataState = GraphKnowledgeAssetMetadataStateV1;
 
 /**
  * Parse the graph-scoped confirmation discriminator shared by metadata writers
@@ -145,31 +139,17 @@ export type GraphKnowledgeAssetMetadataState =
 export function normalizeGraphKnowledgeAssetConfirmationKindV1(
   raw: string | undefined,
 ): GraphKnowledgeAssetConfirmationKind {
-  if (raw === undefined || raw === 'transaction') return 'transaction';
-  if (raw === 'finalized-materialization') return raw;
-  throw new Error(`Unsupported graph knowledge asset confirmation kind: ${raw}`);
+  return normalizeGraphKnowledgeAssetConfirmationKind(raw);
 }
 
 /** Read and validate the confirmation state from one KA's structural metadata. */
 export function readGraphKnowledgeAssetConfirmationKindV1(
   metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
 ): GraphKnowledgeAssetConfirmationKind {
-  const values = metadataQuads
-    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE)
-    .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (values.length > 1) {
-    throw new Error(`Graph knowledge asset metadata has ${values.length} confirmation kinds`);
-  }
-  if (values.length === 1 && values[0] === undefined) {
-    throw new Error('Graph knowledge asset confirmation kind must be an RDF literal');
-  }
-  return normalizeGraphKnowledgeAssetConfirmationKindV1(values[0]);
+  return readGraphKnowledgeAssetConfirmationKind(metadataQuads);
 }
 
-export interface GraphKnowledgeAssetReceiptProvenanceV1 {
-  readonly transactionHash: string;
-  readonly materializedVersion?: MaterializedVersion;
-}
+export type GraphKnowledgeAssetReceiptProvenanceV1 = GraphKnowledgeAssetReceiptProvenance;
 
 /**
  * Read the locally authenticated, receipt-backed part of graph-scoped KA
@@ -183,48 +163,7 @@ export interface GraphKnowledgeAssetReceiptProvenanceV1 {
 export function readGraphKnowledgeAssetReceiptProvenanceV1(
   metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
 ): GraphKnowledgeAssetReceiptProvenanceV1 | null {
-  const statuses = metadataQuads
-    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE)
-    .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (statuses.length !== 1 || statuses[0] !== 'confirmed') return null;
-
-  let confirmationKind: GraphKnowledgeAssetConfirmationKind;
-  try {
-    confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
-  } catch {
-    return null;
-  }
-  if (confirmationKind !== 'transaction') return null;
-
-  const hashes = metadataQuads
-    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE)
-    .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (
-    hashes.length !== 1
-    || hashes[0] === undefined
-    || !/^0x[0-9a-fA-F]{64}$/.test(hashes[0])
-  ) {
-    return null;
-  }
-
-  const versions = metadataQuads
-    .filter((quad) => quad.predicate === MATERIALIZED_VERSION_PRED)
-    .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (versions.length > 1 || (versions.length === 1 && versions[0] === undefined)) {
-    return null;
-  }
-  const materializedVersion = versions.length === 0
-    ? undefined
-    : parseCanonicalMaterializedVersionV1(versions[0]!);
-  if (versions.length === 1 && materializedVersion === null) return null;
-  const validMaterializedVersion = materializedVersion ?? undefined;
-
-  return Object.freeze({
-    transactionHash: hashes[0],
-    ...(validMaterializedVersion === undefined
-      ? {}
-      : { materializedVersion: Object.freeze(validMaterializedVersion) }),
-  });
+  return readGraphKnowledgeAssetReceiptProvenance(metadataQuads);
 }
 
 /**
@@ -235,36 +174,7 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
   incomingMetadata: readonly Quad[],
   currentMetadata: readonly Pick<Quad, 'predicate' | 'object'>[],
 ): Quad[] {
-  const provenance = readGraphKnowledgeAssetReceiptProvenanceV1(currentMetadata);
-  if (provenance === null) return [...incomingMetadata];
-  const identity = incomingMetadata[0];
-  if (identity === undefined) return [...incomingMetadata];
-  return [
-    ...incomingMetadata.filter((quad) => (
-      quad.predicate !== GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE
-      && quad.predicate !== MATERIALIZED_VERSION_PRED
-      && quad.predicate !== GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE
-    )),
-    mq(
-      identity.subject,
-      GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
-      lit(provenance.transactionHash),
-      identity.graph,
-    ),
-    mq(
-      identity.subject,
-      GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-      lit('transaction'),
-      identity.graph,
-    ),
-    ...(provenance.materializedVersion === undefined
-      ? []
-      : [materializedVersionQuad(
-          identity.graph,
-          identity.subject,
-          provenance.materializedVersion,
-        )]),
-  ];
+  return preserveGraphKnowledgeAssetReceiptProvenance(incomingMetadata, currentMetadata);
 }
 
 /**
@@ -276,49 +186,10 @@ export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
   incomingMetadata: readonly Quad[],
   currentMetadata: readonly Quad[],
 ): Quad[] {
-  const identity = incomingMetadata[0];
-  const currentPublishedAt = currentMetadata.filter(
-    (quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-  );
-  const publishedAtLexical = currentPublishedAt.length === 1
-    ? rdfLiteralLexicalValue(currentPublishedAt[0]!.object)
-    : undefined;
-  const preservePublishedAt = identity !== undefined
-    && currentPublishedAt.length === 1
-    && currentPublishedAt[0]!.subject === identity.subject
-    && currentPublishedAt[0]!.graph === identity.graph
-    && publishedAtLexical !== undefined
-    && Number.isFinite(Date.parse(publishedAtLexical));
-  let merged = preservePublishedAt
-    ? [
-        ...incomingMetadata.filter(
-          (quad) => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-        ),
-        currentPublishedAt[0]!,
-      ]
-    : [...incomingMetadata];
-  if (readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
-    merged = preserveGraphKnowledgeAssetReceiptProvenanceV1(merged, currentMetadata);
-  }
-  return merged;
+  return mergeSameVersionGraphKnowledgeAssetMetadata(incomingMetadata, currentMetadata);
 }
 
-function parseCanonicalMaterializedVersionV1(raw: string): MaterializedVersion | null {
-  const match = /^(0|[1-9]\d*):(0|[1-9]\d*)$/.exec(raw);
-  if (!match) return null;
-  const blockNumber = Number(match[1]);
-  const txIndex = Number(match[2]);
-  if (!Number.isSafeInteger(blockNumber) || !Number.isSafeInteger(txIndex)) return null;
-  return { blockNumber, txIndex };
-}
-
-export interface GraphKnowledgeAssetMetadata extends KCMetadata {
-  assertionVersion: string | number | bigint;
-  publicTripleCount: number;
-  privateTripleCount?: number;
-  privateMerkleRoot?: Uint8Array;
-  assertionGraph: string;
-}
+export type GraphKnowledgeAssetMetadata = GraphKnowledgeAssetMetadataV1;
 
 function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
   if (/[<>"{}|^`\\\s]/.test(contextGraphId)) {
@@ -537,85 +408,7 @@ export function generateGraphKnowledgeAssetMetadata(
   meta: GraphKnowledgeAssetMetadata,
   state: GraphKnowledgeAssetMetadataState,
 ): Quad[] {
-  const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
-  if (state.status === 'confirmed') {
-    const { confirmation } = state;
-    if (confirmation.kind === 'transaction') {
-      quads.push(...generateConfirmedMetadata(
-        scope.ual,
-        meta.contextGraphId,
-        confirmation.provenance,
-      ));
-      quads.push(mq(
-        scope.ual,
-        GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-        lit('transaction'),
-        metaGraph,
-      ));
-    } else {
-      const { batchId, materializedVersion } = confirmation.provenance;
-      if (batchId < 0n) {
-        throw new Error('Finalized graph metadata batchId must be non-negative');
-      }
-      quads.push(
-        getConfirmedStatusQuad(scope.ual, meta.contextGraphId),
-        mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-          lit('finalized-materialization'),
-          metaGraph,
-        ),
-        materializedVersionQuad(metaGraph, scope.ual, materializedVersion),
-      );
-    }
-  } else {
-    quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
-  }
-  return quads;
-}
-
-function generateGraphKnowledgeAssetMetadataBase(
-  meta: GraphKnowledgeAssetMetadata,
-): Readonly<{
-  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  metaGraph: string;
-  quads: Quad[];
-}> {
-  const scope = createGraphKnowledgeAssetScope(meta.ual, meta.assertionVersion);
-  if (!Number.isSafeInteger(meta.publicTripleCount) || meta.publicTripleCount < 0) {
-    throw new Error(`Invalid graph-scoped KA public triple count: ${meta.publicTripleCount}`);
-  }
-  const privateTripleCount = meta.privateTripleCount ?? 0;
-  if (!Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0) {
-    throw new Error(`Invalid graph-scoped KA private triple count: ${privateTripleCount}`);
-  }
-  if (privateTripleCount > 0 && meta.privateMerkleRoot?.length !== 32) {
-    throw new Error('Graph-scoped KA private content requires one 32-byte private Merkle root');
-  }
-  if (privateTripleCount === 0 && meta.privateMerkleRoot !== undefined) {
-    throw new Error('Graph-scoped KA private Merkle root requires a positive private triple count');
-  }
-  if (meta.publicTripleCount === 0 && privateTripleCount === 0) {
-    throw new Error('Graph-scoped KA metadata cannot describe an empty asset');
-  }
-  assertSafeGraphIriForSparql(meta.assertionGraph);
-  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const quads = [
-    ...generateKCMetadata({ ...meta, ual: scope.ual }, []),
-    mq(scope.ual, `${DKG}contentScopeVersion`, intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), metaGraph),
-    mq(scope.ual, `${DKG}kaUal`, scope.ual, metaGraph),
-    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), metaGraph),
-    mq(scope.ual, `${DKG}publicTripleCount`, intLit(meta.publicTripleCount), metaGraph),
-    mq(scope.ual, `${DKG}privateTripleCount`, intLit(privateTripleCount), metaGraph),
-    mq(scope.ual, `${DKG}assertionGraph`, meta.assertionGraph, metaGraph),
-  ];
-  if (meta.privateMerkleRoot) {
-    quads.push(
-      mq(scope.ual, `${DKG}privateMerkleRoot`, lit(toHex(meta.privateMerkleRoot)), metaGraph),
-    );
-  }
-  return { scope, metaGraph, quads };
+  return generateGraphKnowledgeAssetMetadataV1(meta, state);
 }
 
 export interface ConfirmedGraphKnowledgeAssetMetadataEnvelope {
