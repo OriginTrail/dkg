@@ -30,12 +30,18 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
+import {
+  buildOpenOwnerContextGraphPolicyV1,
+  computeOpenContextGraphPolicyDigestV1,
+} from '../src/rfc64/open-catalog-policy-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
   Rfc64PublicCatalogAutoPublishConfigV1,
+  Rfc64PublicCatalogBootstrapConfigV1,
 } from '../src/dkg-agent-types.js';
 import {
   createLoopbackJsonRpcTestHarness,
@@ -101,6 +107,8 @@ async function startNativeAgent(
     initialSubscription?: ContextGraphIdV1;
   }>,
   autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1,
+  bootstrap?: Rfc64PublicCatalogBootstrapConfigV1,
+  persistentStorePath?: string,
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -112,7 +120,7 @@ async function startNativeAgent(
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge',
-    store: new OxigraphStore(),
+    store: new OxigraphStore(persistentStorePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
@@ -121,6 +129,7 @@ async function startNativeAgent(
     rfc64CatalogDeploymentProfile: deployment,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     rfc64PublicCatalogAutoPublish: autoPublish,
+    rfc64PublicCatalogBootstrap: bootstrap,
     ...(finalizedRuntime === undefined ? {} : {
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
@@ -294,6 +303,46 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).toThrow(/must be unique/u);
   });
 
+  it('snapshots a bounded public-root bootstrap manifest', () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const policyDigest = computeOpenContextGraphPolicyDigestV1(policy);
+    const providers = ['12D3KooPrimary'];
+    const callerOwned: Rfc64PublicCatalogBootstrapConfigV1 = {
+      acceptedPublicPolicies: [{ policy, policyDigest }],
+      targets: [{
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: policy.era,
+        },
+        providers,
+      }],
+      retryIntervalMs: 1_000,
+    };
+    const snapshot = snapshotRfc64PublicCatalogBootstrapConfigV1(callerOwned)!;
+    providers.push('12D3KooLateMutation');
+
+    expect(snapshot.targets[0]?.providers).toEqual(['12D3KooPrimary']);
+    expect(snapshot.acceptedPublicPolicies[0]).toEqual({ policy, policyDigest });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.targets)).toBe(true);
+    expect(Object.isFrozen(snapshot.targets[0]?.providers)).toBe(true);
+    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policy.source)).toBe(true);
+    expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({
+      ...callerOwned,
+      targets: [{
+        ...callerOwned.targets[0]!,
+        scope: { ...callerOwned.targets[0]!.scope, subGraphName: 'private' },
+      }],
+    })).toThrow(/public root catalogs only/u);
+  });
+
   it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
     const receiver = await startNativeAgent('auto-publish-receiver');
     const author = await startNativeAgent(
@@ -412,6 +461,130 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
       applied: 2,
       failed: 0,
+    });
+  }, 60_000);
+
+  it('automatically cold-joins a published public catalog and recovers it after restart', async () => {
+    const author = await startNativeAgent(
+      'bootstrap-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const accepted = author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const publicQuads = [
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+    ] as const;
+    await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'bootstrap-publication-1' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(21n)),
+    });
+    const published = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'bootstrap-publication-2' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(22n)),
+    });
+    expect(published).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+
+    const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
+      acceptedPublicPolicies: [accepted],
+      targets: [{
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: accepted.policy.era,
+        },
+        providers: [author.peerId],
+      }],
+      retryIntervalMs: 1_000,
+    };
+    const receiverDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-native-bootstrap-'));
+    tempDirs.push(receiverDataDir);
+    const persistentStorePath = join(receiverDataDir, 'oxigraph');
+    const receiver = await startNativeAgent(
+      'bootstrap-receiver',
+      NATIVE_DEPLOYMENT,
+      receiverDataDir,
+      undefined,
+      undefined,
+      undefined,
+      bootstrap,
+      persistentStorePath,
+    );
+    await connectBothWays(author, receiver);
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'applied',
+        providerPeerId: author.peerId,
+        appliedHeadDigest: published?.currentCatalogHeadDigest,
+        catalogVersion: '2',
+        inventoryRowCount: '2',
+      });
+    }, { timeout: 20_000, interval: 100 });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: published?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '2',
+    });
+
+    await receiver.stop();
+    agents.splice(agents.indexOf(receiver), 1);
+    const restarted = await startNativeAgent(
+      'bootstrap-receiver',
+      NATIVE_DEPLOYMENT,
+      receiverDataDir,
+      undefined,
+      undefined,
+      undefined,
+      bootstrap,
+      persistentStorePath,
+    );
+    await connectBothWays(author, restarted);
+    await vi.waitFor(() => {
+      expect(restarted.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'applied',
+        providerPeerId: author.peerId,
+        appliedHeadDigest: published?.currentCatalogHeadDigest,
+        catalogVersion: '2',
+        inventoryRowCount: '2',
+      });
+    }, { timeout: 20_000, interval: 100 });
+    expect(restarted.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: published?.currentCatalogHeadDigest,
+      catalogVersion: '2',
+      inventoryRowCount: '2',
     });
   }, 60_000);
 

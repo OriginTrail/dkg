@@ -31,7 +31,13 @@ import type {
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
   CatalogSealDeploymentProfileV1,
+  ContextGraphIdV1,
+  ContextGraphPolicyV1,
+  DecimalU64V1,
+  Digest32V1,
   EvmAddressV1,
+  NetworkIdV1,
+  SubGraphNameV1,
   TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import type {
@@ -1071,6 +1077,35 @@ export interface Rfc64PublicCatalogAutoPublishConfigV1 {
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
 
+export interface Rfc64PublicCatalogBootstrapScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
+}
+
+export interface Rfc64PublicCatalogBootstrapTargetV1 {
+  readonly scope: Rfc64PublicCatalogBootstrapScopeV1;
+  /** Ordered provider failover candidates for this exact author catalog. */
+  readonly providers: readonly string[];
+}
+
+/**
+ * Explicit V1 cold-start manifest. Policies are operator-pinned outputs of an
+ * independent finality/administrative verifier; the catalog lane only consumes
+ * them. A zero retry interval performs one startup pass, which is useful for
+ * deterministic harnesses. Omission defaults to a 30-second refresh pass.
+ */
+export interface Rfc64PublicCatalogBootstrapConfigV1 {
+  readonly acceptedPublicPolicies: readonly Readonly<{
+    readonly policy: ContextGraphPolicyV1;
+    readonly policyDigest: Digest32V1;
+  }>[];
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1092,6 +1127,8 @@ export interface DKGAgentConfig {
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
   /** Omission preserves the existing publication and synchronization behavior. */
   rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  /** Omission preserves manual RFC-64 current-head discovery. */
+  rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

@@ -1306,6 +1306,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // production router. Announce/fetch protocols are admission-gated like
     // every other node protocol. Dormant when no dataDir opened persistence.
     this.startRfc64PublicCatalogServiceV1(ctx);
+    this.startRfc64PublicCatalogBootstrapV1(ctx);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
