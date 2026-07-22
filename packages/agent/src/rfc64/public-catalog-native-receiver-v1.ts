@@ -14,7 +14,6 @@
 
 import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
-  AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
@@ -30,7 +29,6 @@ import {
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  buildAuthorAttestationTypedData,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
@@ -81,6 +79,7 @@ import type {
   AppliedCatalogHeadSnapshotV1,
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
+import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -683,7 +682,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         sealBinding = readVerifiedCatalogSealBindingV1(
           transferredMetadata.catalogSealBinding,
         );
-        assertRecoverableAuthorAttestationV1(sealBinding);
+        assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
         const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
         projectionMetadata = readVerifiedCgSharedProjectionMetadataV1(
           projection,
@@ -1774,51 +1773,6 @@ async function activateExactPublicProjection(
   };
 }
 
-/**
- * Require the transferred v1 AuthorAttestation to recover the catalog author.
- * This first receiver slice intentionally supports the recoverable EOA scheme;
- * EIP-1271 contract-author admission needs a separately pinned chain verifier.
- */
-export function assertRecoverableAuthorAttestationV1(
-  binding: VerifiedCatalogSealBindingSnapshotV1,
-): void {
-  const { seal } = binding;
-  if (seal.authorSchemeVersion !== String(AUTHOR_SCHEME_VERSION_V1)) {
-    fail('catalog-native-receiver-transfer', 'unsupported author attestation scheme');
-  }
-  try {
-    const typedData = buildAuthorAttestationTypedData({
-      chainId: BigInt(seal.assertedAtChainId),
-      kav10Address: seal.assertedAtKav10Address,
-      merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
-      authorAddress: seal.authorAddress,
-      reservedKaId: BigInt(seal.reservedKaId),
-      schemeVersion: AUTHOR_SCHEME_VERSION_V1,
-    });
-    const digest = ethers.TypedDataEncoder.hash(
-      typedData.domain,
-      typedData.types,
-      typedData.message,
-    );
-    const signature = ethers.Signature.from({
-      r: seal.authorAttestationR,
-      yParityAndS: seal.authorAttestationVS,
-    });
-    const recovered = ethers.recoverAddress(digest, signature);
-    if (recovered.toLowerCase() !== seal.authorAddress) {
-      throw new Error(
-        `signature recovers ${recovered.toLowerCase()} instead of ${seal.authorAddress}`,
-      );
-    }
-  } catch (cause) {
-    fail(
-      'catalog-native-receiver-transfer',
-      'author attestation does not recover the catalog author',
-      cause,
-    );
-  }
-}
-
 async function assertExactAuthorSealPostRead(
   store: TripleStore,
   binding: VerifiedCatalogSealBindingSnapshotV1,
@@ -1874,6 +1828,27 @@ export function rfc64CatalogSignatureVariantDigestV1(
     envelope.objectDigest,
     envelope.signature,
   ) as Digest32V1;
+}
+
+/**
+ * Preserve the package-root receiver contract while keeping the pure
+ * attestation capability free of receiver-specific error translation.
+ */
+export function assertRecoverableAuthorAttestationV1(
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): void {
+  try {
+    assertRecoverableAuthorAttestationCapabilityV1(binding);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
+    fail(
+      'catalog-native-receiver-transfer',
+      cause instanceof Error
+        ? cause.message
+        : 'author attestation does not recover the catalog author',
+      cause,
+    );
+  }
 }
 
 function fail(

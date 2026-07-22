@@ -11,6 +11,7 @@ import {
   composeFinalizedContextGraphReadV1,
   resolveFinalizedContextGraphReadWithSignalV1,
   resolveFinalizedContextGraphReadV1,
+  snapshotFinalizedContextGraphReadV1,
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
   type FinalizedContextGraphReadRequestV1,
@@ -89,6 +90,28 @@ describe('RFC-64 finalized Context Graph chain read', () => {
       publishAuthorityAccountId: '7',
       nameHash: NAME_HASH,
     });
+  });
+
+  it('revalidates normalized finalized reads at the cross-package boundary', () => {
+    const read = composeFinalizedContextGraphReadV1(validRequest(), validRaw());
+    expect(snapshotFinalizedContextGraphReadV1(structuredClone(read))).toEqual(read);
+    expectFailure(
+      () => snapshotFinalizedContextGraphReadV1({ ...read, unexpected: true }),
+      'request-binding',
+    );
+
+    const open = composeFinalizedContextGraphReadV1(validRequest(), {
+      ...validRaw(),
+      publishPolicy: 1,
+      publishAuthority: ZERO,
+      publishAuthorityAccountId: '0',
+    });
+    expect(snapshotFinalizedContextGraphReadV1(structuredClone(open)).publishAuthority)
+      .toBeNull();
+    expectFailure(
+      () => snapshotFinalizedContextGraphReadV1({ ...open, publishAuthority: ZERO }),
+      'malformed-authority',
+    );
   });
 
   it('passes one frozen canonical binding through the resolver seam', async () => {

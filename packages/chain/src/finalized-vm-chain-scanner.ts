@@ -5,7 +5,6 @@ import {
   assertCanonicalDigest,
   assertNetworkIdV1,
   unpackDeterministicRootlessKnowledgeAssetId,
-  type BlockNumberV1,
   type ChainIdV1,
   type DecimalU256V1,
   type DecimalU64V1,
@@ -27,6 +26,11 @@ import {
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from './current-finalized-evm-snapshot.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
+import {
+  snapshotFinalizedVmChainInventoryV1,
+  type FinalizedVmChainCandidateV1,
+  type FinalizedVmChainInventoryV1,
+} from './finalized-vm-chain-inventory.js';
 import {
   assertCanonicalNonzeroEvmAddress,
   isAbortSignal,
@@ -57,11 +61,7 @@ const ID_CALLS_PER_ROW = 1;
 const ASSERTION_CALLS_PER_ROW = 4;
 const TOTAL_CALLS_PER_ROW = ID_CALLS_PER_ROW + ASSERTION_CALLS_PER_ROW;
 
-/**
- * One active/count header plus one indexed-ID read and four assertion reads
- * per row. The exported ceiling is derived from the exact call and batching
- * equations so transport-budget changes cannot silently invalidate it.
- */
+/** Exact row ceiling owned by pinned-snapshot scanner orchestration. */
 export const FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 = deriveFinalizedVmScanMaxRows(
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1,
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
@@ -83,37 +83,6 @@ export interface FinalizedVmChainScannerConfigV1
 export interface FinalizedVmChainScanRequestV1 {
   readonly contextGraphId: DecimalU256V1;
   readonly signal: AbortSignal;
-}
-
-/** Chain-authenticated assertion identity before subgraph placement is joined. */
-export interface FinalizedVmChainCandidateV1 {
-  readonly chainId: ChainIdV1;
-  readonly contractAddress: EvmAddressV1;
-  readonly knowledgeAssetStorageAddress: EvmAddressV1;
-  readonly ordinal: DecimalU64V1;
-  readonly kaId: string;
-  readonly ual: string;
-  readonly authorAddress: EvmAddressV1;
-  /** Latest chain-verified author attestation; null is explicit legacy/incomplete state. */
-  readonly attestedAuthorAddress: EvmAddressV1 | null;
-  /** EOA that submitted the latest root; curated admission consumes this chain truth. */
-  readonly publisherAddress: EvmAddressV1 | null;
-  readonly assertionVersion: DecimalU64V1;
-  readonly assertionRoot: Digest32V1;
-  readonly finalizedBlockNumber: BlockNumberV1;
-  readonly finalizedBlockHash: Digest32V1;
-}
-
-export interface FinalizedVmChainInventoryV1 {
-  readonly networkId: NetworkIdV1;
-  readonly contextGraphId: DecimalU256V1;
-  readonly chainId: ChainIdV1;
-  readonly contractAddress: EvmAddressV1;
-  readonly knowledgeAssetStorageAddress: EvmAddressV1;
-  readonly finalizedBlockNumber: BlockNumberV1;
-  readonly finalizedBlockHash: Digest32V1;
-  readonly highestFinalizedOrdinal: DecimalU64V1 | null;
-  readonly rows: readonly Readonly<FinalizedVmChainCandidateV1>[];
 }
 
 export interface FinalizedVmChainScannerV1 {
@@ -291,17 +260,21 @@ async function scanPinnedInventory(
   const highestFinalizedOrdinal = rowCount === 0n
     ? null
     : (rowCount - 1n).toString(10) as DecimalU64V1;
-  return Object.freeze({
-    networkId: config.networkId,
-    contextGraphId,
-    chainId: config.chainId,
-    contractAddress: config.contextGraphStorageAddress,
-    knowledgeAssetStorageAddress: config.knowledgeAssetStorageAddress,
-    finalizedBlockNumber: session.blockNumber,
-    finalizedBlockHash: session.blockHash,
-    highestFinalizedOrdinal,
-    rows: Object.freeze(rows),
-  });
+  try {
+    return snapshotFinalizedVmChainInventoryV1({
+      networkId: config.networkId,
+      contextGraphId,
+      chainId: config.chainId,
+      contractAddress: config.contextGraphStorageAddress,
+      knowledgeAssetStorageAddress: config.knowledgeAssetStorageAddress,
+      finalizedBlockNumber: session.blockNumber,
+      finalizedBlockHash: session.blockHash,
+      highestFinalizedOrdinal,
+      rows: Object.freeze(rows),
+    }, { maxRows: FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 });
+  } catch (cause) {
+    throw malformedReturn('Finalized VM scanner produced a non-canonical inventory', cause);
+  }
 }
 
 async function readFinalizedVmAssertions(
@@ -543,6 +516,17 @@ function snapshotRequest(input: unknown): Readonly<FinalizedVmChainScanRequestV1
   }
 }
 
+function malformedReturn(
+  message: string,
+  cause?: unknown,
+): CurrentFinalizedEvmCallErrorV1 {
+  return new CurrentFinalizedEvmCallErrorV1(
+    'malformed-return',
+    message,
+    cause === undefined ? {} : { cause },
+  );
+}
+
 function deriveFinalizedVmScanMaxRows(
   maxCalls: number,
   maxBatches: number,
@@ -565,19 +549,6 @@ function deriveFinalizedVmScanMaxRows(
   return lower;
 }
 
-function malformedReturn(
-  message: string,
-  cause?: unknown,
-): CurrentFinalizedEvmCallErrorV1 {
-  return new CurrentFinalizedEvmCallErrorV1(
-    'malformed-return',
-    message,
-    cause === undefined ? {} : { cause },
-  );
-}
-
-// Keep the derived public bound tied to the two snapshot budgets if either is
-// tightened later; this assertion is module-load local and performs no I/O.
 if (
   1
     + Math.ceil(

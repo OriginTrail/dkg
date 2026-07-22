@@ -10,6 +10,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import {
+  FinalizedVmChainInventoryValidationErrorV1,
+  snapshotFinalizedVmChainInventoryV1,
+} from '../src/finalized-vm-chain-inventory.js';
+import {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
@@ -134,6 +138,25 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(Object.isFrozen(scanner)).toBe(true);
     expect(Object.isFrozen(inventory)).toBe(true);
     expect(Object.isFrozen(inventory.rows)).toBe(true);
+    expect(snapshotFinalizedVmChainInventoryV1(structuredClone(inventory))).toEqual(inventory);
+    expect(snapshotFinalizedVmChainInventoryV1(
+      structuredClone(inventory),
+      { maxRows: 2 },
+    )).toEqual(inventory);
+    expect(() => snapshotFinalizedVmChainInventoryV1(
+      structuredClone(inventory),
+      { maxRows: 1 },
+    )).toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    for (const maxRows of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+      expect(() => snapshotFinalizedVmChainInventoryV1(
+        structuredClone(inventory),
+        { maxRows },
+      )).toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    }
+    expect(() => snapshotFinalizedVmChainInventoryV1({
+      ...structuredClone(inventory),
+      unexpected: true,
+    })).toThrow(/not canonical/);
     expect(inventory).toEqual({
       networkId: NETWORK_ID,
       contextGraphId: CG_ID,

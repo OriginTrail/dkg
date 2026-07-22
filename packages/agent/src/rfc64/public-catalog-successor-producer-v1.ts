@@ -67,7 +67,7 @@ import type {
   Rfc64ControlObjectOperationsV1,
   StageVerifiedControlObjectsResultV1,
 } from './control-object-store-v1.js';
-import { assertRecoverableAuthorAttestationV1 } from './public-catalog-native-receiver-v1.js';
+import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1,
   addRfc64PublicCatalogExactSetBundleBytesV1,
@@ -264,7 +264,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           prepared.sealBytes,
           prepared.deployment,
         );
-        assertRecoverableAuthorAttestationV1(
+        assertRecoverableAuthorAttestationCapabilityV1(
           readVerifiedCatalogSealBindingV1(initialSealBinding),
         );
       } catch (cause) {
@@ -333,7 +333,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           prepared.deployment,
         );
         const sealBinding = readVerifiedCatalogSealBindingV1(transfer.catalogSealBinding);
-        assertRecoverableAuthorAttestationV1(sealBinding);
+        assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
         const verifiedProjection = verifyCgSharedProjectionV1(
           transferred,
           publication.head,

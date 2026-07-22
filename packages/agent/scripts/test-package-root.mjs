@@ -20,8 +20,25 @@ if (
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
+  || typeof root.composeFinalizedVmSetV1 !== 'function'
+  || typeof root.FinalizedVmCompositionErrorV1 !== 'function'
+  || typeof root.assertRecoverableAuthorAttestationV1 !== 'function'
+  || typeof root.RecoverableAuthorAttestationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
+}
+try {
+  root.assertRecoverableAuthorAttestationV1({
+    seal: { authorSchemeVersion: 'unsupported' },
+  });
+  throw new Error('package-root author attestation guard accepted an unsupported scheme');
+} catch (error) {
+  if (
+    !(error instanceof root.Rfc64PublicCatalogNativeReceiverErrorV1)
+    || error.code !== 'catalog-native-receiver-transfer'
+  ) {
+    throw new Error('package-root author attestation guard changed its receiver error contract');
+  }
 }
 const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
@@ -84,6 +101,7 @@ const blockedRfc64Modules = [
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
+  'finalized-vm-composer-v1.js',
   'ka-bundle-store-v1-internal.js',
   'ka-bundle-store-v1.js',
   'open-catalog-policy-v1.js',
@@ -101,6 +119,7 @@ const blockedRfc64Modules = [
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-producer-v1.js',
   'public-catalog-transport-v1.js',
+  'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
 ];
 const packageExports = packageManifest.exports;

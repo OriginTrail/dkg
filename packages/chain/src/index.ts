@@ -45,11 +45,16 @@ export {
   createFinalizedContextGraphRpcResolverV1,
 } from './finalized-context-graph-rpc-resolver.js';
 export {
+  FinalizedVmChainInventoryValidationErrorV1,
+  snapshotFinalizedVmChainInventoryV1,
+  type FinalizedVmChainCandidateV1,
+  type FinalizedVmChainInventoryV1,
+  type FinalizedVmChainInventorySnapshotOptionsV1,
+} from './finalized-vm-chain-inventory.js';
+export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
-  type FinalizedVmChainCandidateV1,
-  type FinalizedVmChainInventoryV1,
   type FinalizedVmChainScanRequestV1,
   type FinalizedVmChainScannerConfigV1,
   type FinalizedVmChainSessionScannerConfigV1,
@@ -74,6 +79,7 @@ export {
   composeFinalizedContextGraphReadV1,
   resolveFinalizedContextGraphReadWithSignalV1,
   resolveFinalizedContextGraphReadV1,
+  snapshotFinalizedContextGraphReadV1,
   validateFinalizedContextGraphReadRequestV1,
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
