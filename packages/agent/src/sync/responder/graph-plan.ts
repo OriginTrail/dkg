@@ -3558,31 +3558,29 @@ async function readDurableMetaRowsPage(
  * a subject straddling `limit` is emitted in full, so a graph-scoped seal's
  * rows (incl. `dkg:assertionVersion`) are never split across a page — and
  * therefore never across a sync round (#1788). This mirrors the cached path's
- * subject-atomic extend for the non-snapshot lane.
+ * in-memory extend for the non-snapshot lane, and holds for ANY admitted
+ * subject term, not only IRIs.
  *
- * A one-row lookahead (`limit + 1`) detects a straddle; the complete trailing
- * subject is then re-read once (by its exact IRI) and appended in place of its
- * partial rows. Admission in {@link buildDurableMetaRowsQuery} is subject-level,
- * so a subject already present in the page is fully admitted and the re-read
- * needs no re-filtering. `_meta` subjects are small (a seal is 14 quads), so the
- * extension is O(one subject); a pathologically large subject is emitted whole
- * rather than truncated (truncation is exactly the #1788 defect), with the
- * transport frame limit as the final guard.
+ * The trailing subject is completed by RE-READING a GROWING window from the
+ * same offset (`limit + extra`, `extra` doubling) until that subject is fully
+ * contained — a later subject appears in the window, or the store is exhausted
+ * — then cutting at the subject boundary. Each attempt is a SINGLE ordered
+ * query, which is what makes this correct for a blank-node subject: Oxigraph
+ * relabels a blank node per query (observed `_:x` → `_:<hash>`), so a
+ * subject-bound re-read or a multi-query paged loop could not re-identify one,
+ * but within a single self-contained window its label — and therefore the
+ * `(g, s)` boundary comparison — is consistent. Conforming writers only emit
+ * IRI `_meta` subjects (metadata generators build deterministic IRIs; the
+ * publisher rejects blank nodes), but a blank-node subject is reachable via the
+ * unverified system-CG peer-ingest path, so subject atomicity must cover it too;
+ * enforcing the IRI invariant at ingest (defense-in-depth) is tracked
+ * separately.
  *
- * A straddling BLANK-NODE subject is refused (throw), not paged. Conforming
- * writers only ever emit IRI `_meta` subjects (metadata generators build
- * deterministic IRIs; the publisher rejects blank nodes — Rule 5), so a non-IRI
- * subject here is non-conforming input reachable only via the unverified
- * system-CG peer-ingest path (`acceptUnverified` → `selectSystemOverrideMetadataIndexes`
- * admits any subject and stores it verbatim). A blank node CANNOT be paged
- * reliably on this multi-query lane: Oxigraph relabels it per query (observed
- * `_:x` → `_:<hash>`), so its label AND sort position differ across the
- * store-paged lane's separate queries and across sync ROUNDS — no subject-bound
- * re-read or OFFSET continuation can re-identify it, and serving the raw window
- * would split it across rounds (for a batch-local control predicate, the exact
- * #1788 loss). Failing loud only ever fires on non-conforming meta, never in
- * normal sync; the IRI invariant should be enforced at durable-meta ingest to
- * make this unreachable.
+ * `_meta` subjects are small (a seal is 14 quads), so this converges in about
+ * one extra read; the loop is bounded (the finite store exhausts the growing
+ * window) and a pathologically large subject is still emitted whole rather than
+ * truncated (truncation is exactly the #1788 defect), with the transport frame
+ * limit as the final guard.
  */
 async function readDurableMetaRowsPageSubjectAtomic(
   store: TripleStore,
@@ -3595,88 +3593,44 @@ async function readDurableMetaRowsPageSubjectAtomic(
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
-  const rows = await readDurableMetaRowsPage(
-    store,
-    contextGraphId,
-    registeredSubGraphNames,
-    safeOffset,
-    safeLimit + 1,
-    signal,
-  );
-  // Fewer than `limit + 1` admitted rows remain ⇒ this is the final page and
-  // already ends on the last subject's boundary.
-  if (rows.length <= safeLimit) return rows;
-  const lastInPage = rows[safeLimit - 1];
-  if (metaSubjectKey(rows[safeLimit]) !== metaSubjectKey(lastInPage)) {
-    // Clean subject boundary exactly at the limit.
-    return rows.slice(0, safeLimit);
-  }
-  // The trailing subject straddles the limit. A blank-node subject cannot be
-  // completed on this multi-query lane (unstable label/sort across queries and
-  // rounds — see the JSDoc); refuse rather than emit a subject-split page.
-  if (!isIriTerm(lastInPage.s)) {
-    throw new Error(
-      `durable-meta subject-atomic paging: refusing to page a non-IRI straddling `
-      + `_meta subject (${lastInPage.s.slice(0, 64)}) for "${contextGraphId}" — `
-      + `non-conforming/unverified peer-ingested meta cannot be completed without `
-      + `splitting it across sync rounds (#1788)`,
+  let extra = 1;
+  // Bounded by construction: `extra` at least doubles each attempt and the
+  // store is finite, so a short (exhausted) window always terminates the loop;
+  // the iteration cap is a defensive ceiling a real `_meta` graph never nears.
+  for (let attempt = 0; attempt < 48; attempt += 1) {
+    const window = await readDurableMetaRowsPage(
+      store,
+      contextGraphId,
+      registeredSubGraphNames,
+      safeOffset,
+      safeLimit + extra,
+      signal,
     );
-  }
-  // IRI subject: complete it with an exact bound-subject re-read (a stable
-  // identifier), read in the same `?p ?o` order the paged query uses for a
-  // single (fixed g,s) subject. `head + complete-subject` equals the paged
-  // query's prefix, so the next OFFSET lands on the next subject with no
-  // duplicate or skip.
-  const trailingKey = metaSubjectKey(lastInPage);
-  let cut = safeLimit;
-  while (cut > 0 && metaSubjectKey(rows[cut - 1]) === trailingKey) cut -= 1;
-  const trailingSubject = await readDurableMetaSubjectRows(
-    store,
-    contextGraphId,
-    lastInPage.s,
-    signal,
-  );
-  // An admitted IRI subject present in the page always re-reads to ≥1 row; an
-  // empty result is a store/contract violation, so fail loud rather than emit a
-  // silently subject-split page.
-  if (trailingSubject.length === 0) {
-    throw new Error(
-      `durable-meta subject-atomic paging: IRI subject ${lastInPage.s.slice(0, 64)} `
-      + `re-read empty for "${contextGraphId}" (store/contract violation)`,
-    );
-  }
-  return [...rows.slice(0, cut), ...trailingSubject];
-}
-
-/**
- * Read every `_meta` row of ONE subject, ordered like the paged query
- * (`?p ?o` within the fixed `g, s`). Completes a subject that straddles a page
- * limit on the store-paged durable-meta lane. Admission in
- * {@link buildDurableMetaRowsQuery} is subject-level, so a subject already
- * present in the page is fully admitted and needs no re-filtering here. The
- * bound subject IRI makes this a per-subject read, not a graph scan.
- */
-async function readDurableMetaSubjectRows(
-  store: TripleStore,
-  contextGraphId: string,
-  subject: string,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  if (!isIriTerm(subject)) return [];
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const res = await store.query(
-    `
-    SELECT ?p ?o WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(subject)}> ?p ?o }
+    // Fewer than `limit + 1` admitted rows remain ⇒ final page, already ends on
+    // the last subject's boundary.
+    if (window.length <= safeLimit) return window;
+    // The row just past the page begins a new subject ⇒ clean boundary.
+    if (metaSubjectKey(window[safeLimit]) !== metaSubjectKey(window[safeLimit - 1])) {
+      return window.slice(0, safeLimit);
     }
-    ORDER BY ?p ?o
-  `,
-    syncResponderStoreOptions(signal, 'sync.responder.readDurableMetaSubjectRows'),
+    // The trailing subject straddles the limit. It is fully contained once a
+    // later subject appears in this window, or the window is short (EOF).
+    const trailingKey = metaSubjectKey(window[safeLimit - 1]);
+    const windowExhausted = window.length < safeLimit + extra;
+    if (metaSubjectKey(window[window.length - 1]) !== trailingKey || windowExhausted) {
+      let end = window.length;
+      while (end > 0 && metaSubjectKey(window[end - 1]) !== trailingKey) end -= 1;
+      return window.slice(0, end);
+    }
+    // The whole window is still the trailing subject and more may exist: grow
+    // the window (roughly doubling) and re-read as one query so the boundary
+    // comparison stays self-consistent.
+    extra = extra === 1 ? safeLimit + 1 : extra * 2;
+  }
+  throw new Error(
+    `durable-meta subject-atomic paging did not converge for "${contextGraphId}" at offset ${safeOffset} `
+    + '(trailing subject exceeded the bounded window budget)',
   );
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: subject, p: row['p'], o: row['o'], g: metaGraph }))
-    .filter((row): row is SyncRow => Boolean(row.p && row.o));
 }
 
 /**

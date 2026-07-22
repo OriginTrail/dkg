@@ -231,20 +231,20 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     expect(pages.flat()).toHaveLength(12);
   });
 
-  it('store-paged path: refuses (throws) a straddling blank-node subject instead of splitting it across rounds', async () => {
+  it('store-paged path: keeps a straddling blank-node subject atomic (unverified peer-ingest)', async () => {
     // A blank-node `_meta` subject is not produced by conforming first-party
     // writers (metadata generators emit IRIs; the publisher rejects blank nodes)
-    // — it is reachable only via the unverified system-CG peer-ingest path.
-    // Oxigraph relabels a blank node per query, so its label AND sort position
-    // are unstable across the store-paged lane's separate queries and across
-    // sync ROUNDS: it cannot be paged atomically, and serving the raw window
-    // would split it across rounds (for a batch-local control predicate, the
-    // #1788 loss). The responder must FAIL LOUD, never emit a split page.
+    // but IS reachable via the unverified system-CG peer-ingest path. Oxigraph
+    // relabels a blank node per query, so a subject-bound re-read or a
+    // multi-query paged loop could not re-identify it — but the growing-window
+    // extend re-reads ONE query per attempt, within which the label (and thus
+    // the `(g, s)` boundary) is self-consistent, so the straddling subject is
+    // served WHOLE. 14 rows (incl. a dkg:assertionVersion control field — the
+    // row whose loss #1788 is about) > limit ⇒ straddles; admitted via
+    // dkg:memoryLayer != WorkingMemory; a few IRI fillers prove the boundary cut.
     const limit = 10;
     const store = new OxigraphStore();
     const BNODE = '_:peerSeal';
-    // 14 rows (incl. dkg:assertionVersion) > limit ⇒ straddles a page boundary;
-    // admitted via dkg:memoryLayer != WorkingMemory.
     const bnodeQuads: Quad[] = [
       { graph: META, subject: BNODE, predicate: `${DKG_NS}memoryLayer`, object: '"LongTermMemory"' },
       { graph: META, subject: BNODE, predicate: ASSERTION_VERSION, object: '"1"' },
@@ -264,10 +264,9 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     await store.insert([...bnodeQuads, ...filler]);
 
     // Round-based: pageThrough re-queries the store on each fetch, like
-    // successive sync rounds. The straddling blank-node page must THROW, never
-    // return a partial (subject-split) page that a later round could not
-    // reconcile.
-    await expect(pageThrough(
+    // successive sync rounds. The blank node may be relabelled per query, so
+    // identify it structurally.
+    const pages = await pageThrough(
       async (offset, pageLimit) => {
         const page = await readDurableMetaPage({
           store,
@@ -279,6 +278,16 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
         return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
       },
       limit,
-    )).rejects.toThrow(/non-IRI straddling|#1788/);
+    );
+
+    const bnodeRowCount = (page: readonly Row[]) => page.filter((row) => row.s.startsWith('_:')).length;
+    // 0-or-all invariant: no page carries a proper subset of the blank-node subject.
+    for (const page of pages) expect([0, bnodeQuads.length]).toContain(bnodeRowCount(page));
+    const allBnode = pages.flat().filter((row) => row.s.startsWith('_:'));
+    expect(allBnode).toHaveLength(bnodeQuads.length);
+    expect(allBnode.some((row) => row.p === ASSERTION_VERSION)).toBe(true);
+    // No throw, subject-atomic, and every admitted row delivered exactly once.
+    assertNoDuplicatesOrGaps(pages);
+    expect(pages.flat()).toHaveLength(bnodeQuads.length + filler.length);
   });
 });
