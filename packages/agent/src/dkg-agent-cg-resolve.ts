@@ -1501,6 +1501,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
+   * Derive the curator commitment for a LOCAL cleartext identifier.
+   *
+   * This deliberately hashes every string, including values that happen to
+   * look like a 32-byte wire id. A hash-shaped user-chosen CG name is still
+   * cleartext and its on-chain commitment is keccak256(utf8(name)). Host-only
+   * subscriptions carry an explicit `onChainHash`, so callers never need to
+   * guess which interpretation applies from the string shape alone.
+   */
+  contextGraphNameCommitment(this: DKGAgent, localId: string): string {
+    return ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
+  }
+
+  /**
    * OT-RFC-39 Codex review (round 2) on PR #727:
    * `gossipWireIdFor(rawId)` would happily keccak a literal numeric
    * string ("42") as if it were cleartext, producing a hash that does
@@ -1613,7 +1626,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options?: { persist?: boolean },
   ): string | null {
     const wireId = this.contextGraphWireId(nameHash);
-    const localId = this.localCgIdForWireId(wireId);
+    // Chain events may only enrich a subscription that explicitly indexed this
+    // commitment. Falling back to `localId === wireId` is ambiguous: a user may
+    // legitimately choose a cleartext id that itself looks like a 32-byte hash.
+    // Host-only records are indexed under their explicit `onChainHash`, so the
+    // reverse map covers both safe cases without a shape-based fallback.
+    const localId = this.wireIdToLocalCgId.get(wireId);
+    if (localId === undefined) return null;
     const current = this.subscribedContextGraphs.get(localId);
     if (current === undefined) return null;
     const next = { ...current };

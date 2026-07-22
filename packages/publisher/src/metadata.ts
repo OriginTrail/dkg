@@ -107,6 +107,10 @@ export interface OnChainProvenance {
 }
 
 export const GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE = `${DKG}confirmationKind`;
+const GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE = `${DKG}status`;
+const GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE = `${DKG}transactionHash`;
+const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
+const GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE = `${DKG}publishedAt`;
 
 export type GraphKnowledgeAssetConfirmationKind =
   | 'transaction'
@@ -160,6 +164,152 @@ export function readGraphKnowledgeAssetConfirmationKindV1(
     throw new Error('Graph knowledge asset confirmation kind must be an RDF literal');
   }
   return normalizeGraphKnowledgeAssetConfirmationKindV1(values[0]);
+}
+
+export interface GraphKnowledgeAssetReceiptProvenanceV1 {
+  readonly transactionHash: string;
+  readonly materializedVersion?: MaterializedVersion;
+}
+
+/**
+ * Read the locally authenticated, receipt-backed part of graph-scoped KA
+ * metadata. This is the canonical parser used when a receiptless finalized
+ * replay must preserve stronger local transaction provenance.
+ *
+ * Invalid, tentative, or finalized-materialization metadata is not eligible
+ * for preservation and returns null. A missing confirmationKind is accepted as
+ * the rolling-compatible legacy transaction shape.
+ */
+export function readGraphKnowledgeAssetReceiptProvenanceV1(
+  metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
+): GraphKnowledgeAssetReceiptProvenanceV1 | null {
+  const statuses = metadataQuads
+    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE)
+    .map((quad) => rdfLiteralLexicalValue(quad.object));
+  if (statuses.length !== 1 || statuses[0] !== 'confirmed') return null;
+
+  let confirmationKind: GraphKnowledgeAssetConfirmationKind;
+  try {
+    confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
+  } catch {
+    return null;
+  }
+  if (confirmationKind !== 'transaction') return null;
+
+  const hashes = metadataQuads
+    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE)
+    .map((quad) => rdfLiteralLexicalValue(quad.object));
+  if (
+    hashes.length !== 1
+    || hashes[0] === undefined
+    || !/^0x[0-9a-fA-F]{64}$/.test(hashes[0])
+  ) {
+    return null;
+  }
+
+  const versions = metadataQuads
+    .filter((quad) => quad.predicate === MATERIALIZED_VERSION_PRED)
+    .map((quad) => rdfLiteralLexicalValue(quad.object));
+  if (versions.length > 1 || (versions.length === 1 && versions[0] === undefined)) {
+    return null;
+  }
+  const materializedVersion = versions.length === 0
+    ? undefined
+    : parseCanonicalMaterializedVersionV1(versions[0]!);
+  if (versions.length === 1 && materializedVersion === null) return null;
+  const validMaterializedVersion = materializedVersion ?? undefined;
+
+  return Object.freeze({
+    transactionHash: hashes[0],
+    ...(validMaterializedVersion === undefined
+      ? {}
+      : { materializedVersion: Object.freeze(validMaterializedVersion) }),
+  });
+}
+
+/**
+ * Preserve valid local receipt provenance while accepting an otherwise exact
+ * same-version metadata replacement from the receiptless finalized lane.
+ */
+export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
+  incomingMetadata: readonly Quad[],
+  currentMetadata: readonly Pick<Quad, 'predicate' | 'object'>[],
+): Quad[] {
+  const provenance = readGraphKnowledgeAssetReceiptProvenanceV1(currentMetadata);
+  if (provenance === null) return [...incomingMetadata];
+  const identity = incomingMetadata[0];
+  if (identity === undefined) return [...incomingMetadata];
+  return [
+    ...incomingMetadata.filter((quad) => (
+      quad.predicate !== GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE
+      && quad.predicate !== MATERIALIZED_VERSION_PRED
+      && quad.predicate !== GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE
+    )),
+    mq(
+      identity.subject,
+      GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
+      lit(provenance.transactionHash),
+      identity.graph,
+    ),
+    mq(
+      identity.subject,
+      GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+      lit('transaction'),
+      identity.graph,
+    ),
+    ...(provenance.materializedVersion === undefined
+      ? []
+      : [materializedVersionQuad(
+          identity.graph,
+          identity.subject,
+          provenance.materializedVersion,
+        )]),
+  ];
+}
+
+/**
+ * Canonically merge metadata for an exact same-assertion replay. Stable local
+ * receive time is retained for every lane; a receiptless finalized replay also
+ * retains stronger, valid transaction provenance already authenticated here.
+ */
+export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
+  incomingMetadata: readonly Quad[],
+  currentMetadata: readonly Quad[],
+): Quad[] {
+  const identity = incomingMetadata[0];
+  const currentPublishedAt = currentMetadata.filter(
+    (quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+  );
+  const publishedAtLexical = currentPublishedAt.length === 1
+    ? rdfLiteralLexicalValue(currentPublishedAt[0]!.object)
+    : undefined;
+  const preservePublishedAt = identity !== undefined
+    && currentPublishedAt.length === 1
+    && currentPublishedAt[0]!.subject === identity.subject
+    && currentPublishedAt[0]!.graph === identity.graph
+    && publishedAtLexical !== undefined
+    && Number.isFinite(Date.parse(publishedAtLexical));
+  let merged = preservePublishedAt
+    ? [
+        ...incomingMetadata.filter(
+          (quad) => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+        ),
+        currentPublishedAt[0]!,
+      ]
+    : [...incomingMetadata];
+  if (readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
+    merged = preserveGraphKnowledgeAssetReceiptProvenanceV1(merged, currentMetadata);
+  }
+  return merged;
+}
+
+function parseCanonicalMaterializedVersionV1(raw: string): MaterializedVersion | null {
+  const match = /^(0|[1-9]\d*):(0|[1-9]\d*)$/.exec(raw);
+  if (!match) return null;
+  const blockNumber = Number(match[1]);
+  const txIndex = Number(match[2]);
+  if (!Number.isSafeInteger(blockNumber) || !Number.isSafeInteger(txIndex)) return null;
+  return { blockNumber, txIndex };
 }
 
 export interface GraphKnowledgeAssetMetadata extends KCMetadata {
@@ -1263,7 +1413,6 @@ const SKOLEM_INFIX = '/.well-known/genid/';
 // writes, and have every writer refuse to apply a state OLDER than what is
 // already materialised. This gives the projection the same ordering guarantee
 // the chain log already has, regardless of interleaving.
-const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
 const ASSERTION_VERSION_PRED = `${DKG}assertionVersion`;
 
 export interface MaterializedVersion {

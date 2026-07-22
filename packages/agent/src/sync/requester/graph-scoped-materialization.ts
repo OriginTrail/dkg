@@ -10,7 +10,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  mergeSameVersionGraphKnowledgeAssetMetadataV1,
   readGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
@@ -320,33 +320,17 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     let replacementMetadata = asset.metadataQuads;
     if (currentVersion === asset.assertionVersion) {
-      const [currentPublishedAt, currentReceiptProvenance] = await Promise.all([
-        readCurrentPublishedAt(store, asset.metaGraph, asset.ual, options),
-        readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads)
-          === 'finalized-materialization'
-          ? readCurrentReceiptBackedProvenance(
-              store,
-              asset.metaGraph,
-              asset.ual,
-              options,
-            )
-          : Promise.resolve(undefined),
-      ]);
-      if (currentPublishedAt) {
-        replacementMetadata = [
-          ...asset.metadataQuads.filter((quad) => quad.predicate !== PUBLISHED_AT),
-          currentPublishedAt,
-        ];
-      }
-      if (currentReceiptProvenance) {
-        replacementMetadata = [
-          ...replacementMetadata.filter((quad) => (
-            quad.predicate !== TRANSACTION_HASH
-            && quad.predicate !== MATERIALIZED_VERSION
-            && quad.predicate !== GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE
-          )),
-          ...currentReceiptProvenance,
-        ];
+      const currentMetadata = await readCurrentGraphKnowledgeAssetMetadata(
+        store,
+        asset.metaGraph,
+        asset.ual,
+        options,
+      );
+      if (currentMetadata) {
+        replacementMetadata = mergeSameVersionGraphKnowledgeAssetMetadataV1(
+          replacementMetadata,
+          currentMetadata,
+        );
       }
     }
     const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
@@ -376,13 +360,8 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   });
 }
 
-/**
- * Preserve stronger locally authenticated receipt provenance when a peer
- * replays the same assertion through the receiptless finalized lane. The data
- * graph is still replaced exactly (healing poisoned replicas), but remote
- * metadata cannot downgrade a transaction-confirmed local assertion to 0:0.
- */
-async function readCurrentReceiptBackedProvenance(
+/** Read the current subject once; publisher metadata helpers own typed merging. */
+async function readCurrentGraphKnowledgeAssetMetadata(
   store: TripleStore,
   metaGraph: string,
   ual: string,
@@ -392,80 +371,17 @@ async function readCurrentReceiptBackedProvenance(
     SELECT ?predicate ?object WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         <${assertSafeIri(ual)}> ?predicate ?object .
-        VALUES ?predicate {
-          <${TRANSACTION_HASH}>
-          <${MATERIALIZED_VERSION}>
-          <${GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE}>
-          <${STATUS}>
-        }
       }
     }
   `, options);
   if (result.type !== 'bindings') return undefined;
-  const byPredicate = new Map<string, string[]>();
-  for (const row of result.bindings) {
-    if (!row.predicate || !row.object) return undefined;
-    const values = byPredicate.get(row.predicate) ?? [];
-    values.push(row.object);
-    byPredicate.set(row.predicate, values);
-  }
-  const hashes = byPredicate.get(TRANSACTION_HASH) ?? [];
-  const versions = byPredicate.get(MATERIALIZED_VERSION) ?? [];
-  const kinds = byPredicate.get(GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE) ?? [];
-  const statuses = byPredicate.get(STATUS) ?? [];
-  if (
-    hashes.length !== 1
-    || kinds.length > 1
-    || statuses.length !== 1
-    || parseRdfLiteral(statuses[0]!) !== 'confirmed'
-    || (kinds.length === 1 && parseRdfLiteral(kinds[0]!) !== 'transaction')
-  ) {
-    return undefined;
-  }
-  try {
-    parseTransactionHashLiteral(hashes[0]!);
-  } catch {
-    return undefined;
-  }
-  const materializedVersion = versions.length === 1
-    && /^(?:0|[1-9]\d*):(?:0|[1-9]\d*)$/.test(parseRdfLiteral(versions[0]!) ?? '')
-    ? versions[0]
-    : undefined;
-  return [
-    { subject: ual, predicate: TRANSACTION_HASH, object: hashes[0]!, graph: metaGraph },
-    {
-      subject: ual,
-      predicate: GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-      object: '"transaction"',
-      graph: metaGraph,
-    },
-    ...(materializedVersion === undefined ? [] : [{
-      subject: ual,
-      predicate: MATERIALIZED_VERSION,
-      object: materializedVersion,
-      graph: metaGraph,
-    }]),
-  ];
-}
-
-async function readCurrentPublishedAt(
-  store: TripleStore,
-  metaGraph: string,
-  ual: string,
-  options: QueryOptions,
-): Promise<Quad | undefined> {
-  const result = await store.query(`
-    SELECT ?publishedAt WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(ual)}> <${PUBLISHED_AT}> ?publishedAt .
-      }
-    }
-  `, options);
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return undefined;
-  const object = result.bindings[0]?.publishedAt;
-  const lexical = object?.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1];
-  if (!object || !lexical || !Number.isFinite(Date.parse(lexical))) return undefined;
-  return { subject: ual, predicate: PUBLISHED_AT, object, graph: metaGraph };
+  if (result.bindings.some((row) => !row.predicate || !row.object)) return undefined;
+  return result.bindings.map((row) => ({
+    subject: ual,
+    predicate: row.predicate!,
+    object: row.object!,
+    graph: metaGraph,
+  }));
 }
 
 async function readCurrentAssertionVersion(

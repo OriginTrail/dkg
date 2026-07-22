@@ -95,6 +95,7 @@ interface AgentInternals {
   awaitHostModePersistence(contextGraphId: string): Promise<void>;
   hostModePersistenceStoreKey(rawCgId: string): string;
   contextGraphWireId(contextGraphId: string): string;
+  contextGraphNameCommitment(contextGraphId: string): string;
   bindOnChainContextGraphIdFromNameHash(
     nameHash: string,
     onChainContextGraphId: string,
@@ -264,6 +265,57 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     await expect(core.getContextGraphOnChainId(cleartext)).resolves.toBe('14');
     await expect(core.getContextGraphOnChainId(wireHash)).resolves.toBe('14');
     expect(storeQuery).not.toHaveBeenCalled();
+  });
+
+  it('does not bind a hash-shaped cleartext CG to an unrelated raw name-hash event', async () => {
+    const { core } = await makeCore();
+    const internals = core as unknown as AgentInternals;
+    const hashShapedCleartext = `0x${'bc'.repeat(32)}`;
+    const committedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(hashShapedCleartext),
+    ).toLowerCase();
+    internals.setContextGraphSubscription(
+      hashShapedCleartext,
+      { subscribed: true, synced: false },
+      { persist: false },
+    );
+
+    expect(internals.contextGraphNameCommitment(hashShapedCleartext)).toBe(committedNameHash);
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      hashShapedCleartext,
+      '13',
+      { persist: false },
+    )).toBeNull();
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      committedNameHash,
+      '14',
+      { persist: false },
+    )).toBe(hashShapedCleartext);
+    expect(internals.subscribedContextGraphs.get(hashShapedCleartext)).toMatchObject({
+      onChainId: '14',
+      onChainHash: committedNameHash,
+    });
+  });
+
+  it('binds an explicitly wire-keyed host-only subscription', async () => {
+    const { core } = await makeCore();
+    const internals = core as unknown as AgentInternals;
+    const wireHash = `0x${'de'.repeat(32)}`;
+    internals.setContextGraphSubscription(
+      wireHash,
+      { subscribed: false, synced: false, onChainHash: wireHash, coreHosted: true },
+      { persist: false },
+    );
+
+    expect(internals.bindOnChainContextGraphIdFromNameHash(
+      wireHash,
+      '15',
+      { persist: false },
+    )).toBe(wireHash);
+    expect(internals.subscribedContextGraphs.get(wireHash)).toMatchObject({
+      onChainId: '15',
+      onChainHash: wireHash,
+    });
   });
 
   it('exactly one gossip handler is wired on the underlying topic regardless of subscribe shape', async () => {

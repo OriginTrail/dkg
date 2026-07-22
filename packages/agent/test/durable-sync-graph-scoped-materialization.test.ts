@@ -908,6 +908,7 @@ describe('durable graph-scoped KA materialization', () => {
         ['privateTripleCount', `"0"^^<${XSD_INTEGER}>`],
         ['status', '"confirmed"'],
         ['publishedAt', `"2026-07-16T08:00:00.000Z"^^<${XSD_DATE_TIME}>`],
+        ['materializedVersion', '"456:7"'],
       ].map(([predicate, object]) => ({
         subject: ual,
         predicate: `${DKG}${predicate}`,
@@ -966,7 +967,7 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await graphQuads(requesterStore, assertionGraph)).toEqual(servedData);
     expect(await values(requesterStore, 'transactionHash')).toEqual([`"${transactionHash(2)}"`]);
     expect(await values(requesterStore, 'confirmationKind')).toEqual(['"transaction"']);
-    expect(await values(requesterStore, 'materializedVersion')).toEqual([]);
+    expect(await values(requesterStore, 'materializedVersion')).toEqual(['"456:7"']);
     expect(await values(requesterStore, 'publishedAt')).toEqual([
       `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
     ]);

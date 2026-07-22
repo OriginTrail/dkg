@@ -2007,7 +2007,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // input and find the on-chain participant agents without an
             // RPC round-trip per envelope.
             const hashLower = this.contextGraphWireId(nameHash);
-            const localId = this.localCgIdForWireId(hashLower);
+            const indexedLocalId = this.wireIdToLocalCgId.get(hashLower);
+            const localId = indexedLocalId ?? hashLower;
             // Stage a synthetic subscription record for the host-only
             // case: cores hosting CGs they never joined have no
             // cleartext; the hash IS their local id. `recordCgWireId`
@@ -2017,8 +2018,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               this.setContextGraphSubscription(localId, {
                 subscribed: false,
                 synced: false,
+                onChainHash: hashLower,
                 pendingMeta: true,
               }, { persist: false });
+            } else if (indexedLocalId === undefined) {
+              // A local subscription already uses the event's hash as its
+              // cleartext id, but did not explicitly claim wire-id identity.
+              // Treat this as an ambiguous hash-shaped-name collision instead
+              // of rebinding or auto-hosting the unrelated on-chain graph.
+              this.log.warn(
+                ctx,
+                `Skipping host-mode auto-subscribe for ${hashLower.slice(0, 18)}…: ` +
+                  'the same string is already used by an uncommitted local CG id',
+              );
+              return;
             }
             this.bindOnChainContextGraphIdFromNameHash(
               hashLower,
@@ -5965,7 +5978,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
-    const localWireId = this.contextGraphWireId(contextGraphId);
+    // A local id is always cleartext unless the subscription explicitly says
+    // otherwise through `onChainHash`. This distinction matters for a valid
+    // user-chosen id that happens to match the 0x+64-hex wire-id shape.
+    const localWireId = this.contextGraphNameCommitment(contextGraphId);
     const previousWireId = previous?.onChainHash
       ? this.contextGraphWireId(previous.onChainHash)
       : localWireId;
