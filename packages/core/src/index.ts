@@ -24,11 +24,13 @@ export {
   assertCanonicalDecimalU64,
   assertCanonicalDecimalU256,
   assertCanonicalDigest,
+  assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
   assertCanonicalKaId,
   assertCanonicalTimestampMs,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
+  isCanonicalEvmAddressShapeV1,
 } from './sync-wire-scalars.js';
 export type {
   BatchIdV1,

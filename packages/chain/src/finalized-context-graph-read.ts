@@ -1,0 +1,273 @@
+import {
+  assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  isCanonicalEvmAddressShapeV1,
+  type BlockNumberV1,
+  type ChainIdV1,
+  type ContextGraphAccessPolicyV1,
+  type ContextGraphPublishPolicyV1,
+  type DecimalU256V1,
+  type Digest32V1,
+  type EvmAddressV1,
+} from '@origintrail-official/dkg-core';
+
+// This module validates one finalized ContextGraphStorage read. It deliberately
+// does not define another RFC-64 policy object: the chain surface cannot supply
+// the network/name identifier, era, version, predecessor, or timestamps needed
+// by ContextGraphPolicyV1. Runtime policy composition must add those trusted
+// inputs once and validate the result with the canonical core policy codec.
+
+export const CG_ACCESS_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
+export const CG_PUBLISH_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
+
+const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+
+export type FinalizedContextGraphReadErrorCodeV1 =
+  | 'request-binding'
+  | 'unregistered-context-graph'
+  | 'malformed-owner'
+  | 'malformed-authority'
+  | 'unsupported-access-policy'
+  | 'unsupported-publish-policy'
+  | 'inconsistent-publish-policy'
+  | 'malformed-anchor'
+  | 'malformed-name-binding';
+
+export class FinalizedContextGraphReadErrorV1 extends Error {
+  constructor(
+    readonly code: FinalizedContextGraphReadErrorCodeV1,
+    message: string,
+  ) {
+    super(`[${code}] ${message}`);
+    this.name = 'FinalizedContextGraphReadErrorV1';
+  }
+}
+
+/** Untrusted identity supplied to the finalized chain resolver. */
+export type FinalizedContextGraphReadRequestV1 = {
+  readonly chainId: unknown;
+  readonly contextGraphId: unknown;
+  readonly governanceContract: unknown;
+};
+
+/** Untrusted RPC output from getContextGraph(uint256) and getNameHash(uint256). */
+export type UntrustedFinalizedContextGraphFieldsV1 = {
+  readonly blockNumber: unknown;
+  readonly blockHash: unknown;
+  readonly owner: unknown;
+  readonly active: unknown;
+  readonly accessPolicy: unknown;
+  readonly publishPolicy: unknown;
+  readonly publishAuthority: unknown;
+  readonly publishAuthorityAccountId: unknown;
+  readonly nameHash: unknown;
+};
+
+/** Validated, immutable adapter read. This is not a ContextGraphPolicyV1. */
+export type FinalizedContextGraphReadV1 = {
+  readonly chainId: ChainIdV1;
+  readonly contextGraphId: DecimalU256V1;
+  readonly governanceContract: EvmAddressV1;
+  readonly blockNumber: BlockNumberV1;
+  readonly blockHash: Digest32V1;
+  readonly owner: EvmAddressV1;
+  readonly active: boolean;
+  readonly accessPolicy: ContextGraphAccessPolicyV1;
+  readonly publishPolicy: ContextGraphPublishPolicyV1;
+  readonly publishAuthority: EvmAddressV1 | null;
+  readonly publishAuthorityAccountId: DecimalU256V1;
+  readonly nameHash: Digest32V1;
+};
+
+export interface FinalizedContextGraphReadResolverV1 {
+  (request: FinalizedContextGraphReadRequestV1): Promise<UntrustedFinalizedContextGraphFieldsV1>;
+}
+
+function canonicalDecimalU256(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+  label: string,
+): DecimalU256V1 {
+  try {
+    assertCanonicalDecimalU256(value, label);
+    return value;
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      code,
+      `${label} must be a canonical decimal uint256`,
+    );
+  }
+}
+
+function canonicalBlockNumber(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+): BlockNumberV1 {
+  try {
+    assertCanonicalDecimalU64(value, 'blockNumber');
+    return value;
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      code,
+      'blockNumber must be a canonical decimal uint64',
+    );
+  }
+}
+
+function canonicalNonZeroAddress(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+  label: string,
+): EvmAddressV1 {
+  try {
+    assertCanonicalEvmAddress(value, label);
+    return value;
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      code,
+      `${label} must be a canonical lowercase non-zero EVM address`,
+    );
+  }
+}
+
+function canonicalNullableAddress(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+  label: string,
+): EvmAddressV1 | null {
+  if (!isCanonicalEvmAddressShapeV1(value)) {
+    throw new FinalizedContextGraphReadErrorV1(
+      code,
+      `${label} must be a canonical lowercase EVM address`,
+    );
+  }
+  if (value === ZERO_ADDRESS) return null;
+  return canonicalNonZeroAddress(value, code, label);
+}
+
+function canonicalDigest32(
+  value: unknown,
+  code: FinalizedContextGraphReadErrorCodeV1,
+  label: string,
+): Digest32V1 {
+  try {
+    assertCanonicalDigest(value, label);
+    return value;
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      code,
+      `${label} must be a 0x-prefixed lowercase 32-byte hex digest`,
+    );
+  }
+}
+
+/** Validate and snapshot one request-bound finalized chain read. */
+export function composeFinalizedContextGraphReadV1(
+  request: FinalizedContextGraphReadRequestV1,
+  raw: UntrustedFinalizedContextGraphFieldsV1,
+): FinalizedContextGraphReadV1 {
+  let chainId: ChainIdV1;
+  try {
+    assertCanonicalChainId(request.chainId, 'finalized Context Graph chainId');
+    chainId = request.chainId;
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      'request-binding',
+      'request chainId is not canonical',
+    );
+  }
+  const contextGraphId = canonicalDecimalU256(
+    request.contextGraphId,
+    'request-binding',
+    'contextGraphId',
+  );
+  const governanceContract = canonicalNonZeroAddress(
+    request.governanceContract,
+    'request-binding',
+    'governanceContract',
+  );
+
+  let owner: EvmAddressV1;
+  if (raw.owner === ZERO_ADDRESS) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'unregistered-context-graph',
+      'ContextGraphStorage returned a zero owner (unregistered context graph)',
+    );
+  }
+  owner = canonicalNonZeroAddress(raw.owner, 'malformed-owner', 'owner');
+
+  const publishAuthority = canonicalNullableAddress(
+    raw.publishAuthority,
+    'malformed-authority',
+    'publishAuthority',
+  );
+  const publishAuthorityAccountId = canonicalDecimalU256(
+    raw.publishAuthorityAccountId,
+    'request-binding',
+    'publishAuthorityAccountId',
+  );
+
+  if (raw.accessPolicy !== 0 && raw.accessPolicy !== 1) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'unsupported-access-policy',
+      `unsupported accessPolicy ${String(raw.accessPolicy)}`,
+    );
+  }
+  const accessPolicy: ContextGraphAccessPolicyV1 = raw.accessPolicy;
+  if (raw.publishPolicy !== 0 && raw.publishPolicy !== 1) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'unsupported-publish-policy',
+      `unsupported publishPolicy ${String(raw.publishPolicy)}`,
+    );
+  }
+  const publishPolicy: ContextGraphPublishPolicyV1 = raw.publishPolicy;
+  if (
+    publishPolicy === 1
+    && (publishAuthority !== null || publishAuthorityAccountId !== '0')
+  ) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'inconsistent-publish-policy',
+      'open contribution requires zero publish authority and account ID zero',
+    );
+  }
+  if (publishPolicy === 0 && publishAuthority === null) {
+    throw new FinalizedContextGraphReadErrorV1(
+      'inconsistent-publish-policy',
+      'curated contribution requires a non-zero publish authority',
+    );
+  }
+  if (typeof raw.active !== 'boolean') {
+    throw new FinalizedContextGraphReadErrorV1('malformed-anchor', 'active must be a boolean');
+  }
+
+  const blockHash = canonicalDigest32(raw.blockHash, 'malformed-anchor', 'blockHash');
+  const blockNumber = canonicalBlockNumber(raw.blockNumber, 'request-binding');
+  const nameHash = canonicalDigest32(raw.nameHash, 'malformed-name-binding', 'nameHash');
+
+  return Object.freeze({
+    chainId,
+    contextGraphId,
+    governanceContract,
+    blockNumber,
+    blockHash,
+    owner,
+    active: raw.active,
+    accessPolicy,
+    publishPolicy,
+    publishAuthority,
+    publishAuthorityAccountId,
+    nameHash,
+  });
+}
+
+/** Resolve untrusted finalized fields, forwarding the exact bound request once. */
+export async function resolveFinalizedContextGraphReadV1(
+  resolver: FinalizedContextGraphReadResolverV1,
+  request: FinalizedContextGraphReadRequestV1,
+): Promise<FinalizedContextGraphReadV1> {
+  const raw = await resolver(request);
+  return composeFinalizedContextGraphReadV1(request, raw);
+}

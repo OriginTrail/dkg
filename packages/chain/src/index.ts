@@ -43,16 +43,15 @@ export {
 export {
   CG_ACCESS_POLICY_VALUES_V1,
   CG_PUBLISH_POLICY_VALUES_V1,
-  FINALIZED_CG_POLICY_SNAPSHOT_SCHEMA_V1,
-  FinalizedContextGraphPolicyErrorV1,
-  resolveFinalizedContextGraphPolicySnapshotV1,
-  snapshotFinalizedContextGraphPolicyV1,
-  type FinalizedContextGraphPolicyErrorCodeV1,
-  type FinalizedContextGraphPolicyRequestV1,
-  type FinalizedContextGraphPolicyResolverV1,
-  type FinalizedContextGraphPolicySnapshotV1,
-  type RawFinalizedContextGraphPolicyFieldsV1,
-} from './finalized-context-graph-policy-snapshot.js';
+  FinalizedContextGraphReadErrorV1,
+  composeFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadV1,
+  type FinalizedContextGraphReadErrorCodeV1,
+  type FinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadV1,
+  type UntrustedFinalizedContextGraphFieldsV1,
+} from './finalized-context-graph-read.js';
 export {
   resolveQuotedPublisherCandidatePricing,
   resolveLegacyPublisherCandidatePricing,

@@ -110,12 +110,17 @@ export function assertCanonicalEvmAddress(
   value: unknown,
   label = 'address',
 ): asserts value is EvmAddressV1 {
-  if (typeof value !== 'string' || !EVM_ADDRESS.test(value)) {
+  if (!isCanonicalEvmAddressShapeV1(value)) {
     throw new Error(`${label} must be a lowercase 20-byte 0x EVM address`);
   }
   if (value === ZERO_EVM_ADDRESS) {
     throw new Error(`${label} must not be the zero address`);
   }
+}
+
+/** Structural EVM-address check for RPC fields whose domain also permits zero. */
+export function isCanonicalEvmAddressShapeV1(value: unknown): value is string {
+  return typeof value === 'string' && EVM_ADDRESS.test(value);
 }
 
 export function assertCanonicalHexBytes(
