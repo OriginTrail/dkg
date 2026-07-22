@@ -20,14 +20,12 @@ import {
 import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
 import {
-  assertDeployedCode,
   assertStrictFinalizedAnchorStableV1,
   cancelled,
   createDeadlineScope,
   executeStrictFinalizedAnchorPolicyV1,
   isTerminalAttemptFailure,
   parseChainId,
-  parseContractReturn,
   parseFinalizedAnchor,
   postJsonRpc,
   resourceLimited,
@@ -359,8 +357,6 @@ async function executeSnapshotBatch(
     deployedTargets,
     rpc,
     settle: (operations) => settleParallelBatch(operations, totalDeadline),
-    assertDeployedCode,
-    parseContractReturn,
   });
 
   const batch = await executeStrictFinalizedAnchorPolicyV1({

@@ -297,8 +297,6 @@ async function executeEndpointAttempt(
       blockReference,
       rpc,
       settle: (operations) => settleParallelBatch(operations, attemptDeadline),
-      assertDeployedCode,
-      parseContractReturn,
     });
     return batch.returnData;
   };
@@ -585,35 +583,6 @@ export function parseFinalizedAnchor(input: unknown, label: string): FinalizedAn
     blockNumberQuantity: input.number as string,
     blockHash: input.hash as Digest32V1,
   });
-}
-
-export function assertDeployedCode(input: unknown): void {
-  if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
-    throw unavailable('eth_getCode returned malformed code bytes');
-  }
-  if (input === '0x') {
-    throw new CurrentFinalizedEvmCallErrorV1(
-      'no-code',
-      'Finalized-read target has no deployed code at the resolved anchor',
-    );
-  }
-}
-
-export function parseContractReturn(input: unknown, maxBytes: number): string {
-  if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
-    throw new CurrentFinalizedEvmCallErrorV1(
-      'malformed-return',
-      'Finalized eth_call returned malformed bytes',
-    );
-  }
-  const byteLength = (input.length - 2) / 2;
-  if (byteLength > maxBytes) {
-    throw new CurrentFinalizedEvmCallErrorV1(
-      'malformed-return',
-      `Finalized eth_call returned ${byteLength} bytes; limit ${maxBytes}`,
-    );
-  }
-  return input;
 }
 
 function parseCanonicalQuantity(input: unknown, maximum: bigint): bigint {
