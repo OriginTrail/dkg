@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 
@@ -13,7 +12,6 @@ import { ethers } from 'ethers';
 
 import {
   atomicWriteExactBytes,
-  readCleanRepositoryHead,
   stableJson,
 } from '../rfc64-persistence-lifecycle/evidence.js';
 import {
@@ -43,19 +41,21 @@ import {
 import { verify as verifyInventoryContract } from './src/verify.ts';
 import { canonicalDocument, type CanonicalValue } from './src/canonical.ts';
 import {
-  assertGate2RuntimeManifestEqualV1,
-  buildGate2RuntimeManifestV1,
   buildGate2RuntimeProvenanceV1,
   consumeGate2RuntimeLaunchReceiptV1,
   type Gate2ExecutedRuntimeManifestV1,
 } from './runtime-provenance.ts';
+import {
+  assertGate2HarnessReadyV1,
+  assertGate2HarnessSourceStateV1,
+  connectGate2HarnessAgentsV1,
+  createGate2TwoAgentDataDirsV1,
+  spawnGate2HarnessAgentV1,
+} from './two-agent-harness.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
-const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
-const RUNTIME_LOAD_HOOK = join(import.meta.dirname, 'runtime-load-hook.ts');
 const DEFAULT_RAW_ARTIFACT = join(import.meta.dirname, 'artifacts/gate2-result.json');
 const DEFAULT_VERDICT_ARTIFACT = join(import.meta.dirname, 'artifacts/gate2-verdict.json');
-const PROCESS_TIMEOUT_MS = 90_000;
 
 const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/gate-2';
@@ -98,17 +98,11 @@ const SUCCESSOR_ISSUED_AT = Object.freeze([
 const FORGED_ISSUED_AT = '1773900004000';
 const DELEGATION_EFFECTIVE_AT = '1773899999000';
 const DELEGATION_EXPIRES_AT = '1774000000000';
-const ROLE_MASTER_KEYS = Object.freeze({
-  author: '1a'.repeat(32),
-  receiver: '2b'.repeat(32),
-});
-
 async function execute(): Promise<void> {
   const launchReceipt = consumeGate2RuntimeLaunchReceiptV1();
-  const headBefore = readCleanRepositoryHead(REPO_ROOT);
-  exact(headBefore, launchReceipt.sourceCommit, 'clean-build launch source commit');
-  assertGate2RuntimeManifestEqualV1(
-    buildGate2RuntimeManifestV1(REPO_ROOT, headBefore),
+  const headBefore = assertGate2HarnessSourceStateV1(
+    REPO_ROOT,
+    launchReceipt.sourceCommit,
     launchReceipt.manifest,
   );
   exact(new Set(PROJECTION_NQUADS).size, 3, 'distinct per-KA projections before spawn');
@@ -119,26 +113,29 @@ async function execute(): Promise<void> {
   rmSync(rawArtifactPath, { force: true });
   rmSync(verdictArtifactPath, { force: true });
 
-  const authorDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate2-author-'));
-  const receiverDataDir = mkdtempSync(join(tmpdir(), 'dkg-rfc64-gate2-receiver-'));
+  const dataDirs = createGate2TwoAgentDataDirsV1('gate2');
+  const authorDataDir = dataDirs.author;
+  const receiverDataDir = dataDirs.receiver;
   const children = new ChildProcessRegistry(20_000);
   let operationFailed = true;
   let primaryFailure: unknown;
   try {
-    const author = spawnAgent(
-      'author', authorDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
-    );
-    const receiver = spawnAgent(
-      'receiver', receiverDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
-    );
+    const author = spawnGate2HarnessAgentV1({
+      role: 'author', dataDir: authorDataDir, registry: children, repoRoot: REPO_ROOT,
+      runtimeManifestDigest: launchReceipt.manifest.manifestDigest, sourceCommit: headBefore,
+    });
+    const receiver = spawnGate2HarnessAgentV1({
+      role: 'receiver', dataDir: receiverDataDir, registry: children, repoRoot: REPO_ROOT,
+      runtimeManifestDigest: launchReceipt.manifest.manifestDigest, sourceCommit: headBefore,
+    });
     const [authorReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
       receiver.waitFor('ready'),
     ]);
-    requireRealReady(authorReady, 'author', launchReceipt.manifest.manifestDigest);
-    requireRealReady(receiverReady, 'receiver', launchReceipt.manifest.manifestDigest);
+    assertGate2HarnessReadyV1(authorReady, 'author', launchReceipt.manifest.manifestDigest);
+    assertGate2HarnessReadyV1(receiverReady, 'receiver', launchReceipt.manifest.manifestDigest);
     requireCondition(authorReady.peerId !== receiverReady.peerId, 'peer identities are not distinct');
-    await connectBothWays(author, receiver, authorReady, receiverReady, 'initial');
+    await connectGate2HarnessAgentsV1(author, receiver, authorReady, receiverReady, 'initial');
 
     const [authorPolicy, receiverPolicy] = await Promise.all([
       acceptPolicy(author, 'author-policy-v1', CONTEXT_GRAPH_ID),
@@ -450,13 +447,20 @@ async function execute(): Promise<void> {
     exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
 
     const receiverCrashBoundary = await receiver.killRestartBoundary('receiver-crash-v1');
-    const restartedReceiver = spawnAgent(
-      'receiver', receiverDataDir, children, launchReceipt.manifest.manifestDigest, headBefore,
-    );
+    const restartedReceiver = spawnGate2HarnessAgentV1({
+      role: 'receiver', dataDir: receiverDataDir, registry: children, repoRoot: REPO_ROOT,
+      runtimeManifestDigest: launchReceipt.manifest.manifestDigest, sourceCommit: headBefore,
+    });
     const restartedReady = await restartedReceiver.waitFor('ready');
-    requireRealReady(restartedReady, 'receiver', launchReceipt.manifest.manifestDigest);
+    assertGate2HarnessReadyV1(restartedReady, 'receiver', launchReceipt.manifest.manifestDigest);
     exact(restartedReady.peerId, receiverReady.peerId, 'receiver peer ID after restart');
-    await connectBothWays(author, restartedReceiver, authorReady, restartedReady, 'restart');
+    await connectGate2HarnessAgentsV1(
+      author,
+      restartedReceiver,
+      authorReady,
+      restartedReady,
+      'restart',
+    );
     await acceptPolicy(restartedReceiver, 'restarted-receiver-policy-v1', CONTEXT_GRAPH_ID);
     await announceAndDrain(
       author,
@@ -502,10 +506,9 @@ async function execute(): Promise<void> {
 
     const restartedReceiverBoundary = await restartedReceiver.stop('receiver-stop-v1');
     const authorBoundary = await author.stop('author-stop-v1');
-    const headAfter = readCleanRepositoryHead(REPO_ROOT);
-    exact(headAfter, headBefore, 'tracked source commit after process run');
-    assertGate2RuntimeManifestEqualV1(
-      buildGate2RuntimeManifestV1(REPO_ROOT, headAfter),
+    const headAfter = assertGate2HarnessSourceStateV1(
+      REPO_ROOT,
+      headBefore,
       launchReceipt.manifest,
     );
     const runtimeProvenance = buildGate2RuntimeProvenanceV1(
@@ -713,25 +716,6 @@ async function acceptPolicy(
     contextGraphId,
     ownerAddress: AUTHOR_ADDRESS,
   });
-}
-
-async function connectBothWays(
-  author: Gate2AgentChild,
-  receiver: Gate2AgentChild,
-  authorReady: Gate2AgentEvent,
-  receiverReady: Gate2AgentEvent,
-  label: string,
-): Promise<void> {
-  await Promise.all([
-    receiver.request('dial', `${label}-receiver-dial-author-v1`, 'dialed', {
-      multiaddr: authorReady.multiaddr,
-      peerId: authorReady.peerId,
-    }),
-    author.request('dial', `${label}-author-dial-receiver-v1`, 'dialed', {
-      multiaddr: receiverReady.multiaddr,
-      peerId: receiverReady.peerId,
-    }),
-  ]);
 }
 
 async function readApplied(
@@ -1040,62 +1024,6 @@ function stagedHeadRef(output: Record<string, unknown>, label: string): Record<s
       `${label}.signatureVariantDigest`,
     ),
   };
-}
-
-function spawnAgent(
-  role: 'author' | 'receiver',
-  dataDir: string,
-  registry: ChildProcessRegistry,
-  runtimeManifestDigest: string,
-  sourceCommit: string,
-): Gate2AgentChild {
-  const childEnv = { ...process.env };
-  delete childEnv.NODE_OPTIONS;
-  delete childEnv.NODE_PATH;
-  delete childEnv.TSX_TSCONFIG_PATH;
-  return new Gate2AgentChild({
-    eventTimeoutMs: PROCESS_TIMEOUT_MS,
-    registry,
-    role,
-    spawn: {
-      command: process.execPath,
-      args: ['--import', 'tsx', '--import', RUNTIME_LOAD_HOOK, ADAPTER_PROCESS, role],
-      cwd: REPO_ROOT,
-      env: {
-        ...childEnv,
-        DKG_RFC64_GATE2_ADAPTER_DATA_DIR: dataDir,
-        DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: ROLE_MASTER_KEYS[role],
-        DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: runtimeManifestDigest,
-        DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: sourceCommit,
-        NODE_ENV: 'production',
-      },
-    },
-  });
-}
-
-function requireRealReady(
-  event: Gate2AgentEvent,
-  expectedRole: 'author' | 'receiver',
-  runtimeManifestDigest: string,
-): void {
-  requireCondition(event.role === expectedRole, 'ready role differs from the spawned role');
-  requireCondition(
-    event.adapterId === GATE2_REAL_DKG_AGENT_ADAPTER_ID,
-    'adapter did not identify the real DKGAgent boundary',
-  );
-  requireCondition(
-    event.protocolVersion === GATE2_ADAPTER_PROTOCOL_VERSION,
-    'adapter protocol version changed',
-  );
-  requireCondition(event.agentClass === 'DKGAgent', 'child did not boot a real DKGAgent');
-  requireCondition(event.catalogServiceStarted === true, 'production catalog service did not start');
-  requireCondition(event.startupRepair === null, 'adapter claimed nonexistent automatic startup repair');
-  exact(event.runtimeBuildManifestDigest, runtimeManifestDigest, 'child runtime build manifest digest');
-  requireCondition(typeof event.peerId === 'string' && event.peerId.length > 0, 'peer ID is missing');
-  requireCondition(
-    typeof event.multiaddr === 'string' && event.multiaddr.includes('/tcp/'),
-    'TCP multiaddr is missing',
-  );
 }
 
 function assertGate2ProductCapabilities(value: unknown, role: string): void {

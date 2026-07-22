@@ -12,7 +12,18 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import {
+  assertAssertionCoordinateV1,
+  assertAuthorCatalogScopeV1,
+  assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalGraphScopedAuthorSealV1,
+  assertCanonicalTimestampMs,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
+  assertSubGraphNameV1,
+  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
   computeControlSignatureVariantDigestHex,
+  parseDeterministicKnowledgeAssetUal,
   type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -169,70 +180,47 @@ async function handle(command: Command): Promise<void> {
       });
       return;
     }
+    case 'acceptPolicySnapshot': {
+      const accepted = currentAgent.acceptRfc64CatalogAccessSnapshotV1(
+        plainRecord(command.input, 'acceptPolicySnapshot input') as never,
+      );
+      emitOperationResult(command, accepted);
+      return;
+    }
     case 'publishGenesis': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishGenesis input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishGenesis.authorPrivateKey',
+      const output = await currentAgent.publishOpenAuthorCatalogGenesisV1(
+        normalizeOpenGenesisInput(command),
       );
-      const author = new ethers.Wallet(authorPrivateKey);
-      const forwarded: Record<string, unknown> = { ...input, author, peers: [] };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishOpenAuthorCatalogGenesisV1(forwarded as never);
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'publishCatalogGenesis': {
+      requireRole('author');
+      const output = await currentAgent.publishAuthorCatalogGenesisV1(
+        normalizePolicyBoundGenesisInput(command),
+      );
       emitOperationResult(command, output);
       return;
     }
     case 'publishExactSetSuccessor': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishExactSetSuccessor input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishExactSetSuccessor.authorPrivateKey',
+      const output = await publishExactSetSuccessorVia(
+        currentAgent,
+        command,
+        'open',
       );
-      const assets = plainArray(input.assets, 'publishExactSetSuccessor.assets').map(
-        (value, index) => {
-          const asset = plainRecord(value, `publishExactSetSuccessor.assets[${index}]`);
-          const projectionNQuads = requiredString(
-            asset.projectionNQuads,
-            `publishExactSetSuccessor.assets[${index}].projectionNQuads`,
-          );
-          const forwarded: Record<string, unknown> = {
-            ...asset,
-            projectionBytes: new TextEncoder().encode(projectionNQuads),
-          };
-          delete forwarded.projectionNQuads;
-          return forwarded;
-        },
+      emitOperationResult(command, output);
+      return;
+    }
+    case 'publishCatalogExactSetSuccessor': {
+      requireRole('author');
+      const output = await publishExactSetSuccessorVia(
+        currentAgent,
+        command,
+        'policy-bound',
       );
-      const forwarded: Record<string, unknown> = {
-        ...input,
-        author: new ethers.Wallet(authorPrivateKey),
-        assets,
-        peers: [],
-      };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishOpenAuthorCatalogExactSetSuccessorV1(
-        forwarded as never,
-      );
-      const result = plainRecord(output, 'publishExactSetSuccessor output');
-      const outputAssets = plainArray(result.assets, 'publishExactSetSuccessor.output.assets');
-      const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
-        const asset = plainRecord(value, `publishExactSetSuccessor.output.assets[${index}]`);
-        const bundleDigest = requiredDigest(
-          asset.bundleDigest,
-          `publishExactSetSuccessor.output.assets[${index}].bundleDigest`,
-        );
-        const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
-        if (stagedBundle === null) {
-          throw new Error(`published exact-set bundle ${bundleDigest} is absent from durable storage`);
-        }
-        return Object.freeze({
-          ...asset,
-          stagedBundleByteLength: stagedBundle.byteLength,
-        });
-      }));
-      emitOperationResult(command, { ...result, assets: Object.freeze(assetsWithReceipts) });
+      emitOperationResult(command, output);
       return;
     }
     case 'announce': {
@@ -352,6 +340,238 @@ async function handle(command: Command): Promise<void> {
   }
 }
 
+type OpenGenesisInput = Parameters<DKGAgent['publishOpenAuthorCatalogGenesisV1']>[0];
+type PolicyBoundGenesisInput = Parameters<DKGAgent['publishAuthorCatalogGenesisV1']>[0];
+type ExactSetSuccessorInput = Parameters<DKGAgent['publishAuthorCatalogExactSetSuccessorV1']>[0];
+
+function normalizeOpenGenesisInput(
+  command: Command,
+): OpenGenesisInput {
+  const label = command.command;
+  const input = plainRecord(command.input, `${label} input`);
+  const authorPrivateKey = requiredString(
+    input.authorPrivateKey,
+    `${label}.authorPrivateKey`,
+  );
+  const networkId = requiredString(input.networkId, `${label}.networkId`);
+  assertNetworkIdV1(networkId);
+  const contextGraphId = requiredString(input.contextGraphId, `${label}.contextGraphId`);
+  assertContextGraphIdV1(contextGraphId);
+  const issuedAt = optionalTimestamp(input.issuedAt, `${label}.issuedAt`);
+  const catalogIssuerDelegationEffectiveAt = canonicalTimestamp(
+    input.catalogIssuerDelegationEffectiveAt,
+    `${label}.catalogIssuerDelegationEffectiveAt`,
+  );
+  const catalogIssuerDelegationExpiresAt = canonicalTimestamp(
+    input.catalogIssuerDelegationExpiresAt,
+    `${label}.catalogIssuerDelegationExpiresAt`,
+  );
+  return {
+    networkId,
+    contextGraphId,
+    author: new ethers.Wallet(authorPrivateKey),
+    peers: [],
+    ...(issuedAt === undefined ? {} : { issuedAt }),
+    ...(input.subGraphName === undefined
+      ? {}
+      : { subGraphName: nullableSubGraphName(input.subGraphName, `${label}.subGraphName`) }),
+    ...(input.policyIssuedAt === undefined
+      ? {}
+      : { policyIssuedAt: canonicalTimestamp(input.policyIssuedAt, `${label}.policyIssuedAt`) }),
+    ...(input.policyEffectiveAt === undefined
+      ? {}
+      : {
+        policyEffectiveAt: canonicalTimestamp(
+          input.policyEffectiveAt,
+          `${label}.policyEffectiveAt`,
+        ),
+      }),
+    ...(input.ownerAuthorityEra === undefined
+      ? {}
+      : {
+        ownerAuthorityEra: canonicalDecimalU64(
+          input.ownerAuthorityEra,
+          `${label}.ownerAuthorityEra`,
+        ),
+      }),
+    catalogIssuerDelegationEffectiveAt,
+    catalogIssuerDelegationExpiresAt,
+  } satisfies OpenGenesisInput;
+}
+
+function normalizePolicyBoundGenesisInput(
+  command: Command,
+): PolicyBoundGenesisInput {
+  const label = command.command;
+  const input = plainRecord(command.input, `${label} input`);
+  const authorPrivateKey = requiredString(
+    input.authorPrivateKey,
+    `${label}.authorPrivateKey`,
+  );
+  assertAuthorCatalogScopeV1(input.scope);
+  return {
+    scope: input.scope,
+    author: new ethers.Wallet(authorPrivateKey),
+    peers: [],
+    ...(input.issuedAt === undefined
+      ? {}
+      : { issuedAt: canonicalTimestamp(input.issuedAt, `${label}.issuedAt`) }),
+    catalogIssuerDelegationEffectiveAt: canonicalTimestamp(
+      input.catalogIssuerDelegationEffectiveAt,
+      `${label}.catalogIssuerDelegationEffectiveAt`,
+    ),
+    catalogIssuerDelegationExpiresAt: canonicalTimestamp(
+      input.catalogIssuerDelegationExpiresAt,
+      `${label}.catalogIssuerDelegationExpiresAt`,
+    ),
+  } satisfies PolicyBoundGenesisInput;
+}
+
+async function publishExactSetSuccessorVia(
+  currentAgent: DKGAgent,
+  command: Command,
+  mode: 'open' | 'policy-bound',
+): Promise<Record<string, unknown>> {
+  const forwarded = normalizeExactSetSuccessorInput(command);
+  const published = mode === 'open'
+    ? await currentAgent.publishOpenAuthorCatalogExactSetSuccessorV1(forwarded)
+    : await currentAgent.publishAuthorCatalogExactSetSuccessorV1(forwarded);
+  return addDurableBundleReceipts(currentAgent, published, command.command);
+}
+
+function normalizeExactSetSuccessorInput(command: Command): ExactSetSuccessorInput {
+  const label = command.command;
+  const input = plainRecord(command.input, `${label} input`);
+  const authorPrivateKey = requiredString(
+    input.authorPrivateKey,
+    `${label}.authorPrivateKey`,
+  );
+  const assets: ExactSetSuccessorInput['assets'] = plainArray(
+    input.assets,
+    `${label}.assets`,
+  ).map((value, index) => {
+    const assetLabel = `${label}.assets[${index}]`;
+    const asset = plainRecord(value, assetLabel);
+    assertAssertionCoordinateV1(asset.assertionCoordinate, `${assetLabel}.assertionCoordinate`);
+    assertCanonicalGraphScopedAuthorSealV1(asset.seal);
+    const projectionNQuads = requiredString(
+      asset.projectionNQuads,
+      `${assetLabel}.projectionNQuads`,
+    );
+    return Object.freeze({
+      assertionCoordinate: asset.assertionCoordinate,
+      projectionBytes: new TextEncoder().encode(projectionNQuads),
+      seal: asset.seal,
+    });
+  });
+  const previousHead = plainRecord(input.previousHead, `${label}.previousHead`);
+  const authorization = plainRecord(
+    input.catalogIssuerAuthorization,
+    `${label}.catalogIssuerAuthorization`,
+  );
+  const catalogIssuerDelegation =
+    authorization.catalogIssuerDelegation as SignedControlEnvelopeV1;
+  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1(catalogIssuerDelegation);
+  if (authorization.parentAuthorAgentEvidence !== null) {
+    throw new TypeError(`${label}.catalogIssuerAuthorization must use direct-author evidence`);
+  }
+  const deployment = plainRecord(input.deployment, `${label}.deployment`);
+  const networkId = requiredString(deployment.networkId, `${label}.deployment.networkId`);
+  assertNetworkIdV1(networkId);
+  const assertedAtChainId = requiredString(
+    deployment.assertedAtChainId,
+    `${label}.deployment.assertedAtChainId`,
+  );
+  assertCanonicalChainId(assertedAtChainId, `${label}.deployment.assertedAtChainId`);
+  const assertedAtKav10Address = canonicalEvmAddress(
+    deployment.assertedAtKav10Address,
+    `${label}.deployment.assertedAtKav10Address`,
+  );
+  return {
+    previousHead: {
+      objectDigest: requiredDigest(previousHead.objectDigest, `${label}.previousHead.objectDigest`),
+      signatureVariantDigest: requiredDigest(
+        previousHead.signatureVariantDigest,
+        `${label}.previousHead.signatureVariantDigest`,
+      ),
+    },
+    author: new ethers.Wallet(authorPrivateKey),
+    catalogIssuerAuthorization: {
+      catalogIssuerDelegation,
+      parentAuthorAgentEvidence: null,
+    },
+    assets,
+    deployment: { networkId, assertedAtChainId, assertedAtKav10Address },
+    ...(input.issuedAt === undefined
+      ? {}
+      : { issuedAt: canonicalTimestamp(input.issuedAt, `${label}.issuedAt`) }),
+    peers: [],
+  } satisfies ExactSetSuccessorInput;
+}
+
+async function addDurableBundleReceipts(
+  currentAgent: DKGAgent,
+  published: unknown,
+  label: string,
+): Promise<Record<string, unknown>> {
+  const result = plainRecord(published, `${label} output`);
+  const outputAssets = plainArray(result.assets, `${label}.output.assets`);
+  const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
+    const assetLabel = `${label}.output.assets[${index}]`;
+    const asset = plainRecord(value, assetLabel);
+    const bundleDigest = requiredDigest(asset.bundleDigest, `${assetLabel}.bundleDigest`);
+    const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
+    if (stagedBundle === null) {
+      throw new Error(`published bundle ${bundleDigest} is absent from durable storage`);
+    }
+    return Object.freeze({
+      ...asset,
+      stagedBundleByteLength: stagedBundle.byteLength,
+    });
+  }));
+  return Object.freeze({ ...result, assets: Object.freeze(assetsWithReceipts) });
+}
+
+function canonicalTimestamp(
+  value: unknown,
+  label: string,
+): NonNullable<OpenGenesisInput['issuedAt']> {
+  assertCanonicalTimestampMs(value, label);
+  return value;
+}
+
+function optionalTimestamp(
+  value: unknown,
+  label: string,
+): NonNullable<OpenGenesisInput['issuedAt']> | undefined {
+  return value === undefined ? undefined : canonicalTimestamp(value, label);
+}
+
+function canonicalDecimalU64(
+  value: unknown,
+  label: string,
+): NonNullable<OpenGenesisInput['ownerAuthorityEra']> {
+  assertCanonicalDecimalU64(value, label);
+  return value;
+}
+
+function nullableSubGraphName(
+  value: unknown,
+  label: string,
+): OpenGenesisInput['subGraphName'] {
+  if (value === null) return null;
+  assertSubGraphNameV1(value, label);
+  return value;
+}
+
+function canonicalEvmAddress(value: unknown, label: string): EvmAddressV1 {
+  const address = requiredString(value, label);
+  if (!/^0x[0-9a-f]{40}$/u.test(address) || address === `0x${'0'.repeat(40)}`) {
+    throw new TypeError(`${label} is not a canonical non-zero EVM address`);
+  }
+  return address as EvmAddressV1;
+}
+
 function compareQuad(left: Quad, right: Quad): number {
   const leftKey = `${left.subject}\n${left.predicate}\n${left.object}\n${left.graph}`;
   const rightKey = `${right.subject}\n${right.predicate}\n${right.object}\n${right.graph}`;
@@ -362,55 +582,106 @@ function wireSynchronizationEvidence(output: unknown): unknown {
   if (output === null) return null;
   const evidence = plainRecord(output, 'exact synchronization evidence');
   if (evidence.inventoryRowCount === 0) return evidence;
-  const sourceRows = evidence.inventoryRowCount === 1
-    ? [evidence]
-    : plainArray(evidence.rows, 'synchronization.rows');
-  let verifiedControlObjectCount: number | undefined;
-  const rows = sourceRows.map((value, index) => {
-    const row = plainRecord(value, `synchronization.rows[${index}]`);
-    const authorship = plainRecord(row.authorship, `synchronization.rows[${index}].authorship`);
-    const path = plainArray(
-      authorship.directoryPathObjectDigests,
-      `synchronization.rows[${index}].authorship.directoryPathObjectDigests`,
+  const wired = evidence.inventoryRowCount === 1
+    ? [wireLegacySingleRowSynchronizationEvidence(evidence)]
+    : plainArray(evidence.rows, 'synchronization.rows').map(
+      (value, index) => wireMultiRowSynchronizationEvidence(value, index),
     );
-    const variants = plainArray(
-      authorship.directoryPathSignatureVariantDigests,
-      `synchronization.rows[${index}].authorship.directoryPathSignatureVariantDigests`,
-    );
-    if (path.length !== variants.length) {
-      throw new Error('synchronization authorship path evidence is incomplete');
-    }
-    const rowControlObjectCount = 3 + path.length;
-    if (
-      verifiedControlObjectCount !== undefined
-      && rowControlObjectCount !== verifiedControlObjectCount
-    ) {
-      throw new Error('synchronization rows disagree on the verified control-object closure');
-    }
-    verifiedControlObjectCount = rowControlObjectCount;
-    return Object.freeze({
-      kaId: canonicalDecimalWire(row.kaId, `synchronization.rows[${index}].kaId`),
-      catalogRowDigest: row.catalogRowDigest,
-      contentDigest: row.contentDigest,
-      sealDigest: row.sealDigest,
-      bundleDigest: row.bundleDigest,
-      kaUal: row.kaUal,
-      activatedTripleCount: row.activatedTripleCount,
-      swmGraph: row.swmGraph,
-    });
-  });
-  if (verifiedControlObjectCount === undefined) {
-    throw new Error('non-empty synchronization evidence contains no exact rows');
-  }
+  const verifiedControlObjectCount = requireUniformControlObjectCount(wired);
   return Object.freeze({
     inventoryDigest: evidence.inventoryDigest,
     catalogHeadDigest: evidence.catalogHeadDigest,
     inventoryRowCount: evidence.inventoryRowCount,
     activatedTripleCount: evidence.activatedTripleCount,
     appliedHeadStatus: evidence.appliedHeadStatus,
-    rows: Object.freeze(rows),
+    rows: Object.freeze(wired.map((entry) => entry.row)),
     verifiedControlObjectCount,
   });
+}
+
+interface WiredSynchronizationRow {
+  readonly row: Readonly<Record<string, unknown>>;
+  readonly verifiedControlObjectCount: number;
+}
+
+function wireLegacySingleRowSynchronizationEvidence(
+  evidence: Record<string, unknown>,
+): WiredSynchronizationRow {
+  const label = 'synchronization.legacySingleRow';
+  const kaUal = requiredString(evidence.kaUal, `${label}.kaUal`);
+  return wireSynchronizationRow(
+    evidence,
+    label,
+    canonicalDecimalWire(packedKaIdFromUal(kaUal), `${label}.kaId`),
+    null,
+  );
+}
+
+function wireMultiRowSynchronizationEvidence(
+  value: unknown,
+  index: number,
+): WiredSynchronizationRow {
+  const label = `synchronization.rows[${index}]`;
+  const row = plainRecord(value, label);
+  return wireSynchronizationRow(
+    row,
+    label,
+    canonicalDecimalWire(row.kaId, `${label}.kaId`),
+    requiredDigest(row.sealDigest, `${label}.sealDigest`),
+  );
+}
+
+function wireSynchronizationRow(
+  row: Record<string, unknown>,
+  label: string,
+  kaId: string,
+  sealDigest: Digest32V1 | null,
+): WiredSynchronizationRow {
+  const authorship = plainRecord(row.authorship, `${label}.authorship`);
+  const path = plainArray(
+    authorship.directoryPathObjectDigests,
+    `${label}.authorship.directoryPathObjectDigests`,
+  );
+  const variants = plainArray(
+    authorship.directoryPathSignatureVariantDigests,
+    `${label}.authorship.directoryPathSignatureVariantDigests`,
+  );
+  if (path.length !== variants.length) {
+    throw new Error('synchronization authorship path evidence is incomplete');
+  }
+  return Object.freeze({
+    row: Object.freeze({
+      kaId,
+      catalogRowDigest: row.catalogRowDigest,
+      contentDigest: row.contentDigest,
+      sealDigest,
+      bundleDigest: row.bundleDigest,
+      kaUal: requiredString(row.kaUal, `${label}.kaUal`),
+      activatedTripleCount: row.activatedTripleCount,
+      swmGraph: row.swmGraph,
+    }),
+    verifiedControlObjectCount: 3 + path.length,
+  });
+}
+
+function requireUniformControlObjectCount(
+  rows: readonly WiredSynchronizationRow[],
+): number {
+  const first = rows[0];
+  if (first === undefined) {
+    throw new Error('non-empty synchronization evidence contains no exact rows');
+  }
+  for (const row of rows.slice(1)) {
+    if (row.verifiedControlObjectCount !== first.verifiedControlObjectCount) {
+      throw new Error('synchronization rows disagree on the verified control-object closure');
+    }
+  }
+  return first.verifiedControlObjectCount;
+}
+
+function packedKaIdFromUal(kaUal: string): string {
+  const parsed = parseDeterministicKnowledgeAssetUal(kaUal);
+  return ((BigInt(parsed.agentAddress) << 96n) | BigInt(parsed.kaNumber)).toString();
 }
 
 function canonicalDecimalWire(value: unknown, label: string): string {
@@ -422,6 +693,8 @@ function canonicalDecimalWire(value: unknown, label: string): string {
 function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string, boolean> {
   const surface = currentAgent as unknown as Record<string, unknown>;
   return Object.freeze({
+    acceptPolicySnapshot:
+      typeof surface.acceptRfc64CatalogAccessSnapshotV1 === 'function',
     acceptOpenPolicy: typeof surface.acceptOpenContextGraphPolicyV1 === 'function',
     announce: typeof surface.announceRfc64PublicCatalogHeadV1 === 'function',
     appliedHeadReadback: typeof surface.readRfc64AppliedCatalogHeadV1 === 'function',
@@ -430,6 +703,10 @@ function inspectGate2ProductCapabilities(currentAgent: DKGAgent): Record<string,
     publishExactSetSuccessor:
       typeof surface.publishOpenAuthorCatalogExactSetSuccessorV1 === 'function',
     publishGenesis: typeof surface.publishOpenAuthorCatalogGenesisV1 === 'function',
+    publishPolicyBoundExactSetSuccessor:
+      typeof surface.publishAuthorCatalogExactSetSuccessorV1 === 'function',
+    publishPolicyBoundGenesis:
+      typeof surface.publishAuthorCatalogGenesisV1 === 'function',
     terminalFailureReadback:
       typeof surface.readRfc64PublicCatalogReconciliationFailureV1 === 'function',
   });

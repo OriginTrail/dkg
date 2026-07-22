@@ -23,6 +23,7 @@ packages:
   - "devnet/rfc64-persistence-lifecycle"
   - "devnet/rfc64-gate1-public-open"
   - "devnet/rfc64-gate2-multi-asset-completeness"
+  - "devnet/rfc64-cp1-public-swm-parity"
   - "devnet/pr1386-term-canon"
   - "devnet/pr1385-subgraph-rs"
   - "devnet/pr1388-okf-integration"
