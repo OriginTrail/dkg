@@ -30,6 +30,7 @@ import {
 const CHAIN_ID = '20430' as ChainIdV1;
 const CHAIN_QUANTITY = '0x4fce';
 const TO = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
+const PREFLIGHT_PROBE_TO = '0x0000000000000000000000000000000000000000';
 const BLOCK_HASH = `0x${'22'.repeat(32)}`;
 const OTHER_BLOCK_HASH = `0x${'23'.repeat(32)}`;
 const FIRST_DATA = '0x11111111';
@@ -70,12 +71,16 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      'eth_getCode',
+      'eth_call',
       'eth_call',
     ]);
     const anchored = server.calls.filter(({ method }) => (
       method === 'eth_getCode' || method === 'eth_call'
     ));
     expect(anchored.map(({ params }) => params[1])).toEqual([
+      HASH_REFERENCE,
+      HASH_REFERENCE,
       HASH_REFERENCE,
       HASH_REFERENCE,
       HASH_REFERENCE,
@@ -106,13 +111,53 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       'eth_getBlockByNumber',
       'eth_getCode',
       'eth_call',
+      'eth_getCode',
+      'eth_call',
+    ]);
+  });
+
+  it('fails over before consumer execution when an endpoint rejects the EIP-1898 read profile', async () => {
+    const baseHandler = successfulHandler();
+    const first = await rpcHarness.start((rpcCall, response, rawRequest) => {
+      if (rpcCall.method === 'eth_call' && isPreflightProbe(rpcCall)) {
+        sendJsonRpcError(response, rpcCall, -32602, 'EIP-1898 block reference unsupported');
+        return;
+      }
+      return baseHandler(rpcCall, response, rawRequest);
+    });
+    const second = await rpcHarness.start(successfulHandler());
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [first.url, second.url],
+    });
+    let consumers = 0;
+
+    await expect(withSnapshot(request(), async (session) => {
+      consumers += 1;
+      return session.read([call(FIRST_DATA)]);
+    })).resolves.toEqual(['0xaaaa']);
+
+    expect(consumers).toBe(1);
+    expect(first.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
+    expect(second.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_getCode',
+      'eth_call',
     ]);
   });
 
   it('never retries or replays the consumer after callback execution begins', async () => {
     const baseHandler = successfulHandler();
     const first = await rpcHarness.start((rpcCall, response, rawRequest) => {
-      if (rpcCall.method !== 'eth_call') {
+      if (rpcCall.method !== 'eth_call' || isPreflightProbe(rpcCall)) {
         return baseHandler(rpcCall, response, rawRequest);
       }
       response.writeHead(503, { 'content-type': 'text/plain' });
@@ -134,6 +179,8 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     expect(first.calls.map(({ method }) => method)).toEqual([
       'eth_chainId',
       'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
       'eth_getCode',
       'eth_call',
     ]);
@@ -187,14 +234,20 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           if (!finalizedLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads > 1 ? BLOCK_HASH : OTHER_BLOCK_HASH,
+            hash: finalizedLookup || numberedHeaderReads !== 2 ? BLOCK_HASH : OTHER_BLOCK_HASH,
           });
           return;
         }
-        case 'eth_getCode':
-          codeReads += 1;
-          sendJsonRpcResult(response, rpcCall, codeReads === 1 ? '0x6000' : '0x');
+        case 'eth_getCode': {
+          const isProbe = rpcCall.params[0] === PREFLIGHT_PROBE_TO;
+          if (!isProbe) codeReads += 1;
+          sendJsonRpcResult(
+            response,
+            rpcCall,
+            isProbe || codeReads === 1 ? '0x6000' : '0x',
+          );
           return;
+        }
         case 'eth_call':
           sendJsonRpcResult(response, rpcCall, '0xaaaa');
           return;
@@ -230,22 +283,34 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
         [OTHER_BLOCK_HASH, 'finalized-state-unavailable'],
         [BLOCK_HASH, failure.stableCode],
       ] as const) {
+        let numberedHeaderReads = 0;
         const server = await rpcHarness.start((rpcCall, response) => {
           switch (rpcCall.method) {
             case 'eth_chainId':
               sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
               return;
-            case 'eth_getBlockByNumber':
+            case 'eth_getBlockByNumber': {
+              const finalizedLookup = rpcCall.params[0] === 'finalized';
+              if (!finalizedLookup) numberedHeaderReads += 1;
               sendJsonRpcResult(response, rpcCall, {
                 number: '0x7b',
-                hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : postHash,
+                hash: finalizedLookup || numberedHeaderReads === 1 ? BLOCK_HASH : postHash,
               });
               return;
+            }
             case 'eth_getCode':
-              sendJsonRpcResult(response, rpcCall, failure.kind === 'no-code' ? '0x' : '0x6000');
+              sendJsonRpcResult(
+                response,
+                rpcCall,
+                rpcCall.params[0] === PREFLIGHT_PROBE_TO || failure.kind !== 'no-code'
+                  ? '0x6000'
+                  : '0x',
+              );
               return;
             case 'eth_call':
-              if (failure.kind === 'revert') {
+              if (isPreflightProbe(rpcCall)) {
+                sendJsonRpcResult(response, rpcCall, '0x');
+              } else if (failure.kind === 'revert') {
                 sendJsonRpcError(response, rpcCall, 3, 'execution reverted');
               } else if (failure.kind === 'resource-limit') {
                 sendJsonRpcError(response, rpcCall, -32000, 'out of gas');
@@ -267,7 +332,9 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           session.read([call(FIRST_DATA, failure.maxReturnBytes)])
         ))).rejects.toMatchObject({ code: expectedCode });
         const expectedCalls = failure.kind === 'no-code' ? 0 : 1;
-        expect(server.calls.filter(({ method }) => method === 'eth_call'))
+        expect(server.calls.filter((rpcCall) => (
+          rpcCall.method === 'eth_call' && !isPreflightProbe(rpcCall)
+        )))
           .toHaveLength(expectedCalls);
         expect(server.calls.filter(({ method }) => method === 'eth_chainId'))
           .toHaveLength(1);
@@ -287,7 +354,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           if (!finalizedLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads === 1
+            hash: finalizedLookup || numberedHeaderReads <= 2
               ? BLOCK_HASH
               : OTHER_BLOCK_HASH,
           });
@@ -313,7 +380,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       await session.read([call(FIRST_DATA)]);
       return 'must-not-escape';
     })).rejects.toMatchObject({ code: 'finalized-state-unavailable' });
-    expect(numberedHeaderReads).toBe(2);
+    expect(numberedHeaderReads).toBe(3);
   });
 
   it('closes an escaped session and cannot mix it into a later adapter scope', async () => {
@@ -344,6 +411,8 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     expect(second.calls.map(({ method }) => method)).toEqual([
       'eth_chainId',
       'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
     ]);
   });
 
@@ -352,7 +421,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     const releaseCall = deferred<void>();
     const baseHandler = successfulHandler();
     const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
-      if (rpcCall.method === 'eth_call') {
+      if (rpcCall.method === 'eth_call' && !isPreflightProbe(rpcCall)) {
         callStarted.resolve(undefined);
         await releaseCall.promise;
       }
@@ -382,7 +451,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     const releaseCall = deferred<void>();
     const baseHandler = successfulHandler();
     const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
-      if (rpcCall.method !== 'eth_call') {
+      if (rpcCall.method !== 'eth_call' || isPreflightProbe(rpcCall)) {
         await baseHandler(rpcCall, response, rawRequest);
         return;
       }
@@ -420,7 +489,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     const releaseCall = deferred<void>();
     const baseHandler = successfulHandler();
     const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
-      if (rpcCall.method === 'eth_call') {
+      if (rpcCall.method === 'eth_call' && !isPreflightProbe(rpcCall)) {
         callStarted.resolve(undefined);
         await releaseCall.promise;
       }
@@ -453,7 +522,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     const closed = deferred<void>();
     const baseHandler = successfulHandler();
     const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
-      if (rpcCall.method !== 'eth_call') {
+      if (rpcCall.method !== 'eth_call' || isPreflightProbe(rpcCall)) {
         return baseHandler(rpcCall, response, rawRequest);
       }
       response.on('close', () => closed.resolve(undefined));
@@ -495,6 +564,8 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     expect(server.calls.map(({ method }) => method)).toEqual([
       'eth_chainId',
       'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
     ]);
   });
 
@@ -595,7 +666,8 @@ function successfulHandler(): LoopbackJsonRpcHandler {
         return;
       case 'eth_call': {
         const callObject = rpcCall.params[0] as { readonly data?: unknown };
-        if (callObject.data === FIRST_DATA) sendJsonRpcResult(response, rpcCall, '0xaaaa');
+        if (callObject.data === '0x') sendJsonRpcResult(response, rpcCall, '0x');
+        else if (callObject.data === FIRST_DATA) sendJsonRpcResult(response, rpcCall, '0xaaaa');
         else if (callObject.data === SECOND_DATA) sendJsonRpcResult(response, rpcCall, '0xbbbb');
         else sendJsonRpcError(response, rpcCall, -32602, 'unexpected calldata');
         return;
@@ -604,6 +676,11 @@ function successfulHandler(): LoopbackJsonRpcHandler {
         sendJsonRpcError(response, rpcCall, -32601, 'method not found');
     }
   };
+}
+
+function isPreflightProbe(rpcCall: { readonly params: readonly unknown[] }): boolean {
+  const callObject = rpcCall.params[0] as { readonly to?: unknown; readonly data?: unknown };
+  return callObject.to === PREFLIGHT_PROBE_TO && callObject.data === '0x';
 }
 
 function deferred<T>(): {

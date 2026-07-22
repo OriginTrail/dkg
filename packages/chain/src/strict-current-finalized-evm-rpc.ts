@@ -311,7 +311,6 @@ async function executeEndpointAttempt(
     ),
     anchorMismatchMessage:
       'Block-number fallback hash sandwich did not preserve the resolved finalized anchor',
-    missingResultMessage: 'Block-number fallback produced no contract results',
   });
 
   return Object.freeze({
@@ -333,7 +332,6 @@ export interface StrictFinalizedAnchorPolicyOptionsV1<T> {
   readonly executeAtReference: (blockReference: unknown) => Promise<T>;
   readonly readPostAnchor: () => Promise<FinalizedAnchorV1>;
   readonly anchorMismatchMessage: string;
-  readonly missingResultMessage: string;
 }
 
 /** Canonical EIP-1898 / authenticated-numbered-anchor execution policy. */
@@ -350,10 +348,14 @@ export async function executeStrictFinalizedAnchorPolicyV1<T>(
   // Number-selected evidence is not deterministic until the same endpoint
   // closes the hash sandwich. Delay every anchor-dependent invalidity until
   // that proof succeeds so neither callers nor caches can observe false state.
-  let anchorDependentFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
-  let provisionalResult: T | undefined;
+  let provisionalExecution:
+    | Readonly<{ readonly ok: true; readonly value: T }>
+    | Readonly<{ readonly ok: false; readonly failure: CurrentFinalizedEvmCallErrorV1 }>;
   try {
-    provisionalResult = await options.executeAtReference(options.anchor.blockNumberQuantity);
+    provisionalExecution = Object.freeze({
+      ok: true,
+      value: await options.executeAtReference(options.anchor.blockNumberQuantity),
+    });
   } catch (cause) {
     if (
       cause instanceof CurrentFinalizedEvmCallErrorV1
@@ -364,7 +366,7 @@ export async function executeStrictFinalizedAnchorPolicyV1<T>(
         || isAnchorDependentResourceLimit(cause)
       )
     ) {
-      anchorDependentFailure = cause;
+      provisionalExecution = Object.freeze({ ok: false, failure: cause });
     } else {
       throw cause;
     }
@@ -374,9 +376,8 @@ export async function executeStrictFinalizedAnchorPolicyV1<T>(
     options.readPostAnchor,
     options.anchorMismatchMessage,
   );
-  if (anchorDependentFailure !== undefined) throw anchorDependentFailure;
-  if (provisionalResult === undefined) throw unavailable(options.missingResultMessage);
-  return provisionalResult;
+  if (!provisionalExecution.ok) throw provisionalExecution.failure;
+  return provisionalExecution.value;
 }
 
 export async function assertStrictFinalizedAnchorStableV1(

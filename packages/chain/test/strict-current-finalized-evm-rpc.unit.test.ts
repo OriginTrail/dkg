@@ -32,6 +32,8 @@ import {
 import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
+  executeStrictFinalizedAnchorPolicyV1,
+  parseFinalizedAnchor,
   readStrictCurrentFinalizedEvmRevertDataV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
@@ -78,6 +80,20 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       .toBe(CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1);
     expect(CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1)
       .toBe(CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1);
+  });
+
+  it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
+    const anchor = parseFinalizedAnchor(
+      { number: '0x7b', hash: BLOCK_HASH },
+      'generic void result test anchor',
+    );
+    await expect(executeStrictFinalizedAnchorPolicyV1<void>({
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+      anchor,
+      executeAtReference: async () => undefined,
+      readPostAnchor: async () => anchor,
+      anchorMismatchMessage: 'generic void result anchor changed',
+    })).resolves.toBeUndefined();
   });
 
   it('executes multiple ABI reads at one EIP-1898 anchor and checks shared code once', async () => {
