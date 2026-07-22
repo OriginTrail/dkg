@@ -1,10 +1,7 @@
 import { type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
-import {
-  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
-  CurrentFinalizedEvmCallErrorV1,
-} from './current-finalized-evm-read-profile.js';
+import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
 import {
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadResolverV1,
@@ -15,8 +12,9 @@ import {
   type StrictCurrentFinalizedEvmReadV1,
 } from './strict-current-finalized-evm-rpc.js';
 
-export const FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1 =
-  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1;
+// getContextGraph has nine fixed words plus a chain-capped 256-address array:
+// its maximal canonical ABI result is 8,512 bytes, below this domain ceiling.
+export const FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1 = 9 * 1024;
 export const FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1 = 32;
 
 const CONTEXT_GRAPH_STORAGE_FINALIZED_READ_INTERFACE = new ethers.Interface([
