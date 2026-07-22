@@ -16,7 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
-  generateGraphKnowledgeAssetMetadata,
+  generateRfc64FinalizedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -29,8 +29,6 @@ import type {
   FinalizedVmMaterializerV1,
 } from './finalized-vm-runtime-v1.js';
 
-const DKG = 'http://dkg.io/ontology/';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
   'OT-RFC-64:finalized-vm-post-read:v1\0',
 );
@@ -114,23 +112,31 @@ export function createFinalizedVmStoreMaterializerV1(
     request.signal.throwIfAborted();
 
     const metaGraph = contextGraphMetaUri(request.catalogLane.contextGraphId);
-    const metadataQuads = locallyAuthenticatedConfirmedMetadata({
+    const timestamp = new Date(seal.assertionFinalizedAt);
+    if (!Number.isFinite(timestamp.getTime())) {
+      throw new Error('finalized VM seal timestamp is invalid');
+    }
+    const metadataQuads = generateRfc64FinalizedGraphKnowledgeAssetMetadata({
       contextGraphId: request.catalogLane.contextGraphId,
       ual: request.candidate.ual,
+      merkleRoot: ethers.getBytes(request.candidate.assertionRoot),
+      publisherPeerId: 'rfc64-finalized-catalog-v1',
+      accessPolicy: 'public',
+      allowedPeers: [],
+      timestamp,
       assertionVersion: request.candidate.assertionVersion,
-      assertionRoot: request.candidate.assertionRoot,
       authorAddress: binding.authorAddress,
       publicTripleCount,
       privateTripleCount,
-      privateMerkleRoot,
-      vmGraph,
-      metaGraph,
-      subGraphName,
-      kaId: request.candidate.kaId,
-      finalizedBlockNumber: boundedMaterializedBlockNumber(
-        request.candidate.finalizedBlockNumber,
-      ),
-      finalizedAt: seal.assertionFinalizedAt,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      assertionGraph: vmGraph,
+      ...(subGraphName ? { subGraphName } : {}),
+    }, {
+      batchId: BigInt(request.candidate.kaId),
+      materializedVersion: {
+        blockNumber: boundedMaterializedBlockNumber(request.candidate.finalizedBlockNumber),
+        txIndex: 0,
+      },
     });
     const asset = Object.freeze({
       contextGraphId: request.catalogLane.contextGraphId,
@@ -179,62 +185,6 @@ export function createFinalizedVmStoreMaterializerV1(
   });
 }
 
-function locallyAuthenticatedConfirmedMetadata(input: {
-  readonly contextGraphId: string;
-  readonly ual: string;
-  readonly assertionVersion: string;
-  readonly assertionRoot: Digest32V1;
-  readonly authorAddress: string;
-  readonly publicTripleCount: number;
-  readonly privateTripleCount: number;
-  readonly privateMerkleRoot?: Uint8Array;
-  readonly vmGraph: string;
-  readonly metaGraph: string;
-  readonly subGraphName?: string;
-  readonly kaId: string;
-  readonly finalizedBlockNumber: string;
-  readonly finalizedAt: string;
-}): readonly Quad[] {
-  const timestamp = new Date(input.finalizedAt);
-  if (!Number.isFinite(timestamp.getTime())) {
-    throw new Error('finalized VM seal timestamp is invalid');
-  }
-  const tentative = generateGraphKnowledgeAssetMetadata({
-    ual: input.ual,
-    contextGraphId: input.contextGraphId,
-    merkleRoot: ethers.getBytes(input.assertionRoot),
-    publisherPeerId: 'rfc64-finalized-catalog-v1',
-    accessPolicy: 'public',
-    allowedPeers: [],
-    timestamp,
-    ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
-    authorAddress: input.authorAddress,
-    assertionVersion: input.assertionVersion,
-    publicTripleCount: input.publicTripleCount,
-    ...(input.privateMerkleRoot ? { privateMerkleRoot: input.privateMerkleRoot } : {}),
-    privateTripleCount: input.privateTripleCount,
-    assertionGraph: input.vmGraph,
-  }, 'tentative');
-  const confirmed = tentative.map((quad) => quad.predicate === `${DKG}status`
-    ? Object.freeze({ ...quad, object: '"confirmed"' })
-    : Object.freeze({ ...quad }));
-  confirmed.push(
-    Object.freeze({
-      subject: input.ual,
-      predicate: `${DKG}batchId`,
-      object: `"${input.kaId}"^^<${XSD_INTEGER}>`,
-      graph: input.metaGraph,
-    }),
-    Object.freeze({
-      subject: input.ual,
-      predicate: `${DKG}materializedVersion`,
-      object: `"${input.finalizedBlockNumber}:0"`,
-      graph: input.metaGraph,
-    }),
-  );
-  return Object.freeze(confirmed);
-}
-
 function boundedTripleCount(value: string, label: string): number {
   const parsed = BigInt(value);
   if (
@@ -246,12 +196,12 @@ function boundedTripleCount(value: string, label: string): number {
   return Number(parsed);
 }
 
-function boundedMaterializedBlockNumber(value: string): string {
+function boundedMaterializedBlockNumber(value: string): number {
   const parsed = BigInt(value);
   if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new RangeError('finalized block number exceeds the VM metadata ordering domain');
   }
-  return parsed.toString(10);
+  return Number(parsed);
 }
 
 function assertProjectionRoot(

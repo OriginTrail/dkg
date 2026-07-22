@@ -54,12 +54,21 @@ export interface ComposeFinalizedVmSetRequestV1 {
 interface ResolvedFinalizedVmPlacementV1 {
   readonly authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>;
   readonly sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>;
+  readonly placement: Readonly<FinalizedVmPlacementEvidenceV1>;
+}
+
+export interface FinalizedVmMaterializationPlanRowV1 {
+  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
+  readonly placement: Readonly<FinalizedVmPlacementEvidenceV1>;
+  readonly row: Readonly<FinalizedVmSetRowV1>;
 }
 
 export interface ComposedFinalizedVmSetV1 {
   readonly catalogLane: Readonly<FinalizedVmCatalogLaneV1>;
   readonly evidence: Readonly<FinalizedVmSetEvidenceV1>;
   readonly rows: readonly Readonly<FinalizedVmSetRowV1>[];
+  /** Exact placement/inventory join in authoritative finalized ordinal order. */
+  readonly materializations: readonly Readonly<FinalizedVmMaterializationPlanRowV1>[];
 }
 
 export type FinalizedVmCompositionErrorCodeV1 =
@@ -177,7 +186,11 @@ export function composeFinalizedVmSetV1(
         `catalog lane contains duplicate placement evidence for KA ${sealBinding.kaId}`,
       );
     }
-    placementsByKaId.set(sealBinding.kaId, Object.freeze({ authorship, sealBinding }));
+    placementsByKaId.set(sealBinding.kaId, Object.freeze({
+      authorship,
+      sealBinding,
+      placement: Object.freeze(placement),
+    }));
   }
 
   const scope = Object.freeze({
@@ -187,6 +200,7 @@ export function composeFinalizedVmSetV1(
   });
   const accumulator = new FinalizedVmSetAccumulatorV1(scope);
   const rows: Readonly<FinalizedVmSetRowV1>[] = [];
+  const materializations: Readonly<FinalizedVmMaterializationPlanRowV1>[] = [];
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) continue;
@@ -214,6 +228,11 @@ export function composeFinalizedVmSetV1(
     } satisfies FinalizedVmSetRowV1);
     accumulator.append(row);
     rows.push(row);
+    materializations.push(Object.freeze({
+      candidate,
+      placement: placement.placement,
+      row,
+    }));
   }
   if (placementsByKaId.size !== 0) {
     const [missingKaId] = placementsByKaId.keys();
@@ -227,6 +246,7 @@ export function composeFinalizedVmSetV1(
     catalogLane,
     evidence: accumulator.finalize(),
     rows: Object.freeze(rows),
+    materializations: Object.freeze(materializations),
   });
 }
 
@@ -309,10 +329,10 @@ function snapshotPlacement(input: unknown, index: number): FinalizedVmPlacementE
     `finalized VM placement ${index}`,
     'finalized-vm-composition-placement',
   );
-  return {
+  return Object.freeze({
     authorship: record.authorship as VerifiedAuthorCatalogRowAuthorshipV1,
     sealBinding: record.sealBinding as VerifiedCatalogSealBindingV1,
-  };
+  });
 }
 
 function snapshotDenseArray(

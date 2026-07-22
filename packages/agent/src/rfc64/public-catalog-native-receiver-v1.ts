@@ -76,7 +76,6 @@ import {
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
-import type { FinalizedVmPlacementEvidenceV1 } from './finalized-vm-composer-v1.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
@@ -129,27 +128,33 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
   >;
   readonly store: TripleStore;
   /**
-   * Final fail-closed semantic admission step. It runs after the exact SWM
+   * Final fail-closed same-process barrier. It runs after the exact SWM
    * post-read and before the durable applied-head CAS. A rejection leaves the
-   * head unapplied so a later synchronization can idempotently repair both
-   * SWM and any partially materialized VM rows.
+   * head unapplied so a later synchronization can idempotently repair SWM and
+   * any consumer-specific side effects performed by an earlier attempt.
    */
-  readonly beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1;
+  readonly beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1;
   readonly transportTimeoutMs?: number;
 }
 
-/** Exact same-process evidence admitted to finalized VM composition. */
-export interface Rfc64PublicCatalogNativeFinalizedVmPrecommitV1 {
+/** Process-local verified row capabilities withheld from serializable receiver evidence. */
+export interface Rfc64PublicCatalogNativePrecommitRowPlanV1 {
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipV1;
+  readonly sealBinding: VerifiedCatalogSealBindingV1;
+}
+
+/** Generic same-process barrier plan executed after semantic post-read and before head CAS. */
+export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1 {
   readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
   readonly catalogHeadDigest: Digest32V1;
   readonly inventoryDigest: Digest32V1;
   /** Strictly increasing by mathematical KA ID. */
-  readonly rows: readonly Readonly<Rfc64PublicCatalogNativeActivatedRowEvidenceV1>[];
+  readonly rows: readonly Readonly<Rfc64PublicCatalogNativePrecommitRowPlanV1>[];
 }
 
-export interface Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1 {
+export interface Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 {
   (
-    evidence: Readonly<Rfc64PublicCatalogNativeFinalizedVmPrecommitV1>,
+    plan: Readonly<Rfc64PublicCatalogNativeBeforeAppliedHeadCommitPlanV1>,
     signal: AbortSignal,
   ): Promise<void>;
 }
@@ -167,8 +172,6 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly swmGraph: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
-  /** Process-local capabilities retained for same-process finalized VM admission. */
-  readonly placement: FinalizedVmPlacementEvidenceV1;
   /** Exact predecessor rows absent from this head and physically deactivated before its CAS. */
   readonly removedRows: readonly Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>[];
   readonly removedRowCount: number;
@@ -187,8 +190,6 @@ export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
   readonly swmGraph: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
-  /** Process-local capabilities retained for same-process finalized VM admission. */
-  readonly placement: FinalizedVmPlacementEvidenceV1;
 }
 
 /** Exact evidence for one bounded multi-asset successor inventory. */
@@ -849,10 +850,6 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           ...activation.evidence,
           swmGraph: activation.swmGraph,
           authorship: prepared.authorship,
-          placement: Object.freeze({
-            authorship: prepared.authorshipCapability,
-            sealBinding: prepared.sealBindingCapability,
-          }),
         }));
       }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
@@ -907,7 +904,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         catalogScope: trustedCatalogScope,
         catalogHeadDigest: head.objectDigest as Digest32V1,
         inventoryDigest: completion.inventoryDigest,
-        rows: Object.freeze(activatedRows),
+        rows: Object.freeze(preparedRows.map((prepared) => Object.freeze({
+          authorship: prepared.authorshipCapability,
+          sealBinding: prepared.sealBindingCapability,
+        }))),
       }), precommitSignal);
       throwIfAborted(precommitSignal);
     } catch (cause) {
@@ -994,7 +994,6 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         activatedTripleCount: only.activatedTripleCount,
         swmGraph: only.swmGraph,
         authorship: only.authorship,
-        placement: only.placement,
         removedRows: Object.freeze(removedRows),
         removedRowCount: removedRows.length,
         appliedHeadStatus,

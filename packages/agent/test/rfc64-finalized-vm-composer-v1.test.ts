@@ -124,6 +124,16 @@ describe('RFC-64 finalized VM placement composition', () => {
           readVerifiedAuthorCatalogRowAuthorshipV1(second.authorship).catalogRowDigest,
       },
     ]);
+    expect(composed.materializations.map(({ candidate, placement, row }) => ({
+      candidateOrdinal: candidate.ordinal,
+      placementKaId: readVerifiedAuthorCatalogRowAuthorshipV1(placement.authorship).row.kaId,
+      rowOrdinal: row.ordinal,
+    }))).toEqual([
+      { candidateOrdinal: '0', placementKaId: KA_1, rowOrdinal: '0' },
+      { candidateOrdinal: '1', placementKaId: KA_2, rowOrdinal: '1' },
+    ]);
+    expect(Object.isFrozen(composed.materializations)).toBe(true);
+    expect(composed.materializations.every(Object.isFrozen)).toBe(true);
     expect(composed.evidence).toMatchObject({
       rowCount: '2',
       highestFinalizedOrdinal: '1',

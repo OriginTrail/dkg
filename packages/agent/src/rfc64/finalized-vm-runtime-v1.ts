@@ -9,7 +9,6 @@ import {
   assertSubGraphNameV1,
   canonicalizeContextGraphPolicyPayloadV1,
   parseCanonicalContextGraphPolicyPayloadV1,
-  readVerifiedCatalogSealBindingV1,
   type ChainIdV1,
   type ContextGraphIdV1,
   type DecimalU256V1,
@@ -167,17 +166,10 @@ interface RuntimeRequestSnapshotV1 {
   readonly signal: AbortSignal;
 }
 
-interface PreparedMaterializationV1 {
-  readonly candidate: Readonly<FinalizedVmChainCandidateV1>;
-  readonly placement: Readonly<FinalizedVmPlacementEvidenceV1>;
-  readonly row: Readonly<ComposedFinalizedVmSetV1['rows'][number]>;
-}
-
 interface VerifiedSnapshotV1 {
   readonly finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
   readonly inventory: Readonly<FinalizedVmChainInventoryV1>;
   readonly composed: Readonly<ComposedFinalizedVmSetV1>;
-  readonly materializations: readonly PreparedMaterializationV1[];
 }
 
 /**
@@ -244,13 +236,12 @@ export function createFinalizedVmRuntimeV1(
           finalizedContextGraph,
           inventory,
           composed,
-          materializations: prepareMaterializations(inventory, composed, request.placements),
         });
       },
     );
 
     const receipts: Readonly<FinalizedVmMaterializationReceiptV1>[] = [];
-    for (const prepared of verified.materializations) {
+    for (const prepared of verified.composed.materializations) {
       request.signal.throwIfAborted();
       let untrustedReceipt: FinalizedVmMaterializationReceiptV1;
       try {
@@ -443,33 +434,6 @@ function assertExactAnchor(
       'policy/name read and VM inventory do not share one exact finalized anchor',
     );
   }
-}
-
-function prepareMaterializations(
-  inventory: Readonly<FinalizedVmChainInventoryV1>,
-  composed: Readonly<ComposedFinalizedVmSetV1>,
-  placements: readonly FinalizedVmPlacementEvidenceV1[],
-): readonly PreparedMaterializationV1[] {
-  const placementByKaId = new Map<string, FinalizedVmPlacementEvidenceV1>();
-  for (const placement of placements) {
-    const binding = readVerifiedCatalogSealBindingV1(placement.sealBinding);
-    placementByKaId.set(binding.kaId, placement);
-  }
-  const candidatesByOrdinal = new Map(inventory.rows.map((candidate) => [
-    candidate.ordinal,
-    candidate,
-  ]));
-  return Object.freeze(composed.rows.map((row) => {
-    const candidate = candidatesByOrdinal.get(row.ordinal);
-    const placement = candidate === undefined ? undefined : placementByKaId.get(candidate.kaId);
-    if (candidate === undefined || placement === undefined) {
-      fail(
-        'finalized-vm-runtime-anchor',
-        `composed ordinal ${row.ordinal} lost its verified chain/catalog join`,
-      );
-    }
-    return Object.freeze({ candidate, placement, row });
-  }));
 }
 
 function snapshotReceipt(

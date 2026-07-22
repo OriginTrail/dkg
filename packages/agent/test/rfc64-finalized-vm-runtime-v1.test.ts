@@ -186,6 +186,19 @@ describe('RFC-64 finalized public VM runtime', () => {
         + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/transactionHash> ?tx } }`,
     );
     expect(receiptRows).toEqual({ type: 'bindings', bindings: [] });
+    const canonicalFinalizationRows = await store.query(
+      `SELECT ?batchId ?materializedVersion WHERE { `
+        + `GRAPH <did:dkg:context-graph:${RFC64_VM_CONTEXT_GRAPH_NAME}/_meta> { `
+        + `<${rfc64VmUal(1n)}> <http://dkg.io/ontology/batchId> ?batchId ; `
+        + `<http://dkg.io/ontology/materializedVersion> ?materializedVersion } }`,
+    );
+    expect(canonicalFinalizationRows).toEqual({
+      type: 'bindings',
+      bindings: [{
+        batchId: `"${rfc64VmPackKaId(1n)}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        materializedVersion: '"123:0"',
+      }],
+    });
   });
 });
 

@@ -332,6 +332,50 @@ export function generateGraphKnowledgeAssetMetadata(
   status: 'tentative' | 'confirmed',
   provenance?: OnChainProvenance,
 ): Quad[] {
+  const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
+  if (status === 'confirmed') {
+    if (!provenance) {
+      throw new Error('Confirmed graph-scoped KA metadata requires on-chain provenance');
+    }
+    quads.push(...generateConfirmedMetadata(scope.ual, meta.contextGraphId, provenance));
+  } else {
+    quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
+  }
+  return quads;
+}
+
+/**
+ * Canonical confirmed metadata for RFC-64 finalized-chain materialization.
+ * The finalized inventory supplies a KA id and chain ordering point but no
+ * publication transaction hash, so this deliberately emits no synthetic
+ * transactionHash statement.
+ */
+export function generateRfc64FinalizedGraphKnowledgeAssetMetadata(
+  meta: GraphKnowledgeAssetMetadata,
+  confirmation: Readonly<{
+    batchId: bigint;
+    materializedVersion: MaterializedVersion;
+  }>,
+): Quad[] {
+  if (confirmation.batchId < 0n) {
+    throw new Error('RFC-64 finalized graph metadata batchId must be non-negative');
+  }
+  const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
+  quads.push(
+    getConfirmedStatusQuad(scope.ual, meta.contextGraphId),
+    mq(scope.ual, `${DKG}batchId`, intLit(confirmation.batchId), metaGraph),
+    materializedVersionQuad(metaGraph, scope.ual, confirmation.materializedVersion),
+  );
+  return quads;
+}
+
+function generateGraphKnowledgeAssetMetadataBase(
+  meta: GraphKnowledgeAssetMetadata,
+): Readonly<{
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  metaGraph: string;
+  quads: Quad[];
+}> {
   const scope = createGraphKnowledgeAssetScope(meta.ual, meta.assertionVersion);
   if (!Number.isSafeInteger(meta.publicTripleCount) || meta.publicTripleCount < 0) {
     throw new Error(`Invalid graph-scoped KA public triple count: ${meta.publicTripleCount}`);
@@ -365,15 +409,7 @@ export function generateGraphKnowledgeAssetMetadata(
       mq(scope.ual, `${DKG}privateMerkleRoot`, lit(toHex(meta.privateMerkleRoot)), metaGraph),
     );
   }
-  if (status === 'confirmed') {
-    if (!provenance) {
-      throw new Error('Confirmed graph-scoped KA metadata requires on-chain provenance');
-    }
-    quads.push(...generateConfirmedMetadata(scope.ual, meta.contextGraphId, provenance));
-  } else {
-    quads.push(mq(scope.ual, `${DKG}status`, lit('tentative'), metaGraph));
-  }
-  return quads;
+  return { scope, metaGraph, quads };
 }
 
 export interface ConfirmedGraphKnowledgeAssetMetadataEnvelope {

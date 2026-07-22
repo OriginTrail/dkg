@@ -118,6 +118,7 @@ async function startNativeAgent(
   finalizedRuntime?: Readonly<{
     rpcUrl: string;
     chainAdapter: FinalizedVmMockChainAdapter;
+    initialSubscription?: ContextGraphIdV1;
   }>,
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir
@@ -147,6 +148,12 @@ async function startNativeAgent(
       },
     }),
   });
+  if (finalizedRuntime?.initialSubscription !== undefined) {
+    (agent as any).setContextGraphSubscription(finalizedRuntime.initialSubscription, {
+      subscribed: true,
+      synced: false,
+    }, { persist: false });
+  }
   agents.push(agent);
   await agent.start();
   return agent;
@@ -635,20 +642,33 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
           sendJsonRpcError(response, call, -32601, 'method not found');
       }
     });
+    const authorChain = new FinalizedVmMockChainAdapter();
+    const receiverChain = new FinalizedVmMockChainAdapter();
+    (receiverChain as any).nextContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
+    const created = await receiverChain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    });
+    expect(created.contextGraphId.toString()).toBe(ON_CHAIN_CONTEXT_GRAPH_ID);
     const [author, receiver] = await Promise.all([
       startNativeAgent(
         'vm-author',
         NATIVE_DEPLOYMENT,
         undefined,
         undefined,
-        { rpcUrl: rpc.url, chainAdapter: new FinalizedVmMockChainAdapter() },
+        { rpcUrl: rpc.url, chainAdapter: authorChain },
       ),
       startNativeAgent(
         'vm-receiver',
         NATIVE_DEPLOYMENT,
         undefined,
         undefined,
-        { rpcUrl: rpc.url, chainAdapter: new FinalizedVmMockChainAdapter() },
+        {
+          rpcUrl: rpc.url,
+          chainAdapter: receiverChain,
+          initialSubscription: CONTEXT_GRAPH_ID,
+        },
       ),
     ]);
     const policy = finalizedPublicCatalogPolicy();
@@ -659,14 +679,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
         roster: null,
       });
     }
-    (receiver as any).setContextGraphSubscription(CONTEXT_GRAPH_ID, {
-      subscribed: true,
-      synced: false,
-    }, { persist: false });
-    (receiver as any).bindContextGraphCreatedNameHashV1(
-      nameHash,
-      ON_CHAIN_CONTEXT_GRAPH_ID,
-    );
+    await (receiver as any).chainPoller.inFlightPoll;
     const storeQuery = vi.spyOn((receiver as any).store, 'query');
     await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBe(
       ON_CHAIN_CONTEXT_GRAPH_ID,
