@@ -10,10 +10,10 @@ import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/ind
 import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-policy-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
-  deriveRfc64PublicOpenCatalogScopeV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogStagedHeadV1,
 } from '../src/rfc64/public-catalog-native-reconciler-v1.js';
+import { deriveRfc64PublicOpenCatalogScopeV1 } from '../src/rfc64/public-open-catalog-scope-v1.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';

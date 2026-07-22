@@ -17,6 +17,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import { snapshotRfc64ExactWireRecordV1 } from '../src/rfc64/catalog-transport-wire-v1-internal.js';
 import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
@@ -167,6 +168,13 @@ function discoveryScope() {
 }
 
 describe('RFC-64 public catalog current-head discovery v1', () => {
+  it('treats an unsorted expected-key declaration as an exact key set', () => {
+    expect(snapshotRfc64ExactWireRecordV1(
+      { alpha: '1', beta: '2' },
+      ['beta', 'alpha'],
+    )).toEqual({ alpha: '1', beta: '2' });
+  });
+
   it('discovers and exact-verifies one applied head without staging or scheduling it', async () => {
     const [providerNode, requesterNode, providerPersistence, requesterPersistence] =
       await Promise.all([

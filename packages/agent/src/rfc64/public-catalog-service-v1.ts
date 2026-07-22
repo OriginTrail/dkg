@@ -84,9 +84,9 @@ import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
 import {
-  deriveRfc64PublicOpenCatalogScopeV1,
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
+import { deriveRfc64PublicOpenCatalogScopeV1 } from './public-open-catalog-scope-v1.js';
 import type {
   Rfc64PublicCatalogIssuerAuthorizationV1,
 } from './public-catalog-successor-producer-v1.js';

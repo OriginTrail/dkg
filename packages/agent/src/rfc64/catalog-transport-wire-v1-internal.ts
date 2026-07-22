@@ -113,11 +113,12 @@ export function snapshotRfc64ExactWireRecordV1(
     utilityFail('exact-keys', 'RFC-64 wire value has symbol fields');
   }
   const actual = [...ownKeys as readonly string[]].sort();
+  const expected = expectedKeys === undefined ? undefined : [...expectedKeys].sort();
   if (
-    expectedKeys !== undefined
+    expected !== undefined
     && (
-      actual.length !== expectedKeys.length
-      || actual.some((key, index) => key !== expectedKeys[index])
+      actual.length !== expected.length
+      || actual.some((key, index) => key !== expected[index])
     )
   ) {
     utilityFail('exact-keys', 'RFC-64 wire value has missing or unknown fields');

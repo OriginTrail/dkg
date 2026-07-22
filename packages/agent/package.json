@@ -43,6 +43,7 @@
     "./dist/rfc64/public-catalog-native-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-native-reconciler-v1.js": null,
     "./dist/rfc64/public-catalog-native-transport-v1.js": null,
+    "./dist/rfc64/public-open-catalog-scope-v1.js": null,
     "./dist/rfc64/public-catalog-reconciliation-failure-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
