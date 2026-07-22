@@ -148,6 +148,17 @@ export interface FinalizedVmChainScannerV1 {
   (request: FinalizedVmChainScanRequestV1): Promise<Readonly<FinalizedVmChainInventoryV1>>;
 }
 
+interface FinalizedVmChainInventoryHeaderSnapshotV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: DecimalU256V1;
+  readonly chainId: ChainIdV1;
+  readonly contractAddress: EvmAddressV1;
+  readonly knowledgeAssetStorageAddress: EvmAddressV1;
+  readonly finalizedBlockNumber: BlockNumberV1;
+  readonly finalizedBlockHash: Digest32V1;
+  readonly highestFinalizedOrdinal: DecimalU64V1 | null;
+}
+
 /** Canonical chain-owned boundary for scanner output consumed across packages. */
 export function snapshotFinalizedVmChainInventoryV1(
   input: unknown,
@@ -168,23 +179,14 @@ export function snapshotFinalizedVmChainInventoryV1(
       'finalized VM inventory block number',
     );
     assertCanonicalDigest(record.finalizedBlockHash, 'finalized VM inventory block hash');
-    if (record.highestFinalizedOrdinal !== null) {
+    const highestFinalizedOrdinal = record.highestFinalizedOrdinal;
+    if (highestFinalizedOrdinal !== null) {
       assertCanonicalDecimalU64(
-        record.highestFinalizedOrdinal,
+        highestFinalizedOrdinal,
         'finalized VM inventory highest ordinal',
       );
     }
-    const untrustedRows = snapshotDenseDataArray(record.rows, {
-      label: 'finalized VM inventory rows',
-      maxLength: FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
-    });
-    const rows = Object.freeze(untrustedRows.map((row, index) =>
-      snapshotInventoryCandidate(row, index, record)));
-    const expectedHighest = rows.length === 0 ? null : String(rows.length - 1);
-    if (record.highestFinalizedOrdinal !== expectedHighest) {
-      throw new Error('highest ordinal does not match the dense inventory rows');
-    }
-    return Object.freeze({
+    const header = Object.freeze({
       networkId: record.networkId,
       contextGraphId: record.contextGraphId,
       chainId: record.chainId,
@@ -192,9 +194,22 @@ export function snapshotFinalizedVmChainInventoryV1(
       knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
       finalizedBlockNumber: record.finalizedBlockNumber,
       finalizedBlockHash: record.finalizedBlockHash,
-      highestFinalizedOrdinal: record.highestFinalizedOrdinal,
+      highestFinalizedOrdinal,
+    } satisfies FinalizedVmChainInventoryHeaderSnapshotV1);
+    const untrustedRows = snapshotDenseDataArray(record.rows, {
+      label: 'finalized VM inventory rows',
+      maxLength: FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+    });
+    const rows = Object.freeze(untrustedRows.map((row, index) =>
+      snapshotInventoryCandidate(row, index, header)));
+    const expectedHighest = rows.length === 0 ? null : String(rows.length - 1);
+    if (header.highestFinalizedOrdinal !== expectedHighest) {
+      throw new Error('highest ordinal does not match the dense inventory rows');
+    }
+    return Object.freeze({
+      ...header,
       rows,
-    }) as Readonly<FinalizedVmChainInventoryV1>;
+    } satisfies FinalizedVmChainInventoryV1);
   } catch (cause) {
     if (cause instanceof CurrentFinalizedEvmCallErrorV1) throw cause;
     throw malformedReturn('Finalized VM chain inventory is not canonical', cause);
@@ -388,7 +403,7 @@ async function scanPinnedInventory(
 function snapshotInventoryCandidate(
   input: unknown,
   index: number,
-  inventory: Record<string, unknown>,
+  inventory: Readonly<FinalizedVmChainInventoryHeaderSnapshotV1>,
 ): Readonly<FinalizedVmChainCandidateV1> {
   const record = snapshotExactDataRecord(input, CANDIDATE_KEYS);
   assertCanonicalChainId(record.chainId, `finalized VM candidate ${index} chainId`);
@@ -428,8 +443,8 @@ function snapshotInventoryCandidate(
     `finalized VM candidate ${index} block hash`,
   );
   const identity = unpackDeterministicRootlessKnowledgeAssetId(
-    inventory.networkId as NetworkIdV1,
-    BigInt(record.kaId as string),
+    inventory.networkId,
+    BigInt(record.kaId),
   );
   if (
     record.ual !== identity.ual
@@ -445,10 +460,27 @@ function snapshotInventoryCandidate(
   ) {
     throw new Error(`finalized VM candidate ${index} differs from its identity or inventory lane`);
   }
-  return Object.freeze({ ...record }) as unknown as Readonly<FinalizedVmChainCandidateV1>;
+  return Object.freeze({
+    chainId: record.chainId,
+    contractAddress: record.contractAddress,
+    knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
+    ordinal: record.ordinal,
+    kaId: record.kaId,
+    ual: record.ual,
+    authorAddress: record.authorAddress,
+    attestedAuthorAddress: record.attestedAuthorAddress,
+    publisherAddress: record.publisherAddress,
+    assertionVersion: record.assertionVersion,
+    assertionRoot: record.assertionRoot,
+    finalizedBlockNumber: record.finalizedBlockNumber,
+    finalizedBlockHash: record.finalizedBlockHash,
+  } satisfies FinalizedVmChainCandidateV1);
 }
 
-function assertNullableInventoryAddress(value: unknown, label: string): void {
+function assertNullableInventoryAddress(
+  value: unknown,
+  label: string,
+): asserts value is EvmAddressV1 | null {
   if (value !== null) assertCanonicalNonzeroEvmAddress(value, label);
 }
 
