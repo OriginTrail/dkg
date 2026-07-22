@@ -692,6 +692,115 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([{ peerId: remotePeer, fresh: true, progress: true }]);
   });
 
+  it('keeps explicit incomplete durable progress non-fresh and retryable', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{
+      peerId: string;
+      fresh: boolean | undefined;
+      progress: boolean | undefined;
+    }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => ({
+        complete: false,
+        insertedTriples: 40_000,
+        insertedDataTriples: 40_000,
+        insertedMetaTriples: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => synced.push({
+        peerId,
+        fresh: syncOutcome?.fresh,
+        progress: syncOutcome?.progress,
+      }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: true }]);
+  });
+
+  it('keeps an incomplete first durable leg non-fresh after a clean discovered-CG leg', async () => {
+    const remotePeer = freshPeerIdString();
+    let contextGraphs = ['cg-a'];
+    const synced: Array<{
+      peerId: string;
+      fresh: boolean | undefined;
+      progress: boolean | undefined;
+    }> = [];
+    const syncFromPeer = recorder(async (_peerId: string, contextGraphIds?: string[]) => ({
+      complete: contextGraphIds !== undefined,
+      insertedTriples: contextGraphIds === undefined ? 40_000 : 1,
+      insertedDataTriples: contextGraphIds === undefined ? 40_000 : 1,
+      insertedMetaTriples: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      timedOutPhases: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+      deniedPhases: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+    }));
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => contextGraphs,
+      syncFromPeer,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => {
+        contextGraphs = ['cg-a', 'cg-b'];
+        return 1;
+      },
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => synced.push({
+        peerId,
+        fresh: syncOutcome?.fresh,
+        progress: syncOutcome?.progress,
+      }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([
+      [remotePeer],
+      [remotePeer, ['cg-b']],
+    ]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: true }]);
+  });
+
   it.each([
     ['timed out', { timedOutPhases: 1 }],
     ['failed integrity verification', { rejectedKcs: 1 }],
