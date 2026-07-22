@@ -1,8 +1,10 @@
 import {
+  AUTHOR_SCHEME_VERSION_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
+  buildAuthorAttestationTypedData,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogScopeDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -52,7 +54,6 @@ const CONTEXT_GRAPH_NAME = 'agent-blackbox-vm' as const;
 const ON_CHAIN_CONTEXT_GRAPH_ID = '14' as const;
 const CG_STORAGE = `0x${'33'.repeat(20)}` as EvmAddressV1;
 const KA_STORAGE = `0x${'44'.repeat(20)}` as EvmAddressV1;
-const GOVERNANCE_CONTRACT = `0x${'55'.repeat(20)}` as EvmAddressV1;
 const PUBLISHER = `0x${'66'.repeat(20)}` as EvmAddressV1;
 const BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
 const ROOT_1 = `0x${'88'.repeat(32)}` as Digest32V1;
@@ -111,6 +112,24 @@ describe('RFC-64 finalized VM placement composition', () => {
     );
   });
 
+  it('requires a recoverable author attestation and rejects spliced valid capabilities', async () => {
+    const first = await createPlacement(KA_1, ROOT_1);
+    const second = await createPlacement(KA_2, ROOT_2);
+    const unsigned = await createPlacement(KA_2, ROOT_2, false);
+
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor([unsigned])),
+      'finalized-vm-composition-placement',
+    );
+    expectCode(
+      () => composeFinalizedVmSetV1(requestFor([{
+        authorship: first.authorship,
+        sealBinding: second.sealBinding,
+      }])),
+      'finalized-vm-composition-mismatch',
+    );
+  });
+
   it('binds lane, author attestation, root, publisher, and deployment to chain truth', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
     const base = requestFor([placement]);
@@ -161,6 +180,22 @@ describe('RFC-64 finalized VM placement composition', () => {
     );
   });
 
+  it('binds the cleartext catalog lane to the exact same-anchor numeric Context Graph', async () => {
+    const placement = await createPlacement(KA_2, ROOT_2);
+    const base = requestFor([placement]);
+    expectCode(() => composeFinalizedVmSetV1({
+      ...base,
+      inventory: { ...base.inventory, contextGraphId: '15' },
+    } as never), 'finalized-vm-composition-mismatch');
+    expectCode(() => composeFinalizedVmSetV1({
+      ...base,
+      finalizedContextGraph: {
+        ...base.finalizedContextGraph,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes('another-graph')).toLowerCase(),
+      },
+    } as never), 'finalized-vm-composition-mismatch');
+  });
+
   it('accepts an empty placement lane without weakening inventory validation', () => {
     const composed = composeFinalizedVmSetV1(requestFor([]));
     expect(composed.rows).toEqual([]);
@@ -178,6 +213,20 @@ function requestFor(
     catalogLane: {
       contextGraphId: CONTEXT_GRAPH_NAME,
       subGraphName: null,
+    },
+    finalizedContextGraph: {
+      chainId: CHAIN_ID,
+      contextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      governanceContract: CG_STORAGE,
+      blockNumber: '123',
+      blockHash: BLOCK_HASH,
+      owner: AUTHOR,
+      active: true,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_NAME)).toLowerCase(),
     },
     inventory: inventory(),
     placements: [...placements],
@@ -228,23 +277,38 @@ function candidate(
 async function createPlacement(
   kaId: KaIdV1,
   assertionRoot: Digest32V1,
+  validAttestation = true,
 ): Promise<FinalizedVmPlacementEvidenceV1> {
+  const assertionVersion = kaId === KA_1 ? '1' : '2';
   const scope = {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_NAME,
     governanceChainId: CHAIN_ID,
-    governanceContractAddress: GOVERNANCE_CONTRACT,
+    governanceContractAddress: CG_STORAGE,
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
     era: '0',
     bucketCount: '1',
   } as AuthorCatalogScopeV1;
+  const typedData = buildAuthorAttestationTypedData({
+    chainId: BigInt(CHAIN_ID),
+    kav10Address: KA_STORAGE,
+    merkleRoot: ethers.getBytes(assertionRoot),
+    authorAddress: AUTHOR,
+    reservedKaId: BigInt(kaId),
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  });
+  const attestation = AUTHOR_WALLET.signingKey.sign(ethers.TypedDataEncoder.hash(
+    typedData.domain,
+    typedData.types,
+    typedData.message,
+  ));
   const seal = {
     assertionMerkleRoot: assertionRoot,
     authorAddress: AUTHOR,
-    authorAttestationR: `0x${'aa'.repeat(32)}`,
-    authorAttestationVS: `0x${'bb'.repeat(32)}`,
+    authorAttestationR: validAttestation ? attestation.r : `0x${'aa'.repeat(32)}`,
+    authorAttestationVS: validAttestation ? attestation.yParityAndS : `0x${'bb'.repeat(32)}`,
     authorSchemeVersion: '1',
     assertedAtChainId: CHAIN_ID,
     assertedAtKav10Address: KA_STORAGE,
@@ -252,7 +316,7 @@ async function createPlacement(
     assertionFinalizedAt: '2026-07-22T08:00:00.000Z',
     contentScopeVersion: '2',
     kaUal: ual(BigInt(kaId) & ((1n << 96n) - 1n)),
-    assertionVersion: '2',
+    assertionVersion,
     publicTripleCount: '10',
     privateTripleCount: '0',
     privateMerkleRoot: null,
@@ -260,7 +324,7 @@ async function createPlacement(
   const row = {
     kaId,
     assertionCoordinate: 'vm-fixture',
-    assertionVersion: '2',
+    assertionVersion,
     projectionId: 'cg-shared-v1',
     projectionDigest: ZERO_DIGEST,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
@@ -284,7 +348,7 @@ async function createPlacement(
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_NAME,
       governanceChainId: CHAIN_ID,
-      governanceContractAddress: GOVERNANCE_CONTRACT,
+      governanceContractAddress: CG_STORAGE,
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,
@@ -338,7 +402,7 @@ async function createPlacement(
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_NAME,
       governanceChainId: CHAIN_ID,
-      governanceContractAddress: GOVERNANCE_CONTRACT,
+      governanceContractAddress: CG_STORAGE,
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,

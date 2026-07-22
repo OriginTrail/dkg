@@ -17,6 +17,8 @@ import {
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 
+import { snapshotExactDataRecord } from './strict-local-data.js';
+
 // This module validates one finalized ContextGraphStorage read. It deliberately
 // does not define another RFC-64 policy object: the chain surface cannot supply
 // the network/name identifier, era, version, predecessor, or timestamps needed
@@ -26,6 +28,20 @@ import {
 const ZERO_DIGEST_32 = `0x${'0'.repeat(64)}`;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
 const CANONICAL_LOWER_EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
+const FINALIZED_CONTEXT_GRAPH_READ_KEYS = Object.freeze([
+  'accessPolicy',
+  'active',
+  'blockHash',
+  'blockNumber',
+  'chainId',
+  'contextGraphId',
+  'governanceContract',
+  'nameHash',
+  'owner',
+  'publishAuthority',
+  'publishAuthorityAccountId',
+  'publishPolicy',
+] as const);
 
 export type FinalizedContextGraphReadErrorCodeV1 =
   | 'request-binding'
@@ -324,4 +340,39 @@ export async function resolveFinalizedContextGraphReadWithSignalV1(
   const binding = validateFinalizedContextGraphReadRequestV1(request);
   const raw = await resolver(binding, signal);
   return composeValidatedFinalizedContextGraphReadV1(binding, raw);
+}
+
+/** Revalidate and freeze a finalized Context Graph read crossing a package boundary. */
+export function snapshotFinalizedContextGraphReadV1(
+  input: unknown,
+): FinalizedContextGraphReadV1 {
+  let record: Record<string, unknown>;
+  try {
+    record = snapshotExactDataRecord(input, FINALIZED_CONTEXT_GRAPH_READ_KEYS);
+  } catch {
+    throw new FinalizedContextGraphReadErrorV1(
+      'request-binding',
+      'finalized Context Graph read must be an exact data-only record',
+    );
+  }
+  return composeFinalizedContextGraphReadV1(
+    {
+      chainId: record.chainId,
+      contextGraphId: record.contextGraphId,
+      governanceContract: record.governanceContract,
+    },
+    {
+      blockNumber: record.blockNumber,
+      blockHash: record.blockHash,
+      owner: record.owner,
+      active: record.active,
+      accessPolicy: record.accessPolicy,
+      publishPolicy: record.publishPolicy,
+      publishAuthority: record.publishAuthority === null
+        ? ZERO_ADDRESS
+        : record.publishAuthority,
+      publishAuthorityAccountId: record.publishAuthorityAccountId,
+      nameHash: record.nameHash,
+    },
+  );
 }

@@ -13,6 +13,7 @@ import {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
+  snapshotFinalizedVmChainInventoryV1,
 } from '../src/finalized-vm-chain-scanner.js';
 import {
   CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1,
@@ -134,6 +135,11 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(Object.isFrozen(scanner)).toBe(true);
     expect(Object.isFrozen(inventory)).toBe(true);
     expect(Object.isFrozen(inventory.rows)).toBe(true);
+    expect(snapshotFinalizedVmChainInventoryV1(structuredClone(inventory))).toEqual(inventory);
+    expect(() => snapshotFinalizedVmChainInventoryV1({
+      ...structuredClone(inventory),
+      unexpected: true,
+    })).toThrow(/not canonical/);
     expect(inventory).toEqual({
       networkId: NETWORK_ID,
       contextGraphId: CG_ID,

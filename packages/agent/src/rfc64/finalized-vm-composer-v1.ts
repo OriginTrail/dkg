@@ -1,67 +1,37 @@
 import {
   FinalizedVmSetAccumulatorV1,
-  assertCanonicalChainId,
-  assertCanonicalDecimalU256,
-  assertCanonicalDecimalU64,
-  assertCanonicalDigest,
-  assertCanonicalEvmAddress,
-  assertCanonicalKaId,
   assertContextGraphIdV1,
-  assertNetworkIdV1,
   assertSubGraphNameV1,
   readVerifiedCatalogSealBindingV1,
-  unpackDeterministicRootlessKnowledgeAssetId,
   type ContextGraphIdV1,
   type FinalizedVmSetEvidenceV1,
   type FinalizedVmSetRowV1,
   type SubGraphNameV1,
   type VerifiedCatalogSealBindingV1,
 } from '@origintrail-official/dkg-core';
-/*
- * These are scanner outputs, not trusted casts. The composer revalidates the
- * complete structural inventory before consuming either capability set.
- */
 import {
-  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  snapshotFinalizedContextGraphReadV1,
+  snapshotFinalizedVmChainInventoryV1,
+  type FinalizedContextGraphReadV1,
   type FinalizedVmChainCandidateV1,
   type FinalizedVmChainInventoryV1,
 } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipV1,
 } from './catalog-row-authorship.js';
+import { assertRecoverableAuthorAttestationV1 } from './recoverable-author-attestation-v1.js';
 
-const COMPOSITION_KEYS = ['catalogLane', 'inventory', 'placements'] as const;
+const COMPOSITION_KEYS = [
+  'catalogLane',
+  'finalizedContextGraph',
+  'inventory',
+  'placements',
+] as const;
 const CATALOG_LANE_KEYS = ['contextGraphId', 'subGraphName'] as const;
 const PLACEMENT_KEYS = ['authorship', 'sealBinding'] as const;
-const INVENTORY_KEYS = [
-  'chainId',
-  'contextGraphId',
-  'contractAddress',
-  'finalizedBlockHash',
-  'finalizedBlockNumber',
-  'highestFinalizedOrdinal',
-  'knowledgeAssetStorageAddress',
-  'networkId',
-  'rows',
-] as const;
-const CANDIDATE_KEYS = [
-  'assertionRoot',
-  'assertionVersion',
-  'attestedAuthorAddress',
-  'authorAddress',
-  'chainId',
-  'contractAddress',
-  'finalizedBlockHash',
-  'finalizedBlockNumber',
-  'kaId',
-  'knowledgeAssetStorageAddress',
-  'ordinal',
-  'publisherAddress',
-  'ual',
-] as const;
-const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 
 export interface FinalizedVmCatalogLaneV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -76,8 +46,14 @@ export interface FinalizedVmPlacementEvidenceV1 {
 
 export interface ComposeFinalizedVmSetRequestV1 {
   readonly catalogLane: FinalizedVmCatalogLaneV1;
+  readonly finalizedContextGraph: FinalizedContextGraphReadV1;
   readonly inventory: FinalizedVmChainInventoryV1;
   readonly placements: readonly FinalizedVmPlacementEvidenceV1[];
+}
+
+interface ResolvedFinalizedVmPlacementV1 {
+  readonly authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>;
+  readonly sealBinding: ReturnType<typeof readVerifiedCatalogSealBindingV1>;
 }
 
 export interface ComposedFinalizedVmSetV1 {
@@ -121,7 +97,25 @@ export function composeFinalizedVmSetV1(
     'finalized-vm-composition-input',
   );
   const catalogLane = snapshotCatalogLane(request.catalogLane);
-  const inventory = snapshotInventory(request.inventory);
+  let inventory: Readonly<FinalizedVmChainInventoryV1>;
+  let finalizedContextGraph: Readonly<FinalizedContextGraphReadV1>;
+  try {
+    inventory = snapshotFinalizedVmChainInventoryV1(request.inventory);
+    finalizedContextGraph = snapshotFinalizedContextGraphReadV1(
+      request.finalizedContextGraph,
+    );
+  } catch (cause) {
+    fail(
+      'finalized-vm-composition-inventory',
+      'chain inventory or finalized Context Graph binding is not canonical',
+      cause,
+    );
+  }
+  assertCatalogLaneMatchesFinalizedContextGraph(
+    catalogLane,
+    finalizedContextGraph,
+    inventory,
+  );
   let placements: readonly unknown[];
   try {
     placements = snapshotDenseArray(
@@ -137,7 +131,7 @@ export function composeFinalizedVmSetV1(
     );
   }
 
-  const placementsByKaId = new Map<string, Readonly<FinalizedVmPlacementEvidenceV1>>();
+  const placementsByKaId = new Map<string, Readonly<ResolvedFinalizedVmPlacementV1>>();
   for (const [index, untrustedPlacement] of placements.entries()) {
     const placement = snapshotPlacement(untrustedPlacement, index);
     let authorship: ReturnType<typeof readVerifiedAuthorCatalogRowAuthorshipV1>;
@@ -145,6 +139,7 @@ export function composeFinalizedVmSetV1(
     try {
       authorship = readVerifiedAuthorCatalogRowAuthorshipV1(placement.authorship);
       sealBinding = readVerifiedCatalogSealBindingV1(placement.sealBinding);
+      assertRecoverableAuthorAttestationV1(sealBinding);
     } catch (cause) {
       fail(
         'finalized-vm-composition-placement',
@@ -155,6 +150,8 @@ export function composeFinalizedVmSetV1(
     if (
       authorship.contextGraphId !== catalogLane.contextGraphId
       || authorship.subGraphName !== catalogLane.subGraphName
+      || authorship.governanceChainId !== finalizedContextGraph.chainId
+      || authorship.governanceContractAddress !== finalizedContextGraph.governanceContract
     ) {
       fail(
         'finalized-vm-composition-mismatch',
@@ -180,7 +177,7 @@ export function composeFinalizedVmSetV1(
         `catalog lane contains duplicate placement evidence for KA ${sealBinding.kaId}`,
       );
     }
-    placementsByKaId.set(sealBinding.kaId, Object.freeze(placement));
+    placementsByKaId.set(sealBinding.kaId, Object.freeze({ authorship, sealBinding }));
   }
 
   const scope = Object.freeze({
@@ -193,9 +190,12 @@ export function composeFinalizedVmSetV1(
   for (const candidate of inventory.rows) {
     const placement = placementsByKaId.get(candidate.kaId);
     if (placement === undefined) continue;
-    const authorship = readVerifiedAuthorCatalogRowAuthorshipV1(placement.authorship);
-    const sealBinding = readVerifiedCatalogSealBindingV1(placement.sealBinding);
-    assertCandidateMatchesPlacement(candidate, inventory, authorship, sealBinding);
+    assertCandidateMatchesPlacement(
+      candidate,
+      inventory,
+      placement.authorship,
+      placement.sealBinding,
+    );
     placementsByKaId.delete(candidate.kaId);
 
     const row = Object.freeze({
@@ -210,7 +210,7 @@ export function composeFinalizedVmSetV1(
       finalizedBlockHash: candidate.finalizedBlockHash,
       // The row digest commits catalogScopeDigest, whose exact scope includes
       // contextGraphId, subGraphName, and authorAddress, plus the selected row.
-      placementEvidenceDigest: authorship.catalogRowDigest,
+      placementEvidenceDigest: placement.authorship.catalogRowDigest,
     } satisfies FinalizedVmSetRowV1);
     accumulator.append(row);
     rows.push(row);
@@ -278,122 +278,28 @@ function snapshotCatalogLane(input: unknown): Readonly<FinalizedVmCatalogLaneV1>
   }) as Readonly<FinalizedVmCatalogLaneV1>;
 }
 
-function snapshotInventory(input: unknown): Readonly<FinalizedVmChainInventoryV1> {
-  const record = snapshotRecord(
-    input,
-    INVENTORY_KEYS,
-    'finalized VM chain inventory',
-    'finalized-vm-composition-inventory',
-  );
-  let rows: readonly Readonly<FinalizedVmChainCandidateV1>[];
-  try {
-    assertNetworkIdV1(record.networkId, 'inventory.networkId');
-    assertCanonicalDecimalU256(record.contextGraphId, 'inventory.contextGraphId');
-    assertCanonicalChainId(record.chainId, 'inventory.chainId');
-    assertNonzeroAddress(record.contractAddress, 'inventory.contractAddress');
-    assertNonzeroAddress(
-      record.knowledgeAssetStorageAddress,
-      'inventory.knowledgeAssetStorageAddress',
-    );
-    assertCanonicalDecimalU64(record.finalizedBlockNumber, 'inventory.finalizedBlockNumber');
-    assertCanonicalDigest(record.finalizedBlockHash, 'inventory.finalizedBlockHash');
-    if (record.highestFinalizedOrdinal !== null) {
-      assertCanonicalDecimalU64(
-        record.highestFinalizedOrdinal,
-        'inventory.highestFinalizedOrdinal',
-      );
-    }
-    const untrustedRows = snapshotDenseArray(
-      record.rows,
-      'finalized VM inventory rows',
-      FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
-    );
-    rows = Object.freeze(untrustedRows.map((row, index) => snapshotCandidate(row, index, record)));
-  } catch (cause) {
-    if (cause instanceof FinalizedVmCompositionErrorV1) throw cause;
-    fail('finalized-vm-composition-inventory', 'chain inventory is not canonical', cause);
-  }
-
-  const expectedHighest = rows.length === 0 ? null : String(rows.length - 1);
-  if (record.highestFinalizedOrdinal !== expectedHighest) {
-    fail(
-      'finalized-vm-composition-inventory',
-      'chain inventory highest ordinal does not match its dense indexed rows',
-    );
-  }
-  return Object.freeze({
-    networkId: record.networkId,
-    contextGraphId: record.contextGraphId,
-    chainId: record.chainId,
-    contractAddress: record.contractAddress,
-    knowledgeAssetStorageAddress: record.knowledgeAssetStorageAddress,
-    finalizedBlockNumber: record.finalizedBlockNumber,
-    finalizedBlockHash: record.finalizedBlockHash,
-    highestFinalizedOrdinal: record.highestFinalizedOrdinal,
-    rows,
-  }) as Readonly<FinalizedVmChainInventoryV1>;
-}
-
-function snapshotCandidate(
-  input: unknown,
-  index: number,
-  inventory: Record<string, unknown>,
-): Readonly<FinalizedVmChainCandidateV1> {
-  const record = snapshotRecord(
-    input,
-    CANDIDATE_KEYS,
-    `finalized VM candidate ${index}`,
-    'finalized-vm-composition-inventory',
-  );
-  try {
-    assertCanonicalChainId(record.chainId, `candidate ${index} chainId`);
-    assertNonzeroAddress(record.contractAddress, `candidate ${index} contractAddress`);
-    assertNonzeroAddress(
-      record.knowledgeAssetStorageAddress,
-      `candidate ${index} knowledgeAssetStorageAddress`,
-    );
-    assertCanonicalDecimalU64(record.ordinal, `candidate ${index} ordinal`);
-    assertCanonicalKaId(record.kaId, `candidate ${index} kaId`);
-    assertNonzeroAddress(record.authorAddress, `candidate ${index} authorAddress`);
-    assertNullableNonzeroAddress(
-      record.attestedAuthorAddress,
-      `candidate ${index} attestedAuthorAddress`,
-    );
-    assertNullableNonzeroAddress(record.publisherAddress, `candidate ${index} publisherAddress`);
-    assertCanonicalDecimalU64(record.assertionVersion, `candidate ${index} assertionVersion`);
-    assertCanonicalDigest(record.assertionRoot, `candidate ${index} assertionRoot`);
-    assertCanonicalDecimalU64(
-      record.finalizedBlockNumber,
-      `candidate ${index} finalizedBlockNumber`,
-    );
-    assertCanonicalDigest(record.finalizedBlockHash, `candidate ${index} finalizedBlockHash`);
-    const identity = unpackDeterministicRootlessKnowledgeAssetId(
-      inventory.networkId as never,
-      BigInt(record.kaId as string),
-    );
-    if (record.ual !== identity.ual || record.authorAddress !== identity.agentAddress) {
-      throw new Error(`candidate ${index} identity differs from its packed KA id`);
-    }
-    if (record.assertionVersion === '0' || record.assertionRoot === `0x${'00'.repeat(32)}`) {
-      throw new Error(`candidate ${index} assertion state must be nonzero`);
-    }
-  } catch (cause) {
-    fail('finalized-vm-composition-inventory', `candidate ${index} is not canonical`, cause);
-  }
+function assertCatalogLaneMatchesFinalizedContextGraph(
+  catalogLane: Readonly<FinalizedVmCatalogLaneV1>,
+  contextGraph: Readonly<FinalizedContextGraphReadV1>,
+  inventory: Readonly<FinalizedVmChainInventoryV1>,
+): void {
+  const expectedNameHash = ethers.keccak256(
+    ethers.toUtf8Bytes(catalogLane.contextGraphId),
+  ).toLowerCase();
   if (
-    record.ordinal !== String(index)
-    || record.chainId !== inventory.chainId
-    || record.contractAddress !== inventory.contractAddress
-    || record.knowledgeAssetStorageAddress !== inventory.knowledgeAssetStorageAddress
-    || record.finalizedBlockNumber !== inventory.finalizedBlockNumber
-    || record.finalizedBlockHash !== inventory.finalizedBlockHash
+    !contextGraph.active
+    || contextGraph.nameHash !== expectedNameHash
+    || contextGraph.chainId !== inventory.chainId
+    || contextGraph.contextGraphId !== inventory.contextGraphId
+    || contextGraph.governanceContract !== inventory.contractAddress
+    || contextGraph.blockNumber !== inventory.finalizedBlockNumber
+    || contextGraph.blockHash !== inventory.finalizedBlockHash
   ) {
     fail(
-      'finalized-vm-composition-inventory',
-      `candidate ${index} differs from the inventory lane or pinned anchor`,
+      'finalized-vm-composition-mismatch',
+      'catalog lane is not bound to this same-anchor finalized Context Graph inventory',
     );
   }
-  return Object.freeze({ ...record }) as unknown as Readonly<FinalizedVmChainCandidateV1>;
 }
 
 function snapshotPlacement(input: unknown, index: number): FinalizedVmPlacementEvidenceV1 {
@@ -475,16 +381,6 @@ function snapshotRecord<Code extends FinalizedVmCompositionErrorCodeV1>(
   } catch (cause) {
     fail(code, `${label} is not a closed data-only record`, cause);
   }
-}
-
-function assertNullableNonzeroAddress(value: unknown, label: string): void {
-  if (value === null) return;
-  assertNonzeroAddress(value, label);
-}
-
-function assertNonzeroAddress(value: unknown, label: string): void {
-  assertCanonicalEvmAddress(value, label);
-  if (value === ZERO_ADDRESS) throw new Error(`${label} must be nonzero`);
 }
 
 function fail(
