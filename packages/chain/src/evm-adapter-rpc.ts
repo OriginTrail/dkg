@@ -8,6 +8,7 @@
  * assertions. Bodies are a 1:1 move from the original module.
  */
 import { ethers, FetchRequest } from 'ethers';
+import type { FetchCancelSignal, FetchGetUrlFunc } from 'ethers';
 import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 
@@ -38,6 +39,60 @@ import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
  */
 const RPC_REQUEST_MAX_RETRIES = 5;
 const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
+
+const cancellableRpcGetUrl: FetchGetUrlFunc = async (
+  request: FetchRequest,
+  signal?: FetchCancelSignal,
+) => {
+  signal?.checkSignal();
+  const controller = new AbortController();
+  let cancelled = false;
+  let timedOut = false;
+  signal?.addListener(() => {
+    cancelled = true;
+    controller.abort();
+  });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, request.timeout);
+  try {
+    let requestBody: ArrayBuffer | undefined;
+    if (request.body) {
+      requestBody = new ArrayBuffer(request.body.length);
+      new Uint8Array(requestBody).set(request.body);
+    }
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: requestBody,
+      signal: controller.signal,
+    });
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => { headers[key] = value; });
+    const body = new Uint8Array(await response.arrayBuffer());
+    return {
+      statusCode: response.status,
+      statusMessage: response.statusText,
+      headers,
+      body: body.length > 0 ? body : null,
+    };
+  } catch (error) {
+    if (cancelled) {
+      throw Object.assign(new Error('RPC request cancelled', { cause: error }), {
+        code: 'CANCELLED',
+      });
+    }
+    if (timedOut) {
+      throw Object.assign(new Error(`RPC request timed out after ${request.timeout}ms`, {
+        cause: error,
+      }), { code: 'TIMEOUT' });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,6 +150,10 @@ export function boundedRetryFetchRequest(
   maxRetries: number = RPC_REQUEST_MAX_RETRIES,
 ): FetchRequest {
   const req = new FetchRequest(url);
+  // ethers 6.16's Node getUrl cancellation rejects the FetchRequest but does
+  // not close its underlying socket. Use the platform fetch transport so the
+  // same FetchCancelSignal also aborts the active HTTP request.
+  req.getUrlFunc = cancellableRpcGetUrl;
   req.retryFunc = async (_attemptReq, _response, attempt) => {
     if (attempt >= maxRetries) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));

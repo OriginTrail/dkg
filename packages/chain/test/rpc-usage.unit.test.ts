@@ -26,9 +26,12 @@ import {
   normalizeRpcUsageConsumer,
   rpcUsageWindowTotal,
   RpcUsageTracker,
+  createCountingJsonRpcProvider,
   type RpcUsageDrainable,
+  withRpcRequestAbortSignal,
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
+import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
@@ -111,6 +114,40 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const drained = a.drainRpcUsage();
     expect(rpcUsageWindowTotal(drained)).toBe(0);
     expect(drained.lifetimeTotal).toBe(usage.lifetimeTotal);
+  });
+
+  it('cancels the active ethers HTTP request when the caller aborts a chain read', async () => {
+    const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
+    servers.push(rpc);
+    const provider = createCountingJsonRpcProvider(
+      rpc.url,
+      0,
+      new RpcUsageTracker(() => 'evm:31337'),
+      { batchMaxCount: 1 },
+    );
+    const controller = new AbortController();
+    const timeoutError = createRpcTimeoutError('authentication attempt timed out');
+
+    const pending = withRpcRequestAbortSignal(
+      controller.signal,
+      () => provider.send('eth_blockNumber', []),
+    );
+    try {
+      for (let turn = 0; turn < 50 && rpc.hits('eth_blockNumber') === 0; turn += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      }
+      expect(rpc.hits('eth_blockNumber')).toBe(1);
+      controller.abort(timeoutError);
+      await expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+      for (let turn = 0; turn < 50 && rpc.aborted('eth_blockNumber') === 0; turn += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      }
+      expect(rpc.aborted('eth_blockNumber')).toBe(1);
+    } finally {
+      if (!controller.signal.aborted) controller.abort(timeoutError);
+      await pending.catch(() => {});
+      provider.destroy();
+    }
   });
 
   it('STATIC NETWORK: getEvmChainId validates configured chain id once, then caches it', async () => {

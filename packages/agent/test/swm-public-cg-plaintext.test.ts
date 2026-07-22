@@ -152,6 +152,46 @@ const isPublic = (a: any, cgId = '0xCURATOR/experimental-music') =>
   (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(a, cgId);
 
 describe('DKGAgent.isContextGraphPublicOnChain', () => {
+  it('preserves the legacy strict binding option while retryable strict reads propagate transport errors', async () => {
+    const cgId = '0xCURATOR/experimental-music';
+    const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0 });
+    const legacyBinding = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    const retryableStrictBinding = (DKGAgent.prototype as any).requireLocalCgMatchesOnChainSlot;
+
+    await expect(legacyBinding.call(agentLike, cgId, 'not-a-slot')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      'not-a-slot',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+
+    delete agentLike.chain.getContextGraphNameHash;
+    await expect(legacyBinding.call(agentLike, cgId, '5')).resolves.toBe(true);
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+
+    const transportError = Object.assign(new Error('name-hash RPC unavailable'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    agentLike.chain.getContextGraphNameHash = async () => { throw transportError; };
+    await expect(legacyBinding.call(
+      agentLike,
+      cgId,
+      '5',
+      undefined,
+      { requireCommittedNameHash: true },
+    )).resolves.toBe(false);
+    await expect(retryableStrictBinding.call(agentLike, cgId, '5'))
+      .rejects.toBe(transportError);
+  });
+
   it('returns true for a LIVE CG whose on-chain access policy is public (0)', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
     await expect(isPublic(agentLike)).resolves.toBe(true);

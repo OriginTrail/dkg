@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  type ChainAdapter,
+  type EVMAdapterConfig,
+} from '@origintrail-official/dkg-chain';
 import {
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
@@ -19,7 +23,6 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   authenticateVerifiedGraphScopedAsset,
-  authenticateVerifiedGraphScopedAssetWithRetry,
   materializeVerifiedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
   type VerifyContextGraphBinding,
@@ -35,6 +38,7 @@ const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memo
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
 const packedKaId = '7719472615821079694904732333912527190217998977704089058462887978021305712641';
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const TEST_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 function transactionHash(version: number): string {
   return `0x${version.toString(16).padStart(64, '0')}`;
@@ -133,13 +137,14 @@ function strictContextGraphBindingVerifier(
   };
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
-  return (localId, onChainId) => (
+  return (localId, onChainId, signal) => (
     DKGAgent.prototype as any
   ).requireLocalCgMatchesOnChainSlot.call(
     agentLike,
     localId,
     onChainId.toString(),
     ctx,
+    { signal },
   );
 }
 
@@ -292,6 +297,51 @@ describe('durable graph-scoped KA materialization', () => {
       predicate: `${DKG}status`,
       object: '"confirmed"',
     }));
+  });
+
+  it('preserves a typed receipt transport failure from the concrete EVM update verifier', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const transportError = Object.assign(
+      new Error('receipt providers unavailable'),
+      { code: 'RPC_RECEIPT_LOOKUP_FAILED' },
+    );
+    const config: EVMAdapterConfig = {
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: TEST_PRIVATE_KEY,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'otp:2043',
+      allowNoAdminSigner: true,
+    };
+    const chain: any = new EVMChainAdapter(config);
+    chain.initialized = true;
+    chain.init = async () => {};
+    chain.getLatestMerkleRoot = async () => root;
+    chain.getMerkleRootCount = async () => 2n;
+    chain.getKAContextGraphId = async () => 14n;
+    chain.getLatestMerkleRootPublisher = async () => (
+      '0x2222222222222222222222222222222222222222'
+    );
+    chain.contracts.knowledgeAssetStorage = {};
+    chain.getTransactionReceiptWithFailover = async () => { throw transportError; };
+
+    try {
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain,
+        {
+          contextGraphId,
+          ual,
+          assertionVersion: 2n,
+          assertionGraph,
+          metaGraph,
+          dataQuads: [dataQuad(2)],
+          metadataQuads: metadata(2),
+        },
+        async () => true,
+      )).rejects.toBe(transportError);
+    } finally {
+      chain.destroy();
+    }
   });
 
   it('fails closed when the bound CG commits a different name hash', async () => {
@@ -804,152 +854,6 @@ describe('durable graph-scoped KA materialization', () => {
 
     expect(exactAssets).toHaveLength(1);
     expect(inserted.filter((quad) => quad.subject === legacyUal)).toEqual(legacyMeta);
-  });
-
-  it('retries typed chain transport failures before advancing checkpoints', async () => {
-    vi.useFakeTimers();
-    try {
-      const v2Meta = metadata(2);
-      const checkpointAttempts: number[] = [];
-      const warnings: string[] = [];
-      let attempts = 0;
-      const chain = authenticatedV2Chain();
-
-      const sync = runGraphScopedDurableSync({
-        storeGraphScopedAsset: async (asset) => {
-          await authenticateVerifiedGraphScopedAssetWithRetry(
-            chain,
-            asset,
-            async () => {
-              attempts += 1;
-              if (attempts < 3) {
-                throw Object.assign(
-                  new Error('all configured RPC endpoints failed'),
-                  { code: 'RPC_ENDPOINTS_EXHAUSTED' },
-                );
-              }
-              return true;
-            },
-            {
-              onRetry: (error, attempt, maxAttempts) => {
-                warnings.push(
-                  `Retrying graph-scoped durable authentication after transient chain `
-                  + `verification failure (${attempt}/${maxAttempts}): `
-                  + `${error instanceof Error ? error.message : String(error)}`,
-                );
-              },
-            },
-          );
-          return 'applied';
-        },
-        deleteCheckpoint: () => { checkpointAttempts.push(attempts); },
-        logWarn: (_ctx, message) => { warnings.push(message); },
-      });
-
-      await vi.runAllTimersAsync();
-      const summary = await sync;
-
-      expect(attempts).toBe(3);
-      expect(warnings).toHaveLength(2);
-      expect(warnings.every((message) => message.includes(
-        'Retrying graph-scoped durable authentication',
-      ))).toBe(true);
-      expect(checkpointAttempts).toEqual([3, 3]);
-      expect(summary.failedPhases).toBe(0);
-      expect(summary.insertedDataTriples).toBe(1);
-      expect(summary.insertedMetaTriples).toBe(v2Meta.length + 1);
-      expect(summary.insertedTriples).toBe(
-        summary.insertedDataTriples + summary.insertedMetaTriples,
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it.each([
-    'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
-    'VM_CHAIN_PROVENANCE_MISMATCH',
-  ])('stops after one attempt for deterministic %s failures', async (code) => {
-    let attempts = 0;
-    const warnings: string[] = [];
-    const root = new Uint8Array(32);
-    root[31] = 2;
-    const chain = authenticatedV2Chain({
-      getLatestMerkleRoot: async () => {
-        attempts += 1;
-        return root;
-      },
-      ...(code === 'VM_CHAIN_PROVENANCE_MISMATCH'
-        ? { verifyKAUpdate: async () => ({ verified: false }) }
-        : {}),
-    });
-
-    const summary = await runGraphScopedDurableSync({
-      storeGraphScopedAsset: async (asset) => {
-        await authenticateVerifiedGraphScopedAssetWithRetry(
-          chain,
-          asset,
-          async () => code !== 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
-          {
-            onRetry: (error, attempt, maxAttempts) => {
-              warnings.push(`${attempt}/${maxAttempts}: ${String(error)}`);
-            },
-          },
-        );
-        return 'applied';
-      },
-      logWarn: (_ctx, message) => { warnings.push(message); },
-    });
-
-    expect(attempts).toBe(1);
-    expect(warnings.some((message) => message.includes(
-      'Retrying graph-scoped durable authentication',
-    ))).toBe(false);
-    expect(summary.failedPhases).toBe(1);
-    expect(summary.backoffWorthyFailures).toBe(0);
-    expect(summary.insertedTriples).toBe(0);
-  });
-
-  it('retries a real name-hash timeout and preserves backoff accounting on exhaustion', async () => {
-    vi.useFakeTimers();
-    try {
-      const deletedCheckpoints: string[] = [];
-      const setCheckpoints: string[] = [];
-      const retryAttempts: number[] = [];
-      const getContextGraphNameHash = vi.fn(() => new Promise<string>(() => {}));
-      const chain = authenticatedV2Chain({ getContextGraphNameHash });
-
-      const sync = runGraphScopedDurableSync({
-        storeGraphScopedAsset: async (asset) => {
-          await authenticateVerifiedGraphScopedAssetWithRetry(
-            chain,
-            asset,
-            strictContextGraphBindingVerifier(chain),
-            {
-              onRetry: (_error, attempt) => {
-                retryAttempts.push(attempt);
-              },
-            },
-          );
-          return 'applied';
-        },
-        deleteCheckpoint: (key) => { deletedCheckpoints.push(key); },
-        setCheckpoint: (key) => { setCheckpoints.push(key); },
-      });
-
-      await vi.runAllTimersAsync();
-      const summary = await sync;
-
-      expect(getContextGraphNameHash).toHaveBeenCalledTimes(5);
-      expect(retryAttempts).toEqual([1, 2, 3, 4]);
-      expect(deletedCheckpoints).toEqual([]);
-      expect(setCheckpoints).toEqual([]);
-      expect(summary.failedPhases).toBe(1);
-      expect(summary.backoffWorthyFailures).toBe(1);
-      expect(summary.insertedTriples).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it('rejects a peer assertion version that does not match chain root history', async () => {

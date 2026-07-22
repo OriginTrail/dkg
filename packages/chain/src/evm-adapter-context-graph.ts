@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 type ContextGraphRegistryScanPlan =
@@ -716,11 +716,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     });
   }
 
-  async getKAContextGraphId(kaId: bigint): Promise<bigint> {
+  async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const cgId: bigint = await this.readContract(
-      cgs, 'cgStorage.kaToContextGraph', 'kaToContextGraph', kaId,
+    const cgId: bigint = await this.readContractWith(
+      cgs,
+      'cgStorage.kaToContextGraph',
+      c => c.kaToContextGraph(kaId),
+      { signal: options.signal },
     );
     return BigInt(cgId);
   }
@@ -849,11 +852,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * the wrong slot. Letting the error throw lets the caller fail CLOSED
    * instead.
    */
-  async getContextGraphNameHash(contextGraphId: bigint): Promise<string | null> {
+  async getContextGraphNameHash(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<string | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string = await this.readContract(
-      cgs, 'cgStorage.getNameHash', 'getNameHash', contextGraphId,
+    const raw: string = await this.readContractWith(
+      cgs,
+      'cgStorage.getNameHash',
+      c => c.getNameHash(contextGraphId),
+      { signal: options.signal },
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();

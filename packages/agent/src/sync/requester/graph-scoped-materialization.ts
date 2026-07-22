@@ -1,12 +1,8 @@
 import {
   assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
-  withRetry,
 } from '@origintrail-official/dkg-core';
-import {
-  isChainRpcTransportError,
-  type ChainAdapter,
-} from '@origintrail-official/dkg-chain';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   tryReplaceGraphAndSubjectAtomically,
   type Quad,
@@ -29,9 +25,6 @@ const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
-const AUTHENTICATION_MAX_ATTEMPTS = 5;
-const AUTHENTICATION_RETRY_BASE_MS = 1_000;
-const AUTHENTICATION_RETRY_MAX_MS = 8_000;
 
 export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
@@ -52,45 +45,10 @@ export interface AuthenticatedGraphScopedAsset {
 export type VerifyContextGraphBinding = (
   localContextGraphId: string,
   onChainContextGraphId: bigint,
+  signal?: AbortSignal,
 ) => Promise<boolean>;
 
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
-
-/** Retry only chain-owned transport failures; verified peer-invalid data is deterministic. */
-export function isRetryableGraphScopedAuthenticationError(error: unknown): boolean {
-  return isChainRpcTransportError(error);
-}
-
-export interface GraphScopedAuthenticationRetryOptions {
-  receivedAt?: Date;
-  onRetry?: (error: unknown, attempt: number, maxAttempts: number) => void;
-}
-
-export async function authenticateVerifiedGraphScopedAssetWithRetry(
-  chain: ChainAdapter,
-  asset: VerifiedGraphScopedAsset,
-  verifyContextGraphBinding?: VerifyContextGraphBinding,
-  options: GraphScopedAuthenticationRetryOptions = {},
-): Promise<AuthenticatedGraphScopedAsset> {
-  return withRetry(
-    () => authenticateVerifiedGraphScopedAsset(
-      chain,
-      asset,
-      verifyContextGraphBinding,
-      options.receivedAt,
-    ),
-    {
-      maxAttempts: AUTHENTICATION_MAX_ATTEMPTS,
-      baseDelayMs: AUTHENTICATION_RETRY_BASE_MS,
-      maxDelayMs: AUTHENTICATION_RETRY_MAX_MS,
-      jitter: 0,
-      isRetryable: isRetryableGraphScopedAuthenticationError,
-      onRetry: (attempt, _delayMs, error) => {
-        options.onRetry?.(error, attempt, AUTHENTICATION_MAX_ATTEMPTS);
-      },
-    },
-  );
-}
 
 /**
  * Bind the peer-verified payload to current chain truth before its structural
@@ -104,6 +62,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   asset: VerifiedGraphScopedAsset,
   verifyContextGraphBinding?: VerifyContextGraphBinding,
   receivedAt = new Date(),
+  options: { signal?: AbortSignal } = {},
 ): Promise<AuthenticatedGraphScopedAsset> {
   const receivedAtMs = receivedAt.getTime();
   if (!Number.isFinite(receivedAtMs)) {
@@ -162,9 +121,9 @@ export async function authenticateVerifiedGraphScopedAsset(
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId),
-    chain.getMerkleRootCount(kaId),
-    chain.getKAContextGraphId(kaId),
+    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
+    chain.getMerkleRootCount(kaId, { signal: options.signal }),
+    chain.getKAContextGraphId(kaId, { signal: options.signal }),
   ]);
   if (latestRoot.length !== 32 || !bytesEqual(latestRoot, roots[0]!)) {
     throw Object.assign(
@@ -195,7 +154,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
     );
   }
-  if (!(await verifyContextGraphBinding(asset.contextGraphId, boundContextGraphId))) {
+  if (!(await verifyContextGraphBinding(
+    asset.contextGraphId,
+    boundContextGraphId,
+    options.signal,
+  ))) {
     throw Object.assign(
       new Error(
         `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
@@ -227,7 +190,9 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const resolved = await chain.resolvePublishByTxHash(transactionHash);
+    const resolved = await chain.resolvePublishByTxHash(transactionHash, {
+      signal: options.signal,
+    });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -250,8 +215,15 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId);
-    const verified = await chain.verifyKAUpdate(transactionHash, kaId, publisherAddress);
+    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId, {
+      signal: options.signal,
+    });
+    const verified = await chain.verifyKAUpdate(
+      transactionHash,
+      kaId,
+      publisherAddress,
+      { signal: options.signal },
+    );
     if (
       !verified.verified
       || verified.onChainMerkleRoot === undefined

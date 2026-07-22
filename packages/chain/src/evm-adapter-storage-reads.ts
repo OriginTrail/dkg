@@ -11,6 +11,7 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers } from 'ethers';
+import type { ChainReadOptions } from './chain-adapter.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -28,23 +29,26 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return kas;
   }
 
-  async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
+  async getLatestMerkleRoot(kaId: bigint, options: ChainReadOptions = {}): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await this.readContract(
-      kas, 'kas.getLatestMerkleRoot', 'getLatestMerkleRoot', kaId,
+    const rootHex: string = await this.readContractWith(
+      kas,
+      'kas.getLatestMerkleRoot',
+      c => c.getLatestMerkleRoot(kaId),
+      { signal: options.signal },
     );
     return ethers.getBytes(rootHex);
   }
 
-  async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+  async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const kas = this.requireKCStorage();
-    const context = await this.readContract(
+    const context = await this.readContractWith(
       kas,
       'kas.getKnowledgeAssetUpdateContext',
-      'getKnowledgeAssetUpdateContext',
-      kaId,
+      c => c.getKnowledgeAssetUpdateContext(kaId),
+      { signal: options.signal },
     ) as { merkleRootsCount?: bigint } & readonly unknown[];
     const rawCount = context.merkleRootsCount ?? context[0];
     if (rawCount === undefined) {
@@ -80,11 +84,17 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return Number(count);
   }
 
-  async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
+  async getLatestMerkleRootPublisher(
+    kaId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const publisher: string = await this.readContract(
-      kas, 'kas.getLatestMerkleRootPublisher', 'getLatestMerkleRootPublisher', kaId,
+    const publisher: string = await this.readContractWith(
+      kas,
+      'kas.getLatestMerkleRootPublisher',
+      c => c.getLatestMerkleRootPublisher(kaId),
+      { signal: options.signal },
     );
     return publisher;
   }

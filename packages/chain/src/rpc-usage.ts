@@ -185,6 +185,7 @@ export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): n
 }
 
 const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
+const rpcRequestAbortContext = new AsyncLocalStorage<AbortSignal>();
 
 /**
  * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
@@ -209,9 +210,25 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   return rpcUsageConsumerContext.run(normalized, fn);
 }
 
+/** Bind one caller-owned cancellation signal to the raw ethers HTTP request. */
+export function withRpcRequestAbortSignal<T>(signal: AbortSignal, fn: () => T): T {
+  return rpcRequestAbortContext.run(signal, fn);
+}
+
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
+}
+
+function activeRpcRequestAbortSignal(): AbortSignal | undefined {
+  return rpcRequestAbortContext.getStore();
+}
+
+function throwAbortReason(signal: AbortSignal): never {
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
+  error.name = 'AbortError';
+  throw error;
 }
 
 /**
@@ -311,14 +328,48 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
     super(url, network, options);
   }
 
-  override _send(payload: JsonRpcPayload | Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
+  override async _send(
+    payload: JsonRpcPayload | Array<JsonRpcPayload>,
+  ): Promise<Array<JsonRpcResult>> {
     try {
       const entries = Array.isArray(payload) ? payload : [payload];
       for (const entry of entries) this.onRpcRequest(String(entry?.method ?? 'unknown'));
     } catch {
       /* accounting must never break an RPC call */
     }
-    return super._send(payload);
+    const signal = activeRpcRequestAbortSignal();
+    if (!signal) return super._send(payload);
+    if (signal.aborted) throwAbortReason(signal);
+
+    // JsonRpcProvider._send creates one FetchRequest per dispatch. Reproduce
+    // that small transport boundary here so caller abort can cancel the actual
+    // request, instead of merely abandoning its promise while it keeps using an
+    // RPC connection in the background.
+    const request = this._getConnection();
+    request.body = JSON.stringify(payload);
+    request.setHeader('content-type', 'application/json');
+    const pending = request.send();
+    const onAbort = () => {
+      try {
+        request.cancel();
+      } catch {
+        // A response can settle concurrently with abort; its completed request
+        // no longer needs cancellation.
+      }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    try {
+      const response = await pending;
+      response.assertOk();
+      const body = response.bodyJson;
+      return Array.isArray(body) ? body : [body];
+    } catch (error) {
+      if (signal.aborted) throwAbortReason(signal);
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 }
 

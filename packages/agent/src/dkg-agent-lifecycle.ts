@@ -96,16 +96,33 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  withRetry,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 import {
-  authenticateVerifiedGraphScopedAssetWithRetry,
+  authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  type VerifiedGraphScopedAsset,
+  type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  NoChainAdapter,
+  buildKnowledgeAssetUal,
+  createRpcTimeoutError,
+  enrichEvmError,
+  isChainRpcTransportError,
+  type ChainAdapter,
+  type CreateContextGraphParams,
+  type CreateOnChainContextGraphParams,
+  type CreateOnChainContextGraphResult,
+  type EVMAdapterConfig,
+  type TxResult,
+  type V10PublishingConvictionAccountInfo,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -782,6 +799,105 @@ export type DurableSyncOptions = {
 };
 
 const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
+const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
+const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
+const DURABLE_AUTHENTICATION_RETRY_MAX_MS = 8_000;
+const DURABLE_AUTHENTICATION_ATTEMPT_TIMEOUT_MS = 15_000;
+
+function raceAuthenticationWithSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+async function authenticateDurableGraphScopedAsset(params: {
+  chain: ChainAdapter;
+  asset: VerifiedGraphScopedAsset;
+  verifyContextGraphBinding: VerifyContextGraphBinding;
+  deadline: number;
+  onRetry: (error: unknown, attempt: number, maxAttempts: number) => void;
+}) {
+  const { chain, asset, verifyContextGraphBinding, deadline, onRetry } = params;
+  const receivedAt = new Date();
+  const deadlineError = createRpcTimeoutError(
+    `Graph-scoped durable authentication for ${asset.ual} exceeded its context-graph deadline`,
+  );
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw deadlineError;
+
+  const deadlineController = new AbortController();
+  const deadlineTimer = setTimeout(
+    () => deadlineController.abort(deadlineError),
+    remaining,
+  );
+  try {
+    return await withRetry(
+      async () => {
+        const attemptRemaining = deadline - Date.now();
+        if (attemptRemaining <= 0) throw deadlineError;
+        const attemptError = createRpcTimeoutError(
+          `Graph-scoped durable authentication attempt for ${asset.ual} timed out`,
+        );
+        const attemptController = new AbortController();
+        const abortFromDeadline = () => attemptController.abort(deadlineController.signal.reason);
+        deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
+        const attemptTimer = setTimeout(
+          () => attemptController.abort(attemptError),
+          Math.min(DURABLE_AUTHENTICATION_ATTEMPT_TIMEOUT_MS, attemptRemaining),
+        );
+        if (deadlineController.signal.aborted) abortFromDeadline();
+        try {
+          return await raceAuthenticationWithSignal(
+            authenticateVerifiedGraphScopedAsset(
+              chain,
+              asset,
+              verifyContextGraphBinding,
+              receivedAt,
+              { signal: attemptController.signal },
+            ),
+            attemptController.signal,
+          );
+        } finally {
+          if (!attemptController.signal.aborted) attemptController.abort();
+          clearTimeout(attemptTimer);
+          deadlineController.signal.removeEventListener('abort', abortFromDeadline);
+        }
+      },
+      {
+        maxAttempts: DURABLE_AUTHENTICATION_MAX_ATTEMPTS,
+        baseDelayMs: DURABLE_AUTHENTICATION_RETRY_BASE_MS,
+        maxDelayMs: DURABLE_AUTHENTICATION_RETRY_MAX_MS,
+        isRetryable: isChainRpcTransportError,
+        signal: deadlineController.signal,
+        onRetry: (attempt, _delayMs, error) => {
+          onRetry(error, attempt, DURABLE_AUTHENTICATION_MAX_ATTEMPTS);
+        },
+      },
+    );
+  } catch (error) {
+    if (deadlineController.signal.aborted) throw deadlineError;
+    throw error;
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
+}
 
 function normalizeDurableSyncTotalTimeoutMs(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
@@ -4171,6 +4287,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const verifyContextGraphBinding = async (
       localContextGraphId: string,
       onChainContextGraphId: bigint,
+      signal?: AbortSignal,
     ): Promise<boolean> => {
       const onChainId = onChainContextGraphId.toString();
       const key = `${localContextGraphId}\0${onChainId}`;
@@ -4180,6 +4297,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           localContextGraphId,
           onChainId,
           ctx,
+          { signal },
         );
         contextGraphBindingProofs.set(key, proof);
       }
@@ -4240,22 +4358,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         priority: 'background',
         source: 'agent.durableSync.storeInsert',
       }),
-      storeGraphScopedAsset: async (asset) => {
-        const authentication = await authenticateVerifiedGraphScopedAssetWithRetry(
-          this.chain,
+      storeGraphScopedAsset: async (asset, deadline) => {
+        const authentication = await authenticateDurableGraphScopedAsset({
+          chain: this.chain,
           asset,
           verifyContextGraphBinding,
-          {
-            onRetry: (error, attempt, maxAttempts) => {
-              this.log.warn(
-                ctx,
-                `Retrying graph-scoped durable authentication for ${asset.ual} `
-                + `after transient chain verification failure (${attempt}/${maxAttempts}): `
-                + `${error instanceof Error ? error.message : String(error)}`,
-              );
-            },
+          deadline,
+          onRetry: (error, attempt, maxAttempts) => {
+            this.log.warn(
+              ctx,
+              `Retrying graph-scoped durable authentication for ${asset.ual} `
+              + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            );
           },
-        );
+        });
         const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
