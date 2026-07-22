@@ -35,6 +35,7 @@ export {
   type VerifyAgentDelegationOptions,
 } from './auth/agent-delegation.js';
 export * from './rfc64/catalog-row-authorship.js';
+export * from './rfc64/finalized-vm-composer-v1.js';
 export * from './rfc64/author-catalog-producer.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';

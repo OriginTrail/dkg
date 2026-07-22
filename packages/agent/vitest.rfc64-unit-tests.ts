@@ -8,6 +8,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-inventory-v1-candidate-faults.test.ts",
   "test/rfc64-candidate-transfer-admission.test.ts",
   "test/rfc64-catalog-row-authorship.test.ts",
+  "test/rfc64-finalized-vm-composer-v1.test.ts",
   "test/rfc64-agent-inventory-lifecycle.test.ts",
   "test/rfc64-author-catalog-producer.test.ts",
   "test/rfc64-control-object-store-v1.test.ts",
