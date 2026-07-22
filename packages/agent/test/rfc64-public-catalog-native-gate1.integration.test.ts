@@ -48,6 +48,7 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverV1,
   rfc64CatalogSignatureVariantDigestV1,
+  type Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
@@ -1199,6 +1200,73 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
+
+  it('runs finalized VM precommit on exact placement evidence before CAS and retries rejection', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const rejectingPrecommit = vi.fn(async () => {
+      throw new Error('simulated finalized VM materialization failure');
+    });
+    const rejectingReceiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, rejectingPrecommit);
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      rejectingReceiver,
+    )).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('finalized VM precommit rejected'),
+    });
+    expect(rejectingPrecommit).toHaveBeenCalledOnce();
+    const [rejectedEvidence, rejectedSignal] = rejectingPrecommit.mock.calls[0]!;
+    expect(rejectedEvidence).toMatchObject({
+      catalogScope: fixture.scope,
+      catalogHeadDigest: fixture.successor.head.objectDigest,
+      rows: [{
+        kaId: fixture.rowBundle.row.kaId,
+        kaUal: fixture.rowBundle.kaUal,
+      }],
+    });
+    expect(Object.isFrozen(rejectedEvidence)).toBe(true);
+    expect(Object.isFrozen(rejectedEvidence.rows)).toBe(true);
+    expect(Object.isFrozen(rejectedEvidence.rows[0]?.placement)).toBe(true);
+    expect(rejectedSignal).toBeInstanceOf(AbortSignal);
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+
+    const acceptingPrecommit = vi.fn(async () => {});
+    const repaired = await fixture.synchronize(
+      fixture.announcement,
+      fixture.createReceiver(
+        fixture.receiverPersistence.inventory,
+        undefined,
+        undefined,
+        fixture.receiverStore,
+        acceptingPrecommit,
+      ),
+    );
+    expect(acceptingPrecommit).toHaveBeenCalledOnce();
+    expect(repaired.appliedHeadStatus).toBe('applied');
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
 });
 
 async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
@@ -1626,12 +1694,14 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       fetchKaBundle: receiverBundleFetch,
     },
     store: TripleStore = receiverStore,
+    beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
     controlObjects,
     inventory,
     store,
+    beforeAppliedHeadCommit,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<
     Rfc64PublicCatalogNativeTransportV1,

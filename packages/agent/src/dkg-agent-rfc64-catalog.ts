@@ -33,7 +33,9 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type OperationContext,
+  type ChainIdV1,
   type ContextGraphIdV1,
+  type DecimalU256V1,
   type Digest32V1,
   type EvmAddressV1,
   type KaIdV1,
@@ -47,7 +49,11 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  createStrictCurrentFinalizedEvmSnapshotScopeV1,
+  resolveRpcUrls,
+  verifyControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
@@ -76,8 +82,11 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
+  type Rfc64PublicCatalogNativeFinalizedVmPrecommitV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
+import { createFinalizedVmRuntimeV1 } from './rfc64/finalized-vm-runtime-v1.js';
+import { createFinalizedVmStoreMaterializerV1 } from './rfc64/finalized-vm-store-materializer-v1.js';
 import {
   createRfc64PublicOpenCatalogNativeReconcilerV1,
   type Rfc64PublicOpenCatalogDeploymentResolverV1,
@@ -753,6 +762,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           controlObjects: persistence.controlObjects,
           inventory: persistence.inventory,
           store: this.store,
+          beforeAppliedHeadCommit: (evidence, signal) =>
+            this.runRfc64FinalizedVmPrecommitV1(evidence, signal),
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
@@ -805,6 +816,77 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         };
         return Object.freeze(deploymentAwareReconciler);
       },
+    });
+  }
+
+  /**
+   * Promote an exact public catalog inventory only when its accepted policy is
+   * already anchored to finalized chain truth. The owner-signed/unregistered
+   * Gate-1 lane remains SWM-only until a finalized policy is accepted.
+   */
+  private async runRfc64FinalizedVmPrecommitV1(
+    this: DKGAgent,
+    evidence: Readonly<Rfc64PublicCatalogNativeFinalizedVmPrecommitV1>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const service = this.requireRfc64PublicCatalogServiceV1();
+    const acceptedPolicy = service.acceptedPolicySnapshotForCatalogScope(
+      evidence.catalogScope,
+    );
+    const { policy } = acceptedPolicy;
+    if (policy.source.kind !== 'finalized-chain') return;
+    if (
+      policy.accessPolicy !== 0
+      || policy.governanceChainId === null
+      || policy.governanceContractAddress === null
+    ) {
+      throw new Error('RFC-64 finalized VM precommit requires one public finalized policy');
+    }
+    const chainConfig = this.config.chainConfig;
+    if (chainConfig === undefined) {
+      throw new Error('RFC-64 finalized VM precommit requires trusted RPC configuration');
+    }
+    if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
+      throw new Error('RFC-64 finalized VM precommit requires DKGKnowledgeAssets resolution');
+    }
+
+    const [onChainContextGraphId, liveChainId, knowledgeAssetStorageAddress] =
+      await Promise.all([
+        this.getContextGraphOnChainId(evidence.catalogScope.contextGraphId, { signal }),
+        this.chain.getEvmChainId(),
+        this.chain.getDKGKnowledgeAssetsAddress(),
+      ]);
+    signal.throwIfAborted();
+    if (onChainContextGraphId === null) {
+      throw new Error('RFC-64 finalized VM precommit could not resolve the numeric context graph id');
+    }
+    if (liveChainId.toString() !== policy.governanceChainId) {
+      throw new Error('RFC-64 finalized VM policy differs from the configured chain id');
+    }
+
+    const chainId = policy.governanceChainId as ChainIdV1;
+    const runtime = createFinalizedVmRuntimeV1({
+      networkId: evidence.catalogScope.networkId,
+      chainId,
+      contextGraphStorageAddress: policy.governanceContractAddress,
+      knowledgeAssetStorageAddress:
+        knowledgeAssetStorageAddress.toLowerCase() as EvmAddressV1,
+      snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
+        chainId,
+        endpoints: resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+      }),
+      materialize: createFinalizedVmStoreMaterializerV1({ store: this.store }),
+    });
+    await runtime({
+      catalogLane: Object.freeze({
+        contextGraphId: evidence.catalogScope.contextGraphId,
+        subGraphName: evidence.catalogScope.subGraphName,
+      }),
+      onChainContextGraphId: onChainContextGraphId as DecimalU256V1,
+      acceptedPolicy,
+      placements: Object.freeze(evidence.rows.map((row) => row.placement)),
+      signal,
     });
   }
 

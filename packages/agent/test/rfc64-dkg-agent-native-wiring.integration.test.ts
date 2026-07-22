@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
+  contextGraphLayerUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
@@ -18,9 +20,10 @@ import {
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -28,6 +31,11 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
 import type { Rfc64CatalogAccessPolicyAuthorityConfigV1 } from '../src/dkg-agent-types.js';
+import {
+  createLoopbackJsonRpcTestHarness,
+  sendJsonRpcError,
+  sendJsonRpcResult,
+} from '../../chain/test/loopback-rpc-harness.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -41,6 +49,11 @@ const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
 const SECOND_SUCCESSOR_ISSUED_AT = '1773900002000' as TimestampMsV1;
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const CONTEXT_GRAPH_STORAGE =
+  '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
+const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}` as Digest32V1;
+const FINALIZED_POLICY_DIGEST = `0x${'cd'.repeat(32)}` as Digest32V1;
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
 const PROJECTION = new TextEncoder().encode(
@@ -55,12 +68,46 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
+const rpcHarness = createLoopbackJsonRpcTestHarness();
+
+const CG = new ethers.Interface([
+  'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
+  'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
+  'function isContextGraphActive(uint256 contextGraphId) view returns (bool)',
+  'function getContextGraphKaCount(uint256 contextGraphId) view returns (uint256)',
+  'function getContextGraphKaAt(uint256 contextGraphId, uint256 ordinal) view returns (uint256)',
+]);
+const KA = new ethers.Interface([
+  'function getKnowledgeAssetUpdateContext(uint256 id) view returns (uint256 merkleRootsCount, uint256 minted, uint88 byteSize, uint40 endEpoch, uint96 tokenAmount, bool isImmutable, uint32 merkleLeafCount)',
+  'function getLatestMerkleRoot(uint256 id) view returns (bytes32)',
+  'function getLatestMerkleRootAuthor(uint256 id) view returns (address)',
+  'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
+]);
+
+class FinalizedVmMockChainAdapter extends MockChainAdapter {
+  constructor() {
+    super(NETWORK_ID);
+  }
+
+  override async getEvmChainId(): Promise<bigint> {
+    return 20_430n;
+  }
+
+  override async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
+    return KAV10;
+  }
+
+  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return KAV10;
+  }
+}
 
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
     try { await agent.stop(); } catch { /* best-effort */ }
   }
   await Promise.all(tempDirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await rpcHarness.stopAll();
 });
 
 async function startNativeAgent(
@@ -68,6 +115,10 @@ async function startNativeAgent(
   deployment: CatalogSealDeploymentProfileV1 = NATIVE_DEPLOYMENT,
   existingDataDir?: string,
   accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  finalizedRuntime?: Readonly<{
+    rpcUrl: string;
+    chainAdapter: FinalizedVmMockChainAdapter;
+  }>,
 ): Promise<DKGAgent> {
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -87,6 +138,14 @@ async function startNativeAgent(
     agentProfileHeartbeatMs: 0,
     rfc64CatalogDeploymentProfile: deployment,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
+    ...(finalizedRuntime === undefined ? {} : {
+      chainAdapter: finalizedRuntime.chainAdapter,
+      chainConfig: {
+        rpcUrl: finalizedRuntime.rpcUrl,
+        hubAddress: CONTEXT_GRAPH_STORAGE,
+        operationalKeys: [`0x${'12'.repeat(32)}`],
+      },
+    }),
   });
   agents.push(agent);
   await agent.start();
@@ -141,6 +200,34 @@ function privateCatalogPolicy(): ContextGraphPolicyV1 {
     },
     effectiveAt: '0',
     issuedAt: '0',
+  };
+}
+
+function finalizedPublicCatalogPolicy(): ContextGraphPolicyV1 {
+  return {
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: '20430',
+    governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+    ownershipTransitionDigest: null,
+    era: '0',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: {
+      kind: 'finalized-chain',
+      chainId: '20430',
+      contractAddress: CONTEXT_GRAPH_STORAGE,
+      blockNumber: '120',
+      blockHash: `0x${'76'.repeat(32)}`,
+    },
+    effectiveAt: '1773900000000',
+    issuedAt: '1773900000000',
   };
 }
 
@@ -455,6 +542,200 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       applied: 3,
       dedupedAlreadyApplied: 1,
     });
+  }, 60_000);
+
+  it('materializes finalized VM through production two-agent wiring before applying the head', async () => {
+    const kaNumber = 7n;
+    const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const rpc = await rpcHarness.start((call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendJsonRpcResult(response, call, ethers.toQuantity(20_430));
+          return;
+        case 'eth_getBlockByNumber':
+          sendJsonRpcResult(response, call, {
+            number: '0x7b',
+            hash: FINALIZED_BLOCK_HASH,
+          });
+          return;
+        case 'eth_getCode':
+          sendJsonRpcResult(response, call, '0x6000');
+          return;
+        case 'eth_call': {
+          const request = call.params[0] as { readonly data?: string };
+          const selector = request.data?.slice(0, 10);
+          switch (selector) {
+            case CG.getFunction('getContextGraph')!.selector:
+              sendJsonRpcResult(response, call, CG.encodeFunctionResult(
+                'getContextGraph',
+                [AUTHOR, [], 0n, true, 1n, 0, 1, ethers.ZeroAddress, 0n],
+              ));
+              return;
+            case CG.getFunction('getNameHash')!.selector:
+              sendJsonRpcResult(response, call, CG.encodeFunctionResult('getNameHash', [nameHash]));
+              return;
+            case CG.getFunction('isContextGraphActive')!.selector:
+              sendJsonRpcResult(
+                response,
+                call,
+                CG.encodeFunctionResult('isContextGraphActive', [true]),
+              );
+              return;
+            case CG.getFunction('getContextGraphKaCount')!.selector:
+              sendJsonRpcResult(
+                response,
+                call,
+                CG.encodeFunctionResult('getContextGraphKaCount', [1n]),
+              );
+              return;
+            case CG.getFunction('getContextGraphKaAt')!.selector:
+              sendJsonRpcResult(
+                response,
+                call,
+                CG.encodeFunctionResult('getContextGraphKaAt', [BigInt(kaId)]),
+              );
+              return;
+            case KA.getFunction('getKnowledgeAssetUpdateContext')!.selector:
+              sendJsonRpcResult(response, call, KA.encodeFunctionResult(
+                'getKnowledgeAssetUpdateContext',
+                [1n, 0n, 0n, 0n, 0n, false, 0],
+              ));
+              return;
+            case KA.getFunction('getLatestMerkleRoot')!.selector:
+              sendJsonRpcResult(
+                response,
+                call,
+                KA.encodeFunctionResult('getLatestMerkleRoot', [ASSERTION_ROOT]),
+              );
+              return;
+            case KA.getFunction('getLatestMerkleRootAuthor')!.selector:
+              sendJsonRpcResult(
+                response,
+                call,
+                KA.encodeFunctionResult('getLatestMerkleRootAuthor', [AUTHOR]),
+              );
+              return;
+            case KA.getFunction('getLatestMerkleRootPublisher')!.selector:
+              sendJsonRpcResult(response, call, KA.encodeFunctionResult(
+                'getLatestMerkleRootPublisher',
+                [`0x${'66'.repeat(20)}`],
+              ));
+              return;
+            default:
+              sendJsonRpcError(response, call, -32602, `unexpected eth_call ${selector}`);
+              return;
+          }
+        }
+        default:
+          sendJsonRpcError(response, call, -32601, 'method not found');
+      }
+    });
+    const [author, receiver] = await Promise.all([
+      startNativeAgent(
+        'vm-author',
+        NATIVE_DEPLOYMENT,
+        undefined,
+        undefined,
+        { rpcUrl: rpc.url, chainAdapter: new FinalizedVmMockChainAdapter() },
+      ),
+      startNativeAgent(
+        'vm-receiver',
+        NATIVE_DEPLOYMENT,
+        undefined,
+        undefined,
+        { rpcUrl: rpc.url, chainAdapter: new FinalizedVmMockChainAdapter() },
+      ),
+    ]);
+    const policy = finalizedPublicCatalogPolicy();
+    for (const agent of [author, receiver]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({
+        policy,
+        policyDigest: FINALIZED_POLICY_DIGEST,
+        roster: null,
+      });
+    }
+    (receiver as any).setContextGraphSubscription(CONTEXT_GRAPH_ID, {
+      subscribed: true,
+      synced: false,
+    }, { persist: false });
+    (receiver as any).bindContextGraphCreatedNameHashV1(
+      nameHash,
+      ON_CHAIN_CONTEXT_GRAPH_ID,
+    );
+    const storeQuery = vi.spyOn((receiver as any).store, 'query');
+    await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBe(
+      ON_CHAIN_CONTEXT_GRAPH_ID,
+    );
+    expect(storeQuery.mock.calls.some(([query]) => String(query).includes('OnChainId'))).toBe(false);
+    storeQuery.mockRestore();
+    await connectBothWays(author, receiver);
+
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as const;
+    const genesis = await author.publishAuthorCatalogGenesisV1({
+      scope,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    expect(genesis.announcedPeers).toEqual([receiver.peerId]);
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'finalized-vm-production-wire' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(kaNumber),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    expect(successor.announcedPeers).toEqual([receiver.peerId]);
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const vmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      AUTHOR,
+      Number(kaNumber),
+    );
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      successor.headObjectDigest,
+    )).toBeNull();
+    await expect((receiver as any).store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'bindings',
+      bindings: expect.arrayContaining([
+        expect.objectContaining({ s: 'https://example.org/alice' }),
+      ]),
+    });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: successor.headObjectDigest,
+      inventoryRowCount: '1',
+    });
+    expect(rpc.calls.some(({ method }) => method === 'eth_call')).toBe(true);
   }, 60_000);
 
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {

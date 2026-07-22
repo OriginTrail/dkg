@@ -421,6 +421,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (subscribed) return subscribed;
 
+    // Registered CG events carry only the curator-committed name hash. Resolve
+    // the cleartext subscription through the in-memory reverse index before
+    // consulting RDF state; this mapping is populated and persisted by the
+    // chain-event lifecycle path.
+    const wireId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      ? contextGraphId.toLowerCase()
+      : ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const mappedLocalId = this.wireIdToLocalCgId.get(wireId);
+    if (mappedLocalId !== undefined) {
+      const mapped = this.subscribedContextGraphs.get(mappedLocalId)?.onChainId;
+      if (mapped) return mapped;
+    }
+
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(

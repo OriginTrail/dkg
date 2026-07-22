@@ -54,6 +54,7 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  type VerifiedCatalogSealBindingV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
@@ -72,8 +73,10 @@ import { unpackKnowledgeAssetId } from '../ka-identity.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogRowAuthorshipV1,
+  type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
+import type { FinalizedVmPlacementEvidenceV1 } from './finalized-vm-composer-v1.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
@@ -125,7 +128,30 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
     'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
   >;
   readonly store: TripleStore;
+  /**
+   * Final fail-closed semantic admission step. It runs after the exact SWM
+   * post-read and before the durable applied-head CAS. A rejection leaves the
+   * head unapplied so a later synchronization can idempotently repair both
+   * SWM and any partially materialized VM rows.
+   */
+  readonly beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1;
   readonly transportTimeoutMs?: number;
+}
+
+/** Exact same-process evidence admitted to finalized VM composition. */
+export interface Rfc64PublicCatalogNativeFinalizedVmPrecommitV1 {
+  readonly catalogScope: Readonly<AuthorCatalogScopeV1>;
+  readonly catalogHeadDigest: Digest32V1;
+  readonly inventoryDigest: Digest32V1;
+  /** Strictly increasing by mathematical KA ID. */
+  readonly rows: readonly Readonly<Rfc64PublicCatalogNativeActivatedRowEvidenceV1>[];
+}
+
+export interface Rfc64PublicCatalogNativeFinalizedVmPrecommitHandlerV1 {
+  (
+    evidence: Readonly<Rfc64PublicCatalogNativeFinalizedVmPrecommitV1>,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
@@ -141,6 +167,8 @@ export interface Rfc64PublicCatalogNativeActivationEvidenceV1 {
   readonly swmGraph: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+  /** Process-local capabilities retained for same-process finalized VM admission. */
+  readonly placement: FinalizedVmPlacementEvidenceV1;
   /** Exact predecessor rows absent from this head and physically deactivated before its CAS. */
   readonly removedRows: readonly Readonly<Rfc64PublicCatalogNativeRemovedRowEvidenceV1>[];
   readonly removedRowCount: number;
@@ -159,6 +187,8 @@ export interface Rfc64PublicCatalogNativeActivatedRowEvidenceV1
   readonly swmGraph: string;
   /** Exact signed delegation/head/path/bucket/row authorization closure. */
   readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+  /** Process-local capabilities retained for same-process finalized VM admission. */
+  readonly placement: FinalizedVmPlacementEvidenceV1;
 }
 
 /** Exact evidence for one bounded multi-asset successor inventory. */
@@ -229,6 +259,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
       || typeof options.store?.query !== 'function'
+      || (
+        options.beforeAppliedHeadCommit !== undefined
+        && typeof options.beforeAppliedHeadCommit !== 'function'
+      )
     ) {
       fail('catalog-native-receiver-input', 'receiver dependencies are incomplete');
     }
@@ -623,16 +657,19 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     const preparedRows: Array<{
       readonly row: AuthorCatalogRowV1;
       readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+      readonly authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
       readonly projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
       readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
+      readonly sealBindingCapability: VerifiedCatalogSealBindingV1;
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
     for (const row of bucket.payload.rows) {
       throwIfAborted(signal);
       let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+      let authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
       try {
-        const authorshipToken = verifyAuthorCatalogRowAuthorshipV1({
+        authorshipCapability = verifyAuthorCatalogRowAuthorshipV1({
           catalogIssuerDelegation: fetchedDelegation.envelope,
           catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
           parentAuthorAgentEvidence: null,
@@ -645,7 +682,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           catalogBucketSignature: fetchedBucket.issuerSignature,
           targetKaId: row.kaId,
         });
-        authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipToken);
+        authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
       } catch (cause) {
         fail(
           'catalog-native-receiver-authorization',
@@ -670,6 +707,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
 
       let projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
       let sealBinding: VerifiedCatalogSealBindingSnapshotV1;
+      let sealBindingCapability: VerifiedCatalogSealBindingV1;
       let projectionBytes: Uint8Array;
       try {
         const transferred = verifyTransferredCatalogBundleV1(head, row, bundle, deployment);
@@ -679,8 +717,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           row,
           deployment,
         );
+        sealBindingCapability = transferredMetadata.catalogSealBinding;
         sealBinding = readVerifiedCatalogSealBindingV1(
-          transferredMetadata.catalogSealBinding,
+          sealBindingCapability,
         );
         assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
         const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
@@ -717,8 +756,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       preparedRows.push(Object.freeze({
         row,
         authorship,
+        authorshipCapability,
         projectionMetadata,
         sealBinding,
+        sealBindingCapability,
         projectionBytes,
         expectedEvidence,
       }));
@@ -808,6 +849,10 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
           ...activation.evidence,
           swmGraph: activation.swmGraph,
           authorship: prepared.authorship,
+          placement: Object.freeze({
+            authorship: prepared.authorshipCapability,
+            sealBinding: prepared.sealBindingCapability,
+          }),
         }));
       }
       completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
@@ -851,6 +896,25 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail(
         'catalog-native-receiver-activation',
         'semantic transition failed after mutation began',
+        cause,
+      );
+    }
+
+    const precommitSignal = signal ?? new AbortController().signal;
+    try {
+      throwIfAborted(precommitSignal);
+      await this.options.beforeAppliedHeadCommit?.(Object.freeze({
+        catalogScope: trustedCatalogScope,
+        catalogHeadDigest: head.objectDigest as Digest32V1,
+        inventoryDigest: completion.inventoryDigest,
+        rows: Object.freeze(activatedRows),
+      }), precommitSignal);
+      throwIfAborted(precommitSignal);
+    } catch (cause) {
+      if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
+      fail(
+        'catalog-native-receiver-activation',
+        'finalized VM precommit rejected the exact activated inventory',
         cause,
       );
     }
@@ -930,6 +994,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         activatedTripleCount: only.activatedTripleCount,
         swmGraph: only.swmGraph,
         authorship: only.authorship,
+        placement: only.placement,
         removedRows: Object.freeze(removedRows),
         removedRowCount: removedRows.length,
         appliedHeadStatus,
@@ -1039,13 +1104,10 @@ function snapshotTrustedPublicOpenScope(
   try {
     assertAuthorCatalogScopeV1(scope);
     if (
-      scope.governanceChainId !== null
-      || scope.governanceContractAddress !== null
-      || scope.ownershipTransitionDigest !== null
-      || scope.subGraphName !== null
+      scope.subGraphName !== null
       || scope.bucketCount !== '1'
     ) {
-      throw new Error('Gate 1 requires the public/open null-governance root scope');
+      throw new Error('bounded public catalog synchronization requires the root one-bucket lane');
     }
     if (
       announcement.networkId !== scope.networkId
