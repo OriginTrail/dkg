@@ -409,18 +409,36 @@ describe('async lift publisher broadcast durability', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
   });
 
-  // #1867 (deliberate, LOCKED edge) — a mined-then-reverted tx whose revert string happens
-  // to contain "insufficient funds" is classified pre-acceptance terminal. This is an
-  // ACCEPTED consequence of the substring match: it mirrors classifyPublishFailureCode
-  // exactly (the mapper would assign insufficient_funds either way), and a revert is a
-  // failure on both the classifier and recovery paths — recovery would only terminate it
-  // later with a different code. The go-ethereum pre-check message is a node-level reject,
-  // not a Solidity revert, so this collision is not realistic for the publish call; the
-  // decision is intentional, not accidental. Do NOT "fix" this by excluding reverts.
-  it('classifies a revert message that contains "insufficient funds" as pre-acceptance terminal (accepted edge)', async () => {
+  // #1867 (#1918 round-6 🔴) — a mined-then-reverted tx whose revert string happens to contain
+  // "insufficient funds" is NOT a pre-acceptance reject. A revert is post-mempool by definition
+  // (the tx was accepted and mined), so it must stay on the recovery track like every other
+  // revert (see the plain-revert case in the safety matrix below) — never taken by the
+  // pre-acceptance shortcut. This keeps the whitelist strictly to node-level pre-send rejects;
+  // go-ethereum's `insufficient funds for gas * price + value` contains no "revert", so the
+  // genuine pre-acceptance case (next test) is unaffected.
+  it('keeps a revert message that contains "insufficient funds" on the recovery track (revert is post-mempool)', async () => {
     const publisher = createPublisher(store, {
       knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
         new Error('execution reverted: insufficient funds'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // The genuine node-level pre-send reject (contains no "revert") still terminal-fails.
+  it('still terminal-fails a node-level "insufficient funds for gas" pre-send reject', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('insufficient funds for gas * price + value'),
       ),
     });
 
@@ -483,6 +501,9 @@ describe('async lift publisher broadcast durability', () => {
     expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: not authorized'))).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(new Error('ETIMEDOUT: request timed out'))).toBe(false);
     expect(isDefinitivePreAcceptanceSendFailure(undefined)).toBe(false);
+    // A revert is post-mempool even when its string contains "insufficient funds": excluded.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: insufficient funds'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('reverted: not enough; insufficient funds'))).toBe(false);
 
     // Throw-safe: an unstringifiable value, a throwing `code` accessor, and a throwing Proxy
     // are each classified non-definitive rather than throwing out of the classifier.

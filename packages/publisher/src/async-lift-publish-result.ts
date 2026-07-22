@@ -120,11 +120,33 @@ export function mapPublishResultToLiftJobSuccess(params: {
   }
 }
 
+/** Throw-safe facts read off an arbitrary thrown publish error. Both the failure-code mapper
+ *  and the pre-acceptance classifier read the SAME low-level extraction here (shared
+ *  mechanics), while each keeps its OWN classification policy. Inspecting a thrown value can
+ *  fail — `String()` on a null-prototype object, or a throwing `.code` accessor / Proxy — so
+ *  every read is guarded and falls back to a safe default (`undefined` code, `''` message).
+ *  A failure to inspect must never throw out of a failure-recording or recovery-decision path. */
+function readPublishErrorFacts(error: unknown): { code: unknown; message: string; lowerMessage: string } {
+  let code: unknown;
+  try {
+    code = (error as { code?: unknown } | null | undefined)?.code;
+  } catch {
+    code = undefined;
+  }
+  let message = '';
+  try {
+    const raw = error instanceof Error ? error.message : String(error);
+    if (typeof raw === 'string') message = raw;
+  } catch {
+    message = '';
+  }
+  return { code, message, lowerMessage: message.toLowerCase() };
+}
+
 export function mapPublishExceptionToLiftJobFailure(
   input: AsyncLiftPublishFailureInput,
 ): LiftJobFailureMetadata {
-  const message = input.error instanceof Error ? input.error.message : String(input.error);
-  const lower = message.toLowerCase();
+  const { code: errorCode, message, lowerMessage: lower } = readPublishErrorFacts(input.error);
 
   // The funded-wallet-selection error (dkg-chain `InsufficientPublisherFundsError`,
   // code `NO_FUNDED_PUBLISHER_WALLET`) carries a friendly "no operational wallet
@@ -137,7 +159,6 @@ export function mapPublishExceptionToLiftJobFailure(
   // same forever-retry trap #1013/#1121 fixed). `insufficient_funds` is only
   // valid from the 'broadcast' state, so only force it there — funded selection
   // is a broadcast-phase concern; any other state falls back to the classifier.
-  const errorCode = (input.error as { code?: unknown } | null | undefined)?.code;
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
   const code = isNoFundedWallet && input.failedFromState === 'broadcast'
@@ -176,32 +197,31 @@ export function mapPublishExceptionToLiftJobFailure(
  * deliberately EXCLUDED: a nonce error can follow a competing tx already propagating, and a
  * revert means the tx was mined. Widen only with a per-error pre-mempool proof.
  *
- * Invariant: whatever this whitelists, `mapPublishExceptionToLiftJobFailure({ error,
- * failedFromState: 'broadcast', ... })` classifies as `insufficient_funds` (terminal,
- * `fail_job`, non-retryable), so the job is never chain-recovery-chased.
+ * REVERTS ARE NEVER PRE-ACCEPTANCE: a `revert`/`reverted` message means the tx was mined
+ * (post-mempool), so it is excluded even when its (caller-controlled) revert string contains
+ * "insufficient funds". This keeps ALL reverts uniformly on the recovery track — consistent
+ * with the plain-revert handling elsewhere — and confines the whitelist to node-level
+ * pre-send rejects. go-ethereum's balance pre-check (`insufficient funds for gas * price +
+ * value`) contains no "revert", so the narrowing loses no genuine pre-acceptance case.
  *
- * The bare `includes('insufficient funds')` mirrors `classifyPublishFailureCode` exactly; a
- * mined-then-reverted tx whose revert string contains that phrase is an accepted, intentional
- * edge (same code the mapper would assign, and a revert is a failure on either path).
+ * DECISION vs MECHANICS: the throw-safe extraction of code+message is shared with
+ * `mapPublishExceptionToLiftJobFailure` (`readPublishErrorFacts`), but this predicate's
+ * classification policy is deliberately SEPARATE and narrower — it must never track the
+ * mapper's broader signals, or a future mapper code could silently widen this whitelist and
+ * re-open the #1851 double-submit hole. The invariant that every whitelisted error maps to a
+ * terminal `insufficient_funds` from 'broadcast' is pinned by test, not by shared code.
  *
- * THROW-SAFE: this runs on the double-submit safety path — if it threw, the caller would
- * never reach the ambiguous-recovery branch and the error would strand off the recovery
- * track. ALL inspection of the arbitrary thrown value is guarded: not just `String(error)`
- * on a pathological value (e.g. `Object.create(null)`), but also the `.code` read, which a
- * throwing accessor or Proxy can make throw. Any failure to inspect → classified
- * non-definitive → stays on recovery (we cannot PROVE a pre-acceptance reject, so we treat
- * it conservatively as ambiguous).
+ * THROW-SAFE via `readPublishErrorFacts`: this runs on the double-submit safety path — if it
+ * threw, the caller would never reach the ambiguous-recovery branch and the error would
+ * strand off recovery. An unstringifiable value / throwing `.code` accessor / Proxy yields
+ * empty facts → classified non-definitive → stays on recovery.
  */
 export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
-  try {
-    const errorCode = (error as { code?: unknown } | null | undefined)?.code;
-    if (errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
-    const message = error instanceof Error ? error.message : String(error);
-    const lower = typeof message === 'string' ? message.toLowerCase() : '';
-    return messageIndicatesNoFundedPublisherWallet(lower) || lower.includes('insufficient funds');
-  } catch {
-    return false;
-  }
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  if (code === NO_FUNDED_PUBLISHER_WALLET_CODE) return true;
+  if (messageIndicatesNoFundedPublisherWallet(lowerMessage)) return true;
+  if (lowerMessage.includes('revert')) return false;
+  return lowerMessage.includes('insufficient funds');
 }
 
 function classifyPublishFailureCode(
