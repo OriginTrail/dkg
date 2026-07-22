@@ -107,13 +107,14 @@ export async function startFinalizedVmHarnessRuntimeV1(
   config: Readonly<FinalizedVmHarnessConfigV1>,
 ): Promise<Readonly<FinalizedVmHarnessRuntimeV1>> {
   const chainAdapter = new FinalizedVmHarnessMockChainAdapter();
-  (chainAdapter as unknown as { nextContextGraphId: bigint }).nextContextGraphId =
-    BigInt(config.onChainContextGraphId);
-  const created = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
-    publishPolicy: 1,
-    nameHash: config.nameHash,
-  });
+  const created = await chainAdapter.createOnChainContextGraphAtIdForTesting(
+    BigInt(config.onChainContextGraphId),
+    {
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: config.nameHash,
+    },
+  );
   if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
     throw new Error('mock chain created a different numeric context graph id');
   }

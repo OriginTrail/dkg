@@ -922,6 +922,25 @@ export class MockChainAdapter implements ChainAdapter {
   }>();
   private nextContextGraphId = 1n;
 
+  /**
+   * Explicit fixture seam for harnesses that must reproduce an existing
+   * on-chain numeric CG id. It is intentionally one-shot and must run before
+   * any CG is created so tests cannot rewrite live mock registry state.
+   */
+  async createOnChainContextGraphAtIdForTesting(
+    contextGraphId: bigint,
+    params: CreateOnChainContextGraphParams,
+  ): Promise<CreateOnChainContextGraphResult> {
+    if (contextGraphId < 1n) {
+      throw new TypeError('Mock fixture context graph id must be positive');
+    }
+    if (this.contextGraphs.size !== 0 || this.nextContextGraphId !== 1n) {
+      throw new Error('Mock fixture context graph id must be seeded before any CG exists');
+    }
+    this.nextContextGraphId = contextGraphId;
+    return this.createOnChainContextGraph(params);
+  }
+
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     if (params.accessPolicy === undefined || params.publishPolicy === undefined) {
       throw new Error(
