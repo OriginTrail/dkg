@@ -106,13 +106,19 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
+export const GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE = `${DKG}confirmationKind`;
+
+export type GraphKnowledgeAssetConfirmationKind =
+  | 'transaction'
+  | 'finalized-materialization';
+
 export type GraphKnowledgeAssetConfirmation =
   | Readonly<{
-      kind: 'transaction';
+      kind: Extract<GraphKnowledgeAssetConfirmationKind, 'transaction'>;
       provenance: OnChainProvenance;
     }>
   | Readonly<{
-      kind: 'finalized-materialization';
+      kind: Extract<GraphKnowledgeAssetConfirmationKind, 'finalized-materialization'>;
       provenance: Readonly<{
         batchId: bigint;
         materializedVersion: MaterializedVersion;
@@ -125,6 +131,36 @@ export type GraphKnowledgeAssetMetadataState =
       readonly status: 'confirmed';
       readonly confirmation: GraphKnowledgeAssetConfirmation;
     }>;
+
+/**
+ * Parse the graph-scoped confirmation discriminator shared by metadata writers
+ * and durable-sync readers. Missing metadata is the rolling-compatible legacy
+ * receipt-backed shape; every explicit value must name exactly one supported
+ * confirmation lane.
+ */
+export function normalizeGraphKnowledgeAssetConfirmationKindV1(
+  raw: string | undefined,
+): GraphKnowledgeAssetConfirmationKind {
+  if (raw === undefined || raw === 'transaction') return 'transaction';
+  if (raw === 'finalized-materialization') return raw;
+  throw new Error(`Unsupported graph knowledge asset confirmation kind: ${raw}`);
+}
+
+/** Read and validate the confirmation state from one KA's structural metadata. */
+export function readGraphKnowledgeAssetConfirmationKindV1(
+  metadataQuads: readonly Pick<Quad, 'predicate' | 'object'>[],
+): GraphKnowledgeAssetConfirmationKind {
+  const values = metadataQuads
+    .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE)
+    .map((quad) => rdfLiteralLexicalValue(quad.object));
+  if (values.length > 1) {
+    throw new Error(`Graph knowledge asset metadata has ${values.length} confirmation kinds`);
+  }
+  if (values.length === 1 && values[0] === undefined) {
+    throw new Error('Graph knowledge asset confirmation kind must be an RDF literal');
+  }
+  return normalizeGraphKnowledgeAssetConfirmationKindV1(values[0]);
+}
 
 export interface GraphKnowledgeAssetMetadata extends KCMetadata {
   assertionVersion: string | number | bigint;
@@ -362,7 +398,7 @@ export function generateGraphKnowledgeAssetMetadata(
       ));
       quads.push(mq(
         scope.ual,
-        `${DKG}confirmationKind`,
+        GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
         lit('transaction'),
         metaGraph,
       ));
@@ -376,7 +412,7 @@ export function generateGraphKnowledgeAssetMetadata(
         mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
         mq(
           scope.ual,
-          `${DKG}confirmationKind`,
+          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
           lit('finalized-materialization'),
           metaGraph,
         ),

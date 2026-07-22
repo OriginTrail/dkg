@@ -166,29 +166,17 @@ async function boot(): Promise<void> {
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
     }),
+    ...(finalizedVmConfig === null ? {} : {
+      initialContextGraphSubscriptions: [{
+        contextGraphId: finalizedVmConfig.contextGraphId,
+        state: { subscribed: true, synced: false },
+      }],
+    }),
   });
   agent = created;
-  if (finalizedVmConfig !== null) {
-    // Models a cleartext subscription restored before the startup chain-event
-    // scan. The production poller must derive the numeric id from nameHash.
-    (created as unknown as {
-      setContextGraphSubscription(
-        id: string,
-        state: Readonly<{ subscribed: boolean; synced: boolean }>,
-        options: Readonly<{ persist: boolean }>,
-      ): void;
-    }).setContextGraphSubscription(
-      finalizedVmConfig.contextGraphId,
-      { subscribed: true, synced: false },
-      { persist: false },
-    );
-  }
   await created.start();
   if (finalizedVmConfig !== null) {
-    const inFlightPoll = (created as unknown as {
-      chainPoller?: { inFlightPoll?: Promise<void> | null };
-    }).chainPoller?.inFlightPoll;
-    if (inFlightPoll) await inFlightPoll;
+    await created.awaitInitialChainPoll();
   }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');

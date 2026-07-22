@@ -896,7 +896,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
 
   it('rejects a locally resolved deployment for another network before head fetch', async () => {
     const fixture = await setupLiveReceiver();
-    await expect(fixture.receiver.bootstrapEmptyPublicOpenCatalog(
+    await expect(fixture.receiver.bootstrapEmptyBoundedPublicRootCatalog(
       'peer-unused',
       fixture.genesisAnnouncement,
       fixture.scope,
@@ -1891,7 +1891,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = genesisAnnouncement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
+    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
@@ -1901,7 +1901,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     bootstrapGoverned: (
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
+    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
       authorNode.peerId,
       governedGenesisAnnouncement,
       governedScope,
@@ -1912,7 +1912,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeOnePublicOpenRow(
+    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
@@ -1923,7 +1923,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.synchronizePublicOpenCatalog(
+    ) => selectedReceiver.synchronizeBoundedPublicRootCatalog(
       authorNode.peerId,
       selectedAnnouncement,
       scope,
@@ -1933,7 +1933,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     synchronizeGoverned: (
       selectedReceiver = receiver,
       signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeOnePublicOpenRow(
+    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
       authorNode.peerId,
       governedSuccessorAnnouncement,
       governedScope,

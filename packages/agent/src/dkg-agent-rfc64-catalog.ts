@@ -83,8 +83,8 @@ import {
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
 import {
-  createRfc64PublicOpenCatalogNativeReconcilerV1,
-  type Rfc64PublicOpenCatalogDeploymentResolverV1,
+  createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import type {
@@ -736,7 +736,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return undefined;
     }
     this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-    const resolveDeployment: Rfc64PublicOpenCatalogDeploymentResolverV1 =
+    const resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1 =
       (announcement, signal) => this.resolveRfc64CatalogDeploymentProfileV1(
         announcement.networkId,
         signal,
@@ -781,10 +781,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           beforeAppliedHeadCommit: finalizedVmPrecommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
-        const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
           nativeReceiver: Object.freeze({
-            synchronizePublicOpenCatalog: async (...args) => {
-              const evidence = await nativeReceiver.synchronizePublicOpenCatalog(...args);
+            synchronizeBoundedPublicRootCatalog: async (...args) => {
+              const evidence = await nativeReceiver.synchronizeBoundedPublicRootCatalog(...args);
               this.rfc64PublicCatalogSynchronizationEvidenceV1.set(
                 evidence.catalogHeadDigest,
                 evidence,

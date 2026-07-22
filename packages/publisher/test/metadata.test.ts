@@ -7,6 +7,7 @@ import {
   generateConfirmedMetadata,
   generateConfirmedFullMetadata,
   generateGraphKnowledgeAssetMetadata,
+  readGraphKnowledgeAssetConfirmationKindV1,
   generateShareMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
@@ -375,6 +376,34 @@ describe('generateConfirmedFullMetadata', () => {
 });
 
 describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
+  it('parses explicit and rolling-compatible legacy confirmation state centrally', () => {
+    const base = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'tentative' });
+    expect(readGraphKnowledgeAssetConfirmationKindV1(base)).toBe('transaction');
+    expect(readGraphKnowledgeAssetConfirmationKindV1([
+      {
+        subject: GRAPH_UAL,
+        predicate: `${DKG}confirmationKind`,
+        object: '"finalized-materialization"',
+        graph: META_GRAPH,
+      },
+    ])).toBe('finalized-materialization');
+  });
+
+  it('rejects unsupported and conflicting confirmation state centrally', () => {
+    const quad = (object: string) => ({
+      subject: GRAPH_UAL,
+      predicate: `${DKG}confirmationKind`,
+      object,
+      graph: META_GRAPH,
+    });
+    expect(() => readGraphKnowledgeAssetConfirmationKindV1([quad('"bogus"')]))
+      .toThrow('Unsupported graph knowledge asset confirmation kind');
+    expect(() => readGraphKnowledgeAssetConfirmationKindV1([
+      quad('"transaction"'),
+      quad('"finalized-materialization"'),
+    ])).toThrow('2 confirmation kinds');
+  });
+
   it('preserves the tentative metadata shape without confirmation provenance', () => {
     const quads = generateGraphKnowledgeAssetMetadata(
       makeGraphMeta(),

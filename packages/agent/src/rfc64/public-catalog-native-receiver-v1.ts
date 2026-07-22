@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Bounded receiver for one public/open root-lane catalog bucket.
+ * Bounded receiver for one public root-lane catalog bucket. The locally
+ * accepted scope may be open or governed; root lane and one bucket are the
+ * stable synchronization invariant.
  *
  * The supported vertical slice is intentionally narrow: one successor head,
  * one bucket with 1..1,024 rows, the root context-graph lane, and complete
@@ -274,14 +276,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     this.#timeoutMs = timeoutMs;
   }
 
-  async synchronizeOnePublicOpenRow(
+  async synchronizeOneBoundedPublicRootRow(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeActivationEvidenceV1> {
-    const trustedScope = snapshotTrustedPublicOpenScope(
+    const trustedScope = snapshotTrustedBoundedPublicRootScope(
       trustedCatalogScope,
       announcement,
     );
@@ -289,7 +291,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     return this.withScopeSerialization(
       computeAuthorCatalogScopeDigestV1(trustedScope),
       async () => {
-        const evidence = await this.synchronizePublicOpenCatalogSerialized(
+        const evidence = await this.synchronizeBoundedPublicRootCatalogSerialized(
           remotePeerId,
           announcement,
           trustedScope,
@@ -310,21 +312,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
    * 1..1,024-row successor. This is the production-facing entrypoint for a fresh receiver:
    * callers do not need to seed durable history out of band.
    */
-  async synchronizePublicOpenCatalog(
+  async synchronizeBoundedPublicRootCatalog(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeSynchronizationEvidenceV1> {
-    const trustedScope = snapshotTrustedPublicOpenScope(
+    const trustedScope = snapshotTrustedBoundedPublicRootScope(
       trustedCatalogScope,
       announcement,
     );
     const trustedDeployment = snapshotTrustedDeployment(deployment, trustedScope);
     return this.withScopeSerialization(
       computeAuthorCatalogScopeDigestV1(trustedScope),
-      () => this.synchronizePublicOpenCatalogSerialized(
+      () => this.synchronizeBoundedPublicRootCatalogSerialized(
         remotePeerId,
         announcement,
         trustedScope,
@@ -336,14 +338,14 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   }
 
   /** Fetch, fully verify, and durably initialize exactly one empty genesis. */
-  async bootstrapEmptyPublicOpenCatalog(
+  async bootstrapEmptyBoundedPublicRootCatalog(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: AuthorCatalogScopeV1,
     deployment: CatalogSealDeploymentProfileV1,
     signal?: AbortSignal,
   ): Promise<Rfc64PublicCatalogNativeGenesisEvidenceV1> {
-    const trustedScope = snapshotTrustedPublicOpenScope(
+    const trustedScope = snapshotTrustedBoundedPublicRootScope(
       trustedCatalogScope,
       announcement,
     );
@@ -351,7 +353,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     return this.withScopeSerialization(
       computeAuthorCatalogScopeDigestV1(trustedScope),
       async () => {
-        const evidence = await this.synchronizePublicOpenCatalogSerialized(
+        const evidence = await this.synchronizeBoundedPublicRootCatalogSerialized(
           remotePeerId,
           announcement,
           trustedScope,
@@ -367,7 +369,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
   }
 
-  private async synchronizePublicOpenCatalogSerialized(
+  private async synchronizeBoundedPublicRootCatalogSerialized(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
@@ -387,7 +389,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     const head = fetchedHead.envelope;
     assertFetchedHeadMatchesTrustedScope(head, trustedCatalogScope);
     if (expected === 'genesis' || (expected === 'any' && claimsGenesisHistory(head))) {
-      return this.bootstrapEmptyPublicOpenCatalogFetched(
+      return this.bootstrapEmptyBoundedPublicRootCatalogFetched(
         remotePeerId,
         announcement,
         trustedCatalogScope,
@@ -401,7 +403,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     if (expected === 'one-successor' && head.payload.totalRows !== '1') {
       fail('catalog-native-receiver-slice', 'one-row synchronization does not accept multi-row heads');
     }
-    return this.synchronizeBoundedPublicOpenCatalogFetched(
+    return this.synchronizeBoundedPublicRootCatalogFetched(
       remotePeerId,
       announcement,
       trustedCatalogScope,
@@ -411,7 +413,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     );
   }
 
-  private async bootstrapEmptyPublicOpenCatalogFetched(
+  private async bootstrapEmptyBoundedPublicRootCatalogFetched(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
@@ -537,7 +539,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     });
   }
 
-  private async synchronizeBoundedPublicOpenCatalogFetched(
+  private async synchronizeBoundedPublicRootCatalogFetched(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
@@ -1085,7 +1087,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
   }
 }
 
-function snapshotTrustedPublicOpenScope(
+function snapshotTrustedBoundedPublicRootScope(
   input: AuthorCatalogScopeV1,
   announcement: Rfc64PublicCatalogHeadAnnouncementV1,
 ): Readonly<AuthorCatalogScopeV1> {
@@ -1120,7 +1122,7 @@ function snapshotTrustedPublicOpenScope(
   } catch (cause) {
     fail(
       'catalog-native-receiver-authorization',
-      'catalog request is not bound to the locally accepted public/open policy scope',
+      'catalog request is not bound to the locally accepted bounded public root scope',
       cause,
     );
   }
@@ -1167,7 +1169,7 @@ function assertFetchedHeadMatchesTrustedScope(
   } catch (cause) {
     fail(
       'catalog-native-receiver-authorization',
-      'fetched catalog head differs from the locally accepted public/open policy scope',
+      'fetched catalog head differs from the locally accepted bounded public root scope',
       cause,
     );
   }
@@ -1189,7 +1191,7 @@ function assertEmptyGenesisHead(head: SignedAuthorCatalogHeadEnvelopeV1): void {
   ) {
     fail(
       'catalog-native-receiver-slice',
-      'genesis bootstrap requires the canonical empty public/open root catalog',
+      'genesis bootstrap requires the canonical empty bounded public root catalog',
     );
   }
 }
@@ -1353,7 +1355,7 @@ function assertDirectAuthorCatalogIssuerDelegationBindingV1(
     || left.authorAddress !== trustedCatalogScope.authorAddress
     || left.catalogEra !== trustedCatalogScope.era
   ) {
-    throw new Error('delegation differs from the locally trusted public/open catalog scope');
+    throw new Error('delegation differs from the locally trusted bounded public root catalog scope');
   }
   if (
     (left.catalogEra === '0') !== (left.previousDelegationDigest === null)

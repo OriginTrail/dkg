@@ -1192,6 +1192,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphSubscriptions();
+    for (const seed of this.config.initialContextGraphSubscriptions ?? []) {
+      this.setContextGraphSubscription(
+        seed.contextGraphId,
+        { ...seed.state },
+        { persist: false },
+      );
+    }
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
@@ -2056,7 +2063,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       });
-      this.chainPoller.start();
+      await this.chainPoller.start();
       this.log.info(ctx, `Chain event poller started`);
     }
 

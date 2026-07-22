@@ -10,8 +10,11 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  normalizeGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
+  type GraphKnowledgeAssetConfirmationKind,
 } from '@origintrail-official/dkg-publisher';
 import {
   filterOversizedSyncQuads,
@@ -31,7 +34,7 @@ export interface VerifiedGraphScopedAsset {
   ual: string;
   assertionVersion: bigint;
   /** Omitted only for rolling-compatible receipt-backed metadata. */
-  confirmationKind?: 'transaction' | 'finalized-materialization';
+  confirmationKind?: GraphKnowledgeAssetConfirmationKind;
   assertionGraph: string;
   metaGraph: string;
   dataQuads: Quad[];
@@ -181,7 +184,9 @@ export async function authenticateVerifiedGraphScopedAsset(
     );
   }
 
-  const confirmationKind = asset.confirmationKind ?? 'transaction';
+  const confirmationKind = normalizeGraphKnowledgeAssetConfirmationKindV1(
+    asset.confirmationKind,
+  );
   let materializedBlock: number;
   let materializedTxIndex: number;
   if (confirmationKind === 'finalized-materialization') {
@@ -203,13 +208,6 @@ export async function authenticateVerifiedGraphScopedAsset(
     // remains the authoritative stale-write guard for this receiptless lane.
     materializedBlock = 0;
     materializedTxIndex = 0;
-  } else if (confirmationKind !== 'transaction') {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} has unsupported confirmation kind ${String(confirmationKind)}`,
-      ),
-      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-    );
   } else if (transactionHashes.length !== 1) {
     throw Object.assign(
       new Error(
@@ -327,16 +325,31 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     let replacementMetadata = asset.metadataQuads;
     if (currentVersion === asset.assertionVersion) {
-      const currentPublishedAt = await readCurrentPublishedAt(
-        store,
-        asset.metaGraph,
-        asset.ual,
-        options,
-      );
+      const [currentPublishedAt, currentReceiptProvenance] = await Promise.all([
+        readCurrentPublishedAt(store, asset.metaGraph, asset.ual, options),
+        asset.confirmationKind === 'finalized-materialization'
+          ? readCurrentReceiptBackedProvenance(
+              store,
+              asset.metaGraph,
+              asset.ual,
+              options,
+            )
+          : Promise.resolve(undefined),
+      ]);
       if (currentPublishedAt) {
         replacementMetadata = [
           ...asset.metadataQuads.filter((quad) => quad.predicate !== PUBLISHED_AT),
           currentPublishedAt,
+        ];
+      }
+      if (currentReceiptProvenance) {
+        replacementMetadata = [
+          ...replacementMetadata.filter((quad) => (
+            quad.predicate !== TRANSACTION_HASH
+            && quad.predicate !== MATERIALIZED_VERSION
+            && quad.predicate !== GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE
+          )),
+          ...currentReceiptProvenance,
         ];
       }
     }
@@ -365,6 +378,78 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     return 'applied';
   });
+}
+
+/**
+ * Preserve stronger locally authenticated receipt provenance when a peer
+ * replays the same assertion through the receiptless finalized lane. The data
+ * graph is still replaced exactly (healing poisoned replicas), but remote
+ * metadata cannot downgrade a transaction-confirmed local assertion to 0:0.
+ */
+async function readCurrentReceiptBackedProvenance(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  options: QueryOptions,
+): Promise<Quad[] | undefined> {
+  const result = await store.query(`
+    SELECT ?predicate ?object WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(ual)}> ?predicate ?object .
+        VALUES ?predicate {
+          <${TRANSACTION_HASH}>
+          <${MATERIALIZED_VERSION}>
+          <${GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE}>
+          <${STATUS}>
+        }
+      }
+    }
+  `, options);
+  if (result.type !== 'bindings') return undefined;
+  const byPredicate = new Map<string, string[]>();
+  for (const row of result.bindings) {
+    if (!row.predicate || !row.object) return undefined;
+    const values = byPredicate.get(row.predicate) ?? [];
+    values.push(row.object);
+    byPredicate.set(row.predicate, values);
+  }
+  const hashes = byPredicate.get(TRANSACTION_HASH) ?? [];
+  const versions = byPredicate.get(MATERIALIZED_VERSION) ?? [];
+  const kinds = byPredicate.get(GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE) ?? [];
+  const statuses = byPredicate.get(STATUS) ?? [];
+  if (
+    hashes.length !== 1
+    || kinds.length > 1
+    || statuses.length !== 1
+    || parseRdfLiteral(statuses[0]!) !== 'confirmed'
+    || (kinds.length === 1 && parseRdfLiteral(kinds[0]!) !== 'transaction')
+  ) {
+    return undefined;
+  }
+  try {
+    parseTransactionHashLiteral(hashes[0]!);
+  } catch {
+    return undefined;
+  }
+  const materializedVersion = versions.length === 1
+    && /^(?:0|[1-9]\d*):(?:0|[1-9]\d*)$/.test(parseRdfLiteral(versions[0]!) ?? '')
+    ? versions[0]
+    : undefined;
+  return [
+    { subject: ual, predicate: TRANSACTION_HASH, object: hashes[0]!, graph: metaGraph },
+    {
+      subject: ual,
+      predicate: GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+      object: '"transaction"',
+      graph: metaGraph,
+    },
+    ...(materializedVersion === undefined ? [] : [{
+      subject: ual,
+      predicate: MATERIALIZED_VERSION,
+      object: materializedVersion,
+      graph: metaGraph,
+    }]),
+  ];
 }
 
 async function readCurrentPublishedAt(
@@ -425,11 +510,21 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
 }
 
 function parseTransactionHashLiteral(raw: string): string {
-  const lexical = raw.match(/^"([^"]*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
+  const lexical = parseRdfLiteral(raw) ?? raw;
   if (!/^0x[0-9a-f]{64}$/i.test(lexical)) {
     throw new Error('Graph-scoped durable sync transactionHash must be a 32-byte hex literal');
   }
   return lexical;
+}
+
+function parseRdfLiteral(raw: string): string | undefined {
+  const encoded = /^("(?:\\.|[^"\\])*")/.exec(raw)?.[1];
+  if (encoded === undefined) return undefined;
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

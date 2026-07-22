@@ -118,14 +118,14 @@ async function startNativeAgent(
         hubAddress: CONTEXT_GRAPH_STORAGE,
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
+      ...(finalizedRuntime.initialSubscription === undefined ? {} : {
+        initialContextGraphSubscriptions: [{
+          contextGraphId: finalizedRuntime.initialSubscription,
+          state: { subscribed: true, synced: false },
+        }],
+      }),
     }),
   });
-  if (finalizedRuntime?.initialSubscription !== undefined) {
-    (agent as any).setContextGraphSubscription(finalizedRuntime.initialSubscription, {
-      subscribed: true,
-      synced: false,
-    }, { persist: false });
-  }
   agents.push(agent);
   await agent.start();
   return agent;
@@ -607,7 +607,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
         roster: null,
       });
     }
-    await (receiver as any).chainPoller.inFlightPoll;
+    await receiver.awaitInitialChainPoll();
     const storeQuery = vi.spyOn((receiver as any).store, 'query');
     await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBe(
       ON_CHAIN_CONTEXT_GRAPH_ID,

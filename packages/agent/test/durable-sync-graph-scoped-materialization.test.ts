@@ -539,10 +539,79 @@ describe('durable graph-scoped KA materialization', () => {
     });
 
     expect(assets).toHaveLength(1);
-    expect(assets[0]).toMatchObject({ ual, assertionGraph });
+    expect(assets[0]).toMatchObject({
+      ual,
+      assertionGraph,
+      confirmationKind: 'transaction',
+    });
     expect(inserted.filter((quad) => quad.subject === lifecycle)).toEqual(
       lifecycleRows.filter((quad) => quad.predicate !== `${DKG}assertionVersion`),
     );
+  });
+
+  it.each([
+    ['conflicting', ['"transaction"', '"finalized-materialization"']],
+    ['unsupported', ['"unsupported"']],
+  ])('rejects %s peer confirmation metadata before durable materialization', async (_label, kinds) => {
+    const v2Data = dataQuad(2);
+    const v2Meta = metadata(2);
+    v2Meta.push(
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      ...kinds.map((object) => ({
+        subject: ual,
+        predicate: `${DKG}confirmationKind`,
+        object,
+        graph: metaGraph,
+      })),
+    );
+    const materialized: unknown[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-invalid-confirmation-kind',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [v2Data],
+        verifiedMeta: v2Meta,
+        verifiedGraphScopedDataGraphs: [assertionGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: v2Meta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async (asset) => {
+        materialized.push(asset);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedTriples).toBe(0);
+    expect(materialized).toEqual([]);
   });
 
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {
@@ -822,6 +891,85 @@ describe('durable graph-scoped KA materialization', () => {
     // The requester never accepts the serving node's 123:0 local ordering
     // claim; it derives a neutral local stamp after chain authentication.
     expect(await values(freshRequesterStore, 'materializedVersion')).toEqual(['"0:0"']);
+  });
+
+  it('does not downgrade same-version local receipt provenance during finalized durable replay', async () => {
+    const sourceNodeStore = new OxigraphStore();
+    const requesterStore = new OxigraphStore();
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const sourceMetadata = finalizedMaterializationMetadata(2, root);
+    await sourceNodeStore.insert([v2Data, ...sourceMetadata]);
+    await requesterStore.insert([
+      dataQuad(1),
+      ...metadata(2, toHex(root)),
+      ...[
+        ['publicTripleCount', `"1"^^<${XSD_INTEGER}>`],
+        ['privateTripleCount', `"0"^^<${XSD_INTEGER}>`],
+        ['status', '"confirmed"'],
+        ['publishedAt', `"2026-07-16T08:00:00.000Z"^^<${XSD_DATE_TIME}>`],
+      ].map(([predicate, object]) => ({
+        subject: ual,
+        predicate: `${DKG}${predicate}`,
+        object,
+        graph: metaGraph,
+      })),
+    ]);
+    const servedData = await graphQuads(sourceNodeStore, assertionGraph);
+    const servedMeta = await graphQuads(sourceNodeStore, metaGraph);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'finalized-vm-replay-source',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
+      ),
+      processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
+        const verified = processDurableBatchForWire(
+          dataQuads,
+          metaQuads,
+          acceptUnverified,
+          mode,
+        );
+        return {
+          ...verified,
+          verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+          verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+        };
+      },
+      storeInsert: (quads) => requesterStore.insert(quads),
+      storeGraphScopedAsset: async (asset) => materializeVerifiedGraphScopedAsset({
+        store: requesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+        )).asset,
+      }),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(0);
+    expect(await graphQuads(requesterStore, assertionGraph)).toEqual(servedData);
+    expect(await values(requesterStore, 'transactionHash')).toEqual([`"${transactionHash(2)}"`]);
+    expect(await values(requesterStore, 'confirmationKind')).toEqual(['"transaction"']);
+    expect(await values(requesterStore, 'materializedVersion')).toEqual([]);
+    expect(await values(requesterStore, 'publishedAt')).toEqual([
+      `"2026-07-16T08:00:00Z"^^<${XSD_DATE_TIME}>`,
+    ]);
   });
 
   it('does not let a stale durable page replace a newer local assertion', async () => {

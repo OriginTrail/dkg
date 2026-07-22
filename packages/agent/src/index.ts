@@ -192,6 +192,7 @@ export {
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type InitialContextGraphSubscription,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type PublishOpts,

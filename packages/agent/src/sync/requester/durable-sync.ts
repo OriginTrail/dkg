@@ -5,7 +5,11 @@ import {
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import {
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  readGraphKnowledgeAssetConfirmationKindV1,
+  type PhaseCallback,
+} from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
@@ -26,7 +30,6 @@ const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
 const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
-const CONFIRMATION_KIND = `${DKG_NS}confirmationKind`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
@@ -47,7 +50,7 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
   `${DKG_NS}contextGraph`,
   `${DKG_NS}subGraphName`,
   TRANSACTION_HASH,
-  CONFIRMATION_KIND,
+  GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
 ]);
 
 export interface DurableSyncSummary {
@@ -741,24 +744,13 @@ function partitionVerifiedGraphScopedAssets(
     if (!versionRaw || !/^\d+$/.test(versionRaw)) {
       throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
     }
-    const confirmationKinds = new Set(
-      metadataQuads
-        .filter((quad) => quad.predicate === CONFIRMATION_KIND)
-        .map((quad) => stripLiteral(quad.object)),
-    );
-    if (confirmationKinds.size > 1) {
+    let confirmationKind;
+    try {
+      confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
+    } catch (cause) {
       throw new Error(
-        `Verified graph-scoped KA ${ual} has ${confirmationKinds.size} confirmation kinds`,
-      );
-    }
-    const [confirmationKindRaw] = confirmationKinds;
-    if (
-      confirmationKindRaw !== undefined
-      && confirmationKindRaw !== 'transaction'
-      && confirmationKindRaw !== 'finalized-materialization'
-    ) {
-      throw new Error(
-        `Verified graph-scoped KA ${ual} has unsupported confirmation kind ${confirmationKindRaw}`,
+        `Verified graph-scoped KA ${ual} has invalid confirmation metadata`,
+        { cause },
       );
     }
     const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
@@ -793,7 +785,7 @@ function partitionVerifiedGraphScopedAssets(
       contextGraphId,
       ual,
       assertionVersion: BigInt(versionRaw),
-      confirmationKind: confirmationKindRaw ?? 'transaction',
+      confirmationKind,
       assertionGraph,
       metaGraph,
       dataQuads: dataByGraph.get(assertionGraph) ?? [],

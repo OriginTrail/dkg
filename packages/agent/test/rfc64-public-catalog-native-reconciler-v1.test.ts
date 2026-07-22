@@ -9,10 +9,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import { buildOpenOwnerContextGraphPolicyV1 } from '../src/rfc64/open-catalog-policy-v1.js';
 import {
-  createRfc64PublicOpenCatalogNativeReconcilerV1,
+  createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   deriveRfc64PublicOpenCatalogScopeV1,
-  type Rfc64PublicOpenCatalogNativeReceiverClientV1,
-  type Rfc64PublicOpenCatalogStagedHeadV1,
+  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
+  type Rfc64BoundedPublicRootCatalogStagedHeadV1,
 } from '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
@@ -91,18 +91,18 @@ function snapshot(
 }
 
 function receiver(
-  synchronizePublicOpenCatalog: Rfc64PublicOpenCatalogNativeReceiverClientV1[
-    'synchronizePublicOpenCatalog'
+  synchronizeBoundedPublicRootCatalog: Rfc64BoundedPublicRootCatalogNativeReceiverClientV1[
+    'synchronizeBoundedPublicRootCatalog'
   ],
-): Rfc64PublicOpenCatalogNativeReceiverClientV1 {
-  return { synchronizePublicOpenCatalog };
+): Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 {
+  return { synchronizeBoundedPublicRootCatalog };
 }
 
 function stagedHead(
   input: Rfc64PublicCatalogHeadAnnouncementV1,
   totalRows: string,
-  overrides: Partial<Rfc64PublicOpenCatalogStagedHeadV1> = {},
-): Rfc64PublicOpenCatalogStagedHeadV1 {
+  overrides: Partial<Rfc64BoundedPublicRootCatalogStagedHeadV1> = {},
+): Rfc64BoundedPublicRootCatalogStagedHeadV1 {
   return {
     envelope: {
       objectDigest: input.catalogHeadObjectDigest,
@@ -130,11 +130,11 @@ function stagedHead(
   };
 }
 
-describe('RFC-64 public/open native reconciler v1', () => {
+describe('RFC-64 bounded public root native reconciler v1', () => {
   it('maps both genesis and successor evidence to applied and passes deployment plus cancellation', async () => {
     const synchronize = vi.fn(async () => ({ inventoryRowCount: 0 } as never));
     const resolveDeployment = vi.fn(async () => DEPLOYMENT);
-    const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
       resolveTrustedCatalogScope,
@@ -167,9 +167,9 @@ describe('RFC-64 public/open native reconciler v1', () => {
     );
   });
 
-  it('dedupes only an exact fixed public/open applied head', async () => {
+  it('dedupes only an exact bounded public root applied head', async () => {
     const readAppliedCatalogHeadV1 = vi.fn();
-    const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(vi.fn()),
       inventory: { readAppliedCatalogHeadV1 },
       resolveTrustedCatalogScope,
@@ -214,7 +214,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const readAppliedCatalogHeadV1 = vi.fn(() => snapshot(successor, {
       inventoryRowCount: '2',
     }));
-    const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(vi.fn()),
       inventory: { readAppliedCatalogHeadV1 },
       resolveTrustedCatalogScope,
@@ -236,7 +236,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     readStagedCatalogHead.mockResolvedValueOnce(null);
     await expect(reconciler.isHeadApplied(successor)).resolves.toBe(false);
 
-    const legacyOnly = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const legacyOnly = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(vi.fn()),
       inventory: { readAppliedCatalogHeadV1 },
       resolveTrustedCatalogScope,
@@ -251,7 +251,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
       'missing',
     );
     const synchronize = vi.fn(async () => { throw notFound; });
-    const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
       resolveTrustedCatalogScope,
@@ -280,7 +280,7 @@ describe('RFC-64 public/open native reconciler v1', () => {
     const synchronize = vi.fn();
     const deploymentFailure = new Error('trusted deployment unavailable');
     const resolveDeployment = vi.fn(async () => { throw deploymentFailure; });
-    const reconciler = createRfc64PublicOpenCatalogNativeReconcilerV1({
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
       nativeReceiver: receiver(synchronize),
       inventory: { readAppliedCatalogHeadV1: () => null },
       resolveTrustedCatalogScope,
