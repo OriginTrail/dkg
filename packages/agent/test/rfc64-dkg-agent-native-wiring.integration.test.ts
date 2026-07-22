@@ -219,7 +219,9 @@ function privateCatalogPolicy(): ContextGraphPolicyV1 {
   };
 }
 
-function finalizedPublicCatalogPolicy(): ContextGraphPolicyV1 {
+function finalizedPublicCatalogPolicy(
+  publishPolicy: ContextGraphPolicyV1['publishPolicy'] = 1,
+): ContextGraphPolicyV1 {
   return {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -230,8 +232,8 @@ function finalizedPublicCatalogPolicy(): ContextGraphPolicyV1 {
     version: '0',
     previousPolicyDigest: null,
     accessPolicy: 0,
-    publishPolicy: 1,
-    publishAuthority: null,
+    publishPolicy,
+    publishAuthority: publishPolicy === 0 ? AUTHOR : null,
     publishAuthorityAccountId: '0',
     projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
     administrativeDelegationDigest: null,
@@ -1307,6 +1309,253 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(finalizedCallTargets).toContain(KA_STORAGE);
     expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
+
+  it('keeps warm and cold public-curated receivers at one exact finalized head across restart', async () => {
+    const kaNumbers = [41n] as const;
+    const assets = kaNumbers.map((kaNumber) => Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | kaNumber).toString(),
+      publisherAddress: AUTHOR,
+    }));
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const fixture = Object.freeze({
+      accessPolicy: 0,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze(assets),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash: nameHash as Digest32V1,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      publishPolicy: 0,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
+    const rpc = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    const policy = finalizedPublicCatalogPolicy(0);
+    const warmDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-release-warm-'));
+    const coldDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-release-cold-'));
+    tempDirs.push(warmDataDir, coldDataDir);
+    const warmStorePath = join(warmDataDir, 'oxigraph');
+    const coldStorePath = join(coldDataDir, 'oxigraph');
+    const startReleaseReceiver = async (
+      name: string,
+      dataDir: string,
+      storePath: string,
+      bootstrapConfig?: Rfc64PublicCatalogBootstrapConfigV1,
+    ): Promise<DKGAgent> => {
+      const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+      await chainAdapter.createOnChainContextGraph({
+        accessPolicy: 0,
+        publishPolicy: 0,
+        nameHash,
+      });
+      return startNativeAgent(
+        name,
+        NATIVE_DEPLOYMENT,
+        dataDir,
+        undefined,
+        {
+          rpcUrl: rpc.url,
+          chainAdapter,
+          initialSubscription: CONTEXT_GRAPH_ID,
+        },
+        undefined,
+        bootstrapConfig,
+        storePath,
+      );
+    };
+
+    // The warm receiver exists before the publisher and before any catalog head.
+    let warm = await startReleaseReceiver('release-proof-warm', warmDataDir, warmStorePath);
+    warm.acceptRfc64CatalogAccessSnapshotV1({
+      policy,
+      policyDigest: FINALIZED_POLICY_DIGEST,
+      roster: null,
+    });
+    const author = await startNativeAgent(
+      'release-proof-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      {
+        rpcUrl: rpc.url,
+        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture),
+      },
+      {
+        peers: [warm.peerId],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    author.acceptRfc64CatalogAccessSnapshotV1({
+      policy,
+      policyDigest: FINALIZED_POLICY_DIGEST,
+      roster: null,
+    });
+    const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
+      acceptedPublicPolicies: [{ policy, policyDigest: FINALIZED_POLICY_DIGEST }],
+      targets: [{
+        scope: {
+          networkId: NETWORK_ID,
+          contextGraphId: CONTEXT_GRAPH_ID,
+          subGraphName: null,
+          authorAddress: AUTHOR,
+          catalogEra: policy.era,
+        },
+        providers: [author.peerId],
+      }],
+      retryIntervalMs: 1_000,
+    };
+    await connectBothWays(author, warm);
+    await warm.awaitInitialChainPoll();
+
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as const;
+    const publicQuads = [
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+    ];
+    const published = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'release-proof-1' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(kaNumbers[0], publicQuads)),
+    });
+    if (published === null) throw new Error('release proof catalog bridge was not enabled');
+
+    const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+    const expectExactReleaseState = async (receiver: DKGAgent): Promise<void> => {
+      expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+        published.currentCatalogHeadDigest,
+      )).toBeNull();
+      expect(receiver.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: scopeDigest,
+        authorAddress: AUTHOR,
+      })).toMatchObject({
+        currentCatalogHeadDigest: published.currentCatalogHeadDigest,
+        catalogVersion: published.catalogVersion,
+        inventoryRowCount: '1',
+      });
+      for (const kaNumber of kaNumbers) {
+        const vmGraph = contextGraphLayerUri(
+          CONTEXT_GRAPH_ID,
+          MemoryLayer.VerifiableMemory,
+          AUTHOR,
+          Number(kaNumber),
+        );
+        await expect((receiver as any).store.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+        )).resolves.toMatchObject({
+          type: 'bindings',
+          bindings: expect.arrayContaining([
+            expect.objectContaining({ s: 'https://example.org/alice' }),
+          ]),
+        });
+      }
+    };
+    await vi.waitFor(() => {
+      expect(warm.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: scopeDigest,
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(published.currentCatalogHeadDigest);
+    }, { timeout: 20_000, interval: 100 });
+    await expectExactReleaseState(warm);
+
+    // The cold receiver starts only after the finalized head exists.
+    let cold = await startReleaseReceiver(
+      'release-proof-cold',
+      coldDataDir,
+      coldStorePath,
+      bootstrap,
+    );
+    await connectBothWays(author, cold);
+    await cold.awaitInitialChainPoll();
+    await vi.waitFor(() => {
+      expect(cold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'applied',
+        providerPeerId: author.peerId,
+        appliedHeadDigest: published.currentCatalogHeadDigest,
+        inventoryRowCount: '1',
+      });
+    }, { timeout: 20_000, interval: 100 });
+    await expectExactReleaseState(cold);
+
+    // Both receiver roles keep their exact durable SWM head and VM graphs after restart.
+    for (const receiver of [warm, cold]) {
+      await receiver.stop();
+      agents.splice(agents.indexOf(receiver), 1);
+    }
+    warm = await startReleaseReceiver(
+      'release-proof-warm',
+      warmDataDir,
+      warmStorePath,
+      bootstrap,
+    );
+    cold = await startReleaseReceiver(
+      'release-proof-cold',
+      coldDataDir,
+      coldStorePath,
+      bootstrap,
+    );
+    await Promise.all([
+      connectBothWays(author, warm),
+      connectBothWays(author, cold),
+    ]);
+    await Promise.all([warm.awaitInitialChainPoll(), cold.awaitInitialChainPoll()]);
+    await vi.waitFor(() => {
+      for (const receiver of [warm, cold]) {
+        expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+          outcome: 'applied',
+          providerPeerId: author.peerId,
+          appliedHeadDigest: published.currentCatalogHeadDigest,
+          inventoryRowCount: '1',
+        });
+      }
+    }, { timeout: 20_000, interval: 100 });
+    await Promise.all([
+      expectExactReleaseState(warm),
+      expectExactReleaseState(cold),
+    ]);
+  }, 90_000);
 
   it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
     const [author, receiver] = await Promise.all([
