@@ -482,6 +482,7 @@ async function executePinnedSnapshotScope<T>(
       calls,
       deployedTargets,
       rpc,
+      totalDeadline,
     ).finally(() => {
       if (inFlight === operation) inFlight = undefined;
     });
@@ -536,6 +537,7 @@ async function executeSnapshotBatch(
   calls: readonly StrictCurrentFinalizedEvmReadCallV1[],
   deployedTargets: Set<EvmAddressV1>,
   rpc: (method: string, params: readonly unknown[]) => Promise<unknown>,
+  totalDeadline: DeadlineScope,
 ): Promise<readonly string[]> {
   const executeCallsAt = async (blockReference: unknown): Promise<readonly string[]> => {
     const uncheckedTargets = [...new Set(calls.map(({ to }) => to))]
@@ -543,7 +545,7 @@ async function executeSnapshotBatch(
     await settleParallelBatch(uncheckedTargets.map(async (to) => {
       assertDeployedCode(await rpc('eth_getCode', Object.freeze([to, blockReference])));
       deployedTargets.add(to);
-    }));
+    }), totalDeadline);
     return settleParallelBatch(calls.map(async (call) => {
       const callObject = Object.freeze({
         from: CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
@@ -555,7 +557,7 @@ async function executeSnapshotBatch(
         await rpc('eth_call', Object.freeze([callObject, blockReference])),
         call.maxReturnBytes,
       );
-    }));
+    }), totalDeadline);
   };
 
   if (config.blockReferenceProfile === 'eip1898') {
