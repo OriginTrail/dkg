@@ -13,7 +13,7 @@ export class RecoverableAuthorAttestationErrorV1 extends Error {
 }
 
 /** Require the v1 EOA AuthorAttestation committed by a catalog seal to recover its author. */
-export function assertRecoverableAuthorAttestationV1(
+export function assertRecoverableAuthorAttestationCapabilityV1(
   binding: VerifiedCatalogSealBindingSnapshotV1,
 ): void {
   const { seal } = binding;

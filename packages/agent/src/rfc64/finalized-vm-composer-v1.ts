@@ -22,7 +22,7 @@ import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipV1,
 } from './catalog-row-authorship.js';
-import { assertRecoverableAuthorAttestationV1 } from './recoverable-author-attestation-v1.js';
+import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 
 const COMPOSITION_KEYS = [
   'catalogLane',
@@ -139,7 +139,7 @@ export function composeFinalizedVmSetV1(
     try {
       authorship = readVerifiedAuthorCatalogRowAuthorshipV1(placement.authorship);
       sealBinding = readVerifiedCatalogSealBindingV1(placement.sealBinding);
-      assertRecoverableAuthorAttestationV1(sealBinding);
+      assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
     } catch (cause) {
       fail(
         'finalized-vm-composition-placement',

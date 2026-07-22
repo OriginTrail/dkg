@@ -79,7 +79,7 @@ import type {
   AppliedCatalogHeadSnapshotV1,
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
-import { assertRecoverableAuthorAttestationV1 } from './recoverable-author-attestation-v1.js';
+import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -682,7 +682,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         sealBinding = readVerifiedCatalogSealBindingV1(
           transferredMetadata.catalogSealBinding,
         );
-        assertRecoverableAuthorAttestationV1(sealBinding);
+        assertRecoverableAuthorAttestationCapabilityV1(sealBinding);
         const projection = verifyCgSharedProjectionV1(transferred, head, row, deployment);
         projectionMetadata = readVerifiedCgSharedProjectionMetadataV1(
           projection,
@@ -1828,6 +1828,27 @@ export function rfc64CatalogSignatureVariantDigestV1(
     envelope.objectDigest,
     envelope.signature,
   ) as Digest32V1;
+}
+
+/**
+ * Preserve the package-root receiver contract while keeping the pure
+ * attestation capability free of receiver-specific error translation.
+ */
+export function assertRecoverableAuthorAttestationV1(
+  binding: VerifiedCatalogSealBindingSnapshotV1,
+): void {
+  try {
+    assertRecoverableAuthorAttestationCapabilityV1(binding);
+  } catch (cause) {
+    if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
+    fail(
+      'catalog-native-receiver-transfer',
+      cause instanceof Error
+        ? cause.message
+        : 'author attestation does not recover the catalog author',
+      cause,
+    );
+  }
 }
 
 function fail(
