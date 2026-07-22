@@ -21,6 +21,7 @@ import {
 } from '../src/control-object-signature-verifier.js';
 import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
+  createStrictCurrentFinalizedEvmReadV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
 
@@ -33,6 +34,8 @@ const OBJECT_DIGEST = `${'33'.repeat(32)}`;
 const CANONICAL_CALL_DATA = `0x1626ba7e${OBJECT_DIGEST}${'0'.repeat(62)}40${'0'.repeat(63)}1aa${'0'.repeat(62)}`;
 const MAGIC_RETURN = `0x1626ba7e${'00'.repeat(28)}`;
 const WRONG_MAGIC_RETURN = `0xffffffff${'00'.repeat(28)}`;
+const FIRST_READ_DATA = '0x11111111';
+const SECOND_READ_DATA = '0x22222222';
 
 interface JsonRpcRequest {
   readonly jsonrpc: '2.0';
@@ -60,6 +63,125 @@ afterEach(async () => {
 });
 
 describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
+  it('executes multiple ABI reads at one EIP-1898 anchor and checks shared code once', async () => {
+    const server = await startRpcServer((call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber':
+          sendResult(response, call, { number: '0x7b', hash: BLOCK_HASH });
+          return;
+        case 'eth_getCode':
+          sendResult(response, call, '0x6000');
+          return;
+        case 'eth_call': {
+          const callObject = call.params[0] as { readonly data?: unknown };
+          sendResult(
+            response,
+            call,
+            callObject.data === FIRST_READ_DATA ? '0xaaaa' : '0xbbbbcc',
+          );
+          return;
+        }
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    const result = await read({
+      chainId: CHAIN_ID,
+      calls: [
+        { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 2 },
+        { to: TO, data: SECOND_READ_DATA, maxReturnBytes: 3 },
+      ],
+      signal: new AbortController().signal,
+    });
+
+    expect(Object.isFrozen(read)).toBe(true);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.returnData)).toBe(true);
+    expect(result).toEqual({
+      chainId: CHAIN_ID,
+      blockNumber: '123',
+      blockHash: BLOCK_HASH,
+      returnData: ['0xaaaa', '0xbbbbcc'],
+    });
+    expect(server.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_call',
+    ]);
+    const hashReference = { blockHash: BLOCK_HASH, requireCanonical: true };
+    expect(server.calls[2]!.params).toEqual([TO, hashReference]);
+    expect(server.calls[3]!.params[1]).toEqual(hashReference);
+    expect(server.calls[4]!.params[1]).toEqual(hashReference);
+  });
+
+  it('closes one hash sandwich after every call in a multi-read fallback', async () => {
+    const server = await startRpcServer(successfulHandler());
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [
+        { to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 },
+        { to: TO, data: SECOND_READ_DATA, maxReturnBytes: 32 },
+      ],
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({
+      blockNumber: '123',
+      blockHash: BLOCK_HASH,
+      returnData: [MAGIC_RETURN, MAGIC_RETURN],
+    });
+    expect(server.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_call',
+      'eth_getBlockByNumber',
+    ]);
+    expect(server.calls[3]!.params[1]).toBe('0x7b');
+    expect(server.calls[4]!.params[1]).toBe('0x7b');
+    expect(server.calls[5]!.params).toEqual(['0x7b', false]);
+  });
+
+  it('rejects a fifth concurrent generic read without queueing it', async () => {
+    const gate = deferred<void>();
+    const baseHandler = successfulHandler();
+    const server = await startRpcServer(async (call, response, request) => {
+      if (call.method === 'eth_chainId') await gate.promise;
+      await baseHandler(call, response, request);
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+    const request = () => ({
+      chainId: CHAIN_ID,
+      calls: [{ to: TO, data: FIRST_READ_DATA, maxReturnBytes: 32 }],
+      signal: new AbortController().signal,
+    });
+    const active = Array.from({ length: 4 }, () => read(request()));
+
+    await expect(read(request())).rejects.toMatchObject({
+      code: 'concurrency-saturated',
+    });
+    gate.resolve(undefined);
+    await expect(Promise.all(active)).resolves.toHaveLength(4);
+  });
+
   it('uses the configured endpoint once, in exact EIP-1898 request order and shape', async () => {
     const server = await startRpcServer(successfulHandler());
     const configuredEndpoints = [server.url];

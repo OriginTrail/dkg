@@ -36,8 +36,15 @@ export {
 } from './current-finalized-evm-call.js';
 export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
+  STRICT_CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
+  STRICT_CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   createStrictCurrentFinalizedEvmChainAdapterV1,
+  createStrictCurrentFinalizedEvmReadV1,
   type CurrentFinalizedEvmBlockReferenceProfileV1,
+  type StrictCurrentFinalizedEvmReadCallV1,
+  type StrictCurrentFinalizedEvmReadRequestV1,
+  type StrictCurrentFinalizedEvmReadResultV1,
+  type StrictCurrentFinalizedEvmReadV1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from './strict-current-finalized-evm-rpc.js';
 export {
