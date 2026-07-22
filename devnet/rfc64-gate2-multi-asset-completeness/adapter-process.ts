@@ -179,144 +179,40 @@ async function handle(command: Command): Promise<void> {
     }
     case 'publishGenesis': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishGenesis input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishGenesis.authorPrivateKey',
+      const output = await publishGenesisVia(
+        command,
+        (input) => currentAgent.publishOpenAuthorCatalogGenesisV1(input),
       );
-      const author = new ethers.Wallet(authorPrivateKey);
-      const forwarded: Record<string, unknown> = { ...input, author, peers: [] };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishOpenAuthorCatalogGenesisV1(forwarded as never);
       emitOperationResult(command, output);
       return;
     }
     case 'publishCatalogGenesis': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishCatalogGenesis input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishCatalogGenesis.authorPrivateKey',
+      const output = await publishGenesisVia(
+        command,
+        (input) => currentAgent.publishAuthorCatalogGenesisV1(input),
       );
-      const forwarded: Record<string, unknown> = {
-        ...input,
-        author: new ethers.Wallet(authorPrivateKey),
-        peers: [],
-      };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishAuthorCatalogGenesisV1(forwarded as never);
       emitOperationResult(command, output);
       return;
     }
     case 'publishExactSetSuccessor': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishExactSetSuccessor input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishExactSetSuccessor.authorPrivateKey',
+      const output = await publishExactSetSuccessorVia(
+        currentAgent,
+        command,
+        (input) => currentAgent.publishOpenAuthorCatalogExactSetSuccessorV1(input),
       );
-      const assets = plainArray(input.assets, 'publishExactSetSuccessor.assets').map(
-        (value, index) => {
-          const asset = plainRecord(value, `publishExactSetSuccessor.assets[${index}]`);
-          const projectionNQuads = requiredString(
-            asset.projectionNQuads,
-            `publishExactSetSuccessor.assets[${index}].projectionNQuads`,
-          );
-          const forwarded: Record<string, unknown> = {
-            ...asset,
-            projectionBytes: new TextEncoder().encode(projectionNQuads),
-          };
-          delete forwarded.projectionNQuads;
-          return forwarded;
-        },
-      );
-      const forwarded: Record<string, unknown> = {
-        ...input,
-        author: new ethers.Wallet(authorPrivateKey),
-        assets,
-        peers: [],
-      };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishOpenAuthorCatalogExactSetSuccessorV1(
-        forwarded as never,
-      );
-      const result = plainRecord(output, 'publishExactSetSuccessor output');
-      const outputAssets = plainArray(result.assets, 'publishExactSetSuccessor.output.assets');
-      const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
-        const asset = plainRecord(value, `publishExactSetSuccessor.output.assets[${index}]`);
-        const bundleDigest = requiredDigest(
-          asset.bundleDigest,
-          `publishExactSetSuccessor.output.assets[${index}].bundleDigest`,
-        );
-        const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
-        if (stagedBundle === null) {
-          throw new Error(`published exact-set bundle ${bundleDigest} is absent from durable storage`);
-        }
-        return Object.freeze({
-          ...asset,
-          stagedBundleByteLength: stagedBundle.byteLength,
-        });
-      }));
-      emitOperationResult(command, { ...result, assets: Object.freeze(assetsWithReceipts) });
+      emitOperationResult(command, output);
       return;
     }
     case 'publishCatalogExactSetSuccessor': {
       requireRole('author');
-      const input = plainRecord(command.input, 'publishCatalogExactSetSuccessor input');
-      const authorPrivateKey = requiredString(
-        input.authorPrivateKey,
-        'publishCatalogExactSetSuccessor.authorPrivateKey',
+      const output = await publishExactSetSuccessorVia(
+        currentAgent,
+        command,
+        (input) => currentAgent.publishAuthorCatalogExactSetSuccessorV1(input),
       );
-      const assets = plainArray(
-        input.assets,
-        'publishCatalogExactSetSuccessor.assets',
-      ).map((value, index) => {
-        const asset = plainRecord(value, `publishCatalogExactSetSuccessor.assets[${index}]`);
-        const projectionNQuads = requiredString(
-          asset.projectionNQuads,
-          `publishCatalogExactSetSuccessor.assets[${index}].projectionNQuads`,
-        );
-        const forwarded: Record<string, unknown> = {
-          ...asset,
-          projectionBytes: new TextEncoder().encode(projectionNQuads),
-        };
-        delete forwarded.projectionNQuads;
-        return forwarded;
-      });
-      const forwarded: Record<string, unknown> = {
-        ...input,
-        author: new ethers.Wallet(authorPrivateKey),
-        assets,
-        peers: [],
-      };
-      delete forwarded.authorPrivateKey;
-      const output = await currentAgent.publishAuthorCatalogExactSetSuccessorV1(
-        forwarded as never,
-      );
-      const result = plainRecord(output, 'publishCatalogExactSetSuccessor output');
-      const outputAssets = plainArray(
-        result.assets,
-        'publishCatalogExactSetSuccessor.output.assets',
-      );
-      const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
-        const asset = plainRecord(
-          value,
-          `publishCatalogExactSetSuccessor.output.assets[${index}]`,
-        );
-        const bundleDigest = requiredDigest(
-          asset.bundleDigest,
-          `publishCatalogExactSetSuccessor.output.assets[${index}].bundleDigest`,
-        );
-        const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
-        if (stagedBundle === null) {
-          throw new Error(`published catalog bundle ${bundleDigest} is absent from durable storage`);
-        }
-        return Object.freeze({
-          ...asset,
-          stagedBundleByteLength: stagedBundle.byteLength,
-        });
-      }));
-      emitOperationResult(command, { ...result, assets: Object.freeze(assetsWithReceipts) });
+      emitOperationResult(command, output);
       return;
     }
     case 'announce': {
@@ -434,6 +330,79 @@ async function handle(command: Command): Promise<void> {
     default:
       throw new Error(`unknown adapter command: ${command.command}`);
   }
+}
+
+type HarnessGenesisPublisher = (input: never) => Promise<unknown>;
+type HarnessExactSetPublisher = (input: never) => Promise<unknown>;
+
+async function publishGenesisVia(
+  command: Command,
+  publish: HarnessGenesisPublisher,
+): Promise<unknown> {
+  const label = command.command;
+  const input = plainRecord(command.input, `${label} input`);
+  const authorPrivateKey = requiredString(
+    input.authorPrivateKey,
+    `${label}.authorPrivateKey`,
+  );
+  const forwarded: Record<string, unknown> = {
+    ...input,
+    author: new ethers.Wallet(authorPrivateKey),
+    peers: [],
+  };
+  delete forwarded.authorPrivateKey;
+  return publish(forwarded as never);
+}
+
+async function publishExactSetSuccessorVia(
+  currentAgent: DKGAgent,
+  command: Command,
+  publish: HarnessExactSetPublisher,
+): Promise<Record<string, unknown>> {
+  const label = command.command;
+  const input = plainRecord(command.input, `${label} input`);
+  const authorPrivateKey = requiredString(
+    input.authorPrivateKey,
+    `${label}.authorPrivateKey`,
+  );
+  const assets = plainArray(input.assets, `${label}.assets`).map((value, index) => {
+    const assetLabel = `${label}.assets[${index}]`;
+    const asset = plainRecord(value, assetLabel);
+    const projectionNQuads = requiredString(
+      asset.projectionNQuads,
+      `${assetLabel}.projectionNQuads`,
+    );
+    const forwarded: Record<string, unknown> = {
+      ...asset,
+      projectionBytes: new TextEncoder().encode(projectionNQuads),
+    };
+    delete forwarded.projectionNQuads;
+    return forwarded;
+  });
+  const forwarded: Record<string, unknown> = {
+    ...input,
+    author: new ethers.Wallet(authorPrivateKey),
+    assets,
+    peers: [],
+  };
+  delete forwarded.authorPrivateKey;
+
+  const result = plainRecord(await publish(forwarded as never), `${label} output`);
+  const outputAssets = plainArray(result.assets, `${label}.output.assets`);
+  const assetsWithReceipts = await Promise.all(outputAssets.map(async (value, index) => {
+    const assetLabel = `${label}.output.assets[${index}]`;
+    const asset = plainRecord(value, assetLabel);
+    const bundleDigest = requiredDigest(asset.bundleDigest, `${assetLabel}.bundleDigest`);
+    const stagedBundle = await currentAgent.readRfc64StagedKaBundleV1(bundleDigest);
+    if (stagedBundle === null) {
+      throw new Error(`published bundle ${bundleDigest} is absent from durable storage`);
+    }
+    return Object.freeze({
+      ...asset,
+      stagedBundleByteLength: stagedBundle.byteLength,
+    });
+  }));
+  return Object.freeze({ ...result, assets: Object.freeze(assetsWithReceipts) });
 }
 
 function compareQuad(left: Quad, right: Quad): number {

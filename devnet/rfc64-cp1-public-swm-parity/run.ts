@@ -4,16 +4,12 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import {
-  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
-  computeContextGraphPolicyObjectDigestV1,
   type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
-  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
@@ -45,6 +41,16 @@ import {
   semanticSha256,
   verifyCp1PublicSwmParity,
 } from './verifier.ts';
+import {
+  CP1_NETWORK_ID,
+  CP1_OWNER_ADDRESS,
+  CP1_PUBLIC_CELL_SPECS,
+  cp1CatalogScope,
+  cp1PolicyDigest,
+  cp1PublicPolicy,
+  type Cp1PublicCellName,
+  type Cp1PublicCellSpec,
+} from './policy-cells.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const GATE2_DIR = resolve(import.meta.dirname, '../rfc64-gate2-multi-asset-completeness');
@@ -53,10 +59,13 @@ const RUNTIME_LOAD_HOOK = join(GATE2_DIR, 'runtime-load-hook.ts');
 const ARTIFACT = process.env.DKG_RFC64_CP1_ARTIFACT
   ?? join(import.meta.dirname, 'artifacts/cp1-public-swm-parity.json');
 const PROCESS_TIMEOUT_MS = 90_000;
-const NETWORK_ID = 'otp:20430';
+const NETWORK_ID = CP1_NETWORK_ID;
 const OWNER_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
 const OWNER_WALLET = new ethers.Wallet(OWNER_PRIVATE_KEY);
 const OWNER = OWNER_WALLET.address.toLowerCase() as EvmAddressV1;
+if (OWNER !== CP1_OWNER_ADDRESS) {
+  throw new Error('CP1 owner fixture does not match its pinned private key');
+}
 const KAV10 = '0x4444444444444444444444444444444444444444';
 const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
@@ -73,24 +82,41 @@ const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f';
 const ROLE_MASTER_KEYS = Object.freeze({ author: '1a'.repeat(32), receiver: '2b'.repeat(32) });
 
-interface CellSpec {
-  readonly cell: 'public-open' | 'public-curated';
-  readonly contextGraphId: string;
-  readonly publishPolicy: 0 | 1;
+interface Cp1PublicationAsset {
+  readonly bundleDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
 }
 
-const CELLS: readonly CellSpec[] = Object.freeze([
-  Object.freeze({
-    cell: 'public-open',
-    contextGraphId: '0x1111111111111111111111111111111111111111/cp1-public-open',
-    publishPolicy: 1,
-  }),
-  Object.freeze({
-    cell: 'public-curated',
-    contextGraphId: '0x1111111111111111111111111111111111111111/cp1-public-curated',
-    publishPolicy: 0,
-  }),
-]);
+interface Cp1SynchronizationRow extends Cp1PublicationAsset {
+  readonly swmGraph: string;
+}
+
+interface Cp1SemanticReadback {
+  readonly projectionNQuads: string;
+}
+
+interface Cp1CellEvidence extends Cp1PublicationAsset {
+  readonly accessPolicy: 0;
+  readonly activatedTripleCount: number;
+  readonly announcementPolicyDigest: Digest32V1;
+  readonly announcedPeerId: string;
+  readonly appliedHeadStatus: string;
+  readonly authorPolicyDigest: Digest32V1;
+  readonly cell: Cp1PublicCellName;
+  readonly contextGraphId: string;
+  readonly inventoryRowCount: number;
+  readonly projectionNQuads: string;
+  readonly publishPolicy: 0 | 1;
+  readonly receiverPolicyDigest: Digest32V1;
+  readonly semanticSha256: string;
+}
+
+interface RunPolicyCellContext {
+  readonly author: Gate2AgentChild;
+  readonly receiver: Gate2AgentChild;
+  readonly receiverPeerId: string;
+  readonly seal: CanonicalGraphScopedAuthorSealV1;
+}
 
 async function execute(): Promise<void> {
   const launch = consumeGate2RuntimeLaunchReceiptV1();
@@ -130,121 +156,15 @@ async function execute(): Promise<void> {
     if (authorPid === receiverPid) throw new Error('CP1 process identities are not distinct');
     await connectBothWays(author, receiver, authorReady, receiverReady);
 
-    const seal = await authorSeal(70n);
-    const cellEvidence: Record<string, unknown>[] = [];
-    for (const [index, spec] of CELLS.entries()) {
-      const policy = publicPolicy(spec);
-      const policyDigest = digestForPolicy(policy);
-      const [authorAccepted, receiverAccepted] = await Promise.all([
-        acceptPolicy(author, `author-${spec.cell}`, policy, policyDigest),
-        acceptPolicy(receiver, `receiver-${spec.cell}`, policy, policyDigest),
-      ]);
-      exact(authorAccepted, policyDigest, `${spec.cell} author policy digest`);
-      exact(receiverAccepted, policyDigest, `${spec.cell} receiver policy digest`);
-
-      const genesis = output(await author.request(
-        'publishCatalogGenesis',
-        `${spec.cell}-genesis`,
-        'operation-completed',
-        {
-          scope: catalogScope(spec.contextGraphId),
-          authorPrivateKey: OWNER_PRIVATE_KEY,
-          issuedAt: String(1773900000000 + index * 10_000),
-          catalogIssuerDelegationEffectiveAt: '1773899999000',
-          catalogIssuerDelegationExpiresAt: '1774000000000',
-        },
-      ), `${spec.cell} genesis`);
-      const genesisAnnouncement = record(genesis.announcement, `${spec.cell} genesis announcement`);
-      exact(genesisAnnouncement.policyDigest, policyDigest, `${spec.cell} genesis policy digest`);
-      await announceAndDrain(
-        author,
-        receiver,
-        genesisAnnouncement,
-        receiverPeerId,
-        `${spec.cell}-genesis`,
-      );
-
-      const publication = output(await author.request(
-        'publishCatalogExactSetSuccessor',
-        `${spec.cell}-successor`,
-        'operation-completed',
-        {
-          previousHead: stagedHead(genesis, `${spec.cell} genesis`),
-          authorPrivateKey: OWNER_PRIVATE_KEY,
-          catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-          assets: [{
-            assertionCoordinate: 'cp1-byte-identical-public-corpus',
-            projectionNQuads: PROJECTION_NQUADS,
-            seal,
-          }],
-          deployment: DEPLOYMENT,
-          issuedAt: String(1773900001000 + index * 10_000),
-        },
-      ), `${spec.cell} successor`);
-      const announcement = record(publication.announcement, `${spec.cell} successor announcement`);
-      exact(announcement.policyDigest, policyDigest, `${spec.cell} successor policy digest`);
-      await announceAndDrain(
-        author,
-        receiver,
-        announcement,
-        receiverPeerId,
-        `${spec.cell}-successor`,
-      );
-      const headDigest = requiredDigest(publication.headObjectDigest, `${spec.cell} head digest`);
-      const synchronization = output(await receiver.request(
-        'exactInventoryReadback',
-        `${spec.cell}-inventory`,
-        'operation-completed',
-        { catalogHeadDigest: headDigest },
-      ), `${spec.cell} inventory`);
-      const rows = array(synchronization.rows, `${spec.cell} inventory rows`);
-      if (rows.length !== 1) throw new Error(`${spec.cell} did not apply exactly one row`);
-      const row = record(rows[0], `${spec.cell} inventory row`);
-      const semantic = output(await receiver.request(
-        'semanticGraphReadback',
-        `${spec.cell}-semantic`,
-        'operation-completed',
-        { swmGraph: requiredString(row.swmGraph, `${spec.cell} SWM graph`) },
-      ), `${spec.cell} semantic readback`);
-      const projectionNQuads = requiredString(
-        semantic.projectionNQuads,
-        `${spec.cell} projection N-Quads`,
-      );
-      exact(projectionNQuads, PROJECTION_NQUADS, `${spec.cell} exact semantic bytes`);
-      const publishedAssets = array(publication.assets, `${spec.cell} published assets`);
-      if (publishedAssets.length !== 1) throw new Error(`${spec.cell} publication has wrong row count`);
-      const publishedAsset = record(publishedAssets[0], `${spec.cell} published asset`);
-      exact(publishedAsset.bundleDigest, row.bundleDigest, `${spec.cell} bundle transfer digest`);
-      exact(publishedAsset.contentDigest, row.contentDigest, `${spec.cell} content transfer digest`);
-      cellEvidence.push({
-        accessPolicy: 0,
-        activatedTripleCount: requiredInteger(
-          synchronization.activatedTripleCount,
-          `${spec.cell} activated triple count`,
-        ),
-        announcementPolicyDigest: requiredDigest(
-          announcement.policyDigest,
-          `${spec.cell} announcement policy digest`,
-        ),
-        announcedPeerId: receiverPeerId,
-        appliedHeadStatus: requiredString(
-          synchronization.appliedHeadStatus,
-          `${spec.cell} applied status`,
-        ),
-        authorPolicyDigest: authorAccepted,
-        bundleDigest: requiredDigest(row.bundleDigest, `${spec.cell} bundle digest`),
-        cell: spec.cell,
-        contentDigest: requiredDigest(row.contentDigest, `${spec.cell} content digest`),
-        contextGraphId: spec.contextGraphId,
-        inventoryRowCount: requiredInteger(
-          synchronization.inventoryRowCount,
-          `${spec.cell} inventory row count`,
-        ),
-        projectionNQuads,
-        publishPolicy: spec.publishPolicy,
-        receiverPolicyDigest: receiverAccepted,
-        semanticSha256: semanticSha256(projectionNQuads),
-      });
+    const context: RunPolicyCellContext = {
+      author,
+      receiver,
+      receiverPeerId,
+      seal: await authorSeal(70n),
+    };
+    const cellEvidence: Cp1CellEvidence[] = [];
+    for (const [index, spec] of CP1_PUBLIC_CELL_SPECS.entries()) {
+      cellEvidence.push(await runPolicyCell(context, spec, index));
     }
 
     const [authorStopped, receiverStopped] = await Promise.all([
@@ -293,54 +213,149 @@ async function execute(): Promise<void> {
   }
 }
 
-function publicPolicy(spec: CellSpec): ContextGraphPolicyV1 {
-  return {
-    networkId: NETWORK_ID as never,
-    contextGraphId: spec.contextGraphId as never,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    era: '0',
-    version: '0',
-    previousPolicyDigest: null,
-    accessPolicy: 0,
-    publishPolicy: spec.publishPolicy,
-    publishAuthority: spec.publishPolicy === 0 ? OWNER : null,
-    publishAuthorityAccountId: '0',
-    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-    administrativeDelegationDigest: null,
-    source: {
-      kind: 'owner-signed-unregistered',
-      ownerAddress: OWNER,
-      ownerAuthorityEra: '0',
+async function runPolicyCell(
+  context: RunPolicyCellContext,
+  spec: Cp1PublicCellSpec,
+  index: number,
+): Promise<Cp1CellEvidence> {
+  const { author, receiver, receiverPeerId, seal } = context;
+  const policy = cp1PublicPolicy(spec);
+  const policyDigest = cp1PolicyDigest(spec);
+  const [authorAccepted, receiverAccepted] = await Promise.all([
+    acceptPolicy(author, `author-${spec.cell}`, policy, policyDigest),
+    acceptPolicy(receiver, `receiver-${spec.cell}`, policy, policyDigest),
+  ]);
+  exact(authorAccepted, policyDigest, `${spec.cell} author policy digest`);
+  exact(receiverAccepted, policyDigest, `${spec.cell} receiver policy digest`);
+
+  const genesis = output(await author.request(
+    'publishCatalogGenesis',
+    `${spec.cell}-genesis`,
+    'operation-completed',
+    {
+      scope: cp1CatalogScope(spec),
+      authorPrivateKey: OWNER_PRIVATE_KEY,
+      issuedAt: String(1773900000000 + index * 10_000),
+      catalogIssuerDelegationEffectiveAt: '1773899999000',
+      catalogIssuerDelegationExpiresAt: '1774000000000',
     },
-    effectiveAt: '0',
-    issuedAt: '0',
-  } as unknown as ContextGraphPolicyV1;
-}
+  ), `${spec.cell} genesis`);
+  const genesisAnnouncement = record(genesis.announcement, `${spec.cell} genesis announcement`);
+  exact(genesisAnnouncement.policyDigest, policyDigest, `${spec.cell} genesis policy digest`);
+  await announceAndDrain(
+    author,
+    receiver,
+    genesisAnnouncement,
+    receiverPeerId,
+    `${spec.cell}-genesis`,
+  );
 
-function digestForPolicy(policy: ContextGraphPolicyV1): Digest32V1 {
-  return computeContextGraphPolicyObjectDigestV1({
-    issuer: OWNER,
-    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-    payload: policy,
-    signatureEvidence: { kind: 'none' },
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  } as unknown as UnsignedControlEnvelopeV1);
-}
+  const publication = output(await author.request(
+    'publishCatalogExactSetSuccessor',
+    `${spec.cell}-successor`,
+    'operation-completed',
+    {
+      previousHead: stagedHead(genesis, `${spec.cell} genesis`),
+      authorPrivateKey: OWNER_PRIVATE_KEY,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'cp1-byte-identical-public-corpus',
+        projectionNQuads: PROJECTION_NQUADS,
+        seal,
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: String(1773900001000 + index * 10_000),
+    },
+  ), `${spec.cell} successor`);
+  const announcement = record(publication.announcement, `${spec.cell} successor announcement`);
+  exact(announcement.policyDigest, policyDigest, `${spec.cell} successor policy digest`);
+  await announceAndDrain(
+    author,
+    receiver,
+    announcement,
+    receiverPeerId,
+    `${spec.cell}-successor`,
+  );
 
-function catalogScope(contextGraphId: string): Record<string, unknown> {
+  const headDigest = requiredDigest(publication.headObjectDigest, `${spec.cell} head digest`);
+  const synchronization = output(await receiver.request(
+    'exactInventoryReadback',
+    `${spec.cell}-inventory`,
+    'operation-completed',
+    { catalogHeadDigest: headDigest },
+  ), `${spec.cell} inventory`);
+  const rows = array(synchronization.rows, `${spec.cell} inventory rows`);
+  if (rows.length !== 1) throw new Error(`${spec.cell} did not apply exactly one row`);
+  const row = synchronizationRow(rows[0], `${spec.cell} inventory row`);
+  const semantic = semanticReadback(output(await receiver.request(
+    'semanticGraphReadback',
+    `${spec.cell}-semantic`,
+    'operation-completed',
+    { swmGraph: row.swmGraph },
+  ), `${spec.cell} semantic readback`), `${spec.cell} semantic readback`);
+  exact(semantic.projectionNQuads, PROJECTION_NQUADS, `${spec.cell} exact semantic bytes`);
+
+  const publishedAssets = array(publication.assets, `${spec.cell} published assets`);
+  if (publishedAssets.length !== 1) throw new Error(`${spec.cell} publication has wrong row count`);
+  const publishedAsset = publicationAsset(publishedAssets[0], `${spec.cell} published asset`);
+  exact(publishedAsset.bundleDigest, row.bundleDigest, `${spec.cell} bundle transfer digest`);
+  exact(publishedAsset.contentDigest, row.contentDigest, `${spec.cell} content transfer digest`);
+
   return {
-    networkId: NETWORK_ID,
-    contextGraphId,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    subGraphName: null,
-    authorAddress: OWNER,
-    era: '0',
-    bucketCount: '1',
+    accessPolicy: 0,
+    activatedTripleCount: requiredInteger(
+      synchronization.activatedTripleCount,
+      `${spec.cell} activated triple count`,
+    ),
+    announcementPolicyDigest: requiredDigest(
+      announcement.policyDigest,
+      `${spec.cell} announcement policy digest`,
+    ),
+    announcedPeerId: receiverPeerId,
+    appliedHeadStatus: requiredString(
+      synchronization.appliedHeadStatus,
+      `${spec.cell} applied status`,
+    ),
+    authorPolicyDigest: authorAccepted,
+    bundleDigest: row.bundleDigest,
+    cell: spec.cell,
+    contentDigest: row.contentDigest,
+    contextGraphId: spec.contextGraphId,
+    inventoryRowCount: requiredInteger(
+      synchronization.inventoryRowCount,
+      `${spec.cell} inventory row count`,
+    ),
+    projectionNQuads: semantic.projectionNQuads,
+    publishPolicy: spec.publishPolicy,
+    receiverPolicyDigest: receiverAccepted,
+    semanticSha256: semanticSha256(semantic.projectionNQuads),
   };
+}
+
+function publicationAsset(value: unknown, label: string): Cp1PublicationAsset {
+  const asset = record(value, label);
+  return Object.freeze({
+    bundleDigest: requiredDigest(asset.bundleDigest, `${label}.bundleDigest`),
+    contentDigest: requiredDigest(asset.contentDigest, `${label}.contentDigest`),
+  });
+}
+
+function synchronizationRow(value: unknown, label: string): Cp1SynchronizationRow {
+  const row = record(value, label);
+  return Object.freeze({
+    ...publicationAsset(row, label),
+    swmGraph: requiredString(row.swmGraph, `${label}.swmGraph`),
+  });
+}
+
+function semanticReadback(value: unknown, label: string): Cp1SemanticReadback {
+  const semantic = record(value, label);
+  return Object.freeze({
+    projectionNQuads: requiredString(
+      semantic.projectionNQuads,
+      `${label}.projectionNQuads`,
+    ),
+  });
 }
 
 async function acceptPolicy(
@@ -348,7 +363,7 @@ async function acceptPolicy(
   requestId: string,
   policy: ContextGraphPolicyV1,
   policyDigest: Digest32V1,
-): Promise<string> {
+): Promise<Digest32V1> {
   const accepted = output(await child.request(
     'acceptPolicySnapshot',
     requestId,
@@ -518,10 +533,10 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-function requiredDigest(value: unknown, label: string): string {
+function requiredDigest(value: unknown, label: string): Digest32V1 {
   const result = requiredString(value, label);
   if (!/^0x[0-9a-f]{64}$/u.test(result)) throw new TypeError(`${label} is not a digest`);
-  return result;
+  return result as Digest32V1;
 }
 
 function requiredInteger(value: unknown, label: string): number {

@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 
+import {
+  CP1_PUBLIC_CELL_SPECS,
+  cp1PolicyDigest,
+} from './policy-cells.ts';
+
 export const CP1_PUBLIC_SWM_PARITY_SCHEMA =
   'dkg-rfc64-cp1-public-swm-parity-v1' as const;
 
 const DIGEST = /^0x[0-9a-f]{64}$/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
-const CELLS = ['public-open', 'public-curated'] as const;
 
 export function semanticSha256(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -76,11 +80,13 @@ export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown
       'receiverPolicyDigest',
       'semanticSha256',
     ]);
-    exact(cell.cell, CELLS[index], `${path}.cell`);
+    const spec = CP1_PUBLIC_CELL_SPECS[index]!;
+    exact(cell.cell, spec.cell, `${path}.cell`);
     exact(cell.accessPolicy, 0, `${path}.accessPolicy`);
-    exact(cell.publishPolicy, index === 0 ? 1 : 0, `${path}.publishPolicy`);
-    string(cell.contextGraphId, `${path}.contextGraphId`);
+    exact(cell.publishPolicy, spec.publishPolicy, `${path}.publishPolicy`);
+    exact(cell.contextGraphId, spec.contextGraphId, `${path}.contextGraphId`);
     const policyDigest = digest(cell.authorPolicyDigest, `${path}.authorPolicyDigest`);
+    exact(policyDigest, cp1PolicyDigest(spec), `${path}.authorPolicyDigest`);
     exact(cell.receiverPolicyDigest, policyDigest, `${path}.receiverPolicyDigest`);
     exact(cell.announcementPolicyDigest, policyDigest, `${path}.announcementPolicyDigest`);
     exact(cell.announcedPeerId, receiverPeerId, `${path}.announcedPeerId`);
@@ -93,8 +99,20 @@ export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown
     exact(projection, expectedProjection, `${path}.projectionNQuads`);
     const semanticDigest = sha256(cell.semanticSha256, `${path}.semanticSha256`);
     exact(semanticDigest, expectedSemanticDigest, `${path}.semanticSha256`);
-    return { bundleDigest, contentDigest, semanticDigest };
+    return {
+      bundleDigest,
+      contentDigest,
+      contextGraphId: spec.contextGraphId,
+      policyDigest,
+      semanticDigest,
+    };
   });
+  if (cells[0]!.contextGraphId === cells[1]!.contextGraphId) {
+    fail('$.cells context graph identity', 'policy cells must use distinct context graphs');
+  }
+  if (cells[0]!.policyDigest === cells[1]!.policyDigest) {
+    fail('$.cells policy identity', 'policy cells must use distinct policy digests');
+  }
   exact(cells[1]!.bundleDigest, cells[0]!.bundleDigest, '$.cells bundle parity');
   exact(cells[1]!.contentDigest, cells[0]!.contentDigest, '$.cells content parity');
   exact(cells[1]!.semanticDigest, cells[0]!.semanticDigest, '$.cells semantic parity');
