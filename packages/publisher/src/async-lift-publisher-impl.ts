@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, buildAtomicSubjectReplaceUpdate, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -377,14 +377,14 @@ export class TripleStoreAsyncLiftPublisher
     // Object-bound triple pattern (not a FILTER) so the store resolves it via the
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
     //
-    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
-    // subject as delete-then-insert, so a lookup that races a state transition can
-    // transiently miss the index and return `none`. This window is pre-existing
-    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
-    // claim-locked findActive remains the authoritative dedup guard, so a transient
-    // false `none` cannot by itself create a duplicate active job. Making writeJob
-    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
-    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
+    // #1863 — writeJob now persists the job subject as a single atomic replace
+    // (DELETE WHERE + INSERT DATA in one store.update() transaction), so on an
+    // update-capable backend a lookup racing a state transition sees the subject
+    // fully prior-or-fully-next and this index row never transiently disappears:
+    // no false `none`. On a backend without update() writeJob falls back to
+    // delete-then-insert, which retains the bounded pre-#1863 window; there
+    // admission's claim-locked findActive remains the authoritative dedup guard,
+    // so a transient false `none` cannot by itself create a duplicate active job.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
     );
@@ -1080,9 +1080,40 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(serializeJob(job, this.graphUri));
+    await this.persistJobRecord(job);
     await this.appendJournal(job, kind);
+  }
+
+  /**
+   * #1863 — persist the job record as a single-subject atomic replace so a
+   * lock-free reader racing a transition never observes the job subject
+   * transiently empty. Every row for `jobSubject` — the payload, the status, and
+   * the `CONTROL_LIFECYCLE_KEY` intent-index row (emitted inside `serializeJob`
+   * via `serializeVmPublishIntentIndex`) — lands in the SAME `INSERT DATA`, so
+   * the false `kind:'none'` intent-lookup miss / dedup gap that hinges on that
+   * index row disappearing mid-write cannot occur. The DELETE (jobSubject only)
+   * and INSERT (the full serializeJob set — the immutable request rows ride
+   * along and re-assert idempotently) commit in one `store.update()`
+   * transaction.
+   *
+   * Fallback: a store without `update()` (older external backends) keeps the
+   * historical delete-then-insert. That is the BOUNDED pre-#1863 path — it still
+   * exposes the transient window — NOT the intended path; admission's
+   * claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the authoritative
+   * dedup guard for such backends. Durability (#1851 fsync) stays scoped to
+   * `recordDurableBroadcastBeforeSend`, not here.
+   */
+  private async persistJobRecord(job: LiftJob): Promise<void> {
+    const quads = serializeJob(job, this.graphUri);
+    const atomic = await tryUpdateWithTouchedGraphs(
+      this.store,
+      buildAtomicSubjectReplaceUpdate(this.graphUri, jobSubject(job.jobId), quads),
+      [this.graphUri],
+      { source: 'publisher.asyncLift.writeJob' },
+    );
+    if (atomic) return;
+    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
+    await this.store.insert(quads);
   }
 
   /**

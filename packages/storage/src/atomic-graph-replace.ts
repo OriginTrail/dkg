@@ -120,6 +120,41 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
   return graphUri.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX);
 }
 
+/**
+ * Build one transactional SPARQL Update that atomically replaces every row for a
+ * single subject inside a *shared* named graph, leaving all other subjects in
+ * that graph untouched — unlike `buildAtomicGraphReplaceUpdate`, which replaces
+ * the whole graph.
+ *
+ * Backends DKG uses execute one Update request as a single transaction, so a
+ * concurrent reader observes `subject` either fully in its prior state or fully
+ * in its new state — never the transiently-empty window a separate
+ * delete-then-insert exposes (see #1863: a lock-free reader racing a job
+ * transition would otherwise see zero rows for the subject and report a false
+ * miss). A failed/malformed INSERT DATA aborts the whole request, so the DELETE
+ * rolls back too; no staging graph is needed because there is no MOVE.
+ *
+ * Only `subject`'s rows are cleared. `insertQuads` MAY carry additional
+ * co-located subjects (e.g. an immutable request record re-asserted alongside a
+ * mutable job record): those are inserted idempotently without being cleared
+ * first, so re-asserting byte-identical rows is a no-op union. All quads must
+ * target `graphUri` and be blank-node free. Object terms are validated/escaped
+ * through the same `formatObject` path as `buildAtomicGraphReplaceUpdate`, so
+ * callers pass already-serialized RDF terms rather than hand-escaping literals.
+ */
+export function buildAtomicSubjectReplaceUpdate(
+  graphUri: string,
+  subject: string,
+  insertQuads: readonly Quad[],
+): string {
+  const target = assertSafeIri(graphUri);
+  const safeSubject = assertSafeIri(subject);
+  assertReplacementPayload(graphUri, insertQuads);
+  const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
+  if (insertQuads.length === 0) return del;
+  return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
+}
+
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri) {
