@@ -174,6 +174,86 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     expect(server.calls.find(({ method }) => method === 'eth_call')?.params[1]).toBe('0x7b');
   });
 
+  it('does not cache deployment evidence from a failed numbered-anchor proof', async () => {
+    let numberedHeaderReads = 0;
+    let codeReads = 0;
+    const server = await rpcHarness.start((rpcCall, response) => {
+      switch (rpcCall.method) {
+        case 'eth_chainId':
+          sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber': {
+          const finalizedLookup = rpcCall.params[0] === 'finalized';
+          if (!finalizedLookup) numberedHeaderReads += 1;
+          sendJsonRpcResult(response, rpcCall, {
+            number: '0x7b',
+            hash: finalizedLookup || numberedHeaderReads > 1 ? BLOCK_HASH : OTHER_BLOCK_HASH,
+          });
+          return;
+        }
+        case 'eth_getCode':
+          codeReads += 1;
+          sendJsonRpcResult(response, rpcCall, codeReads === 1 ? '0x6000' : '0x');
+          return;
+        case 'eth_call':
+          sendJsonRpcResult(response, rpcCall, '0xaaaa');
+          return;
+        default:
+          sendJsonRpcError(response, rpcCall, -32601, 'method not found');
+      }
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+    });
+
+    await expect(withSnapshot(request(), async (session) => {
+      await expect(session.read([call(FIRST_DATA)]))
+        .rejects.toMatchObject({ code: 'finalized-state-unavailable' });
+      await expect(session.read([call(FIRST_DATA)]))
+        .rejects.toMatchObject({ code: 'no-code' });
+      return 'cache-remained-authenticated';
+    })).resolves.toBe('cache-remained-authenticated');
+    expect(codeReads).toBe(2);
+  });
+
+  it('authenticates numbered-anchor-dependent failures before exposing them', async () => {
+    for (const [postHash, expectedCode] of [
+      [OTHER_BLOCK_HASH, 'finalized-state-unavailable'],
+      [BLOCK_HASH, 'no-code'],
+    ] as const) {
+      const server = await rpcHarness.start((rpcCall, response) => {
+        switch (rpcCall.method) {
+          case 'eth_chainId':
+            sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
+            return;
+          case 'eth_getBlockByNumber':
+            sendJsonRpcResult(response, rpcCall, {
+              number: '0x7b',
+              hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : postHash,
+            });
+            return;
+          case 'eth_getCode':
+            sendJsonRpcResult(response, rpcCall, '0x');
+            return;
+          default:
+            sendJsonRpcError(response, rpcCall, -32601, 'method not found');
+        }
+      });
+      const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+        chainId: CHAIN_ID,
+        endpoints: [server.url],
+        blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+      });
+
+      await expect(withSnapshot(request(), async (session) => (
+        session.read([call(FIRST_DATA)])
+      ))).rejects.toMatchObject({ code: expectedCode });
+      expect(server.calls.filter(({ method }) => method === 'eth_call')).toHaveLength(0);
+    }
+  });
+
   it('rechecks the numbered fallback anchor after the scoped consumer completes', async () => {
     let numberedHeaderReads = 0;
     const server = await rpcHarness.start((rpcCall, response) => {
@@ -392,6 +472,45 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1
       * CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
     );
+  });
+
+  it('enforces aggregate budgets through the public snapshot session before extra I/O', async () => {
+    const batchServer = await rpcHarness.start(successfulHandler());
+    const batchScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [batchServer.url],
+    });
+    await batchScope(request(), async (session) => {
+      for (let index = 0; index < CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1; index += 1) {
+        await session.read([call(FIRST_DATA)]);
+      }
+      const callsAtLimit = batchServer.calls.length;
+      await expect(session.read([call(FIRST_DATA)]))
+        .rejects.toMatchObject({ code: 'resource-limit' });
+      expect(batchServer.calls).toHaveLength(callsAtLimit);
+    });
+
+    const returnServer = await rpcHarness.start(successfulHandler());
+    const returnScope = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [returnServer.url],
+    });
+    const maximalBatch = Array.from(
+      { length: CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1 },
+      () => call(FIRST_DATA, CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1),
+    );
+    const batchesToReturnCap = CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_DECLARED_RETURN_BYTES_V1
+      / (CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1
+        * CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1);
+    await returnScope(request(), async (session) => {
+      for (let index = 0; index < batchesToReturnCap; index += 1) {
+        await session.read(maximalBatch);
+      }
+      const callsAtLimit = returnServer.calls.length;
+      await expect(session.read([call(FIRST_DATA)]))
+        .rejects.toMatchObject({ code: 'resource-limit' });
+      expect(returnServer.calls).toHaveLength(callsAtLimit);
+    });
   });
 });
 
