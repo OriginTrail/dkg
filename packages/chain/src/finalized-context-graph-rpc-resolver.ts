@@ -1,4 +1,3 @@
-import { type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
@@ -92,27 +91,15 @@ function decodeFinalizedContextGraphResult(
     assertCanonicalAbiResult('getContextGraph', contextGraph, result.returnData[0]!);
     assertCanonicalAbiResult('getNameHash', nameHash, result.returnData[1]!);
 
-    const [
-      owner,
-      _participantAgents,
-      _metadataBatchId,
-      active,
-      _createdAt,
-      accessPolicy,
-      publishPolicy,
-      publishAuthority,
-      publishAuthorityAccountId,
-    ] = contextGraph;
-
     return Object.freeze({
       blockNumber: result.blockNumber,
       blockHash: result.blockHash,
-      owner: lowerAddress(owner),
-      active,
-      accessPolicy: Number(accessPolicy),
-      publishPolicy: Number(publishPolicy),
-      publishAuthority: lowerAddress(publishAuthority),
-      publishAuthorityAccountId: decimal(publishAuthorityAccountId),
+      owner: lowerAddress(contextGraph.owner),
+      active: contextGraph.active,
+      accessPolicy: Number(contextGraph.accessPolicy),
+      publishPolicy: Number(contextGraph.publishPolicy),
+      publishAuthority: lowerAddress(contextGraph.publishAuthority),
+      publishAuthorityAccountId: decimal(contextGraph.publishAuthorityAccountId),
       nameHash: String(nameHash[0]).toLowerCase(),
     });
   } catch (cause) {
@@ -134,8 +121,8 @@ function assertCanonicalAbiResult(
   }
 }
 
-function lowerAddress(value: unknown): EvmAddressV1 {
-  return String(value).toLowerCase() as EvmAddressV1;
+function lowerAddress(value: unknown): string {
+  return String(value).toLowerCase();
 }
 
 function decimal(value: unknown): string {

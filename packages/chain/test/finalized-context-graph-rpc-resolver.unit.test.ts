@@ -21,8 +21,8 @@ import { type StrictCurrentFinalizedEvmReadV1 } from '../src/strict-current-fina
 
 const CHAIN_ID = '20430' as ChainIdV1;
 const STORAGE = `0x${'11'.repeat(20)}` as EvmAddressV1;
-const OWNER = `0x${'22'.repeat(20)}`;
-const AUTHORITY = `0x${'33'.repeat(20)}`;
+const OWNER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+const AUTHORITY = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 const PARTICIPANT = `0x${'44'.repeat(20)}`;
 const BLOCK_HASH = `0x${'55'.repeat(32)}` as Digest32V1;
 const NAME_HASH = `0x${'66'.repeat(32)}`;
