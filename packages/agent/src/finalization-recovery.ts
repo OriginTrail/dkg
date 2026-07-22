@@ -1,7 +1,6 @@
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   createGraphKnowledgeAssetScope,
-  decodeFinalizationMessage,
   validateContextGraphId,
   validateSubGraphName,
   type FinalizationMessageMsg,
@@ -59,6 +58,11 @@ export type GraphScopedFinalizationRejectionReason =
 export type GraphScopedFinalizationAdmission =
   | { ok: true; value: ParsedGraphScopedFinalization }
   | { ok: false; reason: GraphScopedFinalizationRejectionReason };
+
+export type FinalizationRecoveryApplyOutcome =
+  | 'applied'
+  | 'already-confirmed'
+  | 'deferred';
 
 function reject(reason: GraphScopedFinalizationRejectionReason): GraphScopedFinalizationAdmission {
   return { ok: false, reason };
@@ -151,9 +155,10 @@ export function parseGraphScopedFinalization(
     if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
       return reject('invalid-block-number');
     }
+    const targetContextGraphId = msg.targetContextGraphId || undefined;
     if (
-      msg.targetContextGraphId !== undefined
-      && (!/^\d+$/.test(msg.targetContextGraphId) || BigInt(msg.targetContextGraphId) <= 0n)
+      targetContextGraphId !== undefined
+      && (!/^\d+$/.test(targetContextGraphId) || BigInt(targetContextGraphId) <= 0n)
     ) return reject('invalid-target-context-graph');
     const startKAId = protoToBigInt(msg.startKAId);
     const endKAId = protoToBigInt(msg.endKAId);
@@ -184,17 +189,6 @@ export function parseGraphScopedFinalization(
   }
 }
 
-export function decodeGraphScopedFinalization(
-  data: Uint8Array,
-  topicContextGraphId: string,
-): GraphScopedFinalizationAdmission {
-  try {
-    return parseGraphScopedFinalization(decodeFinalizationMessage(data), topicContextGraphId);
-  } catch {
-    return reject('decode-failed');
-  }
-}
-
 interface FinalizationRecoveryLog {
   info(message: string): void;
   warn(message: string): void;
@@ -210,7 +204,7 @@ export interface FinalizationRecoveryReplayInput {
 }
 
 export class FinalizationRecovery {
-  private readonly replaySingleFlights = new Map<string, Promise<void>>();
+  private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
 
   constructor(
     private readonly journal: FinalizationRecoveryJournal | undefined,
@@ -219,7 +213,7 @@ export class FinalizationRecovery {
       rawMessage: Uint8Array,
       contextGraphId: string,
       sourcePeerId?: string,
-    ) => Promise<void>,
+    ) => Promise<FinalizationRecoveryApplyOutcome>,
     private readonly log: FinalizationRecoveryLog,
   ) {}
 
@@ -241,21 +235,18 @@ export class FinalizationRecovery {
     return this.record({ ...input, state: 'verified' });
   }
 
-  async clear(msg: FinalizationMessageMsg, contextGraphId: string): Promise<void> {
-    if (!this.journal) return;
-    try {
-      await this.journal.remove(finalizationRecoveryEntryKey({
-        chainId: this.chain?.chainId ?? 'none',
-        contextGraphId,
-        ual: msg.ual,
-        txHash: msg.txHash,
-      }));
-    } catch (error) {
-      this.log.warn(
-        `Finalization recovery journal cleanup failed for ${msg.ual}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  async settle(
+    msg: FinalizationMessageMsg,
+    contextGraphId: string,
+    outcome: FinalizationRecoveryApplyOutcome,
+  ): Promise<void> {
+    if (outcome === 'deferred') return;
+    await this.remove(finalizationRecoveryEntryKey({
+      chainId: this.chain?.chainId ?? 'none',
+      contextGraphId,
+      ual: msg.ual,
+      txHash: msg.txHash,
+    }), msg.ual);
   }
 
   async replayMatching(input: FinalizationRecoveryReplayInput): Promise<boolean> {
@@ -313,30 +304,9 @@ export class FinalizationRecovery {
       }
 
       const existing = this.replaySingleFlights.get(entry.key);
-      if (existing) {
-        await existing;
-      } else {
-        const replay = this.apply(
-          Buffer.from(entry.rawMessageBase64, 'base64'),
-          entry.contextGraphId,
-          entry.sourcePeerId,
-        ).catch((error: unknown) => {
-          if (!(error instanceof StoreSchedulerBusyError)) throw error;
-          this.log.info(
-            `Finalization recovery store remains busy for ${entry.ual}; keeping journal entry`,
-          );
-        }).finally(() => {
-          if (this.replaySingleFlights.get(entry.key) === replay) {
-            this.replaySingleFlights.delete(entry.key);
-          }
-        });
-        this.replaySingleFlights.set(entry.key, replay);
-        await replay;
-      }
-      const remaining = await this.journal.forKnowledgeAsset(input);
-      if (!remaining.some((candidate) => candidate.key === entry.key)) {
-        recoveredCurrentAssertion = true;
-      }
+      const replay = existing ?? this.replayEntry(entry);
+      if (!existing) this.replaySingleFlights.set(entry.key, replay);
+      if (await replay) recoveredCurrentAssertion = true;
     }
     return recoveredCurrentAssertion;
   }
@@ -376,6 +346,41 @@ export class FinalizationRecovery {
     } catch (error) {
       this.log.warn(
         `Finalization recovery journal write failed for ${candidate.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  private replayEntry(entry: FinalizationRecoveryEntry): Promise<boolean> {
+    const replay = this.apply(
+      Buffer.from(entry.rawMessageBase64, 'base64'),
+      entry.contextGraphId,
+      entry.sourcePeerId,
+    ).then(async (outcome) => {
+      if (outcome === 'deferred') return false;
+      return this.remove(entry.key, entry.ual);
+    }).catch((error: unknown) => {
+      if (!(error instanceof StoreSchedulerBusyError)) throw error;
+      this.log.info(
+        `Finalization recovery store remains busy for ${entry.ual}; keeping journal entry`,
+      );
+      return false;
+    }).finally(() => {
+      if (this.replaySingleFlights.get(entry.key) === replay) {
+        this.replaySingleFlights.delete(entry.key);
+      }
+    });
+    return replay;
+  }
+
+  private async remove(key: string, ual: string): Promise<boolean> {
+    if (!this.journal) return false;
+    try {
+      return await this.journal.remove(key);
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery journal cleanup failed for ${ual}: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
       return false;

@@ -390,6 +390,68 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('resolves an omitted graph-scoped target context graph id', async () => {
+    const { message, vmGraph } = await stageGraph();
+    let resolverCalls = 0;
+    const resolvingHandler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: async () => {
+        resolverCalls += 1;
+        return '42';
+      },
+    });
+    (resolvingHandler as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+
+    await resolvingHandler.handleFinalizationMessage(
+      encodeFinalizationMessage({ ...message, targetContextGraphId: undefined }),
+      CG,
+    );
+
+    expect(resolverCalls).toBe(1);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('applies after one transient scheduler timeout without journaling', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    const query = store.query.bind(store);
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const journal = new FinalizationRecoveryJournal(directory);
+      const retryingHandler = new FinalizationHandler(store, undefined, {
+        recoveryJournal: journal,
+      });
+      (retryingHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      let busyReads = 1;
+      store.query = async (sparql, options) => {
+        if (busyReads > 0) {
+          busyReads -= 1;
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'sparql-http.query',
+          );
+        }
+        return query(sparql, options);
+      };
+
+      await retryingHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(busyReads).toBe(0);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await journal.list()).toEqual([]);
+    } finally {
+      store.query = query;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('recovers original transaction provenance after a pre-verification store timeout and restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     try {
