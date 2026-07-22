@@ -36,13 +36,13 @@ export interface LoopbackRpc {
 export interface LoopbackOptions {
   /** JSON-RPC methods that respond HTTP 429 (rate-limited). */
   throttle?: Iterable<string>;
-  /** Override canned results per method (return a hex string). */
-  results?: Record<string, string>;
+  /** Override canned JSON-RPC results per method. */
+  results?: Record<string, unknown>;
   /** JSON-RPC methods that accept the request but never send a response. */
   hang?: Iterable<string>;
 }
 
-const DEFAULT_RESULTS: Record<string, string> = {
+const DEFAULT_RESULTS: Record<string, unknown> = {
   eth_chainId: CHAIN_ID_HEX,
   eth_blockNumber: '0x10',
   eth_getCode: '0x1234',

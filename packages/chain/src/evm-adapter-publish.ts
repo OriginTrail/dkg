@@ -449,12 +449,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       if (!receipt || receipt.status !== 1) return null;
 
       const v10 = this.contracts.knowledgeAssetStorage
-        ? await this.parseV10PublishReceipt(receipt)
+        ? await this.parseV10PublishReceipt(receipt, options)
         : null;
       if (v10) return v10;
 
       const v9 = this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt)
+        ? await this.parseV9PublishReceipt(receipt, options)
         : null;
       return v9;
     } catch (err: any) {
@@ -468,6 +468,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+    options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
@@ -512,7 +513,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -534,6 +535,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+    options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
@@ -563,7 +565,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
 
     return {
       batchId,

@@ -348,7 +348,9 @@ export class RpcFailoverClient {
       label,
       fn,
       {
-        isRetryable: opts?.isRetryable ?? isRetryableRpcError,
+        isRetryable: error => !opts?.signal?.aborted && (
+          opts?.isRetryable ?? isRetryableRpcError
+        )(error),
         intent: skipPreferred ? 'transparentRead' : 'stickyRead',
         attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
         isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
@@ -401,7 +403,9 @@ export class RpcFailoverClient {
               label,
               (p) => fn(this.rebindContract(contract, p)),
               {
-                isRetryable: opts?.isRetryable ?? isContractViewRetryable,
+                isRetryable: error => !opts?.signal?.aborted && (
+                  opts?.isRetryable ?? isContractViewRetryable
+                )(error),
                 intent: skipPreferred ? 'transparentRead' : 'stickyRead',
                 attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
                 isEmptyResult: opts?.isEmptyResult as ((value: T) => boolean) | undefined,
@@ -659,7 +663,7 @@ export class RpcFailoverClient {
             logLabel,
             provider => provider.getTransactionReceipt(txHash),
             {
-              isRetryable: isRetryableRpcError,
+              isRetryable: error => !options.signal?.aborted && isRetryableRpcError(error),
               intent: 'write',
               attemptTimeoutMs: () => RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
               ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),

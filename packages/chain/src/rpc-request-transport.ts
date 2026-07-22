@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { JsonRpcProvider } from 'ethers';
 import type {
+  FetchCancelSignal,
+  FetchGetUrlFunc,
   FetchRequest,
-  Networkish,
-  JsonRpcApiProviderOptions,
-  JsonRpcPayload,
-  JsonRpcResult,
 } from 'ethers';
+import { errorMessage } from './evm-adapter-errors.js';
 
 const rpcRequestAbortContext = new AsyncLocalStorage<AbortSignal>();
 
@@ -29,51 +27,82 @@ function throwAbortReason(signal: AbortSignal): never {
 }
 
 /**
- * Ethers provider transport boundary that connects a request-scoped abort
- * signal to the active FetchRequest and therefore to the underlying HTTP
- * socket. Higher layers establish the signal with
- * {@link withRpcRequestAbortSignal}; usage accounting remains a separate
- * observer in `rpc-usage.ts`.
+ * FetchRequest transport that combines ethers' cancellation signal with the
+ * caller-owned signal bound by {@link withRpcRequestAbortSignal}. Keeping the
+ * bridge here lets JsonRpcProvider retain its native `_send` implementation;
+ * this function owns only the HTTP request that can actually close the socket.
  */
-export class CancellableJsonRpcProvider extends JsonRpcProvider {
-  constructor(
-    url: string | FetchRequest,
-    network?: Networkish,
-    options?: JsonRpcApiProviderOptions,
-  ) {
-    super(url, network, options);
-  }
+export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
+  request: FetchRequest,
+  signal?: FetchCancelSignal,
+) => {
+  signal?.checkSignal();
+  const callerSignal = activeRpcRequestAbortSignal();
+  if (callerSignal?.aborted) throwAbortReason(callerSignal);
 
-  override async _send(
-    payload: JsonRpcPayload | Array<JsonRpcPayload>,
-  ): Promise<Array<JsonRpcResult>> {
-    const signal = activeRpcRequestAbortSignal();
-    if (!signal) return super._send(payload);
-    if (signal.aborted) throwAbortReason(signal);
+  const controller = new AbortController();
+  let cancelled = false;
+  let callerCancelled = false;
+  let timedOut = false;
+  signal?.addListener(() => {
+    cancelled = true;
+    controller.abort();
+  });
+  const onCallerAbort = () => {
+    callerCancelled = true;
+    controller.abort();
+  };
+  callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+  if (callerSignal?.aborted) onCallerAbort();
 
-    const request = this._getConnection();
-    request.body = JSON.stringify(payload);
-    request.setHeader('content-type', 'application/json');
-    const pending = request.send();
-    const onAbort = () => {
-      try {
-        request.cancel();
-      } catch {
-        // The response may settle concurrently with the abort.
-      }
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    try {
-      const response = await pending;
-      response.assertOk();
-      const body = response.bodyJson;
-      return Array.isArray(body) ? body : [body];
-    } catch (error) {
-      if (signal.aborted) throwAbortReason(signal);
-      throw error;
-    } finally {
-      signal.removeEventListener('abort', onAbort);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, request.timeout);
+  try {
+    let requestBody: ArrayBuffer | undefined;
+    if (request.body) {
+      requestBody = new ArrayBuffer(request.body.length);
+      new Uint8Array(requestBody).set(request.body);
     }
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: requestBody,
+      signal: controller.signal,
+    });
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => { headers[key] = value; });
+    const body = new Uint8Array(await response.arrayBuffer());
+    return {
+      statusCode: response.status,
+      statusMessage: response.statusText,
+      headers,
+      body: body.length > 0 ? body : null,
+    };
+  } catch (error) {
+    if (callerCancelled && callerSignal) throwAbortReason(callerSignal);
+    if (cancelled) {
+      throw Object.assign(new Error('RPC request cancelled', { cause: error }), {
+        code: 'CANCELLED',
+      });
+    }
+    if (timedOut) {
+      throw Object.assign(new Error(`RPC request timed out after ${request.timeout}ms`, {
+        cause: error,
+      }), { code: 'TIMEOUT' });
+    }
+    const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+    throw Object.assign(
+      new Error(`RPC fetch failed: ${errorMessage(error)}`, { cause: error }),
+      {
+        code: typeof causeCode === 'string' && causeCode.length > 0
+          ? causeCode.toUpperCase()
+          : 'NETWORK_ERROR',
+      },
+    );
+  } finally {
+    clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
   }
-}
+};

@@ -22,6 +22,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { JsonRpcProvider } from 'ethers';
 import type {
   FetchRequest,
   Networkish,
@@ -31,7 +32,6 @@ import type {
 } from 'ethers';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { boundedRetryFetchRequest } from './evm-adapter-rpc.js';
-import { CancellableJsonRpcProvider } from './rpc-request-transport.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -301,7 +301,7 @@ export class RpcUsageTracker {
  * the process: every payload entry is one billable JSON-RPC request (and with
  * the adapter's `batchMaxCount: 1` a batch is a single-entry array anyway).
  */
-export class CountingJsonRpcProvider extends CancellableJsonRpcProvider {
+export class CountingJsonRpcProvider extends JsonRpcProvider {
   constructor(
     url: string | FetchRequest,
     network: Networkish | undefined,

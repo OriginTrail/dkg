@@ -171,7 +171,9 @@ function authenticatedV2Chain(overrides: Partial<ChainAdapter> = {}): ChainAdapt
 function runGraphScopedDurableSync(options: {
   storeGraphScopedAsset: (
     asset: VerifiedGraphScopedAsset,
+    deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
+  createContextGraphSyncDeadline?: () => number;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
@@ -182,7 +184,8 @@ function runGraphScopedDurableSync(options: {
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    createContextGraphSyncDeadline: () => Date.now() + 60_000,
+    createContextGraphSyncDeadline:
+      options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
       phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
     ),
@@ -209,6 +212,22 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('hands the exact context-graph deadline to graph-scoped storage', async () => {
+    const deadline = 1_800_000_123_456;
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      createContextGraphSyncDeadline: () => deadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
+  });
+
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
