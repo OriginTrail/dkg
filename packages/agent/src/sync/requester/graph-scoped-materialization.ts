@@ -45,6 +45,7 @@ export interface AuthenticatedGraphScopedAsset {
 export type VerifyContextGraphBinding = (
   localContextGraphId: string,
   onChainContextGraphId: bigint,
+  signal?: AbortSignal,
 ) => Promise<boolean>;
 
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
@@ -61,6 +62,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   asset: VerifiedGraphScopedAsset,
   verifyContextGraphBinding?: VerifyContextGraphBinding,
   receivedAt = new Date(),
+  options: { signal?: AbortSignal } = {},
 ): Promise<AuthenticatedGraphScopedAsset> {
   const receivedAtMs = receivedAt.getTime();
   if (!Number.isFinite(receivedAtMs)) {
@@ -119,9 +121,9 @@ export async function authenticateVerifiedGraphScopedAsset(
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId),
-    chain.getMerkleRootCount(kaId),
-    chain.getKAContextGraphId(kaId),
+    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
+    chain.getMerkleRootCount(kaId, { signal: options.signal }),
+    chain.getKAContextGraphId(kaId, { signal: options.signal }),
   ]);
   if (latestRoot.length !== 32 || !bytesEqual(latestRoot, roots[0]!)) {
     throw Object.assign(
@@ -152,7 +154,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
     );
   }
-  if (!(await verifyContextGraphBinding(asset.contextGraphId, boundContextGraphId))) {
+  if (!(await verifyContextGraphBinding(
+    asset.contextGraphId,
+    boundContextGraphId,
+    options.signal,
+  ))) {
     throw Object.assign(
       new Error(
         `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
@@ -184,7 +190,9 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const resolved = await chain.resolvePublishByTxHash(transactionHash);
+    const resolved = await chain.resolvePublishByTxHash(transactionHash, {
+      signal: options.signal,
+    });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -207,8 +215,15 @@ export async function authenticateVerifiedGraphScopedAsset(
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId);
-    const verified = await chain.verifyKAUpdate(transactionHash, kaId, publisherAddress);
+    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId, {
+      signal: options.signal,
+    });
+    const verified = await chain.verifyKAUpdate(
+      transactionHash,
+      kaId,
+      publisherAddress,
+      { signal: options.signal },
+    );
     if (
       !verified.verified
       || verified.onChainMerkleRoot === undefined

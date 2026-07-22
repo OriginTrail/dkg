@@ -125,6 +125,7 @@ interface DurableSyncContext {
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     asset: VerifiedGraphScopedAsset,
+    deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
@@ -535,7 +536,7 @@ export async function runDurableSync(
         );
       }
       for (const asset of partitioned.assets) {
-        const outcome = await storeGraphScopedAsset!(asset);
+        const outcome = await storeGraphScopedAsset!(asset, deadline);
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does

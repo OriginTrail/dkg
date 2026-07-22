@@ -17,6 +17,7 @@ import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
+  ChainReadOptions,
   V10PublishParams,
   OnChainPublishResult,
 } from './chain-adapter.js';
@@ -1368,8 +1369,24 @@ export class EVMChainAdapterBase {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
+    return this.readContractWithOptions(contract, label, method, args);
+  }
+
+  /**
+   * Canonical simple contract view with request options. This keeps ordinary
+   * method-name reads on the same path as {@link readContract} while allowing
+   * cancellation and other read policy to be supplied without a custom lambda.
+   */
+  protected readContractWithOptions<T = any>(
+    contract: Contract,
+    label: string,
+    method: string,
+    args: readonly unknown[],
+    opts?: ReadOpts,
+  ): Promise<T> {
     return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
-      rpcUsageConsumer: label,
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
   }
 
@@ -2718,7 +2735,10 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async getBlockTimestamp(blockNumber: number): Promise<number> {
+  protected async getBlockTimestamp(
+    blockNumber: number,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
@@ -2738,6 +2758,7 @@ export class EVMChainAdapterBase {
       {
         rpcUsageConsumer: 'getBlock',
         endpointSetRetry: 'all-throttled',
+        signal: options.signal,
       },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;

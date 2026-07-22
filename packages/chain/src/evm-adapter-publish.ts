@@ -11,13 +11,14 @@
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
 import { ethers, Wallet, Contract } from 'ethers';
-import type { ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
+import type { ChainReadOptions, ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveQuotedPublisherCandidatePricing,
   type PublisherConvictionPlanReader,
 } from './publisher-plan.js';
 import { errorMessage } from './evm-adapter-errors.js';
+import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
@@ -276,14 +277,21 @@ export class PublishMethods extends EVMChainAdapterBase {
   // V9: Update Verification (for gossip receivers)
   // =====================================================================
 
-  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification> {
+  async verifyKAUpdate(
+    txHash: string,
+    batchId: bigint,
+    publisherAddress: string,
+    options: ChainReadOptions = {},
+  ): Promise<KAUpdateVerification> {
     await this.init();
     if (!this.contracts.knowledgeAssetsStorage && !this.contracts.knowledgeAssetStorage) {
       return { verified: false };
     }
 
     try {
-      const receipt = await this.getTransactionReceiptWithFailover(txHash);
+      const receipt = await this.getTransactionReceiptWithFailover(txHash, {
+        signal: options.signal,
+      });
       if (!receipt || receipt.status !== 1) return { verified: false };
 
       let onChainMerkleRoot: Uint8Array | undefined;
@@ -336,12 +344,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       let merkleRootCount: bigint | undefined;
       if (this.contracts.knowledgeAssetStorage) {
         try {
-          const roots = await this.readContract(
+          const roots = await this.readContractWithOptions(
             this.contracts.knowledgeAssetStorage,
             'kas.getMerkleRootsAtUpdateBlock',
             'getMerkleRoots',
-            batchId,
-            { blockTag: receipt.blockNumber },
+            [batchId, { blockTag: receipt.blockNumber }],
+            { signal: options.signal },
           ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
           let matchedIndex = -1;
           for (let i = roots.length - 1; i >= 0; i--) {
@@ -361,7 +369,8 @@ export class PublishMethods extends EVMChainAdapterBase {
             return { verified: false };
           }
           merkleRootCount = BigInt(matchedIndex + 1);
-        } catch {
+        } catch (error) {
+          if (isChainRpcTransportError(error)) throw error;
           // A latest-state fallback can authenticate a historical receipt with
           // a different publisher/root after a later update. V10 verification
           // therefore fails closed when the receipt-block view is unavailable.
@@ -391,7 +400,8 @@ export class PublishMethods extends EVMChainAdapterBase {
         txIndex: receipt.index,
         merkleRootCount,
       };
-    } catch {
+    } catch (error) {
+      if (isChainRpcTransportError(error)) throw error;
       return { verified: false };
     }
   }
@@ -426,20 +436,25 @@ export class PublishMethods extends EVMChainAdapterBase {
     return false;
   }
 
-  async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
+  async resolvePublishByTxHash(
+    txHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<OnChainPublishResult | null> {
     await this.init();
 
     try {
-      const receipt = await this.getTransactionReceiptWithFailover(txHash);
+      const receipt = await this.getTransactionReceiptWithFailover(txHash, {
+        signal: options.signal,
+      });
       if (!receipt || receipt.status !== 1) return null;
 
       const v10 = this.contracts.knowledgeAssetStorage
-        ? await this.parseV10PublishReceipt(receipt)
+        ? await this.parseV10PublishReceipt(receipt, options)
         : null;
       if (v10) return v10;
 
       const v9 = this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt)
+        ? await this.parseV9PublishReceipt(receipt, options)
         : null;
       return v9;
     } catch (err: any) {
@@ -453,6 +468,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+    options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
@@ -497,7 +513,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -519,6 +535,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+    options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
@@ -548,7 +565,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
 
     return {
       batchId,

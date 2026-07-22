@@ -911,6 +911,11 @@ export interface OperationalWalletRegistrationResult {
   taken: Array<{ address: string; identityId: bigint }>;
 }
 
+/** Optional cancellation boundary for caller-owned, read-only chain work. */
+export interface ChainReadOptions {
+  signal?: AbortSignal;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -967,7 +972,10 @@ export interface ChainAdapter {
    * Recover a publish transaction by txHash and reconstruct its on-chain publish result.
    * Returns null when the tx is absent, pending, failed, or not a recognized publish tx.
    */
-  resolvePublishByTxHash?(txHash: string): Promise<OnChainPublishResult | null>;
+  resolvePublishByTxHash?(
+    txHash: string,
+    options?: ChainReadOptions,
+  ): Promise<OnChainPublishResult | null>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).
@@ -982,7 +990,12 @@ export interface ChainAdapter {
    * root and block number so the caller can bind the gossip payload to
    * on-chain state.
    */
-  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification>;
+  verifyKAUpdate?(
+    txHash: string,
+    batchId: bigint,
+    publisherAddress: string,
+    options?: ChainReadOptions,
+  ): Promise<KAUpdateVerification>;
 
   /**
    * Verify that a publisher address owns the UAL range [startKAId, endKAId] on-chain.
@@ -1550,10 +1563,10 @@ export interface ChainAdapter {
    * deployed on this Hub. Optional so non-V10 / no-chain adapters can
    * stub the prover surface.
    */
-  getLatestMerkleRoot?(kaId: bigint): Promise<Uint8Array>;
+  getLatestMerkleRoot?(kaId: bigint, options?: ChainReadOptions): Promise<Uint8Array>;
 
   /** Number of committed roots for the KA (initial publish is version one). */
-  getMerkleRootCount?(kaId: bigint): Promise<bigint>;
+  getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
@@ -1603,7 +1616,7 @@ export interface ChainAdapter {
    * this as the compatibility path for update adapters whose successful
    * `TxResult` cannot directly include `publisherAddress`.
    */
-  getLatestMerkleRootPublisher?(kaId: bigint): Promise<string>;
+  getLatestMerkleRootPublisher?(kaId: bigint, options?: ChainReadOptions): Promise<string>;
 
   /**
    * Verified author identity for the latest merkle-root entry of `kaId`.
@@ -1635,7 +1648,7 @@ export interface ChainAdapter {
    * default-zero mapping). Callers MUST treat zero as "not found" and
    * skip the period rather than blindly querying CG `_meta:0`.
    */
-  getKAContextGraphId?(kaId: bigint): Promise<bigint>;
+  getKAContextGraphId?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
    * Number of Knowledge Assets registered to `contextGraphId`, sourced from
@@ -1775,7 +1788,10 @@ export interface ChainAdapter {
    * value is write-once at create time (no setter exists), so stale
    * entries can't occur.
    */
-  getContextGraphNameHash?(contextGraphId: bigint): Promise<string | null>;
+  getContextGraphNameHash?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<string | null>;
 }
 
 // ----- Backward-compat deprecated aliases -----

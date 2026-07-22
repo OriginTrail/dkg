@@ -10,6 +10,7 @@
 import { ethers, FetchRequest } from 'ethers';
 import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { cancellableRpcGetUrl } from './rpc-request-transport.js';
 
 /**
  * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
@@ -95,6 +96,10 @@ export function boundedRetryFetchRequest(
   maxRetries: number = RPC_REQUEST_MAX_RETRIES,
 ): FetchRequest {
   const req = new FetchRequest(url);
+  // ethers 6.16's Node getUrl cancellation rejects the FetchRequest but does
+  // not close its underlying socket. Use the platform fetch transport so the
+  // same FetchCancelSignal also aborts the active HTTP request.
+  req.getUrlFunc = cancellableRpcGetUrl;
   req.retryFunc = async (_attemptReq, _response, attempt) => {
     if (attempt >= maxRetries) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));

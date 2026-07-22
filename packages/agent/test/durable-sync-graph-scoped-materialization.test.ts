@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  EVMChainAdapter,
+  type ChainAdapter,
+  type EVMAdapterConfig,
+} from '@origintrail-official/dkg-chain';
 import {
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
@@ -20,7 +24,9 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import {
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  type GraphScopedMaterializationOutcome,
   type VerifyContextGraphBinding,
+  type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -32,6 +38,7 @@ const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memo
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
 const packedKaId = '7719472615821079694904732333912527190217998977704089058462887978021305712641';
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const TEST_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 function transactionHash(version: number): string {
   return `0x${version.toString(16).padStart(64, '0')}`;
@@ -130,16 +137,97 @@ function strictContextGraphBindingVerifier(
   };
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
-  return (localId, onChainId) => (DKGAgent.prototype as any).localCgMatchesOnChainSlot.call(
+  return (localId, onChainId, signal) => (
+    DKGAgent.prototype as any
+  ).requireLocalCgMatchesOnChainSlot.call(
     agentLike,
     localId,
     onChainId.toString(),
     ctx,
-    { requireCommittedNameHash: true },
+    { signal },
   );
 }
 
+function authenticatedV2Chain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
+  const root = new Uint8Array(32);
+  root[31] = 2;
+  return {
+    chainId: 'otp:2043',
+    getLatestMerkleRoot: async () => root,
+    getMerkleRootCount: async () => 2n,
+    getKAContextGraphId: async () => 14n,
+    getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+    verifyKAUpdate: async () => ({
+      verified: true,
+      onChainMerkleRoot: root,
+      blockNumber: 123,
+      txIndex: 4,
+      merkleRootCount: 2n,
+    }),
+    ...overrides,
+  } as ChainAdapter;
+}
+
+function runGraphScopedDurableSync(options: {
+  storeGraphScopedAsset: (
+    asset: VerifiedGraphScopedAsset,
+    deadline: number,
+  ) => Promise<GraphScopedMaterializationOutcome>;
+  createContextGraphSyncDeadline?: () => number;
+  deleteCheckpoint?: (key: string) => void;
+  setCheckpoint?: (key: string, offset: number) => void;
+  logWarn?: (ctx: OperationContext, message: string) => void;
+}) {
+  const v2Data = dataQuad(2);
+  const v2Meta = metadata(2);
+  return runDurableSync({
+    ctx,
+    remotePeerId: 'peer-graph-scoped-authentication',
+    contextGraphIds: [contextGraphId],
+    createContextGraphSyncDeadline:
+      options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
+    fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+    ),
+    processDurableBatchInWorker: async () => ({
+      verifiedData: [v2Data],
+      verifiedMeta: v2Meta,
+      verifiedGraphScopedDataGraphs: [assertionGraph],
+      totalFetchedDataQuads: 1,
+      totalFetchedMetaQuads: v2Meta.length,
+      rejectedKcs: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    }),
+    storeInsert: async () => {},
+    storeGraphScopedAsset: options.storeGraphScopedAsset,
+    deleteCheckpoint: options.deleteCheckpoint ?? (() => {}),
+    setCheckpoint: options.setCheckpoint ?? (() => {}),
+    logInfo: () => {},
+    logWarn: options.logWarn ?? (() => {}),
+    logDebug: () => {},
+  });
+}
+
 describe('durable graph-scoped KA materialization', () => {
+  it('hands the exact context-graph deadline to graph-scoped storage', async () => {
+    const deadline = 1_800_000_123_456;
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      createContextGraphSyncDeadline: () => deadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
+  });
+
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
@@ -228,6 +316,51 @@ describe('durable graph-scoped KA materialization', () => {
       predicate: `${DKG}status`,
       object: '"confirmed"',
     }));
+  });
+
+  it('preserves a typed receipt transport failure from the concrete EVM update verifier', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const transportError = Object.assign(
+      new Error('receipt providers unavailable'),
+      { code: 'RPC_RECEIPT_LOOKUP_FAILED' },
+    );
+    const config: EVMAdapterConfig = {
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: TEST_PRIVATE_KEY,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'otp:2043',
+      allowNoAdminSigner: true,
+    };
+    const chain: any = new EVMChainAdapter(config);
+    chain.initialized = true;
+    chain.init = async () => {};
+    chain.getLatestMerkleRoot = async () => root;
+    chain.getMerkleRootCount = async () => 2n;
+    chain.getKAContextGraphId = async () => 14n;
+    chain.getLatestMerkleRootPublisher = async () => (
+      '0x2222222222222222222222222222222222222222'
+    );
+    chain.contracts.knowledgeAssetStorage = {};
+    chain.getTransactionReceiptWithFailover = async () => { throw transportError; };
+
+    try {
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain,
+        {
+          contextGraphId,
+          ual,
+          assertionVersion: 2n,
+          assertionGraph,
+          metaGraph,
+          dataQuads: [dataQuad(2)],
+          metadataQuads: metadata(2),
+        },
+        async () => true,
+      )).rejects.toBe(transportError);
+    } finally {
+      chain.destroy();
+    }
   });
 
   it('fails closed when the bound CG commits a different name hash', async () => {

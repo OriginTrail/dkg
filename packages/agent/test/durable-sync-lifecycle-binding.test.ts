@@ -36,19 +36,88 @@ const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as Oper
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 
+function graphScopedAsset(
+  root: Uint8Array,
+  assertionVersion: bigint = 2n,
+): VerifiedGraphScopedAsset {
+  const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return {
+    contextGraphId,
+    ual,
+    assertionVersion,
+    assertionGraph,
+    metaGraph,
+    dataQuads: [],
+    metadataQuads: [
+      {
+        subject: ual,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${rootHex}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}transactionHash`,
+        object: `"0x${assertionVersion.toString(16).padStart(64, '0')}"`,
+        graph: metaGraph,
+      },
+    ],
+  };
+}
+
+async function captureGraphScopedStore(
+  chain: ChainAdapter,
+  warn: ReturnType<typeof vi.fn> = vi.fn(),
+) {
+  const agentLike: any = {
+    config: {},
+    chain,
+    store: {},
+    subscribedContextGraphs: new Map(),
+    wireIdToLocalCgId: new Map(),
+    bindSubscriptionOnChainId: vi.fn(),
+    persistContextGraphSubscriptionState: vi.fn(),
+    processDurableBatchInWorker: async () => ({}),
+    insertSyncedQuadsAndInvalidateListCache: async () => {},
+    syncCheckpoints: new Map(),
+    oversizeTombstoneLog: { record: () => {} },
+    invalidateListContextGraphsCache: vi.fn(),
+    contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+    log: { info: () => {}, warn, debug: () => {} },
+  };
+  agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+  agentLike.requireLocalCgMatchesOnChainSlot = (
+    DKGAgent.prototype as any
+  ).requireLocalCgMatchesOnChainSlot;
+  agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+  agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+
+  await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+    agentLike,
+    ctx,
+    'peer-remote',
+    contextGraphId,
+    1,
+  );
+  return mockedRunDurableSync.mock.calls[0]![0].storeGraphScopedAsset!;
+}
+
 describe('durable sync lifecycle chain binding', () => {
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
     mockedMaterialize.mockClear();
   });
 
-  it('persists the authenticated on-chain CG id before materializing the asset', async () => {
+  it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
     const root = new Uint8Array(32);
     root[31] = 2;
     const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
-    const getContextGraphNameHash = vi.fn(async () => ethers.keccak256(
-      ethers.toUtf8Bytes(contextGraphId),
-    ));
+    const getContextGraphNameHash = vi.fn()
+      .mockRejectedValueOnce(Object.assign(
+        new Error('all configured RPC endpoints failed'),
+        { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      ))
+      .mockResolvedValue(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
     const chain = {
       chainId: 'otp:2043',
       getLatestMerkleRoot: async () => root,
@@ -88,6 +157,9 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    agentLike.requireLocalCgMatchesOnChainSlot = (
+      DKGAgent.prototype as any
+    ).requireLocalCgMatchesOnChainSlot;
     agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
     agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
 
@@ -124,10 +196,27 @@ describe('durable sync lifecycle chain binding', () => {
         },
       ],
     };
-    await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
-    await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const firstMaterialization = storeGraphScopedAsset!(asset, Date.now() + 120_000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+      expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
+      expect(persistContextGraphSubscriptionState).not.toHaveBeenCalled();
+      expect(mockedMaterialize).not.toHaveBeenCalled();
+      expect(agentLike.invalidateListContextGraphsCache).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_099);
+      expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(firstMaterialization).resolves.toBe('applied');
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+    await expect(storeGraphScopedAsset!(asset, Date.now() + 60_000)).resolves.toBe('applied');
 
-    expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+    expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
 
     expect(bindSubscriptionOnChainId).toHaveBeenCalledWith(
       contextGraphId,
@@ -199,6 +288,9 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    agentLike.requireLocalCgMatchesOnChainSlot = (
+      DKGAgent.prototype as any
+    ).requireLocalCgMatchesOnChainSlot;
     agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
     agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
 
@@ -236,13 +328,155 @@ describe('durable sync lifecycle chain binding', () => {
       };
     };
 
-    await expect(storeGraphScopedAsset!(asset(1))).resolves.toBe('applied');
-    await expect(storeGraphScopedAsset!(asset(2))).rejects.toMatchObject({
+    await expect(storeGraphScopedAsset!(asset(1), Date.now() + 60_000)).resolves.toBe('applied');
+    await expect(storeGraphScopedAsset!(asset(2), Date.now() + 60_000)).rejects.toMatchObject({
       code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
     });
 
     expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
     expect(getContextGraphNameHash.mock.calls.map(([id]) => id)).toEqual([14n, 15n]);
     expect(mockedMaterialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels and retries a hung root read within the graph deadline', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const signals: AbortSignal[] = [];
+      const getLatestMerkleRoot = vi.fn((
+        _kaId: bigint,
+        options?: { signal?: AbortSignal },
+      ) => new Promise<Uint8Array>((_resolve, reject) => {
+        const signal = options?.signal;
+        if (!signal) throw new Error('authentication root read received no abort signal');
+        signals.push(signal);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }));
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot,
+        getMerkleRootCount: async () => 2n,
+        getKAContextGraphId: async () => 14n,
+      } as ChainAdapter;
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
+      const pending = storeGraphScopedAsset(
+        graphScopedAsset(new Uint8Array(32)),
+        Date.now() + 120_000,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(getLatestMerkleRoot).toHaveBeenCalledTimes(5);
+      expect(signals).toHaveLength(5);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(warnings).toHaveBeenCalledTimes(4);
+      expect(mockedMaterialize).not.toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels and retries a hung V1 publish provenance read within the graph deadline', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const root = new Uint8Array(32);
+      root[31] = 1;
+      const signals: AbortSignal[] = [];
+      const resolvePublishByTxHash = vi.fn((
+        _txHash: string,
+        options?: { signal?: AbortSignal },
+      ) => new Promise<never>((_resolve, reject) => {
+        const signal = options?.signal;
+        if (!signal) throw new Error('V1 provenance read received no abort signal');
+        signals.push(signal);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }));
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(
+          ethers.toUtf8Bytes(contextGraphId),
+        ),
+        resolvePublishByTxHash,
+      } as ChainAdapter;
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
+      const pending = storeGraphScopedAsset(
+        graphScopedAsset(root, 1n),
+        Date.now() + 120_000,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(5);
+      expect(signals).toHaveLength(5);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(warnings).toHaveBeenCalledTimes(4);
+      expect(mockedMaterialize).not.toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry deterministic chain evidence mismatches', async () => {
+    const expectedRoot = new Uint8Array(32);
+    const actualRoot = new Uint8Array(32);
+    actualRoot[31] = 1;
+    const getLatestMerkleRoot = vi.fn(async () => actualRoot);
+    const warnings = vi.fn();
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+    } as ChainAdapter;
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
+
+    await expect(storeGraphScopedAsset(
+      graphScopedAsset(expectedRoot),
+      Date.now() + 60_000,
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+    expect(getLatestMerkleRoot).toHaveBeenCalledTimes(1);
+    expect(warnings).not.toHaveBeenCalled();
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+  });
+
+  it('cancels sibling chain reads when one authentication read fails early', async () => {
+    const deterministicError = Object.assign(new Error('contract view reverted'), {
+      code: 'CALL_EXCEPTION',
+    });
+    let siblingSignal: AbortSignal | undefined;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => { throw deterministicError; },
+      getMerkleRootCount: (
+        _kaId: bigint,
+        options?: { signal?: AbortSignal },
+      ) => new Promise<bigint>((_resolve, reject) => {
+        siblingSignal = options?.signal;
+        siblingSignal?.addEventListener(
+          'abort',
+          () => reject(siblingSignal?.reason),
+          { once: true },
+        );
+      }),
+      getKAContextGraphId: async () => 14n,
+    } as ChainAdapter;
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain);
+
+    await expect(storeGraphScopedAsset(
+      graphScopedAsset(new Uint8Array(32)),
+      Date.now() + 60_000,
+    )).rejects.toBe(deterministicError);
+    expect(siblingSignal?.aborted).toBe(true);
+    expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 });

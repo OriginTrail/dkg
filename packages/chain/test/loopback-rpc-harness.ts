@@ -26,6 +26,8 @@ export interface LoopbackRpc {
   server: Server;
   /** Per-JSON-RPC-method request counts, e.g. `hits('eth_chainId')`. */
   hits: (method: string) => number;
+  /** Requests whose client connection closed before a response was sent. */
+  aborted: (method: string) => number;
   totalHits: () => number;
   /** Force-close sockets then close the server (afterEach teardown). */
   close: () => Promise<void>;
@@ -34,11 +36,13 @@ export interface LoopbackRpc {
 export interface LoopbackOptions {
   /** JSON-RPC methods that respond HTTP 429 (rate-limited). */
   throttle?: Iterable<string>;
-  /** Override canned results per method (return a hex string). */
-  results?: Record<string, string>;
+  /** Override canned JSON-RPC results per method. */
+  results?: Record<string, unknown>;
+  /** JSON-RPC methods that accept the request but never send a response. */
+  hang?: Iterable<string>;
 }
 
-const DEFAULT_RESULTS: Record<string, string> = {
+const DEFAULT_RESULTS: Record<string, unknown> = {
   eth_chainId: CHAIN_ID_HEX,
   eth_blockNumber: '0x10',
   eth_getCode: '0x1234',
@@ -55,8 +59,10 @@ const DEFAULT_RESULTS: Record<string, string> = {
  */
 export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<LoopbackRpc> {
   const throttle = new Set(options.throttle ?? []);
+  const hang = new Set(options.hang ?? []);
   const results = { ...DEFAULT_RESULTS, ...(options.results ?? {}) };
   const counts = new Map<string, number>();
+  const abortedCounts = new Map<string, number>();
 
   const server = createServer((req, res) => {
     let raw = '';
@@ -72,6 +78,16 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
         if (throttle.has(r.method)) { throttled = true; continue; }
         const result = r.method in results ? results[r.method] : '0x';
         out.push({ jsonrpc: '2.0', id: r.id, result: result === '' ? null : result });
+      }
+      const hungMethods = reqs.filter(r => hang.has(r.method)).map(r => r.method);
+      if (hungMethods.length > 0) {
+        res.on('close', () => {
+          if (res.writableEnded) return;
+          for (const method of hungMethods) {
+            abortedCounts.set(method, (abortedCounts.get(method) ?? 0) + 1);
+          }
+        });
+        return;
       }
       if (throttled) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -93,6 +109,7 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
     url: `http://127.0.0.1:${addr.port}`,
     server,
     hits: (method) => counts.get(method) ?? 0,
+    aborted: (method) => abortedCounts.get(method) ?? 0,
     totalHits: () => [...counts.values()].reduce((a, b) => a + b, 0),
     close: async () => {
       server.closeAllConnections?.();

@@ -78,17 +78,9 @@ describe('EVMChainAdapter historical KA update verification', () => {
       interface: iface,
     };
     const latestRead = recorder(async () => publisher);
-    adapter.readContract = async (
-      _contract: unknown,
-      _label: string,
-      method: string,
-    ) => {
-      if (method === 'getMerkleRoots') {
-        if (roots instanceof Error) throw roots;
-        return roots;
-      }
-      if (method === 'getLatestMerkleRootPublisher') return latestRead();
-      throw new Error(`unexpected method ${method}`);
+    adapter.readContractWithOptions = async () => {
+      if (roots instanceof Error) throw roots;
+      return roots;
     };
     return { adapter, latestRead };
   }
@@ -102,6 +94,31 @@ describe('EVMChainAdapter historical KA update verification', () => {
     await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
       .resolves.toEqual({ verified: false });
     expect(latestRead.calls).toHaveLength(0);
+  });
+
+  it.each([
+    'RPC_ENDPOINTS_EXHAUSTED',
+    'RPC_RECEIPT_LOOKUP_FAILED',
+    'RPC_TIMEOUT',
+  ])('preserves typed %s receipt failures for durable retry', async (code) => {
+    const { adapter } = adapterWithHistoricalRead([]);
+    const transportError = Object.assign(new Error(`transport failed: ${code}`), { code });
+    (adapter as any).getTransactionReceiptWithFailover = async () => {
+      throw transportError;
+    };
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .rejects.toBe(transportError);
+  });
+
+  it('preserves typed receipt-block history failures for durable retry', async () => {
+    const transportError = Object.assign(new Error('archive RPC timed out'), {
+      code: 'RPC_TIMEOUT',
+    });
+    const { adapter } = adapterWithHistoricalRead(transportError);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .rejects.toBe(transportError);
   });
 });
 
