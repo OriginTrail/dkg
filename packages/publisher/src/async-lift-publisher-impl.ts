@@ -46,6 +46,7 @@ import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
+  isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
@@ -97,6 +98,20 @@ import {
   walletLockSubject,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
+
+/**
+ * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
+ * (`recordDurableBroadcastBeforeSend`), tracked by the broadcast recorder's closure and
+ * read by the `processKnowledgeAssetVmPublish` catch to decide recovery vs terminal —
+ * replacing the prior inference from a mutable `executorReturned` flag + a post-hoc
+ * `getStatus` re-read. A transient control-flow value, deliberately kept out of the
+ * persisted `LiftJobState` model.
+ * - `'not-reached'`          the write-ahead hook never fired (no tx was signed or sent).
+ * - `'recorded-durable'`     `'broadcast'` was fsync-durably recorded; the tx is being/was sent.
+ * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
+ *                            and was rolled back to `'validated'`; the tx was never sent.
+ */
+type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
@@ -585,7 +600,6 @@ export class TripleStoreAsyncLiftPublisher
     const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
     const preflightInput = { walletId, request, snapshot, snapshotMetadata };
 
-    let executorReturned = false;
     try {
       const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
@@ -625,19 +639,20 @@ export class TripleStoreAsyncLiftPublisher
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
     }
 
+    const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
+    const broadcastRecorder = this.createKnowledgeAssetVmPublishBroadcastRecorder({
+      jobId: claimed.jobId,
+      walletId,
+      merkleRoot: request.sealMerkleRoot,
+      publicByteSize,
+      delegate: prepared.publishOptions.onPhase,
+    });
+    let publishResult!: PublishResult;
     try {
       const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
-      const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-      const onPhase = this.createKnowledgeAssetVmPublishBroadcastProgressCallback({
-        jobId: claimed.jobId,
-        walletId,
-        merkleRoot: request.sealMerkleRoot,
-        publicByteSize,
-        delegate: prepared.publishOptions.onPhase,
-      });
       const executionInput = {
         walletId,
         request,
@@ -647,34 +662,45 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
-          onPhase,
+          onPhase: broadcastRecorder.onPhase,
         },
       };
-      const publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
-      executorReturned = true;
+      publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
+    } catch (error) {
+      // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
+      // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
+      // records 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose failure
+      // rolls the transition back), so a 'recorded-durable' outcome means the tx may be on
+      // the wire.
+      if (broadcastRecorder.outcome === 'recorded-durable' && !isDefinitivePreAcceptanceSendFailure(error)) {
+        // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend.
+        return await this.getRequiredJob(claimed.jobId);
+      }
+      // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
+      // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)
+      // on a durably-recorded broadcast: record an immediate terminal failure rather than a
+      // ~15-min recovery chase. A failed KA VM job is never chain-recovery-chased
+      // (canRetryFailedRecovery === false); its code comes from the publish mapper
+      // (insufficient_funds for the whitelisted rejects).
+      return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
+    }
+    try {
+      // execute() returned — the tx landed and returned a result. A local recording failure
+      // here is a broadcast-phase failure (unchanged from the prior single-catch behavior).
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize,
       });
     } catch (error) {
-      const current = await this.getStatus(claimed.jobId);
-      if (!executorReturned && current?.status === 'broadcast') {
-        // The tx send happens strictly AFTER the write-ahead durably records
-        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
-        // failure rolls the transition back). So a durable 'broadcast' here means
-        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
-        // interrupted-broadcast path reconciles it on chain, never resend. A
-        // pre-send failure (fsync failed → rolled back to 'validated', or an error
-        // before the write-ahead) does NOT reach here and is recorded as 'failed'
-        // below; a failed KA VM job is never chain-recovery-chased
-        // (canRetryFailedRecovery === false), and its code comes from the publish
-        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
-        return current;
-      }
-      const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
-        ? 'validated'
-        : 'broadcast';
-      return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
+      return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
     }
+  }
+
+  private async failKnowledgeAssetVmPublishExecution(jobId: string, error: unknown): Promise<LiftJob> {
+    const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
+      ? 'validated'
+      : 'broadcast';
+    return await this.recordExecutionFailure(jobId, failedFromState, error);
   }
 
   private async recoverRawLiftInterrupted(job: LiftJob): Promise<boolean> {
@@ -1435,27 +1461,47 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private createKnowledgeAssetVmPublishBroadcastProgressCallback(params: {
+  private createKnowledgeAssetVmPublishBroadcastRecorder(params: {
     jobId: string;
     walletId: string;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
     delegate?: PhaseCallback;
-  }): PhaseCallback {
+  }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
+    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like
+    // `recordedTxHash`) rather than threaded as a mutable out-parameter through the publish
+    // path. The processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs
+    // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
+    let outcome: PreSendOutcome = 'not-reached';
     let recordedTxHash: LiftJobHex | undefined;
-    return async (phase, status) => {
+    const onPhase: PhaseCallback = async (phase, status) => {
       await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
       if (status !== 'start') return;
       const txHash = txHashFromSignedPhase(phase);
       if (!txHash || recordedTxHash) return;
       recordedTxHash = txHash;
-      await this.recordKnowledgeAssetVmPublishBroadcastProgress({
-        jobId: params.jobId,
-        walletId: params.walletId,
-        txHash,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      });
+      try {
+        await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+          jobId: params.jobId,
+          walletId: params.walletId,
+          txHash,
+          merkleRoot: params.merkleRoot,
+          publicByteSize: params.publicByteSize,
+        });
+        // The transition is fsync-durable (or was already durable): the tx is about to send.
+        outcome = 'recorded-durable';
+      } catch (error) {
+        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or
+        // the write-ahead never durably mutated state): the tx was never sent.
+        outcome = 'rolled-back-pre-send';
+        throw error;
+      }
+    };
+    return {
+      onPhase,
+      get outcome() {
+        return outcome;
+      },
     };
   }
 
@@ -1497,6 +1543,10 @@ export class TripleStoreAsyncLiftPublisher
    * never landed. The prior job is 'validated' (asserted by the sole caller), so
    * restoring it takes no fsync and cannot re-fail here. The caller then fails
    * the job from its pre-broadcast state, off the chain-recovery track.
+   *
+   * #1864 — success vs the rollback re-throw is what the broadcast recorder maps to its
+   * `PreSendOutcome` ('recorded-durable' vs 'rolled-back-pre-send'); this method itself
+   * stays a pure durability boundary and does not carry that state.
    */
   private async recordDurableBroadcastBeforeSend(
     current: LiftJob,
