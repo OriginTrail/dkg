@@ -508,6 +508,18 @@ async function cmdJoin(args: string[]): Promise<number> {
     console.log(`[join]   ${r.action.padEnd(10)} ${r.absPath} (${r.bytesWritten.toLocaleString()} bytes)`);
   }
 
+  // File installation is already complete, so adoption delivery is strictly
+  // best-effort and must never turn a successful local install into a failure.
+  // The daemon owns the stable Peer ID and opt-in policy; this client sends only
+  // the Context Graph identifier.
+  if (results.length > 0) {
+    try {
+      await client.recordProjectInstall(invite.contextGraphId);
+    } catch (err) {
+      console.warn(`[join] install tracking was not recorded: ${(err as Error).message.slice(0, 160)}`);
+    }
+  }
+
   console.log(`\n[join] ✔ Installed ${results.length} file${results.length === 1 ? '' : 's'} for project ${invite.contextGraphId}.`);
   // Mirror what planInstall actually templated in — agentUri wins when
   // we successfully resolved a wallet from /api/agent/identity; fall

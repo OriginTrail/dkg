@@ -496,6 +496,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     requestToken,
     requestAgentAddress,
     emitMemoryGraphChanged,
+    adoptionTelemetry,
   } = ctx;
   // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
   // require a node-level admin token — a recognised token (in validTokens) that
@@ -1611,6 +1612,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       };
       const plan = planInstallImpl({ ...ctx.context, manifest });
       const written = await writeInstallImpl(plan);
+      const trackingQueued = written.length > 0 && (adoptionTelemetry?.enqueue({
+        type: 'install_completed',
+        contextGraphId: manifest.contextGraphId,
+      }) ?? false);
       const skipped: string[] = [];
       if (!(ctx.context.tools as readonly string[]).includes('claude-code')) {
         skipped.push('claudeHooksTemplate (claude-code not selected)');
@@ -1628,11 +1633,32 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         })),
         warnings: plan.warnings,
         skipped,
+        adoptionTracking: trackingQueued ? 'queued' : 'disabled',
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
     }
+  }
+
+  // Used by the standalone `dkg-mcp join` path after its local file writes
+  // succeed. The daemon owns the stable Peer ID and telemetry configuration,
+  // so the CLI never needs to read or transmit node identity itself.
+  const manifestInstallReceiptMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/install-receipt$/);
+  if (req.method === 'POST' && manifestInstallReceiptMatch) {
+    const contextGraphId = safeDecodeURIComponent(manifestInstallReceiptMatch[1], res);
+    if (contextGraphId === null) return;
+    if (!isValidContextGraphId(contextGraphId)) {
+      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    }
+    const queued = adoptionTelemetry?.enqueue({
+      type: 'install_completed',
+      contextGraphId,
+    }) ?? false;
+    return jsonResponse(res, 202, {
+      ok: true,
+      adoptionTracking: queued ? 'queued' : 'disabled',
+    });
   }
 
   // POST /api/context-graph/reconcile
