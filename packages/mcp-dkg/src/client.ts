@@ -491,6 +491,10 @@ export class DkgClient {
     to: string;
     text: string;
     contextGraphId?: string;
+    // Agent-addressed messaging (V1): the recipient agent's `0x…` identity.
+    // Sent alongside the transport `to` so the message is signed by this
+    // agent and addressed to that agent, verifiable independently of the node.
+    recipientAgentAddress?: string;
   }): Promise<{
     delivered: boolean;
     /**
@@ -512,6 +516,7 @@ export class DkgClient {
     const body: Record<string, unknown> = { to: args.to, text: args.text };
     const contextGraphId = optionalContextGraphId(args.contextGraphId);
     if (contextGraphId) body.contextGraphId = contextGraphId;
+    if (args.recipientAgentAddress) body.recipientAgentAddress = args.recipientAgentAddress;
     return this.request('POST', '/api/chat', body);
   }
 
@@ -560,6 +565,10 @@ export class DkgClient {
       peerName?: string;
       text: string;
       delivered?: boolean;
+      // Agent-addressed messaging (V1): authenticated sender / addressed-to
+      // agent `0x…` identities. Undefined for legacy node-addressed chats.
+      senderAgent?: string;
+      recipientAgent?: string;
     }>;
   }> {
     const params = new URLSearchParams();

@@ -825,6 +825,10 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       peerId?: string;
       message?: string;
       contextGraphId?: string;
+      // Agent-addressed messaging (V1): the recipient agent's `0x…` identity.
+      // The caller supplies BOTH the transport `to`/`peerId` (which node to
+      // dial) and this (which agent it is for) — no directory lookup in V1.
+      recipientAgentAddress?: string;
     };
     // #1106 (1): accept the intuitive `peerId`/`message` aliases for
     // `to`/`text` — callers integrating from the tool tables repeatedly
@@ -832,6 +836,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     const to = chatParsed.to ?? chatParsed.peerId;
     const text = chatParsed.text ?? chatParsed.message;
     const contextGraphId = chatParsed.contextGraphId;
+    const recipientAgentAddress = chatParsed.recipientAgentAddress;
     if (!to || !text)
       return jsonResponse(res, 400, { error: 'Missing "to" or "text" (aliases: "peerId" / "message")' });
 
@@ -842,8 +847,14 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, { error: `Agent "${to}" not found` });
 
     const sendT0 = Date.now();
+    const sendOptions: {
+      contextGraphId?: string;
+      recipientAgentAddress?: string;
+    } = {};
+    if (contextGraphId) sendOptions.contextGraphId = contextGraphId;
+    if (recipientAgentAddress) sendOptions.recipientAgentAddress = recipientAgentAddress;
     const result = await Promise.race([
-      agent.sendChat(peerId, text, contextGraphId ? { contextGraphId } : {}),
+      agent.sendChat(peerId, text, sendOptions),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("sendChat timeout (30s)")), 30_000),
       ),
@@ -936,6 +947,10 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       peerName: r.peer_name ?? undefined,
       text: r.text,
       delivered: r.delivered == null ? undefined : r.delivered === 1,
+      // Agent-addressed messaging (V1): authenticated sender / addressed-to
+      // agent identities. Undefined for legacy node-addressed chats.
+      senderAgent: r.sender_agent ?? undefined,
+      recipientAgent: r.recipient_agent ?? undefined,
     }));
     return jsonResponse(res, 200, { messages: msgs });
   }

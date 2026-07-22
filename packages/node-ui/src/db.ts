@@ -316,12 +316,34 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
       }
     };
+    // Agent-addressed messaging (V1): add the sender/recipient agent identity
+    // columns to an existing chat_messages table. Idempotent + version-
+    // independent (mirrors the responder-session adjunct above) so it lands on
+    // any pre-existing DB regardless of which schema version it was created at.
+    const ensureChatMessageAgentColumns = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'chat_messages'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has('sender_agent')) {
+        this.db.exec(`ALTER TABLE chat_messages ADD COLUMN sender_agent TEXT;`);
+      }
+      if (!columns.has('recipient_agent')) {
+        this.db.exec(`ALTER TABLE chat_messages ADD COLUMN recipient_agent TEXT;`);
+      }
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
       // but lost an idempotent schema adjunct.
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResponderSessionColumns();
+      ensureChatMessageAgentColumns();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -458,7 +480,9 @@ export class DashboardDB {
           peer_name TEXT,
           text TEXT NOT NULL,
           delivered INTEGER,
-          message_id TEXT
+          message_id TEXT,
+          sender_agent TEXT,
+          recipient_agent TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_messages(ts);
         CREATE INDEX IF NOT EXISTS idx_chat_peer ON chat_messages(peer);
@@ -1193,6 +1217,10 @@ export class DashboardDB {
       // restart can resume that same list instead of discarding durable work.
       ensureSyncCheckpointResponderSessionColumns();
     }
+    // Agent-addressed messaging (V1): idempotent, version-independent — lands
+    // the sender/recipient agent columns on any upgrading DB whose
+    // chat_messages predates them.
+    ensureChatMessageAgentColumns();
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -2690,10 +2718,16 @@ export class DashboardDB {
     text: string;
     delivered?: boolean | null;
     messageId?: string | null;
+    // Agent-addressed messaging (V1) — the authenticated sending agent and the
+    // local agent it was addressed to. Null/omitted for legacy node chats.
+    senderAgent?: string | null;
+    recipientAgent?: string | null;
   }): boolean {
     const info = this.stmt('insertChat', `
-      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered, message_id)
-      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered, @message_id)
+      INSERT INTO chat_messages
+        (ts, direction, peer, peer_name, text, delivered, message_id, sender_agent, recipient_agent)
+      VALUES
+        (@ts, @direction, @peer, @peer_name, @text, @delivered, @message_id, @sender_agent, @recipient_agent)
     `).run({
       ts: msg.ts,
       direction: msg.direction,
@@ -2702,6 +2736,8 @@ export class DashboardDB {
       text: msg.text,
       delivered: msg.delivered == null ? null : msg.delivered ? 1 : 0,
       message_id: msg.messageId ?? null,
+      sender_agent: msg.senderAgent ?? null,
+      recipient_agent: msg.recipientAgent ?? null,
     });
     return info.changes > 0;
   }
@@ -4078,6 +4114,14 @@ export interface ChatMessageRow {
    * readers + rollback safety.
    */
   message_id: string | null;
+  /**
+   * Agent-addressed messaging (V1). `sender_agent` is the authenticated `0x…`
+   * identity of the sending agent (from the verified manifest); `recipient_agent`
+   * is the local agent it was addressed to. Both null for legacy node-addressed
+   * chats and for outbound rows that predate agent addressing.
+   */
+  sender_agent: string | null;
+  recipient_agent: string | null;
 }
 
 export type ChatPersistenceStatus = 'pending' | 'in_progress' | 'stored' | 'failed';

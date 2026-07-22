@@ -31,6 +31,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { MessageHandler, ed25519ToX25519Private, type ChatHandler, type ChatAclCheck } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
+import { ethers } from 'ethers';
+import {
+  agentManifestDigestBytes,
+  serializeCompactSignature,
+} from '../src/agent-message-manifest.js';
 
 // Hand-rolled recorder: a plain function that records every call's
 // arguments and delegates to `impl`. Replaces the vitest spy seams used
@@ -394,5 +399,97 @@ describe('MessageHandler — skill_request ACL (GH #462)', () => {
     const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([4]) });
     expect(res.success).toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Agent-addressed messaging (V1): the signed manifest rides the existing
+// encrypted chat payload; `handleIncoming` verifies it end-to-end and hands
+// the AUTHENTICATED agent identities to the chat handler. These cases exercise
+// the real send-payload → receive-parse field plumbing (the `from`/`to`/`ts`/
+// `sig` JSON keys are dynamic and not covered by tsc), plus the fail-closed path.
+describe('MessageHandler — agent-addressed messaging (V1)', () => {
+  // Deterministic sender agent wallet (hardhat account #0) + a recipient addr.
+  const AGENT = new ethers.Wallet(
+    '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+  );
+  const RECIP_AGENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+
+  async function signManifest(messageId: string, ts: number, text: string): Promise<string> {
+    const digest = agentManifestDigestBytes({
+      from: AGENT.address,
+      to: RECIP_AGENT,
+      messageId,
+      ts,
+      text,
+    });
+    const s = ethers.Signature.from(await AGENT.signMessage(digest));
+    return serializeCompactSignature({ r: ethers.getBytes(s.r), vs: ethers.getBytes(s.yParityAndS) });
+  }
+
+  it('verified manifest reaches the chat handler as sender/recipient agent addresses', async () => {
+    const { a, b } = await buildPair();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
+    b.onChat(chatHandler);
+
+    const messageId = 'rt-agent-1';
+    const ts = Date.now();
+    const text = 'hi from agent';
+    const sig = await signManifest(messageId, ts, text);
+
+    const result = await a.sendChat(PEER_B, text, {
+      messageId,
+      agentManifest: {
+        from: ethers.getAddress(AGENT.address),
+        to: ethers.getAddress(RECIP_AGENT),
+        ts,
+        sig,
+      },
+    });
+
+    expect(result.delivered).toBe(true);
+    expect(chatHandler.calls).toHaveLength(1);
+    // positional: [text, sender, convId, senderCg, verifiedCg, messageId,
+    //              senderAgentAddress, recipientAgentAddress]
+    const [callText, , , , , , senderAgent, recipientAgent] = chatHandler.calls[0];
+    expect(callText).toBe(text);
+    expect(senderAgent).toBe(ethers.getAddress(AGENT.address));
+    expect(recipientAgent).toBe(ethers.getAddress(RECIP_AGENT));
+  });
+
+  it('tampered text (sig over a different message) → rejected, handler NOT invoked', async () => {
+    const { a, b } = await buildPair();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
+    b.onChat(chatHandler);
+
+    const messageId = 'rt-agent-2';
+    const ts = Date.now();
+    // Sign over the original text, then send DIFFERENT text with that manifest.
+    const sig = await signManifest(messageId, ts, 'original text');
+
+    const result = await a.sendChat(PEER_B, 'DIFFERENT text', {
+      messageId,
+      agentManifest: {
+        from: ethers.getAddress(AGENT.address),
+        to: ethers.getAddress(RECIP_AGENT),
+        ts,
+        sig,
+      },
+    });
+
+    expect(result.delivered).toBe(false);
+    expect(result.error).toContain('Invalid agent manifest');
+    expect(chatHandler.calls).toEqual([]);
+  });
+
+  it('legacy chat without a manifest leaves the agent addresses undefined', async () => {
+    const { a, b } = await buildPair();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
+    b.onChat(chatHandler);
+
+    await a.sendChat(PEER_B, 'plain node chat');
+
+    const [, , , , , , senderAgent, recipientAgent] = chatHandler.calls[0];
+    expect(senderAgent).toBeUndefined();
+    expect(recipientAgent).toBeUndefined();
   });
 });
