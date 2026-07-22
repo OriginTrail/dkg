@@ -1,4 +1,7 @@
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  MOCK_DEFAULT_SIGNER,
+} from '@origintrail-official/dkg-chain';
 import type {
   Digest32V1,
   EvmAddressV1,
@@ -59,7 +62,9 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
   readonly #fixture: FinalizedVmLoopbackFixtureConfigV1;
 
   constructor(fixture: FinalizedVmLoopbackFixtureConfigV1) {
-    super(fixture.networkId);
+    super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
+      initialContextGraphId: BigInt(fixture.onChainContextGraphId),
+    });
     this.#fixture = fixture;
   }
 

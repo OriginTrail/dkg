@@ -396,6 +396,7 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
     const byPredicate = new Map(quads.map((quad) => [quad.predicate, quad.object]));
 
     expect(byPredicate.get(`${DKG}status`)).toBe('"confirmed"');
+    expect(byPredicate.get(`${DKG}confirmationKind`)).toBe('"transaction"');
     expect(byPredicate.get(`${DKG}transactionHash`)).toBe(`"${PROVENANCE.txHash}"`);
     expect(byPredicate.get(`${DKG}batchId`)).toContain('42');
     expect(byPredicate.has(`${DKG}materializedVersion`)).toBe(false);
@@ -415,6 +416,7 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
     const byPredicate = new Map(quads.map((quad) => [quad.predicate, quad.object]));
 
     expect(byPredicate.get(`${DKG}status`)).toBe('"confirmed"');
+    expect(byPredicate.get(`${DKG}confirmationKind`)).toBe('"finalized-materialization"');
     expect(byPredicate.get(`${DKG}batchId`)).toContain('7');
     expect(byPredicate.get(`${DKG}materializedVersion`)).toBe('"123:4"');
     expect(byPredicate.has(`${DKG}transactionHash`)).toBe(false);

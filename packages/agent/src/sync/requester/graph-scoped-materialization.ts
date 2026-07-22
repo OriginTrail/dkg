@@ -30,6 +30,8 @@ export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
   ual: string;
   assertionVersion: bigint;
+  /** Omitted only for rolling-compatible receipt-backed metadata. */
+  confirmationKind?: 'transaction' | 'finalized-materialization';
   assertionGraph: string;
   metaGraph: string;
   dataQuads: Quad[];
@@ -179,9 +181,18 @@ export async function authenticateVerifiedGraphScopedAsset(
     );
   }
 
+  const confirmationKind = asset.confirmationKind ?? 'transaction';
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (transactionHashes.length === 0) {
+  if (confirmationKind === 'finalized-materialization') {
+    if (transactionHashes.length !== 0) {
+      throw Object.assign(
+        new Error(
+          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
+        ),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
     // RFC-64 finalized VM materialization deliberately has no receipt claim:
     // it is reconstructed from a pinned finalized chain snapshot. A later
     // durable-sync requester must not trust the serving peer's local
@@ -192,6 +203,20 @@ export async function authenticateVerifiedGraphScopedAsset(
     // remains the authoritative stale-write guard for this receiptless lane.
     materializedBlock = 0;
     materializedTxIndex = 0;
+  } else if (confirmationKind !== 'transaction') {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} has unsupported confirmation kind ${String(confirmationKind)}`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  } else if (transactionHashes.length !== 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
   } else if (asset.assertionVersion === 1n) {
     const transactionHash = transactionHashes[0]!;
     if (!chain.resolvePublishByTxHash) {

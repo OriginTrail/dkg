@@ -360,6 +360,12 @@ export function generateGraphKnowledgeAssetMetadata(
         meta.contextGraphId,
         confirmation.provenance,
       ));
+      quads.push(mq(
+        scope.ual,
+        `${DKG}confirmationKind`,
+        lit('transaction'),
+        metaGraph,
+      ));
     } else {
       const { batchId, materializedVersion } = confirmation.provenance;
       if (batchId < 0n) {
@@ -368,6 +374,12 @@ export function generateGraphKnowledgeAssetMetadata(
       quads.push(
         getConfirmedStatusQuad(scope.ual, meta.contextGraphId),
         mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
+        mq(
+          scope.ual,
+          `${DKG}confirmationKind`,
+          lit('finalized-materialization'),
+          metaGraph,
+        ),
         materializedVersionQuad(metaGraph, scope.ual, materializedVersion),
       );
     }

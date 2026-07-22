@@ -106,14 +106,11 @@ export async function startFinalizedVmHarnessRuntimeV1(
   } satisfies FinalizedVmLoopbackFixtureConfigV1);
   const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
   const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-  const created = await chainAdapter.createOnChainContextGraphAtIdForTesting(
-    BigInt(config.onChainContextGraphId),
-    {
-      accessPolicy: 0,
-      publishPolicy: 1,
-      nameHash: config.nameHash,
-    },
-  );
+  const created = await chainAdapter.createOnChainContextGraph({
+    accessPolicy: 0,
+    publishPolicy: 1,
+    nameHash: config.nameHash,
+  });
   if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
     throw new Error('mock chain created a different numeric context graph id');
   }

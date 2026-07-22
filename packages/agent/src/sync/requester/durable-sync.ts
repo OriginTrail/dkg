@@ -26,6 +26,7 @@ const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
 const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
+const CONFIRMATION_KIND = `${DKG_NS}confirmationKind`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
@@ -46,6 +47,7 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
   `${DKG_NS}contextGraph`,
   `${DKG_NS}subGraphName`,
   TRANSACTION_HASH,
+  CONFIRMATION_KIND,
 ]);
 
 export interface DurableSyncSummary {
@@ -720,9 +722,10 @@ function partitionVerifiedGraphScopedAssets(
       throw new Error(`Verified graph-scoped assertion ${assertionGraph} has ${owners?.size ?? 0} metadata owners`);
     }
     const [ual] = owners;
-    // Only persist structural fields used to verify and locate the exact
-    // assertion. ACLs, status, timestamps and provenance are not Merkle-bound
-    // by V2 data and must never become trusted local controls from a peer.
+    // Carry only structural fields plus the bounded provenance discriminator
+    // and receipt claim consumed by the chain authenticator below. ACLs,
+    // status, timestamps, and local ordering are never accepted as trusted
+    // controls from a peer.
     const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
       (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
     );
@@ -737,6 +740,26 @@ function partitionVerifiedGraphScopedAssets(
     const [versionRaw] = versions;
     if (!versionRaw || !/^\d+$/.test(versionRaw)) {
       throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
+    }
+    const confirmationKinds = new Set(
+      metadataQuads
+        .filter((quad) => quad.predicate === CONFIRMATION_KIND)
+        .map((quad) => stripLiteral(quad.object)),
+    );
+    if (confirmationKinds.size > 1) {
+      throw new Error(
+        `Verified graph-scoped KA ${ual} has ${confirmationKinds.size} confirmation kinds`,
+      );
+    }
+    const [confirmationKindRaw] = confirmationKinds;
+    if (
+      confirmationKindRaw !== undefined
+      && confirmationKindRaw !== 'transaction'
+      && confirmationKindRaw !== 'finalized-materialization'
+    ) {
+      throw new Error(
+        `Verified graph-scoped KA ${ual} has unsupported confirmation kind ${confirmationKindRaw}`,
+      );
     }
     const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
     if (metaGraphs.size !== 1) {
@@ -770,6 +793,7 @@ function partitionVerifiedGraphScopedAssets(
       contextGraphId,
       ual,
       assertionVersion: BigInt(versionRaw),
+      confirmationKind: confirmationKindRaw ?? 'transaction',
       assertionGraph,
       metaGraph,
       dataQuads: dataByGraph.get(assertionGraph) ?? [],

@@ -283,6 +283,7 @@ describe('durable graph-scoped KA materialization', () => {
         contextGraphId,
         ual,
         assertionVersion: 2n,
+        confirmationKind: 'finalized-materialization',
         assertionGraph,
         metaGraph,
         dataQuads: [v2Data],
@@ -299,6 +300,35 @@ describe('durable graph-scoped KA materialization', () => {
     expect(authenticated.asset.metadataQuads.filter(
       (quad) => quad.predicate === `${DKG}materializedVersion`,
     )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
+  });
+
+  it('rejects receipt-backed graph metadata when its transaction claim is missing', async () => {
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        confirmationKind: 'transaction',
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v2Data],
+        metadataQuads: metadata(2, toHex(root)).filter(
+          (quad) => quad.predicate !== `${DKG}transactionHash`,
+        ),
+      },
+      strictContextGraphBindingVerifier(chain),
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
   });
 
   it('fails closed when the bound CG commits a different name hash', async () => {

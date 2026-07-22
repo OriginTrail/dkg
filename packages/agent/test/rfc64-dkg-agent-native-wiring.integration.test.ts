@@ -573,14 +573,11 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
     const authorChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
     const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-    const created = await receiverChain.createOnChainContextGraphAtIdForTesting(
-      BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
-      {
-        accessPolicy: 0,
-        publishPolicy: 1,
-        nameHash,
-      },
-    );
+    const created = await receiverChain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    });
     expect(created.contextGraphId.toString()).toBe(ON_CHAIN_CONTEXT_GRAPH_ID);
     const [author, receiver] = await Promise.all([
       startNativeAgent(
