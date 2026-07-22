@@ -46,7 +46,8 @@ import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { withRpcRequestAbortSignal, withRpcUsageConsumer } from './rpc-usage.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
+import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,

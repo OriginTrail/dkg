@@ -22,7 +22,6 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { JsonRpcProvider } from 'ethers';
 import type {
   FetchRequest,
   Networkish,
@@ -32,6 +31,7 @@ import type {
 } from 'ethers';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { boundedRetryFetchRequest } from './evm-adapter-rpc.js';
+import { CancellableJsonRpcProvider } from './rpc-request-transport.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -185,7 +185,6 @@ export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): n
 }
 
 const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
-const rpcRequestAbortContext = new AsyncLocalStorage<AbortSignal>();
 
 /**
  * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
@@ -210,25 +209,9 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   return rpcUsageConsumerContext.run(normalized, fn);
 }
 
-/** Bind one caller-owned cancellation signal to the raw ethers HTTP request. */
-export function withRpcRequestAbortSignal<T>(signal: AbortSignal, fn: () => T): T {
-  return rpcRequestAbortContext.run(signal, fn);
-}
-
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
-}
-
-function activeRpcRequestAbortSignal(): AbortSignal | undefined {
-  return rpcRequestAbortContext.getStore();
-}
-
-function throwAbortReason(signal: AbortSignal): never {
-  if (signal.reason instanceof Error) throw signal.reason;
-  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
-  error.name = 'AbortError';
-  throw error;
 }
 
 /**
@@ -318,7 +301,7 @@ export class RpcUsageTracker {
  * the process: every payload entry is one billable JSON-RPC request (and with
  * the adapter's `batchMaxCount: 1` a batch is a single-entry array anyway).
  */
-export class CountingJsonRpcProvider extends JsonRpcProvider {
+export class CountingJsonRpcProvider extends CancellableJsonRpcProvider {
   constructor(
     url: string | FetchRequest,
     network: Networkish | undefined,
@@ -337,39 +320,7 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
     } catch {
       /* accounting must never break an RPC call */
     }
-    const signal = activeRpcRequestAbortSignal();
-    if (!signal) return super._send(payload);
-    if (signal.aborted) throwAbortReason(signal);
-
-    // JsonRpcProvider._send creates one FetchRequest per dispatch. Reproduce
-    // that small transport boundary here so caller abort can cancel the actual
-    // request, instead of merely abandoning its promise while it keeps using an
-    // RPC connection in the background.
-    const request = this._getConnection();
-    request.body = JSON.stringify(payload);
-    request.setHeader('content-type', 'application/json');
-    const pending = request.send();
-    const onAbort = () => {
-      try {
-        request.cancel();
-      } catch {
-        // A response can settle concurrently with abort; its completed request
-        // no longer needs cancellation.
-      }
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    try {
-      const response = await pending;
-      response.assertOk();
-      const body = response.bodyJson;
-      return Array.isArray(body) ? body : [body];
-    } catch (error) {
-      if (signal.aborted) throwAbortReason(signal);
-      throw error;
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
+    return super._send(payload);
   }
 }
 

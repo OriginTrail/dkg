@@ -36,12 +36,15 @@ const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as Oper
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 
-function graphScopedAsset(root: Uint8Array): VerifiedGraphScopedAsset {
+function graphScopedAsset(
+  root: Uint8Array,
+  assertionVersion: bigint = 2n,
+): VerifiedGraphScopedAsset {
   const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return {
     contextGraphId,
     ual,
-    assertionVersion: 2n,
+    assertionVersion,
     assertionGraph,
     metaGraph,
     dataQuads: [],
@@ -55,7 +58,7 @@ function graphScopedAsset(root: Uint8Array): VerifiedGraphScopedAsset {
       {
         subject: ual,
         predicate: `${DKG}transactionHash`,
-        object: `"0x${'02'.padStart(64, '0')}"`,
+        object: `"0x${assertionVersion.toString(16).padStart(64, '0')}"`,
         graph: metaGraph,
       },
     ],
@@ -366,6 +369,53 @@ describe('durable sync lifecycle chain binding', () => {
       await vi.runAllTimersAsync();
       await rejection;
       expect(getLatestMerkleRoot).toHaveBeenCalledTimes(5);
+      expect(signals).toHaveLength(5);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(warnings).toHaveBeenCalledTimes(4);
+      expect(mockedMaterialize).not.toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels and retries a hung V1 publish provenance read within the graph deadline', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const root = new Uint8Array(32);
+      root[31] = 1;
+      const signals: AbortSignal[] = [];
+      const resolvePublishByTxHash = vi.fn((
+        _txHash: string,
+        options?: { signal?: AbortSignal },
+      ) => new Promise<never>((_resolve, reject) => {
+        const signal = options?.signal;
+        if (!signal) throw new Error('V1 provenance read received no abort signal');
+        signals.push(signal);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }));
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(
+          ethers.toUtf8Bytes(contextGraphId),
+        ),
+        resolvePublishByTxHash,
+      } as ChainAdapter;
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
+      const pending = storeGraphScopedAsset(
+        graphScopedAsset(root, 1n),
+        Date.now() + 120_000,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+
+      await vi.runAllTimersAsync();
+      await rejection;
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(5);
       expect(signals).toHaveLength(5);
       expect(signals.every((signal) => signal.aborted)).toBe(true);
       expect(warnings).toHaveBeenCalledTimes(4);

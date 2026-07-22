@@ -78,7 +78,7 @@ describe('EVMChainAdapter historical KA update verification', () => {
       interface: iface,
     };
     const latestRead = recorder(async () => publisher);
-    adapter.readContractWith = async () => {
+    adapter.readContractWithOptions = async () => {
       if (roots instanceof Error) throw roots;
       return roots;
     };

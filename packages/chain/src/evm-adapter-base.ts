@@ -1368,8 +1368,24 @@ export class EVMChainAdapterBase {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
+    return this.readContractWithOptions(contract, label, method, args);
+  }
+
+  /**
+   * Canonical simple contract view with request options. This keeps ordinary
+   * method-name reads on the same path as {@link readContract} while allowing
+   * cancellation and other read policy to be supplied without a custom lambda.
+   */
+  protected readContractWithOptions<T = any>(
+    contract: Contract,
+    label: string,
+    method: string,
+    args: readonly unknown[],
+    opts?: ReadOpts,
+  ): Promise<T> {
     return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
-      rpcUsageConsumer: label,
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
   }
 

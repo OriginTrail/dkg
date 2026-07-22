@@ -32,10 +32,11 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getLatestMerkleRoot(kaId: bigint, options: ChainReadOptions = {}): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await this.readContractWith(
+    const rootHex: string = await this.readContractWithOptions(
       kas,
       'kas.getLatestMerkleRoot',
-      c => c.getLatestMerkleRoot(kaId),
+      'getLatestMerkleRoot',
+      [kaId],
       { signal: options.signal },
     );
     return ethers.getBytes(rootHex);
@@ -44,10 +45,11 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const kas = this.requireKCStorage();
-    const context = await this.readContractWith(
+    const context = await this.readContractWithOptions(
       kas,
       'kas.getKnowledgeAssetUpdateContext',
-      c => c.getKnowledgeAssetUpdateContext(kaId),
+      'getKnowledgeAssetUpdateContext',
+      [kaId],
       { signal: options.signal },
     ) as { merkleRootsCount?: bigint } & readonly unknown[];
     const rawCount = context.merkleRootsCount ?? context[0];
@@ -90,10 +92,11 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   ): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const publisher: string = await this.readContractWith(
+    const publisher: string = await this.readContractWithOptions(
       kas,
       'kas.getLatestMerkleRootPublisher',
-      c => c.getLatestMerkleRootPublisher(kaId),
+      'getLatestMerkleRootPublisher',
+      [kaId],
       { signal: options.signal },
     );
     return publisher;

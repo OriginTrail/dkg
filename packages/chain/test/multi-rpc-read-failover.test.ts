@@ -106,6 +106,19 @@ describe('multi-RPC read failover (real loopback providers)', () => {
   // backup is healthy — i.e. no failover — so the first test fails exactly as a
   // regression gate should. It must flip GREEN once R1 lands; do not weaken it.
   describe('TARGET — immediate read failover (R1)', () => {
+    it('raw fetch failure on a refused primary advances to the healthy backup', async () => {
+      const backup = trackServer(await startLoopbackRpc());
+      const a = track(new EVMChainAdapter(minimalConfig({
+        rpcUrl: 'http://127.0.0.1:1',
+        rpcUrls: [backup.url],
+      })));
+
+      const start = Date.now();
+      await expect(a.getEvmChainId()).resolves.toBe(31337n);
+      expect(backup.hits('eth_chainId')).toBeGreaterThanOrEqual(1);
+      expect(Date.now() - start).toBeLessThan(2_000);
+    });
+
     it('primary 429 on the read → served by the healthy backup, primary hit exactly once (no per-endpoint retry)', async () => {
       const primary = trackServer(await startLoopbackRpc({ throttle: ['eth_chainId'] }));
       const backup = trackServer(await startLoopbackRpc());

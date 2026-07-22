@@ -28,9 +28,9 @@ import {
   RpcUsageTracker,
   createCountingJsonRpcProvider,
   type RpcUsageDrainable,
-  withRpcRequestAbortSignal,
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
+import { withRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';

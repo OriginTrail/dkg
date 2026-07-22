@@ -88,7 +88,15 @@ const cancellableRpcGetUrl: FetchGetUrlFunc = async (
         cause: error,
       }), { code: 'TIMEOUT' });
     }
-    throw error;
+    const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+    throw Object.assign(
+      new Error(`RPC fetch failed: ${errorMessage(error)}`, { cause: error }),
+      {
+        code: typeof causeCode === 'string' && causeCode.length > 0
+          ? causeCode.toUpperCase()
+          : 'NETWORK_ERROR',
+      },
+    );
   } finally {
     clearTimeout(timeout);
   }

@@ -719,10 +719,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const cgId: bigint = await this.readContractWith(
+    const cgId: bigint = await this.readContractWithOptions(
       cgs,
       'cgStorage.kaToContextGraph',
-      c => c.kaToContextGraph(kaId),
+      'kaToContextGraph',
+      [kaId],
       { signal: options.signal },
     );
     return BigInt(cgId);
@@ -858,10 +859,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<string | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string = await this.readContractWith(
+    const raw: string = await this.readContractWithOptions(
       cgs,
       'cgStorage.getNameHash',
-      c => c.getNameHash(contextGraphId),
+      'getNameHash',
+      [contextGraphId],
       { signal: options.signal },
     );
     if (!raw || raw === ethers.ZeroHash) return null;

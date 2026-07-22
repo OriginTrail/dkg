@@ -344,10 +344,11 @@ export class PublishMethods extends EVMChainAdapterBase {
       let merkleRootCount: bigint | undefined;
       if (this.contracts.knowledgeAssetStorage) {
         try {
-          const roots = await this.readContractWith(
+          const roots = await this.readContractWithOptions(
             this.contracts.knowledgeAssetStorage,
             'kas.getMerkleRootsAtUpdateBlock',
-            c => c.getMerkleRoots(batchId, { blockTag: receipt.blockNumber }),
+            'getMerkleRoots',
+            [batchId, { blockTag: receipt.blockNumber }],
             { signal: options.signal },
           ) as Array<{ publisher?: string; merkleRoot?: string } | readonly unknown[]>;
           let matchedIndex = -1;
