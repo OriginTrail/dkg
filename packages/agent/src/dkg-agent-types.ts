@@ -39,6 +39,7 @@ import type {
   NetworkIdV1,
   SubGraphNameV1,
   TimestampMsV1,
+  UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -1086,9 +1087,16 @@ export interface Rfc64PublicCatalogBootstrapScopeV1 {
 }
 
 export interface Rfc64PublicCatalogBootstrapTargetV1 {
-  readonly scope: Rfc64PublicCatalogBootstrapScopeV1;
+  readonly authorAddress: EvmAddressV1;
   /** Ordered provider failover candidates for this exact author catalog. */
   readonly providers: readonly string[];
+}
+
+export interface Rfc64PublicCatalogBootstrapPolicyV1 {
+  /** Exact verified control object; its digest is recomputed during snapshotting. */
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  /** Author catalogs under the policy graph/era. */
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
 }
 
 /**
@@ -1098,11 +1106,7 @@ export interface Rfc64PublicCatalogBootstrapTargetV1 {
  * deterministic harnesses. Omission defaults to a 30-second refresh pass.
  */
 export interface Rfc64PublicCatalogBootstrapConfigV1 {
-  readonly acceptedPublicPolicies: readonly Readonly<{
-    readonly policy: ContextGraphPolicyV1;
-    readonly policyDigest: Digest32V1;
-  }>[];
-  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  readonly acceptedPublicPolicies: readonly Rfc64PublicCatalogBootstrapPolicyV1[];
   readonly retryIntervalMs?: number;
 }
 

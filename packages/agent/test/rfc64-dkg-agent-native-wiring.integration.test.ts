@@ -35,7 +35,7 @@ import {
 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
   buildOpenOwnerContextGraphPolicyV1,
-  computeOpenContextGraphPolicyDigestV1,
+  unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
@@ -108,9 +108,45 @@ async function startNativeAgent(
     initialSubscription?: ContextGraphIdV1;
   }>,
   autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1,
-  bootstrap?: Rfc64PublicCatalogBootstrapConfigV1,
-  persistentStorePath?: string,
 ): Promise<DKGAgent> {
+  return startNativeAgentWithOptions({
+    name,
+    deployment,
+    existingDataDir,
+    accessPolicyAuthority,
+    finalizedRuntime,
+    autoPublish,
+  });
+}
+
+interface NativeAgentStartOptionsV1 {
+  readonly name: string;
+  readonly deployment?: CatalogSealDeploymentProfileV1;
+  readonly existingDataDir?: string;
+  readonly accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  readonly finalizedRuntime?: Readonly<{
+    rpcUrl: string;
+    chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
+    initialSubscription?: ContextGraphIdV1;
+  }>;
+  readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
+  readonly persistentStorePath?: string;
+}
+
+async function startNativeAgentWithOptions(
+  options: NativeAgentStartOptionsV1,
+): Promise<DKGAgent> {
+  const {
+    name,
+    deployment = NATIVE_DEPLOYMENT,
+    existingDataDir,
+    accessPolicyAuthority,
+    finalizedRuntime,
+    autoPublish,
+    bootstrap,
+    persistentStorePath,
+  } = options;
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
   if (existingDataDir === undefined) tempDirs.push(dataDir);
@@ -309,38 +345,32 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       contextGraphId: CONTEXT_GRAPH_ID,
       ownerAddress: AUTHOR,
     });
-    const policyDigest = computeOpenContextGraphPolicyDigestV1(policy);
+    const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
     const providers = ['12D3KooPrimary'];
     const callerOwned: Rfc64PublicCatalogBootstrapConfigV1 = {
-      acceptedPublicPolicies: [{ policy, policyDigest }],
-      targets: [{
-        scope: {
-          networkId: NETWORK_ID,
-          contextGraphId: CONTEXT_GRAPH_ID,
-          subGraphName: null,
-          authorAddress: AUTHOR,
-          catalogEra: policy.era,
-        },
-        providers,
+      acceptedPublicPolicies: [{
+        policyEnvelope,
+        targets: [{ authorAddress: AUTHOR, providers }],
       }],
       retryIntervalMs: 1_000,
     };
     const snapshot = snapshotRfc64PublicCatalogBootstrapConfigV1(callerOwned)!;
     providers.push('12D3KooLateMutation');
 
-    expect(snapshot.targets[0]?.providers).toEqual(['12D3KooPrimary']);
-    expect(snapshot.acceptedPublicPolicies[0]).toEqual({ policy, policyDigest });
+    expect(snapshot.acceptedPublicPolicies[0]?.targets[0]?.providers)
+      .toEqual(['12D3KooPrimary']);
+    expect(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload).toEqual(policy);
     expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(Object.isFrozen(snapshot.targets)).toBe(true);
-    expect(Object.isFrozen(snapshot.targets[0]?.providers)).toBe(true);
-    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policy.source)).toBe(true);
+    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.targets)).toBe(true);
+    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.targets[0]?.providers)).toBe(true);
+    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload.source))
+      .toBe(true);
     expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({
-      ...callerOwned,
-      targets: [{
-        ...callerOwned.targets[0]!,
-        scope: { ...callerOwned.targets[0]!.scope, subGraphName: 'private' },
+      acceptedPublicPolicies: [{
+        ...callerOwned.acceptedPublicPolicies[0]!,
+        policyDigest: `0x${'11'.repeat(32)}`,
       }],
-    })).toThrow(/public root catalogs only/u);
+    } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
   });
 
   it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
@@ -733,32 +763,21 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(published).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
 
     const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
-      acceptedPublicPolicies: [accepted],
-      targets: [{
-        scope: {
-          networkId: NETWORK_ID,
-          contextGraphId: CONTEXT_GRAPH_ID,
-          subGraphName: null,
-          authorAddress: AUTHOR,
-          catalogEra: accepted.policy.era,
-        },
-        providers: [author.peerId],
+      acceptedPublicPolicies: [{
+        policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(accepted.policy),
+        targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
       }],
       retryIntervalMs: 1_000,
     };
     const receiverDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-native-bootstrap-'));
     tempDirs.push(receiverDataDir);
     const persistentStorePath = join(receiverDataDir, 'oxigraph');
-    const receiver = await startNativeAgent(
-      'bootstrap-receiver',
-      NATIVE_DEPLOYMENT,
-      receiverDataDir,
-      undefined,
-      undefined,
-      undefined,
+    const receiver = await startNativeAgentWithOptions({
+      name: 'bootstrap-receiver',
+      existingDataDir: receiverDataDir,
       bootstrap,
       persistentStorePath,
-    );
+    });
     await connectBothWays(author, receiver);
     await vi.waitFor(() => {
       expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
@@ -780,16 +799,12 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
 
     await receiver.stop();
     agents.splice(agents.indexOf(receiver), 1);
-    const restarted = await startNativeAgent(
-      'bootstrap-receiver',
-      NATIVE_DEPLOYMENT,
-      receiverDataDir,
-      undefined,
-      undefined,
-      undefined,
+    const restarted = await startNativeAgentWithOptions({
+      name: 'bootstrap-receiver',
+      existingDataDir: receiverDataDir,
       bootstrap,
       persistentStorePath,
-    );
+    });
     await connectBothWays(author, restarted);
     await vi.waitFor(() => {
       expect(restarted.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
@@ -809,6 +824,146 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       inventoryRowCount: '2',
     });
   }, 60_000);
+
+  it('retries an initial miss and fails over to the later provider', async () => {
+    const emptyProvider = await startNativeAgent('bootstrap-empty-provider');
+    const author = await startNativeAgent(
+      'bootstrap-retry-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    const accepted = author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    emptyProvider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(accepted.policy),
+        targets: [{
+          authorAddress: AUTHOR,
+          providers: [emptyProvider.peerId, author.peerId],
+        }],
+      }],
+      retryIntervalMs: 1_000,
+    };
+    const receiver = await startNativeAgentWithOptions({
+      name: 'bootstrap-retry-receiver',
+      bootstrap,
+    });
+    await Promise.all([
+      connectBothWays(emptyProvider, receiver),
+      connectBothWays(author, receiver),
+    ]);
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'not-found',
+        attempts: 2,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+      });
+    }, { timeout: 20_000, interval: 100 });
+
+    const publicQuads = [
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+    ];
+    const published = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'bootstrap-retry-publication' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(23n, publicQuads)),
+    });
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()).toMatchObject({
+        pass: expect.any(Number),
+        targets: [expect.objectContaining({
+          outcome: 'applied',
+          attempts: 2,
+          providerPeerId: author.peerId,
+          appliedHeadDigest: published?.currentCatalogHeadDigest,
+          inventoryRowCount: '1',
+        })],
+      });
+    }, { timeout: 20_000, interval: 100 });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })?.currentCatalogHeadDigest).toBe(published?.currentCatalogHeadDigest);
+  }, 60_000);
+
+  it('clears applied metadata when a later bootstrap refresh misses', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const appliedHeadDigest = `0x${'a1'.repeat(32)}` as Digest32V1;
+    const synchronize = vi.spyOn(
+      DKGAgent.prototype,
+      'synchronizeRfc64PublicCatalogFromProviderV1',
+    ).mockResolvedValueOnce({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+      currentCatalogHeadDigest: appliedHeadDigest,
+      appliedInventoryDigest: `0x${'b2'.repeat(32)}` as Digest32V1,
+      catalogVersion: '2' as never,
+      inventoryRowCount: '3' as never,
+    }).mockResolvedValue(null);
+    const bootstrap: Rfc64PublicCatalogBootstrapConfigV1 = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+        targets: [{ authorAddress: AUTHOR, providers: ['12D3KooStatusProvider'] }],
+      }],
+      retryIntervalMs: 1_000,
+    };
+    const receiver = await startNativeAgentWithOptions({
+      name: 'bootstrap-status-reset',
+      bootstrap,
+    });
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'applied',
+        appliedHeadDigest,
+        catalogVersion: '2',
+        inventoryRowCount: '3',
+      });
+    }, { timeout: 10_000, interval: 50 });
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'not-found',
+        attempts: 1,
+        providerPeerId: null,
+        appliedHeadDigest: null,
+        catalogVersion: null,
+        inventoryRowCount: null,
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(synchronize).toHaveBeenCalledTimes(2);
+    synchronize.mockRestore();
+  }, 30_000);
 
 
   it('serializes mixed-case projection terms in raw UTF-8 order', async () => {

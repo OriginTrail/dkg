@@ -3,6 +3,7 @@
 /** Restart-safe, operator-pinned public catalog cold-start supervisor. */
 
 import {
+  computeContextGraphPolicyObjectDigestV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -16,6 +17,7 @@ import type {
   Rfc64PublicCatalogBootstrapConfigV1,
   Rfc64PublicCatalogBootstrapScopeV1,
 } from './dkg-agent-types.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
@@ -89,13 +91,25 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     }
     for (const accepted of config.acceptedPublicPolicies) {
       service.acceptPolicySnapshot({
-        policy: accepted.policy,
-        policyDigest: accepted.policyDigest,
+        policy: accepted.policyEnvelope.payload,
+        policyDigest: computeContextGraphPolicyObjectDigestV1(accepted.policyEnvelope),
       });
     }
+    const targets = config.acceptedPublicPolicies.flatMap(({ policyEnvelope, targets }) => (
+      targets.map((target) => ({
+        scope: Object.freeze({
+          networkId: policyEnvelope.payload.networkId,
+          contextGraphId: policyEnvelope.payload.contextGraphId,
+          subGraphName: null,
+          authorAddress: target.authorAddress,
+          catalogEra: policyEnvelope.payload.era,
+        }),
+        providers: target.providers,
+      }))
+    ));
     const state: BootstrapStateV1 = {
       config,
-      targets: config.targets.map((target) => ({
+      targets: targets.map((target) => ({
         scope: target.scope,
         providers: target.providers,
         outcome: 'pending',
@@ -197,24 +211,18 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     state.lastPassStartedAtMs = Date.now();
     const abortController = new AbortController();
     state.abortController = abortController;
-    let cursor = 0;
-    const workers = Array.from(
-      { length: Math.min(MAX_CONCURRENT_TARGETS_V1, state.targets.length) },
-      async () => {
-        while (!state.closed) {
-          const index = cursor;
-          cursor += 1;
-          const target = state.targets[index];
-          if (target === undefined) return;
+    try {
+      await mapWithConcurrency(
+        state.targets,
+        MAX_CONCURRENT_TARGETS_V1,
+        async (target) => {
+          if (state.closed) return;
           await this.synchronizeRfc64PublicCatalogBootstrapTargetV1(
             target,
             abortController.signal,
           );
-        }
-      },
-    );
-    try {
-      await Promise.all(workers);
+        },
+      );
     } finally {
       if (state.abortController === abortController) state.abortController = null;
       state.running = false;
@@ -227,6 +235,13 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     target: MutableTargetStatusV1,
     signal: AbortSignal,
   ): Promise<void> {
+    target.outcome = 'pending';
+    target.attempts = 0;
+    target.providerPeerId = null;
+    target.appliedHeadDigest = null;
+    target.catalogVersion = null;
+    target.inventoryRowCount = null;
+    target.lastError = null;
     let sawNotFound = false;
     let lastError: string | null = null;
     for (const providerPeerId of target.providers) {
@@ -257,6 +272,9 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     }
     target.outcome = lastError === null && sawNotFound ? 'not-found' : 'failed';
     target.providerPeerId = null;
+    target.appliedHeadDigest = null;
+    target.catalogVersion = null;
+    target.inventoryRowCount = null;
     target.lastError = lastError;
     target.updatedAtMs = Date.now();
   }
