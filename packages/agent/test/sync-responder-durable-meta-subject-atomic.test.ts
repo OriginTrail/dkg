@@ -198,6 +198,67 @@ describe('durable-meta subject-atomic paging (#1788)', () => {
     expect(pages.flat()).toHaveLength(filler.length + SEAL_PREDICATES.length);
   });
 
+  it('store-paged path: cuts before a LATER subject when the extended window is not exhausted', async () => {
+    // The "completes" case above resolves the straddle at EOF (window shorter
+    // than requested). This exercises the OTHER branch: the grown window is FULL
+    // and a later subject appears in it, so the cut must drop the later subject's
+    // partial rows exactly at the seal boundary — otherwise the page would emit a
+    // partial next subject (a #1788-class split of THAT subject). A later
+    // multi-row subject (`z…` sorts after `seal-report`) forces this branch.
+    const limit = 10;
+    const store = new OxigraphStore();
+    const straddling = 'did:dkg:activity:seal-report';
+    const later = 'did:dkg:activity:zeta-later';
+    const filler: Quad[] = Array.from({ length: 5 }, (_, i) => ({
+      graph: META,
+      subject: `did:dkg:activity:f0${i}`,
+      predicate: `${DKG_NS}label`,
+      object: `"f-${i}"`,
+    }));
+    const straddlingQuads: Quad[] = SEAL_PREDICATES.map((name, index) => ({
+      graph: META,
+      subject: straddling,
+      predicate: `${DKG_NS}${name}`,
+      object: `"seal-${name}-${index}"`,
+    }));
+    const laterQuads: Quad[] = Array.from({ length: 8 }, (_, i) => ({
+      graph: META,
+      subject: later,
+      predicate: `${DKG_NS}q${String(i).padStart(2, '0')}`,
+      object: `"later-${i}"`,
+    }));
+    await store.insert([...filler, ...straddlingQuads, ...laterQuads]);
+
+    const pages = await pageThrough(
+      async (offset, pageLimit) => {
+        const page = await readDurableMetaPage({
+          store,
+          contextGraphId: CG,
+          registeredSubGraphNames: [],
+          offset,
+          limit: pageLimit,
+        });
+        return page.map((row) => ({ s: row.s, p: row.p, o: row.o, g: row.g }));
+      },
+      limit,
+    );
+
+    const countFor = (subject: string) => (page: readonly Row[]) =>
+      page.filter((row) => row.s === subject).length;
+    // Both subjects are 0-or-all per page (never a proper subset).
+    for (const page of pages) {
+      expect([0, SEAL_PREDICATES.length]).toContain(countFor(straddling)(page));
+      expect([0, laterQuads.length]).toContain(countFor(later)(page));
+    }
+    // Page 1 is exactly 5 filler + 14 seal and cuts BEFORE the later subject.
+    expect(pages[0]).toHaveLength(filler.length + SEAL_PREDICATES.length);
+    expect(countFor(later)(pages[0])).toBe(0);
+    // The later subject resumes intact on the next page.
+    expect(countFor(later)(pages[1])).toBe(laterQuads.length);
+    assertNoDuplicatesOrGaps(pages);
+    expect(pages.flat()).toHaveLength(filler.length + SEAL_PREDICATES.length + laterQuads.length);
+  });
+
   it('store-paged path: a clean subject boundary at the limit is not extended', async () => {
     const limit = 5;
     const store = new OxigraphStore();
