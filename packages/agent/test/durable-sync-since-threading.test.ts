@@ -37,6 +37,21 @@ describe('exact-asset rolling-upgrade filter', () => {
 
     expect(filtered.metaQuads.map((quad) => quad.subject)).toEqual([wanted, wanted]);
     expect(filtered.dataQuads.map((quad) => quad.graph)).toEqual([wantedGraph]);
+    expect(filtered.descriptorCoverageComplete).toBe(true);
+  });
+
+  it('reports incomplete descriptor coverage from the same exact projection', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const missing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
+    ] as Quad[];
+
+    expect(filterExactAssetDurablePayload([], meta, [wanted, missing])).toMatchObject({
+      descriptorCoverageComplete: false,
+    });
   });
 
   it('threads exactAssetUalsFor into both fetch phases and filters an old-responder payload before verification', async () => {

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { classifyDurableProgress } from '../src/sync/durable-progress.js';
+import {
+  classifyDurableProgress,
+  createDurableSyncAccumulator,
+  createFailedPeerDurableSyncResult,
+  createIncompleteDurableSyncResult,
+  durableSyncAccumulatorFromResult,
+  finalizeDurableSyncCompletion,
+  isDurableSyncComplete,
+  markDurableTerminalBoundary,
+  mergeDurableSyncAccumulatorInto,
+  normalizeDurableSyncResult,
+  recordDurableSyncDiagnostics,
+} from '../src/sync/durable-progress.js';
 
 describe('classifyDurableProgress', () => {
   it('classifies inserted durable data as reconnect and readiness progress', () => {
@@ -116,5 +128,192 @@ describe('classifyDurableProgress', () => {
 
     expect(progress.madeReconnectProgress).toBe(true);
     expect(progress.madeReadinessProgress).toBe(true);
+  });
+
+  it('does not classify an explicitly incomplete durable result as readiness complete', () => {
+    const progress = classifyDurableProgress({
+      insertedTriples: 40_000,
+      insertedDataTriples: 40_000,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+    }, { complete: false });
+
+    expect(progress.madeReadinessProgress).toBe(true);
+    expect(progress.completedWithoutFailure).toBe(false);
+    expect(progress.completedReadinessCleanly).toBe(false);
+  });
+
+  it('does not classify an explicitly incomplete private-only result as clean progress', () => {
+    const progress = classifyDurableProgress({
+      insertedTriples: 8,
+      insertedDataTriples: 0,
+      insertedMetaTriples: 8,
+      verifiedPrivateOnlyResponses: 1,
+      completedPhases: 1,
+    }, { complete: false });
+
+    expect(progress.hasVerifiedPrivateOnlyResponse).toBe(true);
+    expect(progress.hasCleanVerifiedPrivateOnlyCompletion).toBe(false);
+    expect(progress.madeReconnectProgress).toBe(false);
+    expect(progress.completedWithoutFailure).toBe(false);
+  });
+
+  it('keeps the generic classifier counters-only and accepts an explicit durable verdict', () => {
+    const counters = { completedPhases: 1 };
+
+    expect(classifyDurableProgress(counters).completedWithoutFailure).toBe(true);
+    expect(classifyDurableProgress(counters, { complete: true }).completedWithoutFailure).toBe(true);
+    expect(classifyDurableProgress(counters, { complete: false }).completedWithoutFailure).toBe(false);
+  });
+});
+
+describe('isDurableSyncComplete', () => {
+  it('requires both a lane terminal boundary and a clean completed phase', () => {
+    const progress = { completedPhases: 1 };
+
+    expect(isDurableSyncComplete(progress, true)).toBe(true);
+    expect(isDurableSyncComplete(progress, false)).toBe(false);
+  });
+
+  it.each([
+    ['timeout', { timedOutPhases: 1 }],
+    ['transport failure', { failedPeers: 1 }],
+    ['phase failure', { failedPhases: 1 }],
+    ['denial', { deniedPhases: 1 }],
+    ['backpressure', { deferredBackpressure: 1 }],
+    ['rejected KC', { rejectedKcs: 1 }],
+    ['missing metadata', { dataRejectedMissingMeta: 1 }],
+  ])('centralizes %s as a non-complete durable result', (_label, failure) => {
+    expect(isDurableSyncComplete({ completedPhases: 1, ...failure }, true)).toBe(false);
+  });
+});
+
+describe('durable terminal boundary model', () => {
+  it('keeps an incomplete lane sticky across later clean boundaries', () => {
+    const accumulator = createDurableSyncAccumulator();
+    recordDurableSyncDiagnostics(accumulator, { completedPhases: 1 });
+
+    markDurableTerminalBoundary(accumulator, false);
+    markDurableTerminalBoundary(accumulator, true);
+
+    expect(finalizeDurableSyncCompletion(accumulator).complete).toBe(false);
+  });
+
+  it('owns clean phase synthesis and authoritative incomplete cleanup', () => {
+    const complete = createDurableSyncAccumulator();
+    markDurableTerminalBoundary(complete, true, { countCompletedPhase: true });
+    expect(finalizeDurableSyncCompletion(complete)).toMatchObject({
+      complete: true,
+      completedPhases: 1,
+    });
+
+    const incomplete = createDurableSyncAccumulator();
+    recordDurableSyncDiagnostics(incomplete, { completedPhases: 2 });
+    markDurableTerminalBoundary(incomplete, false, {
+      countCompletedPhase: true,
+      clearCompletedPhasesWhenIncomplete: true,
+    });
+    expect(finalizeDurableSyncCompletion(incomplete)).toMatchObject({
+      complete: false,
+      completedPhases: 0,
+    });
+  });
+
+  it('does not synthesize a completed phase when a blocking counter is present', () => {
+    const accumulator = createDurableSyncAccumulator();
+    recordDurableSyncDiagnostics(accumulator, { rejectedKcs: 1 });
+
+    markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
+
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
+      complete: false,
+      completedPhases: 0,
+    });
+  });
+
+  it('keeps the neutral merge identity internal and assigns complete only on finalization', () => {
+    const completedLane = createDurableSyncAccumulator();
+    markDurableTerminalBoundary(completedLane, true, { countCompletedPhase: true });
+    const publicLane = finalizeDurableSyncCompletion(completedLane);
+    const neutral = createDurableSyncAccumulator();
+
+    expect('complete' in neutral).toBe(false);
+    const merged = mergeDurableSyncAccumulatorInto(
+      neutral,
+      durableSyncAccumulatorFromResult(publicLane),
+    );
+    expect('complete' in merged).toBe(false);
+    expect(finalizeDurableSyncCompletion(merged).complete).toBe(true);
+  });
+
+  it('keeps peer failure idempotent while summing phase failures', () => {
+    const first = createFailedPeerDurableSyncResult();
+    first.failedPhases = 1;
+    const second = createFailedPeerDurableSyncResult();
+    second.failedPhases = 2;
+    const accumulator = durableSyncAccumulatorFromResult(first);
+
+    mergeDurableSyncAccumulatorInto(
+      accumulator,
+      durableSyncAccumulatorFromResult(second),
+    );
+
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
+      failedPeers: 1,
+      failedPhases: 3,
+    });
+  });
+
+  it('records diagnostic deltas additively while keeping peer failure idempotent', () => {
+    const accumulator = createDurableSyncAccumulator();
+    recordDurableSyncDiagnostics(accumulator, {
+      insertedTriples: 7,
+      failedPeers: 1,
+      failedPhases: 1,
+    });
+    recordDurableSyncDiagnostics(accumulator, {
+      insertedTriples: 5,
+      failedPeers: 1,
+      failedPhases: 2,
+    });
+    markDurableTerminalBoundary(accumulator, false);
+
+    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({
+      complete: false,
+      insertedTriples: 12,
+      failedPeers: 1,
+      failedPhases: 3,
+    });
+  });
+});
+
+describe('durable result factories', () => {
+  it('makes incomplete and failed-peer public results self-consistent', () => {
+    expect(createIncompleteDurableSyncResult()).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      failedPeers: 0,
+    });
+    expect(createFailedPeerDurableSyncResult()).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      failedPeers: 1,
+    });
+  });
+
+  it('normalizes public results without exposing reducer metadata', () => {
+    const result = createIncompleteDurableSyncResult();
+    result.insertedTriples = Number.NaN;
+    result.insertedDataTriples = 7;
+    result.failedPhases = -1;
+    result.backoffWorthyFailures = undefined;
+
+    expect(normalizeDurableSyncResult(result)).toMatchObject({
+      complete: false,
+      insertedTriples: 0,
+      insertedDataTriples: 7,
+      failedPhases: 0,
+      backoffWorthyFailures: 0,
+    });
   });
 });

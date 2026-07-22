@@ -76,7 +76,10 @@ interface SyncResultAccounting {
   cleanNonMetadataResponse: boolean;
 }
 
-function classifySyncResult(result: SyncFromPeerResult): SyncResultAccounting {
+function classifySyncResult(
+  result: SyncFromPeerResult,
+  complete?: boolean,
+): SyncResultAccounting {
   if (typeof result === 'number') {
     return {
       insertedTriples: result,
@@ -90,7 +93,7 @@ function classifySyncResult(result: SyncFromPeerResult): SyncResultAccounting {
     };
   }
 
-  const progress = classifyDurableProgress(result);
+  const progress = classifyDurableProgress(result, { complete });
   return {
     insertedTriples: result.insertedTriples,
     madeProgress: progress.madeReconnectProgress,
@@ -133,12 +136,19 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawBackoffWorthyFailure = false;
   let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
+  let sawExplicitIncompleteDurableResult = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (
     result: SyncFromPeerResult,
     phase: 'durable' | 'shared',
   ): SyncResultAccounting => {
-    const accounting = classifySyncResult(result);
+    const complete = phase === 'durable'
+      && typeof result !== 'number'
+      && 'complete' in result
+      && typeof result.complete === 'boolean'
+        ? result.complete
+        : undefined;
+    const accounting = classifySyncResult(result, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;
@@ -146,12 +156,22 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     sawBackpressureDeferral = sawBackpressureDeferral || accounting.deferredByBackpressure;
     if (phase === 'durable') {
       sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || accounting.metadataOnly;
-      cleanDurableDetailedRound = cleanDurableDetailedRound || accounting.cleanNonMetadataResponse;
+      sawExplicitIncompleteDurableResult = sawExplicitIncompleteDurableResult || complete === false;
+      // Safely committed prefixes are useful progress, but an explicit
+      // incomplete durable result must not refresh the peer's successful-sync
+      // timestamp and suppress the next recovery attempt. Legacy counter-only
+      // results keep their existing behaviour when no completion verdict is
+      // available.
+      cleanDurableDetailedRound = cleanDurableDetailedRound || (
+        complete !== false && accounting.cleanNonMetadataResponse
+      );
     }
     return accounting;
   };
   const finishSyncAccounting = (): SyncOnConnectOutcome => {
-    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    const cleanDurableRound = cleanDurableDetailedRound
+      && !sawDurableMetadataOnlyDetailedSync
+      && !sawExplicitIncompleteDurableResult;
     if (sawBackpressureDeferral) {
       if (madeProgress) {
         context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });

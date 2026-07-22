@@ -405,9 +405,68 @@ describe('runChangelogSync — driver loop', () => {
     expect(h.resyncs()).toBe(0);
     expect(h.cursor()).toEqual({ era: 'e1', seq: 4 });
   });
+
+  it('returns an explicit incomplete outcome when forward progress never reaches head before the round bound', async () => {
+    const h = loopHarness(
+      [delta(10, 1), delta(10, 2)],
+      async (p) => ({ advanceTo: p.nextSeq, applied: 1, deferred: false }),
+    );
+    h.deps.maxRounds = 2;
+
+    const out = await runChangelogSync(h.deps);
+
+    expect(out).toEqual({ kind: 'incomplete', applied: 2, reason: 'round-limit' });
+    expect(h.cursor()).toEqual({ era: 'e1', seq: 2 });
+  });
 });
 
 describe('changelog drop resync reconciliation', () => {
+  it('surfaces a round-bound stop as an incomplete durable result', async () => {
+    const responses = [
+      encodeChangelogResponse(delta(10, 1)),
+      encodeChangelogResponse(delta(10, 2)),
+    ];
+    let responseIndex = 0;
+    let cursor: { era: string; seq: number } | undefined;
+    const agent = {
+      changelogCursors: {
+        get: () => cursor,
+        set: (_peer: string, _cg: string, era: string, seq: number) => {
+          cursor = { era, seq };
+        },
+      },
+      messenger: { sendToPeer: async () => responses[responseIndex++]! },
+      node: { stopSignal: null },
+      getOrCreateSyncVerifyWorker: () => ({ parseAndFilter: async () => ({ quads: [] }) }),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        verifiedGraphScopedDataGraphs: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        rejectedKcs: 0,
+        emptyResponses: 1,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    const result = await (LifecycleSyncMethods.prototype.runChangelogSyncForCg as any).call(
+      agent,
+      { kind: 'system', id: 'test', startedAt: 0 },
+      'peer',
+      'cg',
+      2,
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.failedPhases).toBe(1);
+    expect(result.completedPhases).toBe(0);
+    expect(cursor).toEqual({ era: 'e1', seq: 2 });
+  });
+
   it('removes only graphs absent from the complete verified snapshot before advancing the cursor', async () => {
     const presentGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/8';
     const staleGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0xabc/9';
@@ -442,8 +501,9 @@ describe('changelog drop resync reconciliation', () => {
         forceFreshSession?: boolean,
       ) => {
         forceFreshSessionFlags.push(forceFreshSession === true);
+        const quads = phase === 'data' ? [qd(presentGraph, 1)] : [];
         return {
-          quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+          quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length,
           checkpointKey: `${contextGraphId}:${phase}`, completed: true, timedOut: false,
         };
       },
