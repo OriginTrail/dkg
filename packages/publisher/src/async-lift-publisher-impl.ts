@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore, buildAtomicSubjectReplaceUpdate, tryUpdateWithTouchedGraphs } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, tryReplaceSubjectAtomically } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -377,12 +377,12 @@ export class TripleStoreAsyncLiftPublisher
     // Object-bound triple pattern (not a FILTER) so the store resolves it via the
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
     //
-    // #1863 — writeJob now persists the job subject as a single atomic replace
-    // (DELETE WHERE + INSERT DATA in one transaction) on any store that declares
-    // group-atomicity (atomicUpdateGroups), so a lookup racing a state transition
-    // sees the subject fully prior-or-fully-next and this index row never
-    // transiently disappears: no false `none`. On a store that cannot guarantee
-    // that (no update(), or a non-transactional endpoint) writeJob falls back to
+    // #1863 — writeJob now persists the job subject via the atomic
+    // tryReplaceSubjectAtomically capability (one commit boundary), so a lookup
+    // racing a state transition sees the subject fully prior-or-fully-next and
+    // this index row never transiently disappears: no false `none`. On a store
+    // that cannot guarantee one commit boundary (no replaceSubject, or a
+    // non-transactional endpoint that refuses it) writeJob falls back to
     // delete-then-insert, which retains the bounded pre-#1863 window; there
     // admission's claim-locked findActive remains the authoritative dedup guard,
     // so a transient false `none` cannot by itself create a duplicate active job.
@@ -1090,35 +1090,34 @@ export class TripleStoreAsyncLiftPublisher
    * lock-free reader racing a transition never observes the job subject
    * transiently empty. Every row for `jobSubject` — the payload, the status, and
    * the `CONTROL_LIFECYCLE_KEY` intent-index row (emitted inside `serializeJob`
-   * via `serializeVmPublishIntentIndex`) — lands in the SAME `INSERT DATA`, so
-   * the false `kind:'none'` intent-lookup miss / dedup gap that hinges on that
-   * index row disappearing mid-write cannot occur. The DELETE (jobSubject only)
-   * and INSERT (the full serializeJob set — the immutable request rows ride
-   * along and re-assert idempotently) commit in one `store.update()`
-   * transaction.
+   * via `serializeVmPublishIntentIndex`) — is replaced in ONE commit, so the
+   * false `kind:'none'` intent-lookup miss / dedup gap that hinges on that index
+   * row disappearing mid-write cannot occur.
    *
-   * The atomic path is taken ONLY when the store declares
-   * `atomicUpdateGroups === true` — i.e. it commits a multi-op UPDATE request as
-   * one transaction. A store that merely exposes `update()` is not enough: a
-   * generic SPARQL endpoint (e.g. `SparqlHttpStore` with `atomicUpdates:false`)
-   * applies `DELETE WHERE; INSERT DATA` sequentially and would re-expose the
-   * transient window. Such stores — and any without `update()` — take the
-   * BOUNDED pre-#1863 delete-then-insert fallback: it still has the window, but
+   * Routed through the storage capability `tryReplaceSubjectAtomically` (a
+   * sibling of `replaceGraph` / `replaceGraphAndSubject`) rather than a raw
+   * `update()` string: the storage layer owns the transaction boundary, literal
+   * externalization, graph-set-index and changelog bookkeeping, and — crucially —
+   * the reserved-plane guard applies to the TARGET GRAPH structurally instead of
+   * scanning a serialized SPARQL string (a raw update would false-reject a job
+   * whose quads merely reference a reserved IRI). A store that cannot guarantee
+   * one commit boundary (no `replaceSubject`, or a non-transactional SPARQL
+   * endpoint that refuses it) returns `false`, and we take the BOUNDED pre-#1863
+   * delete-then-insert fallback: it still has the transient window, but
    * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
    * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
    * `recordDurableBroadcastBeforeSend`, not here.
    */
   private async persistJobRecord(job: LiftJob): Promise<void> {
     const quads = serializeJob(job, this.graphUri);
-    if (this.store.atomicUpdateGroups === true) {
-      const atomic = await tryUpdateWithTouchedGraphs(
-        this.store,
-        buildAtomicSubjectReplaceUpdate(this.graphUri, jobSubject(job.jobId), quads),
-        [this.graphUri],
-        { source: 'publisher.asyncLift.writeJob' },
-      );
-      if (atomic) return;
-    }
+    const replaced = await tryReplaceSubjectAtomically(
+      this.store,
+      this.graphUri,
+      jobSubject(job.jobId),
+      quads,
+      { source: 'publisher.asyncLift.writeJob' },
+    );
+    if (replaced) return;
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(quads);
   }

@@ -149,6 +149,26 @@ export interface TripleStore {
     metadataQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /**
+   * Atomically replace every row for one subject inside a shared named graph,
+   * leaving all other subjects in that graph untouched. Implementations MUST
+   * guarantee ONE commit boundary, so a concurrent reader observes the subject
+   * fully in its prior or its new state, never transiently empty (#1863).
+   *
+   * `quads` MAY carry co-located subjects (e.g. an immutable request record
+   * re-asserted beside a mutable job record): only `subject`'s rows are cleared,
+   * the rest are inserted idempotently. Every quad must target `graphUri`.
+   * Optional because generic `update()` support is NOT sufficient — a
+   * non-transactional SPARQL endpoint would apply the delete and the insert
+   * sequentially — so callers fall back (delete-then-insert) when it is absent
+   * or refuses.
+   */
+  replaceSubject?(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -167,20 +187,6 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
-
-  /**
-   * True only when a single multi-operation UPDATE request (e.g.
-   * `DELETE WHERE { … } ; INSERT DATA { … }`) commits as ONE atomic
-   * transaction, so a concurrent reader observes every operation applied or
-   * none — never a partial prefix. Merely implementing `update()` is NOT
-   * sufficient: a generic SPARQL endpoint may apply the operations
-   * sequentially. Callers that need old-or-new visibility across a multi-op
-   * group (e.g. a single-subject atomic replace built from `DELETE WHERE` +
-   * `INSERT DATA`) MUST gate on this and fall back otherwise. Decorators
-   * forward the wrapped store's value; an unforwarded/absent value is falsy,
-   * so callers conservatively take their non-atomic fallback.
-   */
-  readonly atomicUpdateGroups?: boolean;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -288,6 +294,38 @@ export async function tryReplaceGraphAndSubjectAtomically(
     if (
       error instanceof UnsupportedTripleStoreCapabilityError &&
       error.capability === 'replaceGraphAndSubject'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic single-subject replace inside a shared named graph.
+ *
+ * Returns `false` when the store does not implement `replaceSubject`, or when a
+ * decorator reports the wrapped store cannot guarantee it (a clean preflight
+ * capability refusal raised before mutation) — the caller then takes its
+ * non-atomic delete-then-insert fallback. Genuine execution failures propagate
+ * so a caller never mistakes an outage or a partial mutation for "unsupported".
+ */
+export async function tryReplaceSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replaceSubject = store.replaceSubject;
+  if (typeof replaceSubject !== 'function') return false;
+  try {
+    await replaceSubject.call(store, graphUri, subject, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceSubject'
     ) {
       return false;
     }

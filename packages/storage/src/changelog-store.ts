@@ -12,6 +12,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
+  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
@@ -199,13 +200,6 @@ export interface ChangelogStoreOptions {
 export class ChangelogStore implements TripleStore, ChangelogReader {
   get queryCancellation() {
     return this.inner.queryCancellation;
-  }
-
-  // #1863 — forward the wrapped store's atomic-multi-op capability so a
-  // subject-atomic replace above this decorator is only attempted when the
-  // backend actually commits DELETE WHERE + INSERT DATA as one transaction.
-  get atomicUpdateGroups() {
-    return this.inner.atomicUpdateGroups;
   }
 
   private readonly inner: TripleStore;
@@ -410,6 +404,37 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
         throw error;
       }
       await this.markPostMutation([graphUri, metaGraphUri], options);
+    });
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'ChangelogStore');
+    }
+    if (!this.enabled) return this.inner.replaceSubject(graphUri, subject, quads, options);
+    // Structural guard on the TARGET graph only — NOT a scan of the serialized
+    // update string. Every quad targets `graphUri` (the atomic builder enforces
+    // it), so a job term that merely REFERENCES a reserved IRI as a subject/
+    // predicate/object is accepted, matching the insert() path (#1863 regression
+    // the raw-update path reintroduced via assertNoReservedRef).
+    this.assertNotReserved(graphUri, 'replaceSubject');
+    await this.runExclusive(async () => {
+      try {
+        await this.inner.replaceSubject!(graphUri, subject, quads, options);
+      } catch (error) {
+        if (isReplaceSubjectCapabilityRefusal(error)) {
+          // Clean preflight refusal: no mutation started, nothing to reconcile.
+          throw error;
+        }
+        this.flagReconcile('replaceSubject(indeterminate-failure)');
+        throw error;
+      }
+      await this.markPostMutation([graphUri], options);
     });
   }
 

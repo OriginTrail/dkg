@@ -44,6 +44,7 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -177,14 +178,6 @@ export interface SparqlHttpStoreOptions {
 
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
-
-  // #1863 — a generic SPARQL endpoint may apply a multi-op UPDATE request
-  // (DELETE WHERE; INSERT DATA) sequentially, so group-atomicity holds only on
-  // the transactional daemon-managed endpoint. Mirror the exact flag that
-  // replaceGraph / replaceGraphAndSubject already gate on.
-  get atomicUpdateGroups(): boolean {
-    return this.atomicUpdates;
-  }
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -514,6 +507,32 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
+      // operations, re-exposing the transient-empty subject. Fail closed before
+      // any request so callers take their non-atomic delete-then-insert fallback.
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+    }
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceSubject',
+    });
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    await this.postUpdate(
+      update,
+      { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
+      'replaceSubject',
+    );
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

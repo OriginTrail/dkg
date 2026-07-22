@@ -147,10 +147,6 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
-  // update() forwards the whole SPARQL as ONE atomic worker message to the
-  // worker's embedded OxigraphStore (one transaction) — #1863.
-  readonly atomicUpdateGroups = true;
-
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
   private worker!: Worker;
@@ -675,6 +671,13 @@ export class OxigraphWorkerStore implements TripleStore {
       metadataQuads,
     );
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[]): Promise<void> {
+    // The worker dispatch is generic (`store[method](...args)`), so this routes
+    // to the worker's embedded OxigraphStore.replaceSubject — one atomic
+    // single-message commit, same contract as insert/replaceGraph.
+    await this.call('replaceSubject', graphUri, subject, quads);
+    this.writeGen.recordGraphWrites([graphUri]);
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
