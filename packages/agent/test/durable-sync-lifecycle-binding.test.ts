@@ -42,13 +42,16 @@ describe('durable sync lifecycle chain binding', () => {
     mockedMaterialize.mockClear();
   });
 
-  it('persists the authenticated on-chain CG id before materializing the asset', async () => {
+  it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
     const root = new Uint8Array(32);
     root[31] = 2;
     const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
-    const getContextGraphNameHash = vi.fn(async () => ethers.keccak256(
-      ethers.toUtf8Bytes(contextGraphId),
-    ));
+    const getContextGraphNameHash = vi.fn()
+      .mockRejectedValueOnce(Object.assign(
+        new Error('all configured RPC endpoints failed'),
+        { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      ))
+      .mockResolvedValue(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
     const chain = {
       chainId: 'otp:2043',
       getLatestMerkleRoot: async () => root,
@@ -124,10 +127,17 @@ describe('durable sync lifecycle chain binding', () => {
         },
       ],
     };
-    await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
+    vi.useFakeTimers();
+    try {
+      const firstMaterialization = storeGraphScopedAsset!(asset);
+      await vi.runAllTimersAsync();
+      await expect(firstMaterialization).resolves.toBe('applied');
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(storeGraphScopedAsset!(asset)).resolves.toBe('applied');
 
-    expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+    expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
 
     expect(bindSubscriptionOnChainId).toHaveBeenCalledWith(
       contextGraphId,

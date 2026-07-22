@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -962,11 +962,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * A genuinely reused slot commits a DIFFERENT name that matches neither.
    *
    * Returns `false` (→ caller fails closed) on an AFFIRMATIVE mismatch (the
-   * committed hash matches neither derivation); whenever the hash cannot be
-   * verified once the adapter EXPOSES `getContextGraphNameHash` (RPC rejection or
-   * read timeout — #884 review 🔴 GZ8L_); AND when the slot has NO committed
-   * name-hash at all (`null` / empty — #884 review 🔴 GaZk2). A missing
-   * commitment is NOT an identity proof: a devnet-reset slot reused by a
+   * committed hash matches neither derivation) and when the slot has NO committed
+   * name-hash at all (`null` / empty — #884 review 🔴 GaZk2). Legacy policy
+   * callers also receive `false` when the hash read rejects or times out. Strict
+   * durable-sync callers instead receive that transport failure so a bounded
+   * retry can perform a fresh read without weakening the fail-closed decision.
+   * A missing commitment is NOT an identity proof: a devnet-reset slot reused by a
    * different no-commitment public CG would otherwise disable encryption for the
    * wrong local graph, so a downgrade decision requires an affirmative binding.
    * Returns `true` (proceed to the liveness/policy gate) where the adapter
@@ -1057,6 +1058,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — ` +
         `cannot verify local-mapping identity, treating CG as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       );
+      if (options?.requireCommittedNameHash === true) throw err;
       return false;
     }
     if (onChainHash === TIMEOUT_SENTINEL) {
@@ -1067,6 +1069,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after ` +
         `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, treating CG as NOT public (fail-closed)`,
       );
+      if (options?.requireCommittedNameHash === true) {
+        throw createRpcTimeoutError(
+          `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+        );
+      }
       return false;
     }
     // MISSING commitment (`null` / empty): the slot has NO on-chain name-hash.

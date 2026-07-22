@@ -104,6 +104,7 @@ import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync
 import {
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  withGraphScopedMaterializationRetry,
 } from './sync/requester/graph-scoped-materialization.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -4164,11 +4165,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // The CG name commitment is immutable for an on-chain slot. Prove a
     // local/on-chain binding once per durable-sync invocation, then reuse the
     // successful proof for every KA in that batch. Without this operation-
-    // scoped cache, a large CG performs one RPC name-hash read per KA and a
-    // single transient timeout aborts the rest of an otherwise verified page.
-    // Rejections remain fail-closed and are never reused by a later operation.
+    // scoped cache, a large CG performs one RPC name-hash read per KA. Only an
+    // affirmative proof remains cached; false results and read failures are
+    // evicted so a bounded materialization retry performs a fresh chain read.
     const contextGraphBindingProofs = new Map<string, Promise<boolean>>();
-    const verifyContextGraphBinding = (
+    const verifyContextGraphBinding = async (
       localContextGraphId: string,
       onChainContextGraphId: bigint,
     ): Promise<boolean> => {
@@ -4184,7 +4185,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         contextGraphBindingProofs.set(key, proof);
       }
-      return proof;
+      try {
+        const matches = await proof;
+        if (!matches && contextGraphBindingProofs.get(key) === proof) {
+          contextGraphBindingProofs.delete(key);
+        }
+        return matches;
+      } catch (error) {
+        if (contextGraphBindingProofs.get(key) === proof) {
+          contextGraphBindingProofs.delete(key);
+        }
+        throw error;
+      }
     };
     return runDurableSync({
       ctx,
@@ -4230,7 +4242,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         priority: 'background',
         source: 'agent.durableSync.storeInsert',
       }),
-      storeGraphScopedAsset: async (asset) => {
+      storeGraphScopedAsset: (asset) => withGraphScopedMaterializationRetry(async () => {
         const authentication = await authenticateVerifiedGraphScopedAsset(
           this.chain,
           asset,
@@ -4262,7 +4274,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
         }
         return outcome;
-      },
+      }, (error, attempt, maxAttempts) => {
+        this.log.warn(
+          ctx,
+          `Retrying graph-scoped durable materialization for ${asset.ual} `
+          + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }),
       onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),

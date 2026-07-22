@@ -222,13 +222,18 @@ describe('error-tags: permanent-rejection classification', () => {
 });
 
 describe('error-tags: retry classification', () => {
-  it('treats exhausted chain RPC reads as backoff-worthy', () => {
-    const error = new Error(
+  it('treats typed exhausted chain RPC reads as backoff-worthy', () => {
+    const error = Object.assign(new Error(
       'cgStorage.kaToContextGraph read failed on all configured RPC endpoints: '
       + 'RPC #3 timed out after 4000ms',
-    );
+    ), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
     expect(isSyncBackoffWorthyError(error)).toBe(true);
     expect(isSyncPermanentRejection(error)).toBe(false);
+  });
+
+  it('does not infer chain transport failure from message text alone', () => {
+    const error = new Error('read failed on all configured RPC endpoints');
+    expect(isSyncBackoffWorthyError(error)).toBe(false);
   });
 });
 
