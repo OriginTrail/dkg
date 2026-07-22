@@ -6,6 +6,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   DKGNode,
   ProtocolRouter,
   assertAuthorCatalogRowV1,
@@ -27,6 +28,7 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
+  type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -51,6 +53,7 @@ import {
   type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
+import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -1303,6 +1306,78 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )?.currentCatalogHeadDigest).toBe(fixture.multiAssetSuccessor.head.objectDigest);
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
   }, 30_000);
+
+  it('keeps the governed successor head unapplied when the production VM precommit lacks RPC', async () => {
+    const fixture = await setupLiveReceiver();
+    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
+      fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
+        fixture.receiverPersistence.inventory,
+      ),
+    );
+    const getOnChainContextGraphId = vi.fn(async () => '14');
+    const getEvmChainId = vi.fn(async () => 20_430n);
+    const getKnowledgeAssetStorageAddress = vi.fn(async () => KAV10);
+    const policy = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: GOVERNANCE_CONTRACT,
+      ownershipTransitionDigest: fixture.governedScope.ownershipTransitionDigest,
+      era: '0',
+      version: '0',
+      previousPolicyDigest: null,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+      administrativeDelegationDigest: null,
+      source: {
+        kind: 'finalized-chain',
+        chainId: '20430',
+        contractAddress: GOVERNANCE_CONTRACT,
+        blockNumber: '123',
+        blockHash: `0x${'77'.repeat(32)}`,
+      },
+      effectiveAt: '1773900000000',
+      issuedAt: '1773900000000',
+    } satisfies ContextGraphPolicyV1);
+    const precommit = createRfc64FinalizedVmAgentPrecommitV1({
+      acceptedPolicySnapshotForCatalogScope: () => Object.freeze({
+        policy,
+        policyDigest: POLICY_DIGEST,
+        roster: null,
+      }),
+      rpcEndpoints: [],
+      getOnChainContextGraphId,
+      getEvmChainId,
+      getKnowledgeAssetStorageAddress,
+      store: fixture.receiverStore,
+    });
+    const receiver = fixture.createReceiver({
+      readAppliedCatalogHeadV1:
+        fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
+          fixture.receiverPersistence.inventory,
+        ),
+      compareAndSwapAppliedCatalogHeadV1,
+    }, undefined, undefined, fixture.receiverStore, precommit);
+
+    await fixture.bootstrapGoverned(receiver);
+    compareAndSwapAppliedCatalogHeadV1.mockClear();
+    await expect(fixture.synchronizeGoverned(receiver)).rejects.toMatchObject({
+      code: 'catalog-native-receiver-activation',
+      message: expect.stringContaining('finalized VM precommit rejected'),
+    });
+
+    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
+    expect(getEvmChainId).not.toHaveBeenCalled();
+    expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
+    expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      computeAuthorCatalogScopeDigestV1(fixture.governedScope),
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.governedGenesis.head.objectDigest);
+  }, 30_000);
 });
 
 async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
@@ -1786,6 +1861,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     genesisAnnouncement,
     governedGenesis,
     governedGenesisAnnouncement,
+    governedScope,
     governedSuccessor,
     governedSuccessorAnnouncement,
     invalidGenesisAnnouncement,
@@ -1822,6 +1898,16 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       DEPLOYMENT,
       signal,
     ),
+    bootstrapGoverned: (
+      selectedReceiver = receiver,
+      signal?: AbortSignal,
+    ) => selectedReceiver.bootstrapEmptyPublicOpenCatalog(
+      authorNode.peerId,
+      governedGenesisAnnouncement,
+      governedScope,
+      DEPLOYMENT,
+      signal,
+    ),
     synchronize: (
       selectedAnnouncement = announcement,
       selectedReceiver = receiver,
@@ -1841,6 +1927,16 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
       authorNode.peerId,
       selectedAnnouncement,
       scope,
+      DEPLOYMENT,
+      signal,
+    ),
+    synchronizeGoverned: (
+      selectedReceiver = receiver,
+      signal?: AbortSignal,
+    ) => selectedReceiver.synchronizeOnePublicOpenRow(
+      authorNode.peerId,
+      governedSuccessorAnnouncement,
+      governedScope,
       DEPLOYMENT,
       signal,
     ),
