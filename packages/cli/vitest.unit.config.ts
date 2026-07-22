@@ -90,6 +90,7 @@ export default defineConfig({
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
+          'test/publisher-runtime-snapshot-store-injection.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
