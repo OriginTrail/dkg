@@ -106,6 +106,18 @@ describe('buildAtomicSubjectReplaceUpdate', () => {
     ).toThrow(/must target subject .* in graph/);
   });
 
+  it('rejects a blank-node subject — a replace needs a canonical skolem IRI, not an IRI-wrapped `_:`', () => {
+    // `_:b1` passes assertSafeIri but would be interpolated as `<_:b1>` and treated
+    // as an IRI, operating on the wrong RDF term while the real blank-node rows stay.
+    expect(() =>
+      buildAtomicSubjectReplaceUpdate(GRAPH, '_:b1', [
+        { subject: '_:b1', predicate: 'urn:test:p', object: '"v"', graph: GRAPH },
+      ]),
+    ).toThrow(/blank node/);
+    // Guarded on the empty-quads DELETE path too.
+    expect(() => buildAtomicSubjectReplaceUpdate(GRAPH, '_:b1', [])).toThrow(/blank node/);
+  });
+
   it('returns a bare DELETE when the insert set is empty', () => {
     const sparql = buildAtomicSubjectReplaceUpdate(GRAPH, SUBJECT_A, []);
     expect(sparql).toBe(`DELETE WHERE { GRAPH <${GRAPH}> { <${SUBJECT_A}> ?p ?o } }`);

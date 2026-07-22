@@ -178,13 +178,23 @@ function assertSubjectReplacementPayload(
   subject: string,
   quads: readonly Quad[],
 ): void {
+  // The subject is interpolated as `<subject>` (an IRI). A blank-node label
+  // (`_:b1`) passes `assertSafeIri` but would then be treated as an IRI term,
+  // so the replace would operate on a different RDF term than the caller named
+  // (and never clear the real blank-node rows). Reject it — atomic replacement
+  // requires canonical skolem IRIs. Guards the empty-quads DELETE path too.
+  if (subject.startsWith('_:')) {
+    throw new Error(
+      `Atomic subject replacement requires a canonical skolem IRI subject; "${subject}" is a blank node`,
+    );
+  }
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri || quad.subject !== subject) {
       throw new Error(
         `Atomic subject replacement quad ${index} must target subject "${subject}" in graph "${graphUri}"`,
       );
     }
-    if (quad.object.startsWith('_:')) {
+    if (quad.subject.startsWith('_:') || quad.object.startsWith('_:')) {
       throw new Error(
         `Atomic subject replacement requires canonical skolem IRIs; quad ${index} still contains a blank node`,
       );

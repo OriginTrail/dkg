@@ -155,13 +155,15 @@ export interface TripleStore {
    * guarantee ONE commit boundary, so a concurrent reader observes the subject
    * fully in its prior or its new state, never transiently empty (#1863).
    *
-   * `quads` MAY carry co-located subjects (e.g. an immutable request record
-   * re-asserted beside a mutable job record): only `subject`'s rows are cleared,
-   * the rest are inserted idempotently. Every quad must target `graphUri`.
-   * Optional because generic `update()` support is NOT sufficient — a
-   * non-transactional SPARQL endpoint would apply the delete and the insert
-   * sequentially — so callers fall back (delete-then-insert) when it is absent
-   * or refuses.
+   * STRICT single-subject payload: EVERY quad in `quads` MUST target `graphUri`
+   * and carry `subject` as its subject (implementations reject anything else),
+   * and `subject` must be a canonical skolem IRI (not a blank node). Co-located
+   * writes for another subject (e.g. an immutable request record re-asserted
+   * beside a mutable job record) are the caller's own separate write, sequenced
+   * so the reader never observes a dangling reference. Optional because generic
+   * `update()` support is NOT sufficient — a non-transactional SPARQL endpoint
+   * would apply the delete and the insert sequentially — so callers fall back
+   * (delete-then-insert) when it is absent or refuses.
    */
   replaceSubject?(
     graphUri: string,

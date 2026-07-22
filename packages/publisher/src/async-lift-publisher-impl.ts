@@ -92,7 +92,7 @@ import {
   parseIntegerLiteral,
   parseLiteral,
   requestSubject,
-  serializeJob,
+  serializeJobRecord,
   serializeWalletLock,
   walletLockSubject,
   type PersistedFailedJob,
@@ -1122,11 +1122,9 @@ export class TripleStoreAsyncLiftPublisher
    * `recordDurableBroadcastBeforeSend`, not here.
    */
   private async persistJobRecord(job: LiftJob): Promise<void> {
-    const jobRef = jobSubject(job.jobId);
-    const requestRef = requestSubject(job.jobId);
-    const allQuads = serializeJob(job, this.graphUri);
-    const requestQuads = allQuads.filter((quad) => quad.subject === requestRef);
-    const jobQuads = allQuads.filter((quad) => quad.subject === jobRef);
+    // The serializer owns the split (and guards that a job record is exactly the
+    // job + request subjects) — no ad-hoc subject filters on the write path.
+    const { jobRef, jobQuads, requestQuads } = serializeJobRecord(job, this.graphUri);
     // (1) Request present BEFORE the job subject is observable — ordering matters.
     await this.store.insert(requestQuads);
     // (2) Atomically replace the mutable job subject.

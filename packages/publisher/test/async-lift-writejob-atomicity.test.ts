@@ -8,7 +8,13 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, requestSubject } from '../src/async-lift-control-plane.js';
+import {
+  DEFAULT_CONTROL_GRAPH_URI,
+  jobSubject,
+  requestSubject,
+  serializeJob,
+  serializeJobRecord,
+} from '../src/async-lift-control-plane.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
 
 // #1863 — writeJob persists a job transition via the atomic
@@ -226,5 +232,23 @@ describe('#1863 async-lift writeJob atomicity', () => {
       `SELECT ?p WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { <${jobSubject('job-1')}> ?p ?o } }`,
     );
     expect(jobAfter.type === 'bindings' ? jobAfter.bindings.length : 0).toBeGreaterThan(0);
+  });
+
+  it('serializeJobRecord splits exhaustively into exactly the job and request subjects', async () => {
+    const publisher = makePublisher(new OxigraphStore());
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const job = (await publisher.getStatus(jobId))!;
+
+    const record = serializeJobRecord(job, DEFAULT_CONTROL_GRAPH_URI);
+    expect(record.jobRef).toBe(jobSubject(jobId));
+    expect(record.requestRef).toBe(requestSubject(jobId));
+    expect(record.jobQuads.every((q) => q.subject === jobSubject(jobId))).toBe(true);
+    expect(record.requestQuads.every((q) => q.subject === requestSubject(jobId))).toBe(true);
+    expect(record.jobQuads.length).toBeGreaterThan(0);
+    expect(record.requestQuads.length).toBeGreaterThan(0);
+    // Nothing dropped: the two groups partition the full serializeJob output.
+    expect(record.jobQuads.length + record.requestQuads.length).toBe(
+      serializeJob(job, DEFAULT_CONTROL_GRAPH_URI).length,
+    );
   });
 });

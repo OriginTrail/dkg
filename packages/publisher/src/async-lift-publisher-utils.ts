@@ -38,6 +38,7 @@ export {
   jobSubject,
   parseIntegerLiteral,
   serializeJob,
+  serializeJobRecord,
   serializeWalletLock,
   literal,
   parseLiteral,
