@@ -168,6 +168,20 @@ export interface TripleStore {
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
 
+  /**
+   * True only when a single multi-operation UPDATE request (e.g.
+   * `DELETE WHERE { … } ; INSERT DATA { … }`) commits as ONE atomic
+   * transaction, so a concurrent reader observes every operation applied or
+   * none — never a partial prefix. Merely implementing `update()` is NOT
+   * sufficient: a generic SPARQL endpoint may apply the operations
+   * sequentially. Callers that need old-or-new visibility across a multi-op
+   * group (e.g. a single-subject atomic replace built from `DELETE WHERE` +
+   * `INSERT DATA`) MUST gate on this and fall back otherwise. Decorators
+   * forward the wrapped store's value; an unforwarded/absent value is falsy,
+   * so callers conservatively take their non-atomic fallback.
+   */
+  readonly atomicUpdateGroups?: boolean;
+
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
   /**

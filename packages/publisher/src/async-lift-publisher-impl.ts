@@ -378,10 +378,11 @@ export class TripleStoreAsyncLiftPublisher
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
     //
     // #1863 — writeJob now persists the job subject as a single atomic replace
-    // (DELETE WHERE + INSERT DATA in one store.update() transaction), so on an
-    // update-capable backend a lookup racing a state transition sees the subject
-    // fully prior-or-fully-next and this index row never transiently disappears:
-    // no false `none`. On a backend without update() writeJob falls back to
+    // (DELETE WHERE + INSERT DATA in one transaction) on any store that declares
+    // group-atomicity (atomicUpdateGroups), so a lookup racing a state transition
+    // sees the subject fully prior-or-fully-next and this index row never
+    // transiently disappears: no false `none`. On a store that cannot guarantee
+    // that (no update(), or a non-transactional endpoint) writeJob falls back to
     // delete-then-insert, which retains the bounded pre-#1863 window; there
     // admission's claim-locked findActive remains the authoritative dedup guard,
     // so a transient false `none` cannot by itself create a duplicate active job.
@@ -1096,22 +1097,28 @@ export class TripleStoreAsyncLiftPublisher
    * along and re-assert idempotently) commit in one `store.update()`
    * transaction.
    *
-   * Fallback: a store without `update()` (older external backends) keeps the
-   * historical delete-then-insert. That is the BOUNDED pre-#1863 path — it still
-   * exposes the transient window — NOT the intended path; admission's
-   * claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the authoritative
-   * dedup guard for such backends. Durability (#1851 fsync) stays scoped to
+   * The atomic path is taken ONLY when the store declares
+   * `atomicUpdateGroups === true` — i.e. it commits a multi-op UPDATE request as
+   * one transaction. A store that merely exposes `update()` is not enough: a
+   * generic SPARQL endpoint (e.g. `SparqlHttpStore` with `atomicUpdates:false`)
+   * applies `DELETE WHERE; INSERT DATA` sequentially and would re-expose the
+   * transient window. Such stores — and any without `update()` — take the
+   * BOUNDED pre-#1863 delete-then-insert fallback: it still has the window, but
+   * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
+   * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
    * `recordDurableBroadcastBeforeSend`, not here.
    */
   private async persistJobRecord(job: LiftJob): Promise<void> {
     const quads = serializeJob(job, this.graphUri);
-    const atomic = await tryUpdateWithTouchedGraphs(
-      this.store,
-      buildAtomicSubjectReplaceUpdate(this.graphUri, jobSubject(job.jobId), quads),
-      [this.graphUri],
-      { source: 'publisher.asyncLift.writeJob' },
-    );
-    if (atomic) return;
+    if (this.store.atomicUpdateGroups === true) {
+      const atomic = await tryUpdateWithTouchedGraphs(
+        this.store,
+        buildAtomicSubjectReplaceUpdate(this.graphUri, jobSubject(job.jobId), quads),
+        [this.graphUri],
+        { source: 'publisher.asyncLift.writeJob' },
+      );
+      if (atomic) return;
+    }
     await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
     await this.store.insert(quads);
   }

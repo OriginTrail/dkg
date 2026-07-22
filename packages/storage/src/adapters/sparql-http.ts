@@ -178,6 +178,14 @@ export interface SparqlHttpStoreOptions {
 export class SparqlHttpStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
+  // #1863 — a generic SPARQL endpoint may apply a multi-op UPDATE request
+  // (DELETE WHERE; INSERT DATA) sequentially, so group-atomicity holds only on
+  // the transactional daemon-managed endpoint. Mirror the exact flag that
+  // replaceGraph / replaceGraphAndSubject already gate on.
+  get atomicUpdateGroups(): boolean {
+    return this.atomicUpdates;
+  }
+
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
   private readonly timeout: number;

@@ -38,6 +38,10 @@ type OxQuad = oxigraph.Quad;
 export class OxigraphStore implements TripleStore {
   readonly queryCancellation = 'pre-dispatch' as const;
 
+  // The embedded oxigraph runs a single `store.update()` request (including a
+  // multi-op `DELETE WHERE; INSERT DATA`) as one transaction — #1863.
+  readonly atomicUpdateGroups = true;
+
   private store: OxStore;
   private persistPath: string | undefined;
   // #1609: per-graph write generations, bumped on every local mutation (the

@@ -201,6 +201,13 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     return this.inner.queryCancellation;
   }
 
+  // #1863 — forward the wrapped store's atomic-multi-op capability so a
+  // subject-atomic replace above this decorator is only attempted when the
+  // backend actually commits DELETE WHERE + INSERT DATA as one transaction.
+  get atomicUpdateGroups() {
+    return this.inner.atomicUpdateGroups;
+  }
+
   private readonly inner: TripleStore;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;

@@ -189,6 +189,12 @@ export class GraphSetIndexStore implements TripleStore {
     return this.inner.queryCancellation;
   }
 
+  // #1863 — forward the wrapped store's atomic-multi-op capability (see the
+  // TripleStore.atomicUpdateGroups contract).
+  get atomicUpdateGroups() {
+    return this.inner.atomicUpdateGroups;
+  }
+
   getPressureSnapshot(): StorePressureSnapshot | undefined {
     return this.inner.getPressureSnapshot?.();
   }

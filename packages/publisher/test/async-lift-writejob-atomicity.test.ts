@@ -155,4 +155,51 @@ describe('#1863 async-lift writeJob atomicity', () => {
     expect(jobGraphDeletes).toBeGreaterThan(0);
     expect(updateCalls).toBe(0);
   });
+
+  it('takes the fallback on an update()-capable but NON-atomic store (atomicUpdateGroups !== true)', async () => {
+    // The #1863 review 🔴: a store may expose update() yet apply DELETE WHERE;
+    // INSERT DATA sequentially (e.g. SparqlHttpStore with atomicUpdates:false),
+    // which would re-expose the transient window. The publisher must gate on the
+    // declared group-atomicity capability, not on update() existence, and route
+    // such a store to the delete-then-insert fallback.
+    const inner = new OxigraphStore();
+    let jobGraphDeletes = 0;
+    let updateCalls = 0;
+
+    const store = new Proxy(inner, {
+      get(target, prop) {
+        // update() EXISTS and works — but the store declares it is NOT atomic.
+        if (prop === 'atomicUpdateGroups') return false;
+        if (prop === 'update') {
+          return async (sparql: string, options?: unknown) => {
+            updateCalls++;
+            return (target as unknown as {
+              update: (s: string, o?: unknown) => Promise<void>;
+            }).update(sparql, options);
+          };
+        }
+        if (prop === 'deleteByPattern') {
+          return async (pattern: { graph?: string }, options?: unknown) => {
+            if (pattern?.graph === DEFAULT_CONTROL_GRAPH_URI) jobGraphDeletes++;
+            return (target as unknown as {
+              deleteByPattern: (p: unknown, o?: unknown) => Promise<unknown>;
+            }).deleteByPattern(pattern, options);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as TripleStore;
+
+    const publisher = makePublisher(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+
+    expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
+    // The non-atomic update() path was NEVER taken; delete-then-insert was.
+    expect(updateCalls).toBe(0);
+    expect(jobGraphDeletes).toBeGreaterThan(0);
+  });
 });

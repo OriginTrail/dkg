@@ -147,6 +147,10 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
+  // update() forwards the whole SPARQL as ONE atomic worker message to the
+  // worker's embedded OxigraphStore (one transaction) — #1863.
+  readonly atomicUpdateGroups = true;
+
   // Assigned by spawnWorker(), which the constructor always calls — hence the
   // definite-assignment assertion instead of an initializer.
   private worker!: Worker;
