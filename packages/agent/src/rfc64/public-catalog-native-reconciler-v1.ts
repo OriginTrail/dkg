@@ -16,7 +16,6 @@ import {
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CountV1,
-  type ContextGraphPolicyV1,
   type Digest32V1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
@@ -30,18 +29,7 @@ import type {
   Rfc64PublicCatalogReceiverReconcilerV1,
   Rfc64PublicCatalogReconcileResultV1,
 } from './public-catalog-receiver-v1.js';
-import type {
-  Rfc64PublicCatalogHeadAnnouncementV1,
-} from './public-catalog-transport-v1.js';
-
-/** Wire fields that identify one claimed public/open root author-catalog scope. */
-export interface Rfc64PublicOpenCatalogScopeClaimV1 {
-  readonly networkId: Rfc64PublicCatalogHeadAnnouncementV1['networkId'];
-  readonly contextGraphId: Rfc64PublicCatalogHeadAnnouncementV1['contextGraphId'];
-  readonly subGraphName: Rfc64PublicCatalogHeadAnnouncementV1['subGraphName'];
-  readonly authorAddress: Rfc64PublicCatalogHeadAnnouncementV1['authorAddress'];
-  readonly catalogEra: Rfc64PublicCatalogHeadAnnouncementV1['catalogEra'];
-}
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
 export type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1 = Pick<
   Rfc64PublicCatalogNativeReceiverV1,
@@ -80,79 +68,6 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
   readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
-}
-
-/**
- * Derive the one fixed Gate-1 public/open scope from accepted local policy and
- * require the announcement to name that exact owner/network/CG/era/root lane.
- * Policy and signature-variant digests are transport/authentication context,
- * not semantic catalog identity, and therefore do not participate.
- */
-export function deriveRfc64PublicOpenCatalogScopeV1(
-  claim: Rfc64PublicOpenCatalogScopeClaimV1,
-  acceptedPolicy: ContextGraphPolicyV1,
-): AuthorCatalogScopeV1 {
-  if (
-    acceptedPolicy.accessPolicy !== 0
-    || acceptedPolicy.source.kind !== 'owner-signed-unregistered'
-    || acceptedPolicy.networkId !== claim.networkId
-    || acceptedPolicy.contextGraphId !== claim.contextGraphId
-    || acceptedPolicy.governanceChainId !== null
-    || acceptedPolicy.governanceContractAddress !== null
-    || acceptedPolicy.ownershipTransitionDigest !== null
-    || acceptedPolicy.era !== claim.catalogEra
-    || claim.subGraphName !== null
-    || acceptedPolicy.source.ownerAddress !== claim.authorAddress
-  ) {
-    throw new Error(
-      'RFC-64 public/open catalog claim is not bound to the accepted null-governance owner policy',
-    );
-  }
-  return Object.freeze({
-    networkId: acceptedPolicy.networkId,
-    contextGraphId: acceptedPolicy.contextGraphId,
-    governanceChainId: acceptedPolicy.governanceChainId,
-    governanceContractAddress: acceptedPolicy.governanceContractAddress,
-    ownershipTransitionDigest: acceptedPolicy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress: acceptedPolicy.source.ownerAddress,
-    era: acceptedPolicy.era,
-    bucketCount: '1' as CountV1,
-  });
-}
-
-/**
- * Derive a public root catalog scope for any accepted public policy cell,
- * including finalized-chain policies and non-owner SWM authors. Principal
- * authorization remains the accepted-policy registry's responsibility; this
- * pure helper binds only the graph/governance/lane/era identity.
- */
-export function deriveRfc64PublicRootCatalogScopeV1(
-  claim: Rfc64PublicOpenCatalogScopeClaimV1,
-  acceptedPolicy: ContextGraphPolicyV1,
-): AuthorCatalogScopeV1 {
-  if (
-    acceptedPolicy.accessPolicy !== 0
-    || acceptedPolicy.networkId !== claim.networkId
-    || acceptedPolicy.contextGraphId !== claim.contextGraphId
-    || acceptedPolicy.era !== claim.catalogEra
-    || claim.subGraphName !== null
-  ) {
-    throw new Error(
-      'RFC-64 public catalog claim is not bound to the accepted public root policy',
-    );
-  }
-  return Object.freeze({
-    networkId: acceptedPolicy.networkId,
-    contextGraphId: acceptedPolicy.contextGraphId,
-    governanceChainId: acceptedPolicy.governanceChainId,
-    governanceContractAddress: acceptedPolicy.governanceContractAddress,
-    ownershipTransitionDigest: acceptedPolicy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress: claim.authorAddress,
-    era: acceptedPolicy.era,
-    bucketCount: '1' as CountV1,
-  });
 }
 
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
