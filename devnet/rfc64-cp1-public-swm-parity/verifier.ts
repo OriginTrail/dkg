@@ -11,11 +11,19 @@ export const CP1_PUBLIC_SWM_PARITY_SCHEMA =
 const DIGEST = /^0x[0-9a-f]{64}$/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
 
+export interface Cp1ExpectedProvenanceV1 {
+  readonly runtimeManifestDigest: string;
+  readonly testedHeadCommit: string;
+}
+
 export function semanticSha256(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
-export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown> {
+export function verifyCp1PublicSwmParity(
+  value: unknown,
+  expectedProvenance: Cp1ExpectedProvenanceV1,
+): Record<string, unknown> {
   const root = closedRecord(value, '$', [
     'cells',
     'expectedProjectionNQuads',
@@ -29,7 +37,12 @@ export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown
   ]);
   exact(root.schemaVersion, CP1_PUBLIC_SWM_PARITY_SCHEMA, '$.schemaVersion');
   exact(root.status, 'PASS', '$.status');
-  digest(root.runtimeManifestDigest, '$.runtimeManifestDigest');
+  const runtimeManifestDigest = digest(root.runtimeManifestDigest, '$.runtimeManifestDigest');
+  exact(
+    runtimeManifestDigest,
+    expectedProvenance.runtimeManifestDigest,
+    '$.runtimeManifestDigest',
+  );
   const repository = closedRecord(root.repository, '$.repository', [
     'testedHeadCommit',
     'trackedSourceClean',
@@ -38,6 +51,11 @@ export function verifyCp1PublicSwmParity(value: unknown): Record<string, unknown
   if (!/^[0-9a-f]{40}$/u.test(testedHeadCommit)) {
     fail('$.repository.testedHeadCommit', 'must be a full lowercase Git commit');
   }
+  exact(
+    testedHeadCommit,
+    expectedProvenance.testedHeadCommit,
+    '$.repository.testedHeadCommit',
+  );
   exact(repository.trackedSourceClean, true, '$.repository.trackedSourceClean');
   const boundary = closedRecord(root.processBoundary, '$.processBoundary', [
     'authorExitCode',
