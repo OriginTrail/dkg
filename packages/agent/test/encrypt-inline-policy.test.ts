@@ -798,6 +798,8 @@ function makeQueuedAgentHarness(options: {
     _resolveEncryptInlineChunked: recorder(async () => options.encryptInlineChunked),
     _stampPointer: recorder(async () => undefined),
   };
+  agentLike.afterConfirmedGraphScopedVmPublishV1 =
+    (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   if (options.onChainContextGraphId !== undefined) {
     agentLike.getContextGraphOnChainId = recorder(
       async () => options.onChainContextGraphId,
@@ -892,6 +894,42 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
         contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       },
     });
+  });
+
+  it('keeps a confirmed queued publish successful when catalog advancement fails', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-catalog-failure',
+      ual: 'did:dkg:local/queued-catalog-failure',
+      publishStatus: 'confirmed',
+    });
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = recorder(async () => {
+      throw new Error('simulated RFC-64 catalog failure');
+    });
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-public-failure',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka-failure',
+      shareOperationId: 'share-op-catalog-failure',
+      intentByte: 'ae',
+      quads: snapshotQuads,
+    });
+
+    const result = await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+
+    expect(result).toMatchObject({ status: 'confirmed' });
+    expect(agentLike.log.warn.calls.some((call: unknown[]) => (
+      String(call[1]).includes('RFC-64 catalog advancement failed')
+      && String(call[1]).includes('simulated RFC-64 catalog failure')
+    ))).toBe(true);
   });
 
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {
