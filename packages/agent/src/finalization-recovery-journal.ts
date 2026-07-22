@@ -171,11 +171,7 @@ export class FinalizationRecoveryJournal {
       const existingIndex = document.entries.findIndex((entry) => entry.key === key);
       const existing = existingIndex >= 0 ? document.entries[existingIndex] : undefined;
       const rawMessageBase64 = Buffer.from(input.rawMessage).toString('base64');
-      if (
-        existing
-        && existing.rawMessageBase64 !== rawMessageBase64
-        && input.state === 'raw'
-      ) {
+      if (existing && existing.rawMessageBase64 !== rawMessageBase64) {
         return { changed: false, value: false };
       }
       const next: FinalizationRecoveryEntry = {
@@ -228,34 +224,14 @@ export class FinalizationRecoveryJournal {
   private async mutate<T>(
     operation: (document: JournalDocument) => Promise<{ changed: boolean; value: T }>,
   ): Promise<T> {
-    let resolveResult!: (value: T) => void;
-    let rejectResult!: (reason: unknown) => void;
-    const result = new Promise<T>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
+    const run = this.mutationTail.catch(() => undefined).then(async () => {
+      const document = await this.loadDocument();
+      const outcome = await operation(document);
+      if (outcome.changed) await this.saveDocument(document);
+      return outcome.value;
     });
-    this.mutationTail = this.mutationTail.then(async () => {
-      try {
-        const document = await this.loadDocument();
-        const outcome = await operation(document);
-        if (outcome.changed) await this.saveDocument(document);
-        resolveResult(outcome.value);
-      } catch (error) {
-        rejectResult(error);
-      }
-    }, async () => {
-      // A failed caller operation must not permanently poison later mutations.
-      try {
-        const document = await this.loadDocument();
-        const outcome = await operation(document);
-        if (outcome.changed) await this.saveDocument(document);
-        resolveResult(outcome.value);
-      } catch (error) {
-        rejectResult(error);
-      }
-    });
-    await result;
-    return result;
+    this.mutationTail = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private async loadDocument(): Promise<JournalDocument> {

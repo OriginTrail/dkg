@@ -123,4 +123,41 @@ describe('FinalizationRecoveryJournal', () => {
       rawMessageBase64: Buffer.from([1]).toString('base64'),
     }]);
   });
+
+  it('does not let a conflicting verified duplicate inherit the original source peer', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new FinalizationRecoveryJournal(directory);
+    expect(await journal.upsert(entry(1))).toBe(true);
+    expect(await journal.upsert(entry(1, {
+      state: 'verified',
+      sourcePeerId: '12D3KooWAttacker',
+      rawMessage: Uint8Array.from([9]),
+    }))).toBe(false);
+    expect(await journal.list()).toMatchObject([{
+      state: 'raw',
+      sourcePeerId: '12D3KooWPublisher',
+      rawMessageBase64: Buffer.from([1]).toString('base64'),
+    }]);
+  });
+
+  it('continues serializing mutations after a queued save fails', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new FinalizationRecoveryJournal(directory);
+    const internals = journal as unknown as {
+      saveDocument(document: unknown): Promise<void>;
+    };
+    const saveDocument = internals.saveDocument.bind(journal);
+    let failNextSave = true;
+    internals.saveDocument = async (document) => {
+      if (failNextSave) {
+        failNextSave = false;
+        throw new Error('injected save failure');
+      }
+      await saveDocument(document);
+    };
+
+    await expect(journal.upsert(entry(1))).rejects.toThrow('injected save failure');
+    await expect(journal.upsert(entry(2))).resolves.toBe(true);
+    expect(await journal.list()).toMatchObject([{ kaId: '2' }]);
+  });
 });

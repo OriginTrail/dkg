@@ -94,6 +94,7 @@ export default defineConfig({
       "test/finalization-handler.test.ts",
       "test/finalization-handler-chain-truth.test.ts",
       "test/finalization-handler-defensive-cg-id.test.ts",
+      "test/finalization-recovery.test.ts",
       "test/finalization-recovery-journal.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/swm-slice-ka-bound.test.ts",

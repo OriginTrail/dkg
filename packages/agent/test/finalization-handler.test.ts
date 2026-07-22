@@ -10,13 +10,19 @@ import {
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
+  type EventBus,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   generatedPrivateCatalogFloorQuads,
 } from '@origintrail-official/dkg-publisher';
-import { FinalizationHandler } from '../src/finalization-handler.js';
+import {
+  FinalizationHandler,
+  type MarkContextGraphMetaDirtyFromQuads,
+  type ResolveContextGraphOnChainId,
+} from '../src/finalization-handler.js';
+import type { FinalizationLifecycleLogOptions } from '../src/finalization-lifecycle-logger.js';
 import { ethers } from 'ethers';
 
 const CONTEXT_GRAPH = 'test-contextGraph';
@@ -47,6 +53,35 @@ describe('FinalizationHandler', () => {
   beforeEach(async () => {
     store = new OxigraphStore();
     handler = new FinalizationHandler(store, undefined);
+  });
+
+  it('preserves the exported legacy positional constructor wiring', () => {
+    const eventBus = { emit: () => undefined } as unknown as EventBus;
+    const resolver: ResolveContextGraphOnChainId = async () => '42';
+    const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
+    const lifecycleOptions: FinalizationLifecycleLogOptions = {
+      localPeerId: 'legacy-peer',
+      localNodeIdentityId: '99',
+    };
+    const legacy = new FinalizationHandler(
+      store,
+      undefined,
+      eventBus,
+      resolver,
+      markDirty,
+      lifecycleOptions,
+    );
+    const internals = legacy as unknown as {
+      eventBus: EventBus;
+      resolveContextGraphOnChainId: ResolveContextGraphOnChainId;
+      markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads;
+      lifecycle: { options: FinalizationLifecycleLogOptions };
+    };
+
+    expect(internals.eventBus).toBe(eventBus);
+    expect(internals.resolveContextGraphOnChainId).toBe(resolver);
+    expect(internals.markContextGraphMetaDirtyFromQuads).toBe(markDirty);
+    expect(internals.lifecycle.options).toBe(lifecycleOptions);
   });
 
   it('deduplicates messages with same UAL and txHash', async () => {
