@@ -499,6 +499,19 @@ export function createListContextGraphsCacheInvalidatingStore(
             () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
           )
       : undefined,
+    // #1863 — the async-lift publisher persists a job transition via this atomic
+    // single-subject replace. Preserve the optional capability through the agent
+    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
+    // makes every capable production backend appear unsupported, so the publisher
+    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
+    replaceSubject: innerStore.replaceSubject
+      ? (graphUri, subject, quads, options) =>
+          invalidateAfterMutation(
+            () => innerStore.replaceSubject!(graphUri, subject, quads, options),
+            () => true,
+            () => markProjectionDirty?.(quads),
+          )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

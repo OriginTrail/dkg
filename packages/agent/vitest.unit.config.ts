@@ -116,6 +116,7 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
