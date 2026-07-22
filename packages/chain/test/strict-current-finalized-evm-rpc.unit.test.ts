@@ -37,8 +37,8 @@ import {
 } from '../src/strict-current-finalized-evm-rpc.js';
 import {
   executeStrictFinalizedAnchorPolicyV1,
-  parseFinalizedAnchor,
-} from '../src/strict-current-finalized-evm-transport.js';
+} from '../src/strict-current-finalized-evm-lifecycle.js';
+import { parseStrictFinalizedAnchorV1 } from '../src/strict-current-finalized-evm-rpc-client.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,
@@ -85,7 +85,7 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
   });
 
   it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
-    const anchor = parseFinalizedAnchor(
+    const anchor = parseStrictFinalizedAnchorV1(
       { number: '0x7b', hash: BLOCK_HASH },
       'generic void result test anchor',
     );

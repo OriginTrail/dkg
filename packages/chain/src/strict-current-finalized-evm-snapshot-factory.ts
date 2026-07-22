@@ -1,6 +1,6 @@
 import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
 import type { StrictCurrentFinalizedEvmRpcConfigV1 } from './strict-current-finalized-evm-rpc.js';
-import { snapshotConfig } from './strict-current-finalized-evm-transport.js';
+import { snapshotStrictCurrentFinalizedEvmConfigV1 } from './strict-current-finalized-evm-config.js';
 import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-finalized-evm-snapshot-rpc.js';
 
 /**
@@ -11,5 +11,7 @@ import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-fina
 export function createStrictCurrentFinalizedEvmSnapshotScopeV1(
   input: StrictCurrentFinalizedEvmRpcConfigV1,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
-  return createStrictFinalizedSnapshotRpcRuntimeV1(snapshotConfig(input));
+  return createStrictFinalizedSnapshotRpcRuntimeV1(
+    snapshotStrictCurrentFinalizedEvmConfigV1(input),
+  );
 }

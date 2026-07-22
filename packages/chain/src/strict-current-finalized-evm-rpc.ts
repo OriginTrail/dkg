@@ -1,9 +1,9 @@
 /**
  * Public one-shot strict current-finalized RPC surface.
  *
- * Transport orchestration and shared snapshot internals intentionally live in
- * `strict-current-finalized-evm-transport.ts`; this module exposes only the
- * supported one-shot factories, configuration, and read model.
+ * This module exposes only the supported one-shot factories, configuration,
+ * and read model. Config, endpoint lifecycle, RPC framing, and scoped snapshot
+ * transport remain cohesive package-internal modules.
  */
 export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
