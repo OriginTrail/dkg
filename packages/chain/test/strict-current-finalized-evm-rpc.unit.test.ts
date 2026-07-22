@@ -36,6 +36,10 @@ import {
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
 import {
+  executeStrictFinalizedAnchorPolicyV1,
+} from '../src/strict-current-finalized-evm-lifecycle.js';
+import { parseStrictFinalizedAnchorV1 } from '../src/strict-current-finalized-evm-rpc-client.js';
+import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,
   sendJsonRpcResult as sendResult,
@@ -78,6 +82,20 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       .toBe(CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1);
     expect(CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1)
       .toBe(CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1);
+  });
+
+  it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
+    const anchor = parseStrictFinalizedAnchorV1(
+      { number: '0x7b', hash: BLOCK_HASH },
+      'generic void result test anchor',
+    );
+    await expect(executeStrictFinalizedAnchorPolicyV1<void>({
+      blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+      anchor,
+      executeAtReference: async () => undefined,
+      readPostAnchor: async () => anchor,
+      anchorMismatchMessage: 'generic void result anchor changed',
+    })).resolves.toBeUndefined();
   });
 
   it('executes multiple ABI reads at one EIP-1898 anchor and checks shared code once', async () => {
@@ -532,6 +550,39 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       'eth_getCode',
       'eth_call',
     ]);
+  });
+
+  it('classifies malformed deployed-code bytes as RPC failure and fails over', async () => {
+    const malformed = await startRpcServer(successfulHandler({ code: '0x0' }));
+    const backup = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [malformed.url, backup.url],
+    });
+
+    await expect(adapter(fixedRequest())).resolves.toMatchObject({
+      chainId: CHAIN_ID,
+      blockHash: BLOCK_HASH,
+    });
+    expect(malformed.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+    ]);
+    expect(backup.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
+
+    const terminal = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [malformed.url],
+    });
+    await expect(terminal(fixedRequest())).rejects.toMatchObject({
+      code: 'rpc-unavailable',
+    });
   });
 
   it('never follows a redirect to an endpoint outside trusted local configuration', async () => {
