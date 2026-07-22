@@ -47,10 +47,12 @@ export {
 export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
   createFinalizedVmChainScannerV1,
+  scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedVmChainCandidateV1,
   type FinalizedVmChainInventoryV1,
   type FinalizedVmChainScanRequestV1,
   type FinalizedVmChainScannerConfigV1,
+  type FinalizedVmChainSessionScannerConfigV1,
   type FinalizedVmChainScannerV1,
 } from './finalized-vm-chain-scanner.js';
 export {
