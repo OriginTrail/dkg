@@ -271,14 +271,6 @@ async function scanPinnedInventory(
         cause,
       );
     }
-    if (
-      assertion.attestedAuthorAddress !== null
-      && assertion.attestedAuthorAddress !== identity.agentAddress
-    ) {
-      throw malformedReturn(
-        `Finalized VM ordinal ${ordinal} author attestation differs from its packed KA identity`,
-      );
-    }
     return Object.freeze({
       chainId: config.chainId,
       contractAddress: config.contextGraphStorageAddress,

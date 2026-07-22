@@ -293,7 +293,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
     }
   });
 
-  it('keeps absent chain author/publisher evidence explicit and rejects identity drift', async () => {
+  it('keeps absent evidence explicit and preserves transferred KA namespace separately', async () => {
     const noEvidence = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
       activeCountResults(1n),
       [uintResult(KA_A)],
@@ -306,15 +306,22 @@ describe('RFC-64 finalized VM chain scanner', () => {
       rows: [{ attestedAuthorAddress: null, publisherAddress: null }],
     });
 
-    const wrongAuthor = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
+    const transferredUpdate = createFinalizedVmChainScannerV1(config(scriptedSnapshot([
       activeCountResults(1n),
       [uintResult(KA_A)],
       assertionResults(1n, ROOT_A, AUTHOR_B, PUBLISHER_A),
     ])));
-    await expect(wrongAuthor({
+    await expect(transferredUpdate({
       contextGraphId: CG_ID,
       signal: new AbortController().signal,
-    })).rejects.toMatchObject({ code: 'malformed-return' });
+    })).resolves.toMatchObject({
+      rows: [{
+        kaId: KA_A.toString(),
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`,
+        authorAddress: AUTHOR_A,
+        attestedAuthorAddress: AUTHOR_B,
+      }],
+    });
   });
 
   it('scans inside a caller-owned snapshot session for same-anchor runtime composition', async () => {
