@@ -167,6 +167,11 @@ export interface Rfc64AppliedCatalogHeadRefV1 {
   readonly authorAddress: EvmAddressV1;
 }
 
+export type {
+  SynchronizeRfc64PublicCatalogFromProviderParamsV1,
+  SynchronizeRfc64PublicCatalogFromProviderResultV1,
+} from './dkg-agent-rfc64-catalog-sync.js';
+
 export {
   RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
   type Rfc64PublicCatalogReconciliationFailureV1,
@@ -280,6 +285,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      currentHeadDiscovery: {
+        readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
+          const applied = persistence.inventory.readAppliedCatalogHeadV1(
+            computeAuthorCatalogScopeDigestV1(trustedScope),
+            trustedScope.authorAddress,
+          );
+          return applied?.currentCatalogHeadDigest ?? null;
+        },
+      },
       receiver: {
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
@@ -779,6 +793,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           contentTransport: clients.contentTransport,
           controlObjects: persistence.controlObjects,
           inventory: persistence.inventory,
+          kaBundles: persistence.kaBundles,
           store: this.store,
           beforeAppliedHeadCommit: finalizedVmPrecommit,
           transportTimeoutMs: clients.transportTimeoutMs,

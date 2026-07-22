@@ -18,6 +18,7 @@ import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+  ASSERTION_SEAL_PREDICATES,
   DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   ZERO_DIGEST32_V1,
@@ -83,6 +84,7 @@ import type {
   AppliedCatalogHeadSnapshotV1,
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
+import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
 import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
@@ -128,6 +130,8 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1 {
     Rfc64InventoryV1OperationsV1,
     'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
   >;
+  /** Durable immutable cache that makes every applied receiver a provider. */
+  readonly kaBundles: Pick<Rfc64KaBundleOperationsV1, 'putKaBundle'>;
   readonly store: TripleStore;
   /**
    * Final fail-closed same-process barrier. It runs after the exact SWM
@@ -261,6 +265,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       || typeof options.controlObjects?.getVerifiedObjectByDigest !== 'function'
       || typeof options.inventory?.readAppliedCatalogHeadV1 !== 'function'
       || typeof options.inventory?.compareAndSwapAppliedCatalogHeadV1 !== 'function'
+      || typeof options.kaBundles?.putKaBundle !== 'function'
       || typeof options.store?.query !== 'function'
       || (
         options.beforeAppliedHeadCommit !== undefined
@@ -554,7 +559,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       catalogScopeDigest,
       head.payload.authorAddress,
     );
-    const replay = assertMonotonicSuccessorHistory(currentAppliedHead, head, expectedRowCount);
+    const historyDisposition = classifySuccessorHistory(
+      currentAppliedHead,
+      head,
+      expectedRowCount,
+    );
     const scope = nativeScope(announcement, trustedCatalogScope, head);
     const fetchedDelegation = await this.fetchDirectAuthorCatalogIssuerDelegation(
       remotePeerId,
@@ -664,6 +673,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       readonly projectionMetadata: ReturnType<typeof readVerifiedCgSharedProjectionMetadataV1>;
       readonly sealBinding: VerifiedCatalogSealBindingSnapshotV1;
       readonly sealBindingCapability: VerifiedCatalogSealBindingV1;
+      readonly bundleBytes: Uint8Array;
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
@@ -763,6 +773,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         projectionMetadata,
         sealBinding,
         sealBindingCapability,
+        bundleBytes: new Uint8Array(bundle),
         projectionBytes,
         expectedEvidence,
       }));
@@ -792,17 +803,51 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     // predecessor after every target row/bundle has verified, but before the
     // first semantic mutation. This also makes exact-head replay a repair path
     // for a prior indeterminate removal failure.
-    const predecessorRows = await loadExactAppliedPredecessorRows(
-      this.options.controlObjects,
-      head,
-      trustedCatalogScope,
-    );
+    // Every bounded successor is a complete signed exact set. A receiver with
+    // no applied-head record can therefore initialize directly from the
+    // authenticated current snapshot without replaying historical versions.
+    // Existing receivers still reconstruct their exact durable predecessor so
+    // only rows owned by that applied closure may be removed.
+    const predecessorRows = historyDisposition === 'cold-bootstrap'
+      ? Object.freeze([]) as readonly Readonly<AuthorCatalogRowV1>[]
+      : await loadExactAppliedPredecessorRows(
+        this.options.controlObjects,
+        head,
+        trustedCatalogScope,
+      );
+    if (historyDisposition === 'cold-bootstrap') {
+      await assertColdBootstrapHasNoOmittedSemanticStateV1(
+        this.options.store,
+        trustedCatalogScope,
+        preparedRows.map((prepared) => transitionLocationFromTarget(
+          head,
+          prepared.row,
+          prepared.sealBinding,
+        )),
+      );
+    }
     const targetKaIds = new Set(preparedRows.map(({ row }) => row.kaId));
     const plannedRemovals = predecessorRows
       .filter((row) => !targetKaIds.has(row.kaId))
       .map((row) => planOwnedRowRemoval(trustedCatalogScope, row));
 
     try {
+      // An applied-head pointer advertises this node as a current provider, so
+      // every exact bundle must cross its immutable durability barrier before
+      // semantic activation and before that pointer can advance.
+      for (const prepared of preparedRows) {
+        const receipt = await this.options.kaBundles.putKaBundle({
+          blobDigest: prepared.row.transfer.blobDigest,
+          bundleBytes: prepared.bundleBytes,
+        });
+        if (
+          receipt.durable !== true
+          || receipt.blobDigest !== prepared.row.transfer.blobDigest
+          || receipt.byteLength.toString() !== prepared.row.transfer.byteLength
+        ) {
+          throw new Error('KA-bundle store returned a different durable receipt');
+        }
+      }
       await this.options.controlObjects.stageVerifiedObjects([
         fetchedDelegation,
         fetchedHead,
@@ -810,7 +855,11 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         fetchedBucket,
       ]);
     } catch (cause) {
-      fail('catalog-native-receiver-catalog', 'verified catalog objects could not be staged', cause);
+      fail(
+        'catalog-native-receiver-catalog',
+        'verified catalog objects or KA bundles could not be staged',
+        cause,
+      );
     }
 
     const transitionJournal = await snapshotSemanticTransitionV1(
@@ -922,7 +971,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     }
 
     let appliedHeadStatus: 'applied' | 'existing';
-    if (replay) {
+    if (historyDisposition === 'replay') {
       if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
         fail(
           'catalog-native-receiver-history',
@@ -935,7 +984,9 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
           catalogScopeDigest,
           authorAddress: head.payload.authorAddress,
-          expectedCurrentCatalogHeadDigest: head.payload.previousHeadDigest,
+          expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
+            ? null
+            : head.payload.previousHeadDigest,
           currentCatalogHeadDigest: head.objectDigest as Digest32V1,
           appliedInventoryDigest: completion.inventoryDigest,
           catalogVersion: head.payload.version,
@@ -1227,17 +1278,17 @@ function isExactEmptyGenesisSnapshot(
     && current.inventoryRowCount === '0';
 }
 
-function assertMonotonicSuccessorHistory(
+type Rfc64SuccessorHistoryDispositionV1 =
+  | 'cold-bootstrap'
+  | 'monotonic-successor'
+  | 'replay';
+
+function classifySuccessorHistory(
   current: AppliedCatalogHeadSnapshotV1 | null,
   head: SignedAuthorCatalogHeadEnvelopeV1,
   expectedRowCount: number,
-): boolean {
-  if (current === null) {
-    fail(
-      'catalog-native-receiver-history',
-      'successor requires a durable initialized predecessor head',
-    );
-  }
+): Rfc64SuccessorHistoryDispositionV1 {
+  if (current === null) return 'cold-bootstrap';
   if (current.currentCatalogHeadDigest === head.objectDigest) {
     if (
       current.catalogVersion !== head.payload.version
@@ -1245,7 +1296,7 @@ function assertMonotonicSuccessorHistory(
     ) {
       fail('catalog-native-receiver-history', 'replayed head differs from its durable applied state');
     }
-    return true;
+    return 'replay';
   }
   if (
     current.currentCatalogHeadDigest !== head.payload.previousHeadDigest
@@ -1256,7 +1307,7 @@ function assertMonotonicSuccessorHistory(
       'successor does not monotonically extend the durable current head',
     );
   }
-  return false;
+  return 'monotonic-successor';
 }
 
 function assertBoundedSuccessorHead(head: SignedAuthorCatalogHeadEnvelopeV1): number {
@@ -1526,6 +1577,84 @@ interface Rfc64SemanticTransitionPreimageV1
   extends Rfc64SemanticTransitionLocationV1 {
   readonly graphQuads: readonly Readonly<Quad>[];
   readonly sealQuads: readonly Readonly<Quad>[];
+}
+
+/**
+ * Missing durable history is not proof that the semantic store is empty: a
+ * process may have died after atomic activation and before the applied-head
+ * CAS. Cold bootstrap is therefore allowed only when every materialization
+ * already present for this exact author/root scope belongs to the fetched
+ * target. Matching target rows are safe repair preimages; any omitted graph or
+ * author-seal subject makes the successor fail closed before mutation/CAS.
+ */
+async function assertColdBootstrapHasNoOmittedSemanticStateV1(
+  store: TripleStore,
+  scope: Readonly<AuthorCatalogScopeV1>,
+  targets: readonly Readonly<Rfc64SemanticTransitionLocationV1>[],
+): Promise<void> {
+  const allowedGraphs = new Set(targets.map((target) => target.swmGraph));
+  const allowedSealSubjects = new Set(targets.map((target) => target.sealSubject));
+  const swmPrefix = `${contextGraphWorkspaceGraphUri(scope.contextGraphId)}`
+    + `/${scope.authorAddress}/`;
+  let existingGraphs: string[];
+  try {
+    existingGraphs = store.listGraphsByPrefix === undefined
+      ? (await store.listGraphs({ source: 'rfc64-cold-bootstrap-namespace-proof' }))
+        .filter((graph) => graph.startsWith(swmPrefix))
+      : await store.listGraphsByPrefix(
+        swmPrefix,
+        { source: 'rfc64-cold-bootstrap-namespace-proof' },
+      );
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap could not prove the author SWM namespace is exact',
+      cause,
+    );
+  }
+  if (
+    existingGraphs.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+    || existingGraphs.some((graph) => !allowedGraphs.has(graph))
+  ) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap found author SWM materialization omitted by the fetched exact head',
+    );
+  }
+
+  const metaGraph = targets[0]?.sealMetaGraph;
+  if (metaGraph === undefined) {
+    fail('catalog-native-receiver-history', 'cold successor has no semantic target scope');
+  }
+  let sealSubjects;
+  try {
+    sealSubjects = await store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { `
+        + `?s <${ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS}> `
+        + `${JSON.stringify(scope.authorAddress)} } } `
+        + `LIMIT ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1}`,
+      {
+        source: 'rfc64-cold-bootstrap-namespace-proof',
+        maxResponseBytes: 1024 * 1024,
+      },
+    );
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap could not prove the author-seal namespace is exact',
+      cause,
+    );
+  }
+  if (
+    sealSubjects.type !== 'bindings'
+    || sealSubjects.bindings.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+    || sealSubjects.bindings.some(({ s }) => typeof s !== 'string' || !allowedSealSubjects.has(s))
+  ) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap found author-seal materialization omitted by the fetched exact head',
+    );
+  }
 }
 
 function transitionLocationFromRemoval(

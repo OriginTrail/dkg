@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * RFC-64 public/open current-head discovery transport.
+ * RFC-64 public-root current-head discovery transport.
  *
  * Discovery is deliberately a narrow hint protocol. A requester names one
- * independently accepted public/open catalog scope and a provider resolves it
+ * independently accepted public-root catalog scope and a provider resolves it
  * through a trusted semantic-current-head reader. Before advertising the
  * result, the provider re-reads and verifies the exact signed head object. The
  * requester must still exact-fetch and verify that object before treating the
@@ -159,7 +159,11 @@ export interface Rfc64PublicCatalogCurrentHeadDiscoveryTransportOptionsV1 {
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
   ) => Promise<Digest32V1 | null>;
   /** Must consult accepted current policy state, never echo the wire digest. */
-  readonly authorizeOpenCatalogOperation: (
+  readonly authorizeCatalogOperation?: (
+    input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  ) => Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null>;
+  /** @deprecated Use authorizeCatalogOperation. */
+  readonly authorizeOpenCatalogOperation?: (
     input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
   ) => Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null>;
   readonly verifyIssuerSignature: (
@@ -197,6 +201,9 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1 extends Error {
  */
 export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
   #started = false;
+  readonly #authorizeCatalogOperation: (
+    input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+  ) => Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null>;
 
   constructor(
     private readonly router: ProtocolRouter,
@@ -208,9 +215,7 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     if (typeof options.readCurrentAppliedCatalogHeadDigest !== 'function') {
       fail('catalog-discovery-input', 'readCurrentAppliedCatalogHeadDigest must be a function');
     }
-    if (typeof options.authorizeOpenCatalogOperation !== 'function') {
-      fail('catalog-discovery-input', 'authorizeOpenCatalogOperation must be a function');
-    }
+    this.#authorizeCatalogOperation = normalizeCurrentHeadDiscoveryAuthorizerV1(options);
     if (typeof options.verifyIssuerSignature !== 'function') {
       fail('catalog-discovery-input', 'verifyIssuerSignature must be a function');
     }
@@ -412,12 +417,12 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
     }) satisfies Rfc64PublicCatalogCurrentHeadAuthorizationInputV1;
     let authorization: Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null;
     try {
-      authorization = await this.options.authorizeOpenCatalogOperation(input);
+      authorization = await this.#authorizeCatalogOperation(input);
     } catch (cause) {
-      fail('catalog-discovery-policy-denied', 'open catalog discovery authorization failed', cause);
+      fail('catalog-discovery-policy-denied', 'public catalog discovery authorization failed', cause);
     }
     if (authorization === null || authorization.accessPolicy !== 0) {
-      fail('catalog-discovery-policy-denied', 'current-head discovery is not authorized by open policy');
+      fail('catalog-discovery-policy-denied', 'current-head discovery is not authorized by public policy');
     }
     try {
       assertCanonicalDigest(authorization.policyDigest, 'authorized policyDigest');
@@ -435,6 +440,25 @@ export class Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 {
       fail('catalog-discovery-state', 'RFC-64 current-head discovery transport is not started');
     }
   }
+}
+
+function normalizeCurrentHeadDiscoveryAuthorizerV1(
+  options: Rfc64PublicCatalogCurrentHeadDiscoveryTransportOptionsV1,
+): (
+  input: Rfc64PublicCatalogCurrentHeadAuthorizationInputV1,
+) => Promise<Rfc64PublicCatalogCurrentHeadAuthorizationV1 | null> {
+  const current = options.authorizeCatalogOperation;
+  const legacyOpen = options.authorizeOpenCatalogOperation;
+  if (
+    (typeof current !== 'function' && typeof legacyOpen !== 'function')
+    || (typeof current === 'function' && typeof legacyOpen === 'function')
+  ) {
+    fail(
+      'catalog-discovery-input',
+      'exactly one catalog access-policy authorizer must be configured',
+    );
+  }
+  return typeof current === 'function' ? current : legacyOpen!;
 }
 
 export function encodeRfc64PublicCatalogCurrentHeadQueryV1(

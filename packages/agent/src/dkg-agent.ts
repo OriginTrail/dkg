@@ -406,6 +406,7 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
+import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -3057,5 +3058,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods]);
