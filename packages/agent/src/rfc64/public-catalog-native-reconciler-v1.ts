@@ -121,6 +121,40 @@ export function deriveRfc64PublicOpenCatalogScopeV1(
   });
 }
 
+/**
+ * Derive a public root catalog scope for any accepted public policy cell,
+ * including finalized-chain policies and non-owner SWM authors. Principal
+ * authorization remains the accepted-policy registry's responsibility; this
+ * pure helper binds only the graph/governance/lane/era identity.
+ */
+export function deriveRfc64PublicRootCatalogScopeV1(
+  claim: Rfc64PublicOpenCatalogScopeClaimV1,
+  acceptedPolicy: ContextGraphPolicyV1,
+): AuthorCatalogScopeV1 {
+  if (
+    acceptedPolicy.accessPolicy !== 0
+    || acceptedPolicy.networkId !== claim.networkId
+    || acceptedPolicy.contextGraphId !== claim.contextGraphId
+    || acceptedPolicy.era !== claim.catalogEra
+    || claim.subGraphName !== null
+  ) {
+    throw new Error(
+      'RFC-64 public catalog claim is not bound to the accepted public root policy',
+    );
+  }
+  return Object.freeze({
+    networkId: acceptedPolicy.networkId,
+    contextGraphId: acceptedPolicy.contextGraphId,
+    governanceChainId: acceptedPolicy.governanceChainId,
+    governanceContractAddress: acceptedPolicy.governanceContractAddress,
+    ownershipTransitionDigest: acceptedPolicy.ownershipTransitionDigest,
+    subGraphName: null,
+    authorAddress: claim.authorAddress,
+    era: acceptedPolicy.era,
+    bucketCount: '1' as CountV1,
+  });
+}
+
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
   implements Rfc64PublicCatalogReceiverReconcilerV1 {
   constructor(

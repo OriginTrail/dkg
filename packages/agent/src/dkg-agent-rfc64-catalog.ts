@@ -81,6 +81,9 @@ import {
   Rfc64PublicCatalogNativeReceiverV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
+import type {
+  Rfc64PublicCatalogCurrentHeadScopeV1,
+} from './rfc64/public-catalog-current-head-discovery-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
@@ -165,6 +168,20 @@ export interface Rfc64StagedCatalogIssuerDelegationRefV1 {
 export interface Rfc64AppliedCatalogHeadRefV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly authorAddress: EvmAddressV1;
+}
+
+/** Explicit provider + independently accepted public-root scope for a cold pull. */
+export interface SynchronizeRfc64PublicCatalogFromProviderParamsV1 {
+  readonly remotePeerId: string;
+  readonly scope: Rfc64PublicCatalogCurrentHeadScopeV1;
+  readonly signal?: AbortSignal;
+}
+
+/** Exact durable postcondition of a successful provider synchronization. */
+export interface SynchronizeRfc64PublicCatalogFromProviderResultV1
+  extends AppliedCatalogHeadSnapshotV1 {
+  readonly providerPeerId: string;
+  readonly signatureVariantDigest: Digest32V1;
 }
 
 export {
@@ -280,6 +297,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority,
       native: this.createRfc64PublicCatalogNativeOptionsV1(),
+      currentHeadDiscovery: {
+        readCurrentAppliedCatalogHeadDigest: async (trustedScope) => {
+          const applied = persistence.inventory.readAppliedCatalogHeadV1(
+            computeAuthorCatalogScopeDigestV1(trustedScope),
+            trustedScope.authorAddress,
+          );
+          return applied?.currentCatalogHeadDigest ?? null;
+        },
+      },
       receiver: {
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(
@@ -404,6 +430,56 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     input: AnnounceRfc64PublicCatalogHeadInputV1,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
     return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead(input);
+  }
+
+  /**
+   * Pull one provider's authenticated current public-root head and run it
+   * through the ordinary durable receiver. `null` means the provider has no
+   * applied head for the accepted scope. A non-null return proves the exact
+   * discovered head is now the receiver's durable applied-head post-read.
+   */
+  async synchronizeRfc64PublicCatalogFromProviderV1(
+    this: DKGAgent,
+    params: SynchronizeRfc64PublicCatalogFromProviderParamsV1,
+  ): Promise<SynchronizeRfc64PublicCatalogFromProviderResultV1 | null> {
+    const providerPeerId = params.remotePeerId;
+    const scope = params.scope;
+    const signal = params.signal;
+    const synchronized = await this.requireRfc64PublicCatalogServiceV1()
+      .synchronizeCurrentCatalogHead({
+        remotePeerId: providerPeerId,
+        scope,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    if (synchronized === null) return null;
+    const catalogScope = deriveAuthorCatalogScopeFromHeadV1(
+      synchronized.head.envelope.payload,
+    );
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(catalogScope);
+    const applied = this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      synchronized.announcement.authorAddress,
+    ) ?? null;
+    if (
+      applied === null
+      || applied.currentCatalogHeadDigest
+        !== synchronized.announcement.catalogHeadObjectDigest
+      || applied.catalogVersion !== synchronized.announcement.catalogVersion
+    ) {
+      const failure = this.readRfc64PublicCatalogReconciliationFailureV1(
+        synchronized.announcement.catalogHeadObjectDigest,
+      );
+      throw new Error(
+        failure === null
+          ? 'RFC-64 current public catalog head did not reach its durable applied postcondition'
+          : `RFC-64 current public catalog head reconciliation failed (${failure.errorCode ?? failure.errorName})`,
+      );
+    }
+    return Object.freeze({
+      ...applied,
+      providerPeerId,
+      signatureVariantDigest: synchronized.announcement.signatureVariantDigest,
+    });
   }
 
   /**
@@ -779,6 +855,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           contentTransport: clients.contentTransport,
           controlObjects: persistence.controlObjects,
           inventory: persistence.inventory,
+          kaBundles: persistence.kaBundles,
           store: this.store,
           beforeAppliedHeadCommit: finalizedVmPrecommit,
           transportTimeoutMs: clients.transportTimeoutMs,

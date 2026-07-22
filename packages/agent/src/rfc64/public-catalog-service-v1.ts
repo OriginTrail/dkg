@@ -85,6 +85,7 @@ import {
 } from './public-catalog-issuer-delegation-v1.js';
 import {
   deriveRfc64PublicOpenCatalogScopeV1,
+  deriveRfc64PublicRootCatalogScopeV1,
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
 import type {
@@ -227,6 +228,14 @@ export interface DiscoveredRfc64PublicCatalogCurrentHeadV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly head: FetchedRfc64PublicCatalogHeadV1;
 }
+
+/**
+ * A current head that was authenticated through discovery and handed to the
+ * receiver scheduler. The receiver remains the only owner of semantic
+ * activation and the durable applied-head commit.
+ */
+export type SynchronizedRfc64PublicCatalogCurrentHeadV1 =
+  DiscoveredRfc64PublicCatalogCurrentHeadV1;
 
 export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly started: boolean;
@@ -602,6 +611,39 @@ export class Rfc64PublicCatalogServiceV1 {
     return Object.freeze({ announcement, head });
   }
 
+  /**
+   * Discover one provider's current public/open head, enqueue that exact
+   * authenticated head through the ordinary receiver, and wait for all
+   * scheduled reconciliation work to drain. A caller must still inspect the
+   * durable applied-head record: receiver failures are reported through its
+   * bounded diagnostic channel rather than thrown from the scheduler.
+   *
+   * Once discovery has completed, reconciliation is deliberately durable work
+   * owned by the receiver lifecycle. Aborting the caller's signal after that
+   * boundary does not cancel a semantic transition already accepted by the
+   * scheduler; service close remains the cancellation authority.
+   */
+  async synchronizeCurrentCatalogHead(
+    input: DiscoverRfc64PublicCatalogCurrentHeadInputV1,
+  ): Promise<SynchronizedRfc64PublicCatalogCurrentHeadV1 | null> {
+    // Snapshot caller-owned values before discovery's first await so a Proxy or
+    // switching accessor cannot redirect the later scheduled fetch to another
+    // provider.
+    const remotePeerId = input.remotePeerId;
+    const scope = input.scope;
+    const signal = input.signal;
+    const discovered = await this.discoverCurrentCatalogHead({
+      remotePeerId,
+      scope,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (discovered === null) return null;
+    if (signal?.aborted) throw signal.reason;
+    this.#receiver.schedule(discovered.announcement, remotePeerId);
+    await this.#receiver.whenIdle();
+    return discovered;
+  }
+
   /** Idle-await the receiver (tests / graceful shutdown coordination). */
   whenReceiverIdle(): Promise<void> {
     return this.#receiver.whenIdle();
@@ -719,10 +761,24 @@ export class Rfc64PublicCatalogServiceV1 {
       );
     }
     try {
-      return deriveRfc64PublicOpenCatalogScopeV1(input, record.policy);
+      if (!this.#policies.isSwmAuthorAuthorized({
+        networkId: input.networkId,
+        contextGraphId: input.contextGraphId,
+        policyDigest: record.policyDigest,
+        authorAddress: input.authorAddress,
+      })) {
+        throw new Error('catalog author is not authorized by the accepted policy');
+      }
+      return record.policy.source.kind === 'owner-signed-unregistered'
+        && record.policy.governanceChainId === null
+        && record.policy.governanceContractAddress === null
+        && record.policy.ownershipTransitionDigest === null
+        && record.policy.source.ownerAddress === input.authorAddress
+        ? deriveRfc64PublicOpenCatalogScopeV1(input, record.policy)
+        : deriveRfc64PublicRootCatalogScopeV1(input, record.policy);
     } catch (cause) {
       throw new Error(
-        'RFC-64 current-head query is not bound to the accepted public/open root policy',
+        'RFC-64 current-head query is not bound to the accepted public root policy',
         { cause },
       );
     }

@@ -545,6 +545,115 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
+  it('cold-starts after publication from a provider current-head snapshot', async () => {
+    const [author, provider] = await Promise.all([
+      startNativeAgent('cold-author'),
+      startNativeAgent('cold-provider'),
+    ]);
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, provider);
+
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [provider.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    const successor = await author.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assertionCoordinate: 'cold-current-snapshot' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(7n),
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [provider.peerId],
+    });
+    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(provider.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+
+    // The third agent does not exist until after the successor is durable on
+    // the provider, so it cannot have observed either publication hint.
+    const cold = await startNativeAgent('cold-late-receiver');
+    cold.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    expect(cold.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    await connectBothWays(provider, cold);
+
+    const synchronized = await cold.synchronizeRfc64PublicCatalogFromProviderV1({
+      remotePeerId: provider.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    });
+    expect(synchronized).toMatchObject({
+      providerPeerId: provider.peerId,
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+      currentCatalogHeadDigest: successor.headObjectDigest,
+      signatureVariantDigest: successor.signatureVariantDigest,
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(cold.readRfc64PublicCatalogReconciliationFailureV1(
+      successor.headObjectDigest,
+    )).toBeNull();
+    expect(cold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )).toMatchObject({
+      catalogHeadDigest: successor.headObjectDigest,
+      inventoryRowCount: 1,
+      activatedTripleCount: 2,
+      removedRowCount: 0,
+      appliedHeadStatus: 'applied',
+    });
+    expect(cold.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
+      scheduled: 1,
+      applied: 1,
+      failed: 0,
+    });
+
+    const swmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.SharedWorkingMemory,
+      AUTHOR,
+      7,
+    );
+    await expect((cold as any).store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'bindings',
+      bindings: expect.arrayContaining([
+        expect.objectContaining({ s: 'https://example.org/alice' }),
+      ]),
+    });
+  }, 60_000);
+
   it('materializes finalized VM through production two-agent wiring before applying the head', async () => {
     const kaNumber = 7n;
     const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();

@@ -845,6 +845,32 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
   }, 30_000);
 
+  it('withholds staging, semantic mutation, and head CAS when verified bundle retention fails', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const putKaBundle = vi.fn(async () => {
+      throw new Error('simulated durable bundle-store failure');
+    });
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      fixture.receiverStore,
+      { putKaBundle },
+    );
+
+    await expect(fixture.synchronize(
+      fixture.announcement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-catalog' });
+    expect(putKaBundle).toHaveBeenCalledTimes(1);
+    expect(observed.stageVerifiedObjects).not.toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.genesis.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(0);
+  }, 30_000);
+
   it('rejects a governed-scope genesis under the trusted null-governance policy before any mutation', async () => {
     const fixture = await setupLiveReceiver();
     const observed = fixture.createCasObservedReceiver();
@@ -987,6 +1013,10 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const restartedReceiver = fixture.createReceiver(
       reopened.inventory,
       reopened.controlObjects,
+      undefined,
+      undefined,
+      undefined,
+      reopened.kaBundles,
     );
 
     await expect(fixture.bootstrap(
@@ -1807,18 +1837,24 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     },
     store: TripleStore = receiverStore,
     beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
+    kaBundles: Pick<Rfc64PersistenceV1['kaBundles'], 'putKaBundle'> =
+      receiverPersistence.kaBundles,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
     controlObjects,
     inventory,
+    kaBundles,
     store,
     beforeAppliedHeadCommit,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<
     Rfc64PublicCatalogNativeTransportV1,
     'fetchCatalogObject' | 'fetchKaBundle'
-  >, store: TripleStore = receiverStore) => {
+  >, store: TripleStore = receiverStore, kaBundles: Pick<
+    Rfc64PersistenceV1['kaBundles'],
+    'putKaBundle'
+  > = receiverPersistence.kaBundles) => {
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
         receiverPersistence.inventory,
@@ -1842,7 +1878,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
             receiverPersistence.inventory,
           ),
         compareAndSwapAppliedCatalogHeadV1,
-      }, { stageVerifiedObjects, getVerifiedObjectByDigest }, contentTransport, store),
+      }, {
+        stageVerifiedObjects,
+        getVerifiedObjectByDigest,
+      }, contentTransport, store, undefined, kaBundles),
     });
   };
   const receiver = createReceiver(receiverPersistence.inventory);

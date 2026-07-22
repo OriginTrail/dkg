@@ -599,7 +599,7 @@ describe('RFC-64 public catalog current-head discovery v1', () => {
     await expect(service.discoverCurrentCatalogHead({
       remotePeerId: 'unreachable-peer',
       scope: Object.freeze({ ...discoveryScope(), subGraphName: 'nested' as const }),
-    })).rejects.toThrow(/accepted public\/open root policy/);
+    })).rejects.toThrow(/accepted public root policy/);
   });
 
   it('round-trips only exact canonical query fields', () => {
