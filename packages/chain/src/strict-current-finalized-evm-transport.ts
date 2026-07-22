@@ -1,5 +1,7 @@
 // Public one-shot orchestration. Cohesive config, lifecycle, JSON-RPC, and
 // snapshot transport concerns live in their own package-internal modules.
+import type { ChainIdV1 } from '@origintrail-official/dkg-core';
+
 import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
@@ -27,6 +29,7 @@ import {
   createStrictFinalizedEndpointRunnerV1,
   executeStrictFinalizedAnchorPolicyV1,
   settleStrictFinalizedParallelBatchV1,
+  type StrictFinalizedEndpointRunnerMessagesV1,
 } from './strict-current-finalized-evm-lifecycle.js';
 import {
   parseStrictFinalizedAnchorV1,
@@ -93,12 +96,12 @@ export function createStrictCurrentFinalizedEvmReadV1(
 ): StrictCurrentFinalizedEvmReadV1 {
   const config = snapshotStrictCurrentFinalizedEvmConfigV1(input);
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
-    mode: 'read',
     chainId: config.chainId,
     endpoints: config.endpoints,
     maxConcurrentPerChain: CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
     totalDeadlineMs: CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+    messages: createReadEndpointRunnerMessagesV1(config.chainId),
   });
 
   const read: StrictCurrentFinalizedEvmReadV1 = async (inputRequest) => {
@@ -113,6 +116,29 @@ export function createStrictCurrentFinalizedEvmReadV1(
   };
 
   return Object.freeze(read);
+}
+
+function createReadEndpointRunnerMessagesV1(
+  chainId: ChainIdV1,
+): StrictFinalizedEndpointRunnerMessagesV1 {
+  return Object.freeze({
+    chainMismatch: (requested: ChainIdV1) =>
+      `Adapter is configured for chain ${chainId}, not ${requested}`,
+    cancelledBeforeAdmission:
+      'Current-finalized EVM call was cancelled before transport admission',
+    cancelled: 'Current-finalized EVM call was cancelled',
+    totalDeadlineLabel: 'current-finalized total deadline',
+    totalDeadline: (timeoutMs: number) =>
+      `Current-finalized total deadline exceeded ${timeoutMs}ms`,
+    attemptDeadlineLabel: (attempt: number) =>
+      `current-finalized endpoint attempt ${attempt}`,
+    attemptDeadline: (timeoutMs: number) =>
+      `Current-finalized endpoint attempt exceeded ${timeoutMs}ms`,
+    attemptFailure: 'Current-finalized endpoint attempt failed closed',
+    noEndpoint: 'No configured current-finalized endpoint succeeded',
+    saturated: (active: number) =>
+      `Chain ${chainId} already has ${active} finalized reads in flight`,
+  });
 }
 
 async function executeEndpointAttempt(

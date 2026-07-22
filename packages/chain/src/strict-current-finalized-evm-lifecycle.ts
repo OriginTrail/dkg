@@ -17,15 +17,26 @@ import type {
   FinalizedAnchorV1,
 } from './strict-current-finalized-evm-types.js';
 
-type StrictFinalizedEndpointRunnerModeV1 = 'read' | 'snapshot-preflight';
-
 export interface StrictFinalizedEndpointRunnerProfileV1 {
-  readonly mode: StrictFinalizedEndpointRunnerModeV1;
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
   readonly maxConcurrentPerChain: number;
   readonly totalDeadlineMs: number;
   readonly attemptTimeoutMs: number;
+  readonly messages: StrictFinalizedEndpointRunnerMessagesV1;
+}
+
+export interface StrictFinalizedEndpointRunnerMessagesV1 {
+  readonly chainMismatch: (requested: ChainIdV1) => string;
+  readonly cancelledBeforeAdmission: string;
+  readonly cancelled: string;
+  readonly totalDeadlineLabel: string;
+  readonly totalDeadline: (timeoutMs: number) => string;
+  readonly attemptDeadlineLabel: (attempt: number) => string;
+  readonly attemptDeadline: (timeoutMs: number) => string;
+  readonly attemptFailure: string;
+  readonly noEndpoint: string;
+  readonly saturated: (active: number) => string;
 }
 
 interface StrictFinalizedEndpointRunInputV1<AttemptResult, Result> {
@@ -59,7 +70,7 @@ export interface StrictFinalizedEndpointRunnerV1 {
 export function createStrictFinalizedEndpointRunnerV1(
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): StrictFinalizedEndpointRunnerV1 {
-  const messages = endpointRunnerMessages(profile.mode, profile.chainId);
+  const { messages } = profile;
   const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
     profile.maxConcurrentPerChain,
   );
@@ -158,7 +169,7 @@ function classifyEndpointAttemptFailureV1(
   attemptDeadline: DeadlineScopeV1 | null,
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): CurrentFinalizedEvmCallErrorV1 {
-  const messages = endpointRunnerMessages(profile.mode, profile.chainId);
+  const { messages } = profile;
   if (callerSignal.aborted) return cancelled(messages.cancelled);
   if (
     cause instanceof CurrentFinalizedEvmCallErrorV1
@@ -174,62 +185,6 @@ function classifyEndpointAttemptFailureV1(
   }
   if (cause instanceof CurrentFinalizedEvmCallErrorV1) return cause;
   return unavailable(messages.attemptFailure, cause);
-}
-
-interface StrictFinalizedEndpointRunnerMessagesV1 {
-  readonly chainMismatch: (requested: ChainIdV1) => string;
-  readonly cancelledBeforeAdmission: string;
-  readonly cancelled: string;
-  readonly totalDeadlineLabel: string;
-  readonly totalDeadline: (timeoutMs: number) => string;
-  readonly attemptDeadlineLabel: (attempt: number) => string;
-  readonly attemptDeadline: (timeoutMs: number) => string;
-  readonly attemptFailure: string;
-  readonly noEndpoint: string;
-  readonly saturated: (active: number) => string;
-}
-
-function endpointRunnerMessages(
-  mode: StrictFinalizedEndpointRunnerModeV1,
-  chainId: ChainIdV1,
-): StrictFinalizedEndpointRunnerMessagesV1 {
-  if (mode === 'snapshot-preflight') {
-    return Object.freeze({
-      chainMismatch: (requested: ChainIdV1) =>
-        `Snapshot adapter is configured for chain ${chainId}, not ${requested}`,
-      cancelledBeforeAdmission:
-        'Current-finalized snapshot was cancelled before transport admission',
-      cancelled: 'Current-finalized snapshot was cancelled',
-      totalDeadlineLabel: 'current-finalized snapshot total deadline',
-      totalDeadline: (timeoutMs: number) =>
-        `Current-finalized snapshot deadline exceeded ${timeoutMs}ms`,
-      attemptDeadlineLabel: (attempt: number) =>
-        `current-finalized snapshot preflight ${attempt}`,
-      attemptDeadline: (timeoutMs: number) =>
-        `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
-      attemptFailure: 'Current-finalized snapshot preflight failed closed',
-      noEndpoint: 'No configured endpoint completed finalized snapshot preflight',
-      saturated: (active: number) =>
-        `Chain ${chainId} already has ${active} finalized snapshot in flight`,
-    });
-  }
-  return Object.freeze({
-    chainMismatch: (requested: ChainIdV1) =>
-      `Adapter is configured for chain ${chainId}, not ${requested}`,
-    cancelledBeforeAdmission:
-      'Current-finalized EVM call was cancelled before transport admission',
-    cancelled: 'Current-finalized EVM call was cancelled',
-    totalDeadlineLabel: 'current-finalized total deadline',
-    totalDeadline: (timeoutMs: number) =>
-      `Current-finalized total deadline exceeded ${timeoutMs}ms`,
-    attemptDeadlineLabel: (attempt: number) => `current-finalized endpoint attempt ${attempt}`,
-    attemptDeadline: (timeoutMs: number) =>
-      `Current-finalized endpoint attempt exceeded ${timeoutMs}ms`,
-    attemptFailure: 'Current-finalized endpoint attempt failed closed',
-    noEndpoint: 'No configured current-finalized endpoint succeeded',
-    saturated: (active: number) =>
-      `Chain ${chainId} already has ${active} finalized reads in flight`,
-  });
 }
 
 /** Inputs for the shared EIP-1898 or authenticated-numbered-anchor policy. */

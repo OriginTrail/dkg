@@ -7,9 +7,8 @@ import type {
 
 import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
-  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
@@ -30,18 +29,24 @@ import {
   createStrictFinalizedEndpointRunnerV1,
   executeStrictFinalizedAnchorPolicyV1,
   settleStrictFinalizedParallelBatchV1,
+  type StrictFinalizedEndpointRunnerMessagesV1,
 } from './strict-current-finalized-evm-lifecycle.js';
 import {
   parseStrictFinalizedAnchorV1,
   parseStrictFinalizedChainIdV1,
   postStrictFinalizedJsonRpcV1,
 } from './strict-current-finalized-evm-rpc-client.js';
+import {
+  assertStrictFinalizedEvmCodeResultV1,
+  createStrictFinalizedEvmCallParamsV1,
+  createStrictFinalizedEvmCodeParamsV1,
+  parseStrictFinalizedEvmCallResultV1,
+} from './strict-current-finalized-evm-read-operations.js';
 import type {
   DeadlineScopeV1,
   FinalizedAnchorV1,
   StrictRpcConfigSnapshotV1,
 } from './strict-current-finalized-evm-types.js';
-import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
 
 interface SnapshotEndpointPreflightV1 {
   readonly anchor: FinalizedAnchorV1;
@@ -72,8 +77,6 @@ export interface StrictFinalizedSnapshotTransportV1 {
 
 const SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1 =
   '0x0000000000000000000000000000000000000000' as EvmAddressV1;
-const SNAPSHOT_PREFLIGHT_PROBE_GAS_QUANTITY_V1 =
-  `0x${CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1.toString(16)}`;
 
 /**
  * Own the complete endpoint/preflight/deadline/anchor lifecycle for one scoped
@@ -84,12 +87,12 @@ export function createStrictFinalizedSnapshotTransportV1(
   config: StrictRpcConfigSnapshotV1,
 ): StrictFinalizedSnapshotTransportV1 {
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
-    mode: 'snapshot-preflight',
     chainId: config.chainId,
     endpoints: config.endpoints,
     maxConcurrentPerChain: CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
     totalDeadlineMs: CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
+    messages: createSnapshotEndpointRunnerMessagesV1(config.chainId),
   });
   const run: StrictFinalizedSnapshotTransportV1 = async <T>(
     request: StrictCurrentFinalizedEvmSnapshotRequestV1,
@@ -109,6 +112,29 @@ export function createStrictFinalizedSnapshotTransportV1(
     ),
   });
   return Object.freeze(run);
+}
+
+function createSnapshotEndpointRunnerMessagesV1(
+  chainId: ChainIdV1,
+): StrictFinalizedEndpointRunnerMessagesV1 {
+  return Object.freeze({
+    chainMismatch: (requested: ChainIdV1) =>
+      `Snapshot adapter is configured for chain ${chainId}, not ${requested}`,
+    cancelledBeforeAdmission:
+      'Current-finalized snapshot was cancelled before transport admission',
+    cancelled: 'Current-finalized snapshot was cancelled',
+    totalDeadlineLabel: 'current-finalized snapshot total deadline',
+    totalDeadline: (timeoutMs: number) =>
+      `Current-finalized snapshot deadline exceeded ${timeoutMs}ms`,
+    attemptDeadlineLabel: (attempt: number) =>
+      `current-finalized snapshot preflight ${attempt}`,
+    attemptDeadline: (timeoutMs: number) =>
+      `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
+    attemptFailure: 'Current-finalized snapshot preflight failed closed',
+    noEndpoint: 'No configured endpoint completed finalized snapshot preflight',
+    saturated: (active: number) =>
+      `Chain ${chainId} already has ${active} finalized snapshot in flight`,
+  });
 }
 
 async function preflightSnapshotEndpoint(
@@ -166,25 +192,28 @@ async function probeSnapshotReadProfile(
   blockReference: unknown,
 ): Promise<void> {
   try {
-    const code = await rpc('eth_getCode', Object.freeze([
-      SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
-      blockReference,
-    ]));
-    if (!isCanonicalLowerHexBytesV1(code)) {
-      throw new Error('eth_getCode capability probe returned malformed bytes');
-    }
-    const callResult = await rpc('eth_call', Object.freeze([
-      Object.freeze({
-        from: CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
-        to: SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
-        data: '0x',
-        gas: SNAPSHOT_PREFLIGHT_PROBE_GAS_QUANTITY_V1,
-      }),
-      blockReference,
-    ]));
-    if (!isCanonicalLowerHexBytesV1(callResult)) {
-      throw new Error('eth_call capability probe returned malformed bytes');
-    }
+    assertStrictFinalizedEvmCodeResultV1(
+      await rpc(
+        'eth_getCode',
+        createStrictFinalizedEvmCodeParamsV1(
+          SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
+          blockReference,
+        ),
+      ),
+      { allowNoCode: true },
+    );
+    const probeCall = Object.freeze({
+      to: SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1,
+      data: '0x',
+      maxReturnBytes: CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
+    } satisfies StrictCurrentFinalizedEvmReadCallV1);
+    parseStrictFinalizedEvmCallResultV1(
+      await rpc(
+        'eth_call',
+        createStrictFinalizedEvmCallParamsV1(probeCall, blockReference),
+      ),
+      probeCall.maxReturnBytes,
+    );
   } catch (cause) {
     throw unavailable(
       'Configured snapshot endpoint cannot execute the required finalized read profile',
