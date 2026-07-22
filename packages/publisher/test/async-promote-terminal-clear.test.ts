@@ -7,7 +7,7 @@ import {
   type PromoteTerminalJobClearer,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal } from '../src/async-promote-queue-utils.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, parseJobPayload } from '../src/async-promote-queue-utils.js';
 
 // #1837 — atomic by-exact-jobId TERMINAL clear for the SWM promote queue.
 describe('#1837 promote queue clearTerminalJob', () => {
@@ -199,5 +199,17 @@ describe('classifyJobPayload', () => {
     const result = classifyJobPayload(bind({ ...validJob, state: 'bogus_state' }));
     expect(result.kind).toBe('job');
     if (result.kind === 'job') expect(result.job.state).toBe('bogus_state');
+  });
+
+  // #1893 (review round 2): the classifier deliberately accepts a non-enum state string as
+  // `kind: 'job'` (so the terminal clear can report `unknown`), which makes parseJobPayload the
+  // ONLY runtime guard that keeps ordinary readers (list/getStatus/conflict) from surfacing a
+  // row with an impossible state. Lock that strict enum-drop directly here: were it removed from
+  // parseJobPayload, this asserts red even though the classifier tests above stay green.
+  it('parseJobPayload re-applies the enum drop the classifier defers', () => {
+    const nonEnum = bind({ ...validJob, state: 'bogus_state' });
+    expect(classifyJobPayload(nonEnum).kind).toBe('job'); // classifier accepts it for terminal-clear classification
+    expect(parseJobPayload(nonEnum)).toBeNull();          // strict wrapper rejects it for read/list/conflict callers
+    expect(parseJobPayload(bind(validJob))).not.toBeNull(); // a valid enum state is returned unchanged
   });
 });
