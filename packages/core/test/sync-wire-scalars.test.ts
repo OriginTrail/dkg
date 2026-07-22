@@ -11,7 +11,6 @@ import {
   assertCanonicalKaId,
   assertCanonicalTimestampMs,
   parseCanonicalDecimalU256,
-  parseCanonicalNullableEvmAddressV1,
 } from '../src/sync-wire-scalars.js';
 
 describe('RFC-64 sync wire scalar profile', () => {
@@ -61,13 +60,6 @@ describe('RFC-64 sync wire scalar profile', () => {
   });
 
   it('accepts only lowercase nonzero fixed-width EVM addresses', () => {
-    expect(parseCanonicalNullableEvmAddressV1(`0x${'00'.repeat(20)}`)).toBeNull();
-    expect(parseCanonicalNullableEvmAddressV1(`0x${'11'.repeat(20)}`)).toBe(
-      `0x${'11'.repeat(20)}`,
-    );
-    expect(() => parseCanonicalNullableEvmAddressV1(`0x${'AA'.repeat(20)}`)).toThrow(
-      /lowercase 20-byte/,
-    );
     expect(() => assertCanonicalEvmAddress(`0x${'11'.repeat(20)}`)).not.toThrow();
     expect(() => assertCanonicalEvmAddress(`0x${'AA'.repeat(20)}`)).toThrow(
       /lowercase 20-byte/,

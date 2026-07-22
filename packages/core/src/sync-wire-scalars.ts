@@ -110,30 +110,12 @@ export function assertCanonicalEvmAddress(
   value: unknown,
   label = 'address',
 ): asserts value is EvmAddressV1 {
-  if (!isCanonicalEvmAddressShape(value)) {
+  if (typeof value !== 'string' || !EVM_ADDRESS.test(value)) {
     throw new Error(`${label} must be a lowercase 20-byte 0x EVM address`);
   }
   if (value === ZERO_EVM_ADDRESS) {
     throw new Error(`${label} must not be the zero address`);
   }
-}
-
-/**
- * Parse a canonical EVM-address slot whose zero sentinel means no address.
- * Non-zero values are returned in the ordinary EvmAddressV1 domain.
- */
-export function parseCanonicalNullableEvmAddressV1(
-  value: unknown,
-  label = 'address',
-): EvmAddressV1 | null {
-  if (!isCanonicalEvmAddressShape(value)) {
-    throw new Error(`${label} must be a lowercase 20-byte 0x EVM address`);
-  }
-  return value === ZERO_EVM_ADDRESS ? null : value as EvmAddressV1;
-}
-
-function isCanonicalEvmAddressShape(value: unknown): value is string {
-  return typeof value === 'string' && EVM_ADDRESS.test(value);
 }
 
 export function assertCanonicalHexBytes(

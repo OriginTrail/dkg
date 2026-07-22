@@ -5,8 +5,8 @@ import {
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertContextGraphAccessPolicyV1,
+  assertContextGraphPublishDomainV1,
   assertContextGraphPublishPolicyV1,
-  parseCanonicalNullableEvmAddressV1,
   type BlockNumberV1,
   type ChainIdV1,
   type ContextGraphAccessPolicyV1,
@@ -23,6 +23,8 @@ import {
 // inputs once and validate the result with the canonical core policy codec.
 
 const ZERO_DIGEST_32 = `0x${'0'.repeat(64)}`;
+const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+const CANONICAL_LOWER_EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
 
 export type FinalizedContextGraphReadErrorCodeV1 =
   | 'request-binding'
@@ -144,14 +146,14 @@ function canonicalNullableAddress(
   code: FinalizedContextGraphReadErrorCodeV1,
   label: string,
 ): EvmAddressV1 | null {
-  try {
-    return parseCanonicalNullableEvmAddressV1(value, label);
-  } catch {
+  if (typeof value !== 'string' || !CANONICAL_LOWER_EVM_ADDRESS.test(value)) {
     throw new FinalizedContextGraphReadErrorV1(
       code,
       `${label} must be a canonical lowercase EVM address`,
     );
   }
+  if (value === ZERO_ADDRESS) return null;
+  return canonicalNonZeroAddress(value, code, label);
 }
 
 function canonicalDigest32(
@@ -257,19 +259,16 @@ function composeValidatedFinalizedContextGraphReadV1(
     );
   }
   const publishPolicy: ContextGraphPublishPolicyV1 = raw.publishPolicy;
-  if (
-    publishPolicy === 1
-    && (publishAuthority !== null || publishAuthorityAccountId !== '0')
-  ) {
-    throw new FinalizedContextGraphReadErrorV1(
-      'inconsistent-publish-policy',
-      'open contribution requires zero publish authority and account ID zero',
+  try {
+    assertContextGraphPublishDomainV1(
+      publishPolicy,
+      publishAuthority,
+      publishAuthorityAccountId,
     );
-  }
-  if (publishPolicy === 0 && publishAuthority === null) {
+  } catch {
     throw new FinalizedContextGraphReadErrorV1(
       'inconsistent-publish-policy',
-      'curated contribution requires a non-zero publish authority',
+      'publish policy disagrees with its normalized authority tuple',
     );
   }
   if (typeof raw.active !== 'boolean') {

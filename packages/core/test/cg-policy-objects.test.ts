@@ -7,6 +7,7 @@ import {
   MAX_MEMBER_ROSTER_ENTRIES_V1,
   MEMBER_ROSTER_ROLES_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
+  assertContextGraphPublishDomainV1,
   assertContextGraphPolicyV1,
   assertMemberRosterV1,
   assertSignedContextGraphPolicyEnvelopeV1,
@@ -169,6 +170,21 @@ describe('ContextGraphPolicyV1 codec', () => {
         .toThrow(/cg-policy-scalar/);
     }
     expect(() => assertContextGraphPolicyV1({ ...POLICY, publishPolicy: 2 }))
+      .toThrow(/cg-policy-scalar/);
+  });
+
+  it('owns the normalized contribution-policy tuple invariant', () => {
+    expect(() => assertContextGraphPublishDomainV1(1, null, '0')).not.toThrow();
+    expect(() => assertContextGraphPublishDomainV1(0, ISSUER, '0')).not.toThrow();
+    expect(() => assertContextGraphPublishDomainV1(0, ISSUER, '7')).not.toThrow();
+
+    expect(() => assertContextGraphPublishDomainV1(1, ISSUER, '0'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => assertContextGraphPublishDomainV1(1, null, '7'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => assertContextGraphPublishDomainV1(0, null, '0'))
+      .toThrow(/cg-policy-publish-domain/);
+    expect(() => assertContextGraphPublishDomainV1(0, `0x${'00'.repeat(20)}`, '0'))
       .toThrow(/cg-policy-scalar/);
   });
 

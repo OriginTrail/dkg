@@ -30,7 +30,6 @@ export {
   assertCanonicalTimestampMs,
   parseCanonicalDecimalU64,
   parseCanonicalDecimalU256,
-  parseCanonicalNullableEvmAddressV1,
 } from './sync-wire-scalars.js';
 export type {
   BatchIdV1,

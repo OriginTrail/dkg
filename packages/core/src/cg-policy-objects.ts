@@ -173,6 +173,39 @@ export function assertContextGraphPublishPolicyV1(
   assertPolicyEnum(value, label, CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1);
 }
 
+/**
+ * Validate the complete normalized contribution-policy tuple.
+ *
+ * Chain adapters normalize the EVM zero-address sentinel to null before
+ * crossing this boundary. Keeping the tuple invariant here gives every
+ * producer of ContextGraphPolicyV1 the same fail-closed domain check without
+ * making core aware of a storage-specific sentinel representation.
+ */
+export function assertContextGraphPublishDomainV1(
+  publishPolicy: unknown,
+  publishAuthority: unknown,
+  publishAuthorityAccountId: unknown,
+): asserts publishPolicy is ContextGraphPublishPolicyV1 {
+  assertContextGraphPublishPolicyV1(publishPolicy);
+  if (publishAuthority !== null) {
+    scalar(() => assertCanonicalEvmAddress(publishAuthority, 'publishAuthority'));
+  }
+  scalar(() => assertCanonicalDecimalU256(
+    publishAuthorityAccountId,
+    'publishAuthorityAccountId',
+  ));
+  if (publishPolicy === 1) {
+    if (publishAuthority !== null || publishAuthorityAccountId !== '0') {
+      fail(
+        'cg-policy-publish-domain',
+        'open contribution requires null publishAuthority and account ID zero',
+      );
+    }
+  } else if (publishAuthority === null) {
+    fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
+  }
+}
+
 export function canonicalizeContextGraphPolicyPayloadV1(
   policy: ContextGraphPolicyV1,
 ): string {
@@ -430,24 +463,11 @@ function assertContextGraphPolicyStructureV1(
   u64(value.version, 'version');
   optionalDigest(value.previousPolicyDigest, 'previousPolicyDigest');
   assertContextGraphAccessPolicyV1(value.accessPolicy);
-  assertContextGraphPublishPolicyV1(value.publishPolicy);
-  if (value.publishAuthority !== null) {
-    scalar(() => assertCanonicalEvmAddress(value.publishAuthority, 'publishAuthority'));
-  }
-  scalar(() => assertCanonicalDecimalU256(
+  assertContextGraphPublishDomainV1(
+    value.publishPolicy,
+    value.publishAuthority,
     value.publishAuthorityAccountId,
-    'publishAuthorityAccountId',
-  ));
-  if (value.publishPolicy === 1) {
-    if (value.publishAuthority !== null || value.publishAuthorityAccountId !== '0') {
-      fail(
-        'cg-policy-publish-domain',
-        'open contribution requires null publishAuthority and account ID zero',
-      );
-    }
-  } else if (value.publishAuthority === null) {
-    fail('cg-policy-publish-domain', 'curated contribution requires publishAuthority');
-  }
+  );
   if (value.projectionId !== CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1) {
     fail('cg-policy-scalar', 'projectionId must be cg-shared-v1');
   }
