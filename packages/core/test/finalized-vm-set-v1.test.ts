@@ -72,11 +72,11 @@ describe('RFC-64 finalized VM-set accumulator', () => {
   });
 
   it('streams ordered rows with logarithmic retained tree state and finalizes idempotently', () => {
+    const rows = [row(0), row(3), row(9)];
     const accumulator = new FinalizedVmSetAccumulatorV1(SCOPE);
-    accumulator.append(row(0));
-    accumulator.append(row(3));
-    accumulator.append(row(9));
+    for (const value of rows) accumulator.append(value);
     const first = accumulator.finalize();
+    expect(first.rootDigest).toBe(computeReferenceRoot(rows));
     expect(first.rowCount).toBe('3');
     expect(first.highestFinalizedOrdinal).toBe('9');
     expect(accumulator.finalize()).toBe(first);

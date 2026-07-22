@@ -82,6 +82,15 @@ export interface FinalizedVmSetEvidenceV1 {
   readonly highestFinalizedOrdinal: DecimalU64V1 | null;
 }
 
+type CanonicalFinalizedVmSetRowV1 = Readonly<FinalizedVmSetRowV1>
+  & Readonly<Record<string, CanonicalJsonValue>>;
+
+interface ValidatedFinalizedVmSetRowV1 {
+  readonly row: CanonicalFinalizedVmSetRowV1;
+  readonly ordinalValue: bigint;
+  readonly assertionVersionValue: bigint;
+}
+
 export type FinalizedVmSetV1ErrorCode =
   | 'finalized-vm-set-schema'
   | 'finalized-vm-set-scalar'
@@ -151,21 +160,28 @@ export function snapshotFinalizedVmSetRowV1(
   input: FinalizedVmSetRowV1,
 ): Readonly<FinalizedVmSetRowV1> {
   const scope = snapshotFinalizedVmSetScopeV1(scopeInput);
-  return snapshotFinalizedVmSetRowForScopeV1(scope, input);
+  return snapshotFinalizedVmSetRowForScopeV1(scope, input).row;
 }
 
 function snapshotFinalizedVmSetRowForScopeV1(
   scope: Readonly<FinalizedVmSetScopeV1>,
   input: FinalizedVmSetRowV1,
-): Readonly<FinalizedVmSetRowV1> {
+): ValidatedFinalizedVmSetRowV1 {
   const record = snapshotRecord(input, FINALIZED_VM_SET_ROW_KEYS, 'finalized VM row');
+  let ordinalValue: bigint;
+  let assertionVersionValue: bigint;
   try {
     assertCanonicalChainId(record.chainId, 'row.chainId');
     assertCanonicalEvmAddress(record.contractAddress, 'row.contractAddress');
     assertCanonicalDecimalU64(record.ordinal, 'row.ordinal');
+    ordinalValue = parseCanonicalDecimalU64(record.ordinal, 'row.ordinal');
     assertCanonicalEvmAddress(record.authorAddress, 'row.authorAddress');
     assertCanonicalDecimalU64(record.assertionVersion, 'row.assertionVersion');
-    if (parseCanonicalDecimalU64(record.assertionVersion, 'row.assertionVersion') === 0n) {
+    assertionVersionValue = parseCanonicalDecimalU64(
+      record.assertionVersion,
+      'row.assertionVersion',
+    );
+    if (assertionVersionValue === 0n) {
       fail('finalized-vm-set-scalar', 'row.assertionVersion must be positive');
     }
     assertCanonicalDigest(record.assertionRoot, 'row.assertionRoot');
@@ -206,7 +222,7 @@ function snapshotFinalizedVmSetRowForScopeV1(
     fail('finalized-vm-set-lane', 'finalized VM row differs from the trusted scope lane');
   }
 
-  return Object.freeze({
+  const row = Object.freeze({
     chainId: record.chainId,
     contractAddress: record.contractAddress,
     ordinal: record.ordinal,
@@ -217,7 +233,8 @@ function snapshotFinalizedVmSetRowForScopeV1(
     finalizedBlockNumber: record.finalizedBlockNumber,
     finalizedBlockHash: record.finalizedBlockHash,
     placementEvidenceDigest: record.placementEvidenceDigest,
-  }) as Readonly<FinalizedVmSetRowV1>;
+  }) as CanonicalFinalizedVmSetRowV1;
+  return Object.freeze({ row, ordinalValue, assertionVersionValue });
 }
 
 /** Compute the exact domain-separated RFC-64 leaf digest for one placed row. */
@@ -226,8 +243,8 @@ export function computeFinalizedVmSetLeafDigestV1(
   row: FinalizedVmSetRowV1,
 ): Digest32V1 {
   const trustedScope = snapshotFinalizedVmSetScopeV1(scope);
-  const snapshot = snapshotFinalizedVmSetRowForScopeV1(trustedScope, row);
-  return digestBytesToLowerHex(computeFinalizedVmSetLeafDigestBytesV1(snapshot));
+  const validated = snapshotFinalizedVmSetRowForScopeV1(trustedScope, row);
+  return digestBytesToLowerHex(computeFinalizedVmSetLeafDigestBytesV1(validated.row));
 }
 
 /** The canonical finalized-VM empty accumulator root. */
@@ -244,7 +261,11 @@ export function computeEmptyFinalizedVmSetRootV1(): Digest32V1 {
  */
 export class FinalizedVmSetAccumulatorV1 {
   readonly #scope: Readonly<FinalizedVmSetScopeV1>;
-  readonly #levels: Array<Uint8Array | undefined> = [];
+  readonly #frontier = new DomainSeparatedMerkleFrontier(
+    NODE_DOMAIN_BYTES,
+    ODD_DOMAIN_BYTES,
+    EMPTY_DOMAIN_BYTES,
+  );
   #rowCount = 0n;
   #highestFinalizedOrdinal: DecimalU64V1 | null = null;
   #highestOrdinalValue: bigint | null = null;
@@ -268,23 +289,18 @@ export class FinalizedVmSetAccumulatorV1 {
         fail('finalized-vm-set-state', 'finalized VM row count exceeds the u64 range');
       }
 
-      const row = snapshotFinalizedVmSetRowForScopeV1(this.#scope, rowInput);
-      const ordinal = parseCanonicalDecimalU64(row.ordinal, 'row.ordinal');
-      if (this.#highestOrdinalValue !== null && ordinal <= this.#highestOrdinalValue) {
+      const validated = snapshotFinalizedVmSetRowForScopeV1(this.#scope, rowInput);
+      if (
+        this.#highestOrdinalValue !== null
+        && validated.ordinalValue <= this.#highestOrdinalValue
+      ) {
         fail('finalized-vm-set-order', 'finalized VM rows must have unique increasing ordinals');
       }
 
-      let current = computeFinalizedVmSetLeafDigestBytesV1(row);
-      let level = 0;
-      while (this.#levels[level] !== undefined) {
-        current = digestBytes(NODE_DOMAIN_BYTES, this.#levels[level]!, current);
-        this.#levels[level] = undefined;
-        level += 1;
-      }
-      this.#levels[level] = current;
+      this.#frontier.append(computeFinalizedVmSetLeafDigestBytesV1(validated.row));
       this.#rowCount += 1n;
-      this.#highestOrdinalValue = ordinal;
-      this.#highestFinalizedOrdinal = row.ordinal;
+      this.#highestOrdinalValue = validated.ordinalValue;
+      this.#highestFinalizedOrdinal = validated.row.ordinal;
     } finally {
       this.#appendInProgress = false;
     }
@@ -296,30 +312,9 @@ export class FinalizedVmSetAccumulatorV1 {
     }
     if (this.#finalEvidence !== undefined) return this.#finalEvidence;
 
-    let pending: Uint8Array | undefined;
-    let pendingLevel = -1;
-    for (let level = 0; level < this.#levels.length; level += 1) {
-      const left = this.#levels[level];
-      if (left === undefined) continue;
-      if (pending === undefined) {
-        pending = left;
-        pendingLevel = level;
-        continue;
-      }
-      while (pendingLevel < level) {
-        pending = digestBytes(ODD_DOMAIN_BYTES, pending);
-        pendingLevel += 1;
-      }
-      pending = digestBytes(NODE_DOMAIN_BYTES, left, pending);
-      pendingLevel = level + 1;
-    }
-
-    const rootDigest = pending === undefined
-      ? computeEmptyFinalizedVmSetRootV1()
-      : digestBytesToLowerHex(pending);
     this.#finalEvidence = Object.freeze({
       scope: this.#scope,
-      rootDigest,
+      rootDigest: digestBytesToLowerHex(this.#frontier.finalizeRoot()),
       rowCount: this.#rowCount.toString() as DecimalU64V1,
       highestFinalizedOrdinal: this.#highestFinalizedOrdinal,
     });
@@ -338,15 +333,64 @@ export function computeFinalizedVmSetEvidenceV1(
 }
 
 function computeFinalizedVmSetLeafDigestBytesV1(
-  row: Readonly<FinalizedVmSetRowV1>,
+  row: CanonicalFinalizedVmSetRowV1,
 ): Uint8Array {
   return digestBytes(
     LEAF_DOMAIN_BYTES,
-    canonicalizeJsonBytes(row as unknown as CanonicalJsonValue, {
+    canonicalizeJsonBytes(row, {
       maxBytes: 2 * 1024,
       maxDepth: 2,
     }),
   );
+}
+
+class DomainSeparatedMerkleFrontier {
+  readonly #levels: Array<Uint8Array | undefined> = [];
+  #finalRoot: Uint8Array | undefined;
+
+  constructor(
+    private readonly nodeDomain: Uint8Array,
+    private readonly oddDomain: Uint8Array,
+    private readonly emptyDomain: Uint8Array,
+  ) {}
+
+  append(leafDigest: Uint8Array): void {
+    if (this.#finalRoot !== undefined) {
+      fail('finalized-vm-set-state', 'cannot append to a finalized Merkle frontier');
+    }
+    let current = leafDigest;
+    let level = 0;
+    while (this.#levels[level] !== undefined) {
+      current = digestBytes(this.nodeDomain, this.#levels[level]!, current);
+      this.#levels[level] = undefined;
+      level += 1;
+    }
+    this.#levels[level] = current;
+  }
+
+  finalizeRoot(): Uint8Array {
+    if (this.#finalRoot !== undefined) return this.#finalRoot;
+
+    let pending: Uint8Array | undefined;
+    let pendingLevel = -1;
+    for (let level = 0; level < this.#levels.length; level += 1) {
+      const left = this.#levels[level];
+      if (left === undefined) continue;
+      if (pending === undefined) {
+        pending = left;
+        pendingLevel = level;
+        continue;
+      }
+      while (pendingLevel < level) {
+        pending = digestBytes(this.oddDomain, pending);
+        pendingLevel += 1;
+      }
+      pending = digestBytes(this.nodeDomain, left, pending);
+      pendingLevel = level + 1;
+    }
+    this.#finalRoot = pending ?? digestBytes(this.emptyDomain);
+    return this.#finalRoot;
+  }
 }
 
 function snapshotRecord<const Keys extends readonly string[]>(
