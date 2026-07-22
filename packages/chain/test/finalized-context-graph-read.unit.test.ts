@@ -91,20 +91,24 @@ describe('RFC-64 finalized Context Graph chain read', () => {
   it('passes one frozen canonical binding through the resolver seam', async () => {
     const request = validRequest();
     const raw = Object.freeze(validRaw());
+    const signal = new AbortController().signal;
     const resolver = vi.fn((received: FinalizedContextGraphBindingV1) => {
       expect(received).not.toBe(request);
       expect(Object.isFrozen(received)).toBe(true);
       expect(received).toEqual(request);
       return Promise.resolve(raw);
     });
-    const viaSeam = await resolveFinalizedContextGraphReadV1(resolver, request);
+    const viaSeam = await resolveFinalizedContextGraphReadV1(resolver, request, signal);
     const direct = composeFinalizedContextGraphReadV1(request, validRaw());
     expect(resolver).toHaveBeenCalledOnce();
-    expect(resolver).toHaveBeenCalledWith(Object.freeze({
-      chainId: CHAIN_ID,
-      contextGraphId: '42',
-      governanceContract: CGS,
-    }));
+    expect(resolver).toHaveBeenCalledWith(
+      Object.freeze({
+        chainId: CHAIN_ID,
+        contextGraphId: '42',
+        governanceContract: CGS,
+      }),
+      signal,
+    );
     expect(viaSeam).toEqual(direct);
   });
 

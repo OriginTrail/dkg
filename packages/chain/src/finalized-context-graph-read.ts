@@ -92,7 +92,10 @@ export type FinalizedContextGraphReadV1 = {
 };
 
 export interface FinalizedContextGraphReadResolverV1 {
-  (binding: FinalizedContextGraphBindingV1): Promise<UntrustedFinalizedContextGraphFieldsV1>;
+  (
+    binding: FinalizedContextGraphBindingV1,
+    signal?: AbortSignal,
+  ): Promise<UntrustedFinalizedContextGraphFieldsV1>;
 }
 
 function canonicalDecimalU256(
@@ -301,8 +304,9 @@ function composeValidatedFinalizedContextGraphReadV1(
 export async function resolveFinalizedContextGraphReadV1(
   resolver: FinalizedContextGraphReadResolverV1,
   request: FinalizedContextGraphReadRequestV1,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<FinalizedContextGraphReadV1> {
   const binding = validateFinalizedContextGraphReadRequestV1(request);
-  const raw = await resolver(binding);
+  const raw = await resolver(binding, signal);
   return composeValidatedFinalizedContextGraphReadV1(binding, raw);
 }
