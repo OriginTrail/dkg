@@ -6,12 +6,11 @@
  */
 
 import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
-  type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type CountV1,
@@ -20,7 +19,6 @@ import {
   type SubGraphNameV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { serializeWorkspacePublicSnapshotQuads } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
@@ -57,7 +55,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     const autoPublish = this.config.rfc64PublicCatalogAutoPublish;
     if (autoPublish === undefined) return null;
     if (params.subGraphName !== undefined && params.subGraphName !== null) return null;
-    const seal = canonicalRfc64SealFromAssertionSeal(params.seal);
+    const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
     // publishes require the reserved cg-shared-v1 anchor/hash statements to be
     // present in the author-sealed public projection; ordinary publication does
@@ -69,7 +67,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         'RFC-64 auto-publish public projection count differs from the confirmed author seal',
       );
     }
-    const projectionBytes = canonicalPublicProjectionBytes(params.publicQuads);
+    const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(params.publicQuads);
     const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.chain.chainId) as NetworkIdV1;
     if (networkId === 'none') {
@@ -182,59 +180,4 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     return deployment;
   }
 
-}
-
-function canonicalRfc64SealFromAssertionSeal(
-  seal: AssertionSeal,
-): Readonly<CanonicalGraphScopedAuthorSealV1> {
-  if (
-    seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
-    || seal.kaUal === undefined
-    || seal.assertionVersion === undefined
-    || seal.publicTripleCount === undefined
-    || seal.privateTripleCount === undefined
-    || seal.reservedKaId === undefined
-    || seal.authorSchemeVersion !== 1
-  ) {
-    throw new Error('RFC-64 auto-publish requires a complete graph-scoped v2 author seal');
-  }
-  const canonical = {
-    assertionMerkleRoot: ethers.hexlify(seal.merkleRoot).toLowerCase(),
-    authorAddress: seal.authorAddress.toLowerCase(),
-    authorAttestationR: ethers.hexlify(seal.authorAttestationR).toLowerCase(),
-    authorAttestationVS: ethers.hexlify(seal.authorAttestationVS).toLowerCase(),
-    authorSchemeVersion: '1',
-    assertedAtChainId: seal.chainId.toString(),
-    assertedAtKav10Address: seal.kav10Address.toLowerCase(),
-    reservedKaId: seal.reservedKaId.toString(),
-    assertionFinalizedAt: seal.finalizedAtIso,
-    contentScopeVersion: '2',
-    kaUal: seal.kaUal,
-    assertionVersion: seal.assertionVersion,
-    publicTripleCount: seal.publicTripleCount.toString(),
-    privateTripleCount: seal.privateTripleCount.toString(),
-    privateMerkleRoot: seal.privateMerkleRoot === undefined
-      ? null
-      : ethers.hexlify(seal.privateMerkleRoot).toLowerCase(),
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
-  assertCanonicalGraphScopedAuthorSealV1(canonical);
-  return Object.freeze(canonical);
-}
-
-function canonicalPublicProjectionBytes(quads: readonly Quad[]): Uint8Array {
-  const encoder = new TextEncoder();
-  const lines = quads.map((quad) => {
-    const line = serializeWorkspacePublicSnapshotQuads([{ ...quad, graph: '' }]);
-    return Object.freeze({ line, bytes: encoder.encode(line) });
-  });
-  lines.sort((left, right) => compareBytes(left.bytes, right.bytes));
-  return encoder.encode(lines.map(({ line }) => line).join(''));
-}
-
-function compareBytes(left: Uint8Array, right: Uint8Array): number {
-  const length = Math.min(left.byteLength, right.byteLength);
-  for (let index = 0; index < length; index += 1) {
-    if (left[index] !== right[index]) return left[index]! - right[index]!;
-  }
-  return left.byteLength - right.byteLength;
 }

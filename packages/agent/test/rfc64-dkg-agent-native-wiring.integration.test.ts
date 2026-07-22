@@ -416,6 +416,97 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
+  it('canonicalizes ordinary literal lexical forms before catalog projection verification', async () => {
+    const author = await startNativeAgent(
+      'auto-publish-canonical-literal',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const publicQuads = [{
+      subject: 'https://example.org/alice',
+      predicate: 'https://schema.org/age',
+      object: '"042"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      graph: 'urn:ignored-local-graph',
+    }];
+
+    await expect(author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'ordinary-noncanonical-literal' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(13n, publicQuads)),
+    })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+  }, 60_000);
+
+  it('uses the chain signer for a confirmed author when no custodial key is available', async () => {
+    const author = await startNativeAgent(
+      'auto-publish-chain-signer',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(undefined);
+    const chain = (author as unknown as {
+      chain: {
+        signMessageAs?: (
+          address: string,
+          message: Uint8Array,
+        ) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+      };
+    }).chain;
+    const signMessageAs = vi.fn(async (address: string, message: Uint8Array) => {
+      expect(address).toBe(AUTHOR);
+      const signature = ethers.Signature.from(await AUTHOR_WALLET.signMessage(message));
+      return {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      };
+    });
+    chain.signMessageAs = signMessageAs;
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+
+    await expect(author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'ordinary-chain-signed-publication' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal: assertionSealFromCanonical(await authorSeal(14n)),
+    })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(signMessageAs).toHaveBeenCalled();
+  }, 60_000);
+
   it('does not expose an empty applied head when first-asset successor staging fails', async () => {
     const author = await startNativeAgent(
       'auto-publish-first-asset-retry',

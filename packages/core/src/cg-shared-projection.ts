@@ -77,6 +77,38 @@ export interface CgSharedProjectionVerificationLimitsV1 {
   readonly maxLineBytes: number;
 }
 
+export interface CgSharedPublicRootProjectionTripleV1 {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+}
+
+/**
+ * Encode public-root triples into the exact canonical bytes consumed by the
+ * cg-shared-v1 verifier: V10-canonical terms, one LF per line, and raw UTF-8
+ * byte ordering. Graph placement is deliberately absent from this wire view.
+ */
+export function encodeCanonicalCgSharedPublicRootProjectionV1(
+  triples: readonly CgSharedPublicRootProjectionTripleV1[],
+): Uint8Array {
+  const lines = triples.map(({ subject, predicate, object }) => {
+    const content = tripleContentV10(subject, predicate, object);
+    const line = new Uint8Array(content.byteLength + 1);
+    line.set(content);
+    line[line.byteLength - 1] = 0x0a;
+    return line;
+  });
+  lines.sort(compareBytes);
+  const byteLength = lines.reduce((sum, line) => sum + line.byteLength, 0);
+  const projection = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const line of lines) {
+    projection.set(line, offset);
+    offset += line.byteLength;
+  }
+  return projection;
+}
+
 /**
  * Process-local proof that one structurally verified transferred bundle carries
  * the exact canonical `cg-shared-v1` projection committed by its author seal.
