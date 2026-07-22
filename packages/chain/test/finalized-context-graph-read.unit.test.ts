@@ -10,6 +10,7 @@ import {
   FinalizedContextGraphReadErrorV1,
   composeFinalizedContextGraphReadV1,
   resolveFinalizedContextGraphReadV1,
+  type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
   type FinalizedContextGraphReadRequestV1,
   type UntrustedFinalizedContextGraphFieldsV1,
@@ -87,18 +88,33 @@ describe('RFC-64 finalized Context Graph chain read', () => {
     });
   });
 
-  it('forwards the exact request object through the resolver seam once', async () => {
+  it('passes one frozen canonical binding through the resolver seam', async () => {
     const request = validRequest();
     const raw = Object.freeze(validRaw());
-    const resolver = vi.fn((received: FinalizedContextGraphReadRequestV1) => {
-      expect(received).toBe(request);
+    const resolver = vi.fn((received: FinalizedContextGraphBindingV1) => {
+      expect(received).not.toBe(request);
+      expect(Object.isFrozen(received)).toBe(true);
+      expect(received).toEqual(request);
       return Promise.resolve(raw);
     });
     const viaSeam = await resolveFinalizedContextGraphReadV1(resolver, request);
     const direct = composeFinalizedContextGraphReadV1(request, validRaw());
     expect(resolver).toHaveBeenCalledOnce();
-    expect(resolver).toHaveBeenCalledWith(request);
+    expect(resolver).toHaveBeenCalledWith(Object.freeze({
+      chainId: CHAIN_ID,
+      contextGraphId: '42',
+      governanceContract: CGS,
+    }));
     expect(viaSeam).toEqual(direct);
+  });
+
+  it('rejects malformed identity before invoking the resolver', async () => {
+    const resolver = vi.fn(() => Promise.resolve(validRaw()));
+    await expect(resolveFinalizedContextGraphReadV1(resolver, {
+      ...validRequest(),
+      contextGraphId: '0x2a',
+    })).rejects.toMatchObject({ code: 'request-binding' });
+    expect(resolver).not.toHaveBeenCalled();
   });
 
   it('maps the valid open-policy zero authority to the canonical null domain', () => {
@@ -136,6 +152,19 @@ describe('RFC-64 finalized Context Graph chain read', () => {
       active: false,
     });
     expect(read.active).toBe(false);
+  });
+
+  it('maps both finalized name-hash opt-out representations to null', () => {
+    const fromAdapter = composeFinalizedContextGraphReadV1(validRequest(), {
+      ...validRaw(),
+      nameHash: null,
+    });
+    const fromRawRpc = composeFinalizedContextGraphReadV1(validRequest(), {
+      ...validRaw(),
+      nameHash: `0x${'0'.repeat(64)}`,
+    });
+    expect(fromAdapter.nameHash).toBeNull();
+    expect(fromRawRpc.nameHash).toBeNull();
   });
 
   it('accepts the canonical u64 block-number maximum and rejects MAX_U64 + 1', () => {

@@ -41,11 +41,11 @@ export {
   type StrictCurrentFinalizedEvmRpcConfigV1,
 } from './strict-current-finalized-evm-rpc.js';
 export {
-  CG_ACCESS_POLICY_VALUES_V1,
-  CG_PUBLISH_POLICY_VALUES_V1,
   FinalizedContextGraphReadErrorV1,
   composeFinalizedContextGraphReadV1,
   resolveFinalizedContextGraphReadV1,
+  validateFinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
   type FinalizedContextGraphReadRequestV1,
   type FinalizedContextGraphReadResolverV1,

@@ -48,6 +48,8 @@ export const MEMBER_ROSTER_ROLES_V1 = Object.freeze([
   'ingress-host',
   'provider',
 ] as const);
+export const CONTEXT_GRAPH_ACCESS_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
+export const CONTEXT_GRAPH_PUBLISH_POLICY_VALUES_V1 = Object.freeze([0, 1] as const);
 
 export type ContextGraphAccessPolicyV1 = 0 | 1;
 export type ContextGraphPublishPolicyV1 = 0 | 1;
@@ -153,6 +155,20 @@ export function assertContextGraphPolicyV1(
   value: unknown,
 ): asserts value is ContextGraphPolicyV1 {
   validateContextGraphPolicySnapshotV1(value);
+}
+
+export function assertContextGraphAccessPolicyV1(
+  value: unknown,
+  label = 'accessPolicy',
+): asserts value is ContextGraphAccessPolicyV1 {
+  assertPolicyEnum(value, label);
+}
+
+export function assertContextGraphPublishPolicyV1(
+  value: unknown,
+  label = 'publishPolicy',
+): asserts value is ContextGraphPublishPolicyV1 {
+  assertPolicyEnum(value, label);
 }
 
 export function canonicalizeContextGraphPolicyPayloadV1(
@@ -411,8 +427,8 @@ function assertContextGraphPolicyStructureV1(
   u64(value.era, 'era');
   u64(value.version, 'version');
   optionalDigest(value.previousPolicyDigest, 'previousPolicyDigest');
-  assertPolicyEnum(value.accessPolicy, 'accessPolicy');
-  assertPolicyEnum(value.publishPolicy, 'publishPolicy');
+  assertContextGraphAccessPolicyV1(value.accessPolicy);
+  assertContextGraphPublishPolicyV1(value.publishPolicy);
   if (value.publishAuthority !== null) {
     scalar(() => assertCanonicalEvmAddress(value.publishAuthority, 'publishAuthority'));
   }
