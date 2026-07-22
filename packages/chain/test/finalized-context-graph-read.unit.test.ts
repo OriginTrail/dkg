@@ -9,10 +9,13 @@ import type {
 import {
   FinalizedContextGraphReadErrorV1,
   composeFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadWithSignalV1,
   resolveFinalizedContextGraphReadV1,
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
   type FinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadResolverWithSignalV1,
   type UntrustedFinalizedContextGraphFieldsV1,
 } from '../src/finalized-context-graph-read.js';
 
@@ -91,7 +94,7 @@ describe('RFC-64 finalized Context Graph chain read', () => {
   it('passes one frozen canonical binding through the resolver seam', async () => {
     const request = validRequest();
     const raw = Object.freeze(validRaw());
-    const resolver = vi.fn((received: FinalizedContextGraphBindingV1) => {
+    const resolver: FinalizedContextGraphReadResolverV1 = vi.fn((received) => {
       expect(received).not.toBe(request);
       expect(Object.isFrozen(received)).toBe(true);
       expect(received).toEqual(request);
@@ -106,6 +109,29 @@ describe('RFC-64 finalized Context Graph chain read', () => {
       governanceContract: CGS,
     }));
     expect(viaSeam).toEqual(direct);
+  });
+
+  it('requires and forwards caller-owned cancellation for signal-aware resolvers', async () => {
+    const request = validRequest();
+    const raw = Object.freeze(validRaw());
+    const signal = new AbortController().signal;
+    const resolver: FinalizedContextGraphReadResolverWithSignalV1 = vi.fn(
+      async () => raw,
+    );
+
+    const result = await resolveFinalizedContextGraphReadWithSignalV1(
+      resolver,
+      request,
+      signal,
+    );
+
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver).toHaveBeenCalledWith(Object.freeze({
+      chainId: CHAIN_ID,
+      contextGraphId: '42',
+      governanceContract: CGS,
+    }), signal);
+    expect(result).toEqual(composeFinalizedContextGraphReadV1(request, raw));
   });
 
   it('rejects malformed identity before invoking the resolver', async () => {

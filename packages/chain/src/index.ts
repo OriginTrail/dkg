@@ -35,6 +35,11 @@ export {
   type CurrentFinalizedEvmChainAdapterV1,
 } from './current-finalized-evm-call.js';
 export {
+  FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
+  FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
+  createFinalizedContextGraphRpcResolverV1,
+} from './finalized-context-graph-rpc-resolver.js';
+export {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
@@ -48,12 +53,14 @@ export {
 export {
   FinalizedContextGraphReadErrorV1,
   composeFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadWithSignalV1,
   resolveFinalizedContextGraphReadV1,
   validateFinalizedContextGraphReadRequestV1,
   type FinalizedContextGraphBindingV1,
   type FinalizedContextGraphReadErrorCodeV1,
   type FinalizedContextGraphReadRequestV1,
   type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadResolverWithSignalV1,
   type FinalizedContextGraphReadV1,
   type UntrustedFinalizedContextGraphFieldsV1,
 } from './finalized-context-graph-read.js';
