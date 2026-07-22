@@ -4,6 +4,10 @@ import {
 } from './constants.js';
 import type { MemoryLayer } from './memory-model.js';
 import { assertSafeIri, isSafeIri } from './sparql-safe.js';
+import {
+  assertNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
 
 /** Existing V10 KAs may be resolved through the quarantined read-only path. */
 export const LEGACY_ROOT_CONTENT_SCOPE_VERSION = 1 as const;
@@ -129,9 +133,10 @@ export function parseDeterministicKnowledgeAssetUal(
  * bits and therefore fail closed instead of aliasing a graph identity.
  */
 export function unpackDeterministicRootlessKnowledgeAssetId(
-  chainId: string,
+  networkId: NetworkIdV1,
   kaId: bigint,
 ): Readonly<DeterministicRootlessKnowledgeAssetIdentity> {
+  assertNetworkIdV1(networkId, 'rootless Knowledge Asset networkId');
   if (typeof kaId !== 'bigint' || kaId < 1n || kaId > MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID) {
     throw new Error('Rootless Knowledge Asset id must be a nonzero uint256');
   }
@@ -142,7 +147,7 @@ export function unpackDeterministicRootlessKnowledgeAssetId(
   const agentAddress = `0x${authorValue.toString(16).padStart(40, '0')}`;
   const kaNumber = (kaId & MAX_KNOWLEDGE_ASSET_NUMBER).toString(10);
   const parsed = parseDeterministicKnowledgeAssetUal(
-    `did:dkg:${chainId}/${agentAddress}/${kaNumber}`,
+    `did:dkg:${networkId}/${agentAddress}/${kaNumber}`,
   );
   return Object.freeze({ ...parsed, kaId: kaId.toString(10) });
 }
