@@ -374,6 +374,28 @@ function parsePublisherLifecycleFactsFromQuery(
   return { contextGraphId, name, subGraphName, agentAddress, intentKey };
 }
 
+// #1890 — one request-body boundary for the publisher admin POST routes (cancel / retry /
+// clear / clear-job). Reads the small JSON body, applies the shared invalid-JSON mapping
+// (400 `{ error: 'Invalid JSON body' }`), and normalizes a missing / `null` / primitive /
+// array body to `{}` so no route destructures a non-object — a `null` body must not
+// TypeError into a 500. Each route keeps its OWN field validation and response shape.
+// Returns `null` AFTER responding, so callers do:
+//   const parsed = await readSmallJsonObject(req, res); if (!parsed) return;
+async function readSmallJsonObject(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    jsonResponse(res, 400, { error: "Invalid JSON body" });
+    return null;
+  }
+  return isPlainRecord(parsed) ? parsed : {};
+}
+
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -497,14 +519,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/cancel
   if (req.method === "POST" && path === "/api/publisher/cancel") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { jobId } = parsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId as string | undefined;
     if (!jobId) return jsonResponse(res, 400, { error: "Missing jobId" });
     await publisherControl.cancel(jobId);
     return jsonResponse(res, 200, { cancelled: jobId });
@@ -512,14 +529,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/retry
   if (req.method === "POST" && path === "/api/publisher/retry") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let retryParsed: any;
-    try {
-      retryParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = retryParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status && status !== "failed")
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
@@ -530,14 +542,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/clear
   if (req.method === "POST" && path === "/api/publisher/clear") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let clearParsed: any;
-    try {
-      clearParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = clearParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status !== "failed" && status !== "finalized") {
       return jsonResponse(res, 400, {
         error: "status must be failed or finalized",
@@ -553,17 +560,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   // in a native terminal state, is idempotent for an absent job (already_absent = 200,
   // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
   if (req.method === "POST" && path === "/api/publisher/clear-job") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let clearJobParsed: any;
-    try {
-      clearJobParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    // `JSON.parse("null")` etc. succeeds but yields a non-object; optional-chain so a
-    // `null`/primitive body falls through to the malformed guard (400), never a
-    // destructure TypeError → 500.
-    const jobId = clearJobParsed && typeof clearJobParsed === "object" ? clearJobParsed.jobId : undefined;
+    // readSmallJsonObject normalizes a `null`/primitive body to `{}`, so `jobId` is
+    // undefined there and falls through to the malformed guard (400) — never a 500.
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId;
     if (typeof jobId !== "string" || jobId.trim().length === 0) {
       return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
     }
