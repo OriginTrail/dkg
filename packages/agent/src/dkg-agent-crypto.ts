@@ -979,24 +979,61 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * treated like the bare-numeric raw-slot path (not identity-bound) and gated
    * by liveness + fresh policy alone.
    *
-   * `requireCommittedNameHash` is the strict durable-sync mode: unlike the
-   * legacy policy probe, it rejects malformed ids and adapters that cannot
-   * prove a non-numeric local id from the chain commitment. The canonical
-   * direct numeric self-address remains valid in either mode.
+   * This legacy policy probe retains compatibility for malformed identifiers
+   * and adapters without the name-hash getter, while failing closed to `false`
+   * when an available identity read rejects or times out.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
-    options?: { requireCommittedNameHash?: boolean },
   ): Promise<boolean> {
     let numericId: bigint;
     try {
       numericId = BigInt(onChainId);
     } catch {
-      return options?.requireCommittedNameHash !== true;
+      return true;
     }
-    if (numericId <= 0n) return options?.requireCommittedNameHash !== true;
+    if (numericId <= 0n) return true;
+
+    const trimmed = contextGraphId.trim();
+    if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) return true;
+    if (typeof this.chain.getContextGraphNameHash !== 'function') return true;
+    try {
+      ethers.keccak256(ethers.toUtf8Bytes(trimmed));
+    } catch {
+      return true;
+    }
+
+    try {
+      return await WorkspaceCryptoMethods.prototype.requireLocalCgMatchesOnChainSlot.call(
+        this,
+        contextGraphId,
+        onChainId,
+        opCtx,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Strict durable-sync identity proof. Unlike the legacy policy probe, this
+   * rejects malformed or unprovable mappings and propagates chain transport
+   * failures so authentication can retry a fresh read.
+   */
+  async requireLocalCgMatchesOnChainSlot(this: DKGAgent,
+    contextGraphId: string,
+    onChainId: string,
+    opCtx?: OperationContext,
+  ): Promise<boolean> {
+    let numericId: bigint;
+    try {
+      numericId = BigInt(onChainId);
+    } catch {
+      return false;
+    }
+    if (numericId <= 0n) return false;
 
     const trimmed = contextGraphId.trim();
     // DIRECT NUMERIC SELF-ADDRESS: a local CG whose own id IS its numeric
@@ -1013,7 +1050,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (/^\d+$/.test(trimmed) && trimmed === numericId.toString()) return true;
     const getNameHash = this.chain.getContextGraphNameHash;
     if (typeof getNameHash !== 'function') {
-      return options?.requireCommittedNameHash !== true;
+      return false;
     }
     // A locally-resolved (cleartext) id can be committed two ways, and both are
     // legitimate (#884 review 🔴 GZumc + 🔴 GaJf_), so accept a match against EITHER:
@@ -1036,7 +1073,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     try {
       acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
     } catch {
-      return options?.requireCommittedNameHash !== true;
+      return false;
     }
     if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && this.isWireIdKeyedSubscription(trimmed)) {
       acceptable.add(trimmed.toLowerCase());
@@ -1058,8 +1095,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — ` +
         `cannot verify local-mapping identity, treating CG as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       );
-      if (options?.requireCommittedNameHash === true) throw err;
-      return false;
+      throw err;
     }
     if (onChainHash === TIMEOUT_SENTINEL) {
       // Same as a rejection: the getter exists but the hash couldn't be read in
@@ -1069,12 +1105,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after ` +
         `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, treating CG as NOT public (fail-closed)`,
       );
-      if (options?.requireCommittedNameHash === true) {
-        throw createRpcTimeoutError(
-          `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
-        );
-      }
-      return false;
+      throw createRpcTimeoutError(
+        `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+      );
     }
     // MISSING commitment (`null` / empty): the slot has NO on-chain name-hash.
     // This is NOT an affirmative identity proof and must NOT re-enable the

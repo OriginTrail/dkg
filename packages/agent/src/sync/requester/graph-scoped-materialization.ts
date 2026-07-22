@@ -29,9 +29,9 @@ const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
-const MATERIALIZATION_MAX_ATTEMPTS = 5;
-const MATERIALIZATION_RETRY_BASE_MS = 1_000;
-const MATERIALIZATION_RETRY_MAX_MS = 8_000;
+const AUTHENTICATION_MAX_ATTEMPTS = 5;
+const AUTHENTICATION_RETRY_BASE_MS = 1_000;
+const AUTHENTICATION_RETRY_MAX_MS = 8_000;
 
 export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
@@ -57,24 +57,39 @@ export type VerifyContextGraphBinding = (
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
 
 /** Retry only chain-owned transport failures; verified peer-invalid data is deterministic. */
-export function isRetryableGraphScopedMaterializationError(error: unknown): boolean {
+export function isRetryableGraphScopedAuthenticationError(error: unknown): boolean {
   return isChainRpcTransportError(error);
 }
 
-export async function withGraphScopedMaterializationRetry<T>(
-  materialize: () => Promise<T>,
-  onRetry?: (error: unknown, attempt: number, maxAttempts: number) => void,
-): Promise<T> {
-  return withRetry(materialize, {
-    maxAttempts: MATERIALIZATION_MAX_ATTEMPTS,
-    baseDelayMs: MATERIALIZATION_RETRY_BASE_MS,
-    maxDelayMs: MATERIALIZATION_RETRY_MAX_MS,
-    jitter: 0,
-    isRetryable: isRetryableGraphScopedMaterializationError,
-    onRetry: (attempt, _delayMs, error) => {
-      onRetry?.(error, attempt, MATERIALIZATION_MAX_ATTEMPTS);
+export interface GraphScopedAuthenticationRetryOptions {
+  receivedAt?: Date;
+  onRetry?: (error: unknown, attempt: number, maxAttempts: number) => void;
+}
+
+export async function authenticateVerifiedGraphScopedAssetWithRetry(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
+  options: GraphScopedAuthenticationRetryOptions = {},
+): Promise<AuthenticatedGraphScopedAsset> {
+  return withRetry(
+    () => authenticateVerifiedGraphScopedAsset(
+      chain,
+      asset,
+      verifyContextGraphBinding,
+      options.receivedAt,
+    ),
+    {
+      maxAttempts: AUTHENTICATION_MAX_ATTEMPTS,
+      baseDelayMs: AUTHENTICATION_RETRY_BASE_MS,
+      maxDelayMs: AUTHENTICATION_RETRY_MAX_MS,
+      jitter: 0,
+      isRetryable: isRetryableGraphScopedAuthenticationError,
+      onRetry: (attempt, _delayMs, error) => {
+        options.onRetry?.(error, attempt, AUTHENTICATION_MAX_ATTEMPTS);
+      },
     },
-  });
+  );
 }
 
 /**

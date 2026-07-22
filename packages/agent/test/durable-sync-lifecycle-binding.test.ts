@@ -91,6 +91,9 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    agentLike.requireLocalCgMatchesOnChainSlot = (
+      DKGAgent.prototype as any
+    ).requireLocalCgMatchesOnChainSlot;
     agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
     agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
 
@@ -130,6 +133,12 @@ describe('durable sync lifecycle chain binding', () => {
     vi.useFakeTimers();
     try {
       const firstMaterialization = storeGraphScopedAsset!(asset);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
+      expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
+      expect(persistContextGraphSubscriptionState).not.toHaveBeenCalled();
+      expect(mockedMaterialize).not.toHaveBeenCalled();
+      expect(agentLike.invalidateListContextGraphsCache).not.toHaveBeenCalled();
       await vi.runAllTimersAsync();
       await expect(firstMaterialization).resolves.toBe('applied');
     } finally {
@@ -209,6 +218,9 @@ describe('durable sync lifecycle chain binding', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
     agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    agentLike.requireLocalCgMatchesOnChainSlot = (
+      DKGAgent.prototype as any
+    ).requireLocalCgMatchesOnChainSlot;
     agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
     agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
 
