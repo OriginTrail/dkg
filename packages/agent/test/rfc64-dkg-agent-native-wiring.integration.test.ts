@@ -21,7 +21,8 @@ import {
   type NetworkIdV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -300,7 +301,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
       peers: ['duplicate', 'duplicate'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-    })).toThrow(/must be unique/u);
+    })).toThrow(/duplicated/u);
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {
@@ -587,6 +588,97 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       inventoryRowCount: '2',
     });
   }, 60_000);
+
+
+  it('serializes mixed-case projection terms in raw UTF-8 order', async () => {
+    const author = await startNativeAgent(
+      'auto-publish-byte-order',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const publicQuads = [
+      {
+        subject: 'urn:a',
+        predicate: 'https://schema.org/name',
+        object: '"lowercase"',
+        graph: '',
+      },
+      {
+        subject: 'urn:Z',
+        predicate: 'https://schema.org/name',
+        object: '"uppercase"',
+        graph: '',
+      },
+    ];
+    const applied = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'mixed-case-byte-order' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(31n, publicQuads)),
+    });
+    expect(applied).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+  }, 60_000);
+
+  it('explicitly skips private-bearing ordinary publishes in the public-only V1 bridge', async () => {
+    const author = await startNativeAgent(
+      'auto-publish-private-skip',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const privateBearingSeal: AssertionSeal = {
+      ...assertionSealFromCanonical(await authorSeal(32n)),
+      privateTripleCount: 1,
+      privateMerkleRoot: ethers.getBytes(`0x${'99'.repeat(32)}`),
+    };
+    await expect(author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'private-bearing-skip' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal: privateBearingSeal,
+    })).resolves.toBeNull();
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 60_000);
+
 
   it('snapshots the explicit access authority and fails closed before private activation', async () => {
     const resolver = async () => AUTHOR;
@@ -1333,13 +1425,19 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
   }, 60_000);
 });
 
-async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(
+  kaNumber: bigint,
+  publicQuads?: readonly Quad[],
+): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+  const assertionMerkleRoot = publicQuads === undefined
+    ? ASSERTION_ROOT
+    : ethers.hexlify(computeFlatKCRootV10([...publicQuads], [])) as Digest32V1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
     kav10Address: NATIVE_DEPLOYMENT.assertedAtKav10Address,
-    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
+    merkleRoot: ethers.getBytes(assertionMerkleRoot),
     authorAddress: AUTHOR,
     reservedKaId: BigInt(kaId),
   });
@@ -1349,7 +1447,7 @@ async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorS
     typedData.message,
   ));
   const seal = {
-    assertionMerkleRoot: ASSERTION_ROOT,
+    assertionMerkleRoot,
     authorAddress: AUTHOR,
     authorAttestationR: signature.r,
     authorAttestationVS: signature.yParityAndS,
@@ -1361,7 +1459,7 @@ async function authorSeal(kaNumber: bigint): Promise<CanonicalGraphScopedAuthorS
     contentScopeVersion: '2',
     kaUal,
     assertionVersion: '1',
-    publicTripleCount: '2',
+    publicTripleCount: String(publicQuads?.length ?? 2),
     privateTripleCount: '0',
     privateMerkleRoot: null,
   } as unknown as CanonicalGraphScopedAuthorSealV1;

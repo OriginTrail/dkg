@@ -24,10 +24,8 @@ import type {
   Rfc64PublicCatalogBootstrapScopeV1,
   Rfc64PublicCatalogBootstrapTargetV1,
 } from '../dkg-agent-types.js';
+import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
 
-const MAX_RFC64_AUTO_PUBLISH_PEERS_V1 = 64;
-const MAX_RFC64_PEER_ID_BYTES_V1 = 256;
-const UTF8 = new TextEncoder();
 const MAX_RFC64_BOOTSTRAP_POLICIES_V1 = 64;
 const MAX_RFC64_BOOTSTRAP_TARGETS_V1 = 256;
 const MAX_RFC64_BOOTSTRAP_PROVIDERS_V1 = 8;
@@ -140,28 +138,7 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
   ) {
     throw new TypeError('rfc64PublicCatalogAutoPublish has unknown or missing fields');
   }
-  if (!Array.isArray(input.peers) || input.peers.length > MAX_RFC64_AUTO_PUBLISH_PEERS_V1) {
-    throw new TypeError(
-      `rfc64PublicCatalogAutoPublish.peers must contain at most ${MAX_RFC64_AUTO_PUBLISH_PEERS_V1} peer IDs`,
-    );
-  }
-  const peers: string[] = [];
-  const seen = new Set<string>();
-  for (const peerId of input.peers) {
-    if (
-      typeof peerId !== 'string'
-      || peerId.length === 0
-      || peerId.trim() !== peerId
-      || UTF8.encode(peerId).byteLength > MAX_RFC64_PEER_ID_BYTES_V1
-    ) {
-      throw new TypeError('rfc64PublicCatalogAutoPublish.peers contains an invalid peer ID');
-    }
-    if (seen.has(peerId)) {
-      throw new TypeError('rfc64PublicCatalogAutoPublish.peers must be unique');
-    }
-    seen.add(peerId);
-    peers.push(peerId);
-  }
+  const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
   const effectiveAt = snapshotTimestamp(
     input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
     'catalogIssuerDelegationEffectiveAt',
@@ -176,7 +153,7 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
     );
   }
   return Object.freeze({
-    peers: Object.freeze(peers),
+    peers,
     catalogIssuerDelegationEffectiveAt: effectiveAt,
     catalogIssuerDelegationExpiresAt: expiresAt,
   });
@@ -328,31 +305,17 @@ function snapshotBootstrapScope(
 }
 
 function snapshotBootstrapProviders(input: readonly string[], targetIndex: number): readonly string[] {
+  const providers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input);
   if (
-    !Array.isArray(input)
-    || input.length === 0
-    || input.length > MAX_RFC64_BOOTSTRAP_PROVIDERS_V1
+    providers.length === 0
+    || providers.length > MAX_RFC64_BOOTSTRAP_PROVIDERS_V1
   ) {
     throw new TypeError(
       `rfc64PublicCatalogBootstrap.targets[${targetIndex}].providers must contain 1..`
       + `${MAX_RFC64_BOOTSTRAP_PROVIDERS_V1} peers`,
     );
   }
-  const seen = new Set<string>();
-  const providers = input.map((peerId) => {
-    if (
-      typeof peerId !== 'string'
-      || peerId.length === 0
-      || peerId.trim() !== peerId
-      || UTF8.encode(peerId).byteLength > MAX_RFC64_PEER_ID_BYTES_V1
-      || seen.has(peerId)
-    ) {
-      throw new TypeError('rfc64PublicCatalogBootstrap contains an invalid provider peer ID');
-    }
-    seen.add(peerId);
-    return peerId;
-  });
-  return Object.freeze(providers);
+  return providers;
 }
 
 function assertPlainExactObject(
