@@ -18,6 +18,7 @@ import {
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_BUCKET_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
+  ASSERTION_SEAL_PREDICATES,
   DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   ZERO_DIGEST32_V1,
@@ -814,6 +815,17 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         head,
         trustedCatalogScope,
       );
+    if (historyDisposition === 'cold-bootstrap') {
+      await assertColdBootstrapHasNoOmittedSemanticStateV1(
+        this.options.store,
+        trustedCatalogScope,
+        preparedRows.map((prepared) => transitionLocationFromTarget(
+          head,
+          prepared.row,
+          prepared.sealBinding,
+        )),
+      );
+    }
     const targetKaIds = new Set(preparedRows.map(({ row }) => row.kaId));
     const plannedRemovals = predecessorRows
       .filter((row) => !targetKaIds.has(row.kaId))
@@ -1565,6 +1577,84 @@ interface Rfc64SemanticTransitionPreimageV1
   extends Rfc64SemanticTransitionLocationV1 {
   readonly graphQuads: readonly Readonly<Quad>[];
   readonly sealQuads: readonly Readonly<Quad>[];
+}
+
+/**
+ * Missing durable history is not proof that the semantic store is empty: a
+ * process may have died after atomic activation and before the applied-head
+ * CAS. Cold bootstrap is therefore allowed only when every materialization
+ * already present for this exact author/root scope belongs to the fetched
+ * target. Matching target rows are safe repair preimages; any omitted graph or
+ * author-seal subject makes the successor fail closed before mutation/CAS.
+ */
+async function assertColdBootstrapHasNoOmittedSemanticStateV1(
+  store: TripleStore,
+  scope: Readonly<AuthorCatalogScopeV1>,
+  targets: readonly Readonly<Rfc64SemanticTransitionLocationV1>[],
+): Promise<void> {
+  const allowedGraphs = new Set(targets.map((target) => target.swmGraph));
+  const allowedSealSubjects = new Set(targets.map((target) => target.sealSubject));
+  const swmPrefix = `${contextGraphWorkspaceGraphUri(scope.contextGraphId)}`
+    + `/${scope.authorAddress}/`;
+  let existingGraphs: string[];
+  try {
+    existingGraphs = store.listGraphsByPrefix === undefined
+      ? (await store.listGraphs({ source: 'rfc64-cold-bootstrap-namespace-proof' }))
+        .filter((graph) => graph.startsWith(swmPrefix))
+      : await store.listGraphsByPrefix(
+        swmPrefix,
+        { source: 'rfc64-cold-bootstrap-namespace-proof' },
+      );
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap could not prove the author SWM namespace is exact',
+      cause,
+    );
+  }
+  if (
+    existingGraphs.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+    || existingGraphs.some((graph) => !allowedGraphs.has(graph))
+  ) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap found author SWM materialization omitted by the fetched exact head',
+    );
+  }
+
+  const metaGraph = targets[0]?.sealMetaGraph;
+  if (metaGraph === undefined) {
+    fail('catalog-native-receiver-history', 'cold successor has no semantic target scope');
+  }
+  let sealSubjects;
+  try {
+    sealSubjects = await store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { `
+        + `?s <${ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS}> `
+        + `${JSON.stringify(scope.authorAddress)} } } `
+        + `LIMIT ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + 1}`,
+      {
+        source: 'rfc64-cold-bootstrap-namespace-proof',
+        maxResponseBytes: 1024 * 1024,
+      },
+    );
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap could not prove the author-seal namespace is exact',
+      cause,
+    );
+  }
+  if (
+    sealSubjects.type !== 'bindings'
+    || sealSubjects.bindings.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
+    || sealSubjects.bindings.some(({ s }) => typeof s !== 'string' || !allowedSealSubjects.has(s))
+  ) {
+    fail(
+      'catalog-native-receiver-history',
+      'cold bootstrap found author-seal materialization omitted by the fetched exact head',
+    );
+  }
 }
 
 function transitionLocationFromRemoval(

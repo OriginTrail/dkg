@@ -85,7 +85,6 @@ import {
   type Rfc64BoundedPublicRootCatalogTrustedScopeResolverV1,
 } from './public-catalog-native-reconciler-v1.js';
 import {
-  deriveRfc64PublicOpenCatalogScopeV1,
   deriveRfc64PublicRootCatalogScopeV1,
 } from './public-open-catalog-scope-v1.js';
 import type {
@@ -763,13 +762,7 @@ export class Rfc64PublicCatalogServiceV1 {
       })) {
         throw new Error('catalog author is not authorized by the accepted policy');
       }
-      return record.policy.source.kind === 'owner-signed-unregistered'
-        && record.policy.governanceChainId === null
-        && record.policy.governanceContractAddress === null
-        && record.policy.ownershipTransitionDigest === null
-        && record.policy.source.ownerAddress === input.authorAddress
-        ? deriveRfc64PublicOpenCatalogScopeV1(input, record.policy)
-        : deriveRfc64PublicRootCatalogScopeV1(input, record.policy);
+      return deriveRfc64PublicRootCatalogScopeV1(input, record.policy);
     } catch (cause) {
       throw new Error(
         'RFC-64 current-head query is not bound to the accepted public root policy',
