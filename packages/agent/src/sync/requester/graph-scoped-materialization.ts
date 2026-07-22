@@ -80,6 +80,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       graph: asset.metaGraph,
     },
   ];
+  const structuralMetadata = asset.metadataQuads.filter((quad) => (
+    quad.predicate !== PUBLISHED_AT
+    && quad.predicate !== STATUS
+    && quad.predicate !== MATERIALIZED_VERSION
+  ));
   // The timestamp above is local receive time, not peer metadata. It is safe
   // for discovery ordering and keeps graph-scoped KAs visible without trusting
   // a peer-controlled dkg:publishedAt value. No-chain mode remains explicitly
@@ -88,7 +93,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     return {
       asset: {
         ...asset,
-        metadataQuads: [...asset.metadataQuads, ...locallyVisibleMetadata('tentative')],
+        metadataQuads: [...structuralMetadata, ...locallyVisibleMetadata('tentative')],
       },
       onChainContextGraphId: null,
     };
@@ -164,20 +169,31 @@ export async function authenticateVerifiedGraphScopedAsset(
   const transactionHashes = asset.metadataQuads
     .filter((quad) => quad.predicate === TRANSACTION_HASH)
     .map((quad) => parseTransactionHashLiteral(quad.object));
-  if (transactionHashes.length !== 1) {
+  if (transactionHashes.length > 1) {
     throw Object.assign(
       new Error(
-        `Graph-scoped durable sync ${asset.ual} requires one receipt transaction hash, `
+        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
           + `got ${transactionHashes.length}`,
       ),
-      { code: 'VM_CHAIN_PROVENANCE_MISSING' },
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
     );
   }
-  const transactionHash = transactionHashes[0]!;
 
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (asset.assertionVersion === 1n) {
+  if (transactionHashes.length === 0) {
+    // RFC-64 finalized VM materialization deliberately has no receipt claim:
+    // it is reconstructed from a pinned finalized chain snapshot. A later
+    // durable-sync requester must not trust the serving peer's local
+    // materializedVersion, and the requester strips that field before this
+    // boundary. The independently read current root, root count, KA->CG
+    // binding, and local CG name binding above fully authenticate the exact
+    // current assertion. Use a neutral LOCAL ordering stamp; assertionVersion
+    // remains the authoritative stale-write guard for this receiptless lane.
+    materializedBlock = 0;
+    materializedTxIndex = 0;
+  } else if (asset.assertionVersion === 1n) {
+    const transactionHash = transactionHashes[0]!;
     if (!chain.resolvePublishByTxHash) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
@@ -201,6 +217,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     materializedBlock = resolved.blockNumber;
     materializedTxIndex = resolved.txIndex ?? 0;
   } else {
+    const transactionHash = transactionHashes[0]!;
     if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed update verification'),
@@ -237,7 +254,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     asset: {
       ...asset,
       metadataQuads: [
-        ...asset.metadataQuads,
+        ...structuralMetadata,
         ...locallyVisibleMetadata('confirmed'),
         {
           subject: asset.ual,

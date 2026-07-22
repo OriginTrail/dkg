@@ -10,6 +10,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
   replaceLocallyTrustedKnowledgeAssetControls,
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
@@ -61,6 +62,35 @@ function metadata(version: number, merkleRoot = String(version).padStart(64, '0'
     object,
     graph: metaGraph,
   }));
+}
+
+function finalizedMaterializationMetadata(
+  version: number,
+  merkleRoot: Uint8Array,
+): Quad[] {
+  return generateGraphKnowledgeAssetMetadata({
+    contextGraphId,
+    ual,
+    merkleRoot,
+    publisherPeerId: 'rfc64-finalized-catalog-v1',
+    accessPolicy: 'public',
+    allowedPeers: [],
+    timestamp: new Date('2026-07-16T08:00:00.000Z'),
+    assertionVersion: version,
+    authorAddress: '0x1111111111111111111111111111111111111111',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    assertionGraph,
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: BigInt(packedKaId),
+        materializedVersion: { blockNumber: 123, txIndex: 0 },
+      },
+    },
+  });
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -228,6 +258,47 @@ describe('durable graph-scoped KA materialization', () => {
       predicate: `${DKG}status`,
       object: '"confirmed"',
     }));
+  });
+
+  it('authenticates finalized materialization from independent chain state without a receipt claim', async () => {
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash: async () => {
+        throw new Error('receipt lookup must not run for finalized materialization');
+      },
+      verifyKAUpdate: async () => {
+        throw new Error('receipt lookup must not run for finalized materialization');
+      },
+    } as ChainAdapter;
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v2Data],
+        metadataQuads: finalizedMaterializationMetadata(2, root),
+      },
+      strictContextGraphBindingVerifier(chain),
+      new Date('2026-07-16T08:30:00.000Z'),
+    );
+
+    expect(authenticated.onChainContextGraphId).toBe('14');
+    expect(authenticated.asset.metadataQuads).not.toContainEqual(expect.objectContaining({
+      predicate: `${DKG}transactionHash`,
+    }));
+    expect(authenticated.asset.metadataQuads.filter(
+      (quad) => quad.predicate === `${DKG}materializedVersion`,
+    )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
   });
 
   it('fails closed when the bound CG commits a different name hash', async () => {
@@ -655,6 +726,72 @@ describe('durable graph-scoped KA materialization', () => {
       { blockNumber: 0, txIndex: 0 },
       1n,
     )).resolves.toBe(false);
+  });
+
+  it('syncs a finalized-materialized VM asset from one node store into a fresh requester', async () => {
+    const sourceNodeStore = new OxigraphStore();
+    const freshRequesterStore = new OxigraphStore();
+    const v2Data = dataQuad(2);
+    const root = computeFlatKCRootV10([v2Data], []);
+    const sourceMetadata = finalizedMaterializationMetadata(2, root);
+    await sourceNodeStore.insert([v2Data, ...sourceMetadata]);
+    const servedData = await graphQuads(sourceNodeStore, assertionGraph);
+    const servedMeta = await graphQuads(sourceNodeStore, metaGraph);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+    } as ChainAdapter;
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'finalized-vm-source-node',
+      contextGraphIds: [contextGraphId],
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
+      ),
+      processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
+        const verified = processDurableBatchForWire(
+          dataQuads,
+          metaQuads,
+          acceptUnverified,
+          mode,
+        );
+        return {
+          ...verified,
+          verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+          verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+        };
+      },
+      storeInsert: (quads) => freshRequesterStore.insert(quads),
+      storeGraphScopedAsset: async (asset) => materializeVerifiedGraphScopedAsset({
+        store: freshRequesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+          new Date('2026-07-16T09:00:00.000Z'),
+        )).asset,
+      }),
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(0);
+    expect(summary.insertedDataTriples).toBe(1);
+    expect(await graphQuads(freshRequesterStore, assertionGraph)).toEqual(servedData);
+    expect(await values(freshRequesterStore, 'status')).toEqual(['"confirmed"']);
+    expect(await values(freshRequesterStore, 'transactionHash')).toEqual([]);
+    // The requester never accepts the serving node's 123:0 local ordering
+    // claim; it derives a neutral local stamp after chain authentication.
+    expect(await values(freshRequesterStore, 'materializedVersion')).toEqual(['"0:0"']);
   });
 
   it('does not let a stale durable page replace a newer local assertion', async () => {
