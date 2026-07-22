@@ -17,9 +17,9 @@ import {
   type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from '../src/current-finalized-evm-snapshot.js';
 import {
-  createStrictCurrentFinalizedEvmSnapshotScopeV1,
   type StrictCurrentFinalizedEvmReadCallV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
+import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '../src/strict-current-finalized-evm-snapshot-factory.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -218,39 +218,60 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     expect(codeReads).toBe(2);
   });
 
-  it('authenticates numbered-anchor-dependent failures before exposing them', async () => {
-    for (const [postHash, expectedCode] of [
-      [OTHER_BLOCK_HASH, 'finalized-state-unavailable'],
-      [BLOCK_HASH, 'no-code'],
-    ] as const) {
-      const server = await rpcHarness.start((rpcCall, response) => {
-        switch (rpcCall.method) {
-          case 'eth_chainId':
-            sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
-            return;
-          case 'eth_getBlockByNumber':
-            sendJsonRpcResult(response, rpcCall, {
-              number: '0x7b',
-              hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : postHash,
-            });
-            return;
-          case 'eth_getCode':
-            sendJsonRpcResult(response, rpcCall, '0x');
-            return;
-          default:
-            sendJsonRpcError(response, rpcCall, -32601, 'method not found');
-        }
-      });
-      const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
-        chainId: CHAIN_ID,
-        endpoints: [server.url],
-        blockReferenceProfile: 'trusted-block-number-hash-sandwich',
-      });
+  it('authenticates every numbered-anchor-dependent failure before exposing it', async () => {
+    const failureCases = [
+      { kind: 'no-code', stableCode: 'no-code', maxReturnBytes: 2 },
+      { kind: 'revert', stableCode: 'revert', maxReturnBytes: 2 },
+      { kind: 'malformed-return', stableCode: 'malformed-return', maxReturnBytes: 1 },
+      { kind: 'resource-limit', stableCode: 'resource-limit', maxReturnBytes: 2 },
+    ] as const;
+    for (const failure of failureCases) {
+      for (const [postHash, expectedCode] of [
+        [OTHER_BLOCK_HASH, 'finalized-state-unavailable'],
+        [BLOCK_HASH, failure.stableCode],
+      ] as const) {
+        const server = await rpcHarness.start((rpcCall, response) => {
+          switch (rpcCall.method) {
+            case 'eth_chainId':
+              sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
+              return;
+            case 'eth_getBlockByNumber':
+              sendJsonRpcResult(response, rpcCall, {
+                number: '0x7b',
+                hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : postHash,
+              });
+              return;
+            case 'eth_getCode':
+              sendJsonRpcResult(response, rpcCall, failure.kind === 'no-code' ? '0x' : '0x6000');
+              return;
+            case 'eth_call':
+              if (failure.kind === 'revert') {
+                sendJsonRpcError(response, rpcCall, 3, 'execution reverted');
+              } else if (failure.kind === 'resource-limit') {
+                sendJsonRpcError(response, rpcCall, -32000, 'out of gas');
+              } else {
+                sendJsonRpcResult(response, rpcCall, '0xaaaa');
+              }
+              return;
+            default:
+              sendJsonRpcError(response, rpcCall, -32601, 'method not found');
+          }
+        });
+        const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+          chainId: CHAIN_ID,
+          endpoints: [server.url],
+          blockReferenceProfile: 'trusted-block-number-hash-sandwich',
+        });
 
-      await expect(withSnapshot(request(), async (session) => (
-        session.read([call(FIRST_DATA)])
-      ))).rejects.toMatchObject({ code: expectedCode });
-      expect(server.calls.filter(({ method }) => method === 'eth_call')).toHaveLength(0);
+        await expect(withSnapshot(request(), async (session) => (
+          session.read([call(FIRST_DATA, failure.maxReturnBytes)])
+        ))).rejects.toMatchObject({ code: expectedCode });
+        const expectedCalls = failure.kind === 'no-code' ? 0 : 1;
+        expect(server.calls.filter(({ method }) => method === 'eth_call'))
+          .toHaveLength(expectedCalls);
+        expect(server.calls.filter(({ method }) => method === 'eth_chainId'))
+          .toHaveLength(1);
+      }
     }
   });
 

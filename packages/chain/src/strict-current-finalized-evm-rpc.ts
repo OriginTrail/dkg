@@ -28,7 +28,6 @@ import {
 } from './current-finalized-evm-read-model.js';
 import {
   type StrictCurrentFinalizedEvmSnapshotRequestV1,
-  type StrictCurrentFinalizedEvmSnapshotScopeV1,
 } from './current-finalized-evm-snapshot.js';
 import {
   assertCanonicalNonzeroEvmAddress,
@@ -38,7 +37,6 @@ import {
 } from './strict-local-data.js';
 import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
 import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
-import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-finalized-evm-snapshot-rpc.js';
 
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
@@ -67,19 +65,19 @@ export interface StrictCurrentFinalizedEvmRpcConfigV1 {
   readonly blockReferenceProfile?: CurrentFinalizedEvmBlockReferenceProfileV1;
 }
 
-interface StrictRpcConfigSnapshotV1 {
+export interface StrictRpcConfigSnapshotV1 {
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
   readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
 }
 
-interface FinalizedAnchorV1 {
+export interface FinalizedAnchorV1 {
   readonly blockNumber: BlockNumberV1;
   readonly blockNumberQuantity: string;
   readonly blockHash: Digest32V1;
 }
 
-interface DeadlineScope {
+export interface DeadlineScope {
   readonly signal: AbortSignal;
   readonly timedOut: () => boolean;
   readonly close: () => void;
@@ -261,34 +259,6 @@ export function createStrictCurrentFinalizedEvmReadV1(
   return Object.freeze(read);
 }
 
-/**
- * Build a scoped dynamic-read capability pinned to one endpoint and one
- * finalized anchor. Endpoint failover is allowed only during preflight; once
- * the callback begins it is never replayed on another endpoint.
- */
-export function createStrictCurrentFinalizedEvmSnapshotScopeV1(
-  input: StrictCurrentFinalizedEvmRpcConfigV1,
-): StrictCurrentFinalizedEvmSnapshotScopeV1 {
-  const config = snapshotConfig(input);
-  return createStrictFinalizedSnapshotRpcRuntimeV1(config, Object.freeze({
-    snapshotRequest: snapshotSnapshotRequest,
-    snapshotCalls: snapshotSnapshotCalls,
-    createDeadline: createDeadlineScope,
-    postJsonRpc,
-    parseChainId,
-    parseAnchor: parseFinalizedAnchor,
-    assertDeployedCode,
-    parseContractReturn,
-    settle: settleParallelBatch,
-    isTerminalFailure: isTerminalAttemptFailure,
-    isAnchorDependentResourceLimit,
-    unavailable,
-    timedOut,
-    resourceLimited,
-    cancelled,
-  }));
-}
-
 async function executeEndpointAttempt(
   config: StrictRpcConfigSnapshotV1,
   endpoint: string,
@@ -333,57 +303,18 @@ async function executeEndpointAttempt(
     return batch.returnData;
   };
 
-  let returnData: readonly string[];
-  if (config.blockReferenceProfile === 'eip1898') {
-    const blockReference = Object.freeze({
-      blockHash: anchor.blockHash,
-      requireCanonical: true as const,
-    });
-    returnData = await executeCallsAt(blockReference);
-  } else {
-    // Number-selected code/call evidence is not deterministic until the
-    // same-endpoint post-read closes the hash sandwich. Hold anchor-dependent
-    // outcomes until then, so a reorg cannot manufacture no-code/revert, a
-    // malformed return, or an execution-cap failure and poison admission.
-    let anchorDependentFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
-    let provisionalReturnData: readonly string[] | undefined;
-    try {
-      provisionalReturnData = await executeCallsAt(anchor.blockNumberQuantity);
-    } catch (cause) {
-      if (
-        cause instanceof CurrentFinalizedEvmCallErrorV1
-        && (
-          cause.code === 'no-code'
-          || cause.code === 'revert'
-          || cause.code === 'malformed-return'
-          || isAnchorDependentResourceLimit(cause)
-        )
-      ) {
-        anchorDependentFailure = cause;
-      } else {
-        throw cause;
-      }
-    }
-
-    const postAnchor = parseFinalizedAnchor(
+  const returnData = await executeStrictFinalizedAnchorPolicyV1({
+    blockReferenceProfile: config.blockReferenceProfile,
+    anchor,
+    executeAtReference: executeCallsAt,
+    readPostAnchor: async () => parseFinalizedAnchor(
       await rpc('eth_getBlockByNumber', Object.freeze([anchor.blockNumberQuantity, false])),
       'post-call numbered header',
-    );
-    if (
-      postAnchor.blockNumber !== anchor.blockNumber
-      || postAnchor.blockHash !== anchor.blockHash
-    ) {
-      throw new CurrentFinalizedEvmCallErrorV1(
-        'finalized-state-unavailable',
-        'Block-number fallback hash sandwich did not preserve the resolved finalized anchor',
-      );
-    }
-    if (anchorDependentFailure !== undefined) throw anchorDependentFailure;
-    if (provisionalReturnData === undefined) {
-      throw unavailable('Block-number fallback produced no contract results');
-    }
-    returnData = provisionalReturnData;
-  }
+    ),
+    anchorMismatchMessage:
+      'Block-number fallback hash sandwich did not preserve the resolved finalized anchor',
+    missingResultMessage: 'Block-number fallback produced no contract results',
+  });
 
   return Object.freeze({
     chainId: config.chainId,
@@ -398,7 +329,76 @@ async function executeEndpointAttempt(
  * started operation settles. This prevents an early rejection from leaving a
  * sibling fetch alive after the finalized-read concurrency slot is released.
  */
-async function settleParallelBatch<T>(
+export interface StrictFinalizedAnchorPolicyOptionsV1<T> {
+  readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
+  readonly anchor: FinalizedAnchorV1;
+  readonly executeAtReference: (blockReference: unknown) => Promise<T>;
+  readonly readPostAnchor: () => Promise<FinalizedAnchorV1>;
+  readonly anchorMismatchMessage: string;
+  readonly missingResultMessage: string;
+}
+
+/** Canonical EIP-1898 / authenticated-numbered-anchor execution policy. */
+export async function executeStrictFinalizedAnchorPolicyV1<T>(
+  options: StrictFinalizedAnchorPolicyOptionsV1<T>,
+): Promise<T> {
+  if (options.blockReferenceProfile === 'eip1898') {
+    return options.executeAtReference(Object.freeze({
+      blockHash: options.anchor.blockHash,
+      requireCanonical: true as const,
+    }));
+  }
+
+  // Number-selected evidence is not deterministic until the same endpoint
+  // closes the hash sandwich. Delay every anchor-dependent invalidity until
+  // that proof succeeds so neither callers nor caches can observe false state.
+  let anchorDependentFailure: CurrentFinalizedEvmCallErrorV1 | undefined;
+  let provisionalResult: T | undefined;
+  try {
+    provisionalResult = await options.executeAtReference(options.anchor.blockNumberQuantity);
+  } catch (cause) {
+    if (
+      cause instanceof CurrentFinalizedEvmCallErrorV1
+      && (
+        cause.code === 'no-code'
+        || cause.code === 'revert'
+        || cause.code === 'malformed-return'
+        || isAnchorDependentResourceLimit(cause)
+      )
+    ) {
+      anchorDependentFailure = cause;
+    } else {
+      throw cause;
+    }
+  }
+  await assertStrictFinalizedAnchorStableV1(
+    options.anchor,
+    options.readPostAnchor,
+    options.anchorMismatchMessage,
+  );
+  if (anchorDependentFailure !== undefined) throw anchorDependentFailure;
+  if (provisionalResult === undefined) throw unavailable(options.missingResultMessage);
+  return provisionalResult;
+}
+
+export async function assertStrictFinalizedAnchorStableV1(
+  anchor: FinalizedAnchorV1,
+  readPostAnchor: () => Promise<FinalizedAnchorV1>,
+  mismatchMessage: string,
+): Promise<void> {
+  const postAnchor = await readPostAnchor();
+  if (
+    postAnchor.blockNumber !== anchor.blockNumber
+    || postAnchor.blockHash !== anchor.blockHash
+  ) {
+    throw new CurrentFinalizedEvmCallErrorV1(
+      'finalized-state-unavailable',
+      mismatchMessage,
+    );
+  }
+}
+
+export async function settleParallelBatch<T>(
   operations: readonly Promise<T>[],
   attemptDeadline: DeadlineScope,
 ): Promise<readonly T[]> {
@@ -441,7 +441,7 @@ async function settleParallelBatch<T>(
   return Object.freeze(values);
 }
 
-async function postJsonRpc(
+export async function postJsonRpc(
   endpoint: string,
   id: number,
   method: string,
@@ -540,7 +540,7 @@ async function readResponseBodyBounded(response: Response, maxBytes: number): Pr
   }
 }
 
-function parseChainId(input: unknown): ChainIdV1 {
+export function parseChainId(input: unknown): ChainIdV1 {
   let parsed: bigint;
   try {
     parsed = parseCanonicalQuantity(input, MAX_U256);
@@ -550,7 +550,7 @@ function parseChainId(input: unknown): ChainIdV1 {
   return parsed.toString(10) as ChainIdV1;
 }
 
-function parseFinalizedAnchor(input: unknown, label: string): FinalizedAnchorV1 {
+export function parseFinalizedAnchor(input: unknown, label: string): FinalizedAnchorV1 {
   if (input === null) {
     throw new CurrentFinalizedEvmCallErrorV1(
       'finalized-state-unavailable',
@@ -587,7 +587,7 @@ function parseFinalizedAnchor(input: unknown, label: string): FinalizedAnchorV1 
   });
 }
 
-function assertDeployedCode(input: unknown): void {
+export function assertDeployedCode(input: unknown): void {
   if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
     throw unavailable('eth_getCode returned malformed code bytes');
   }
@@ -599,7 +599,7 @@ function assertDeployedCode(input: unknown): void {
   }
 }
 
-function parseContractReturn(input: unknown, maxBytes: number): string {
+export function parseContractReturn(input: unknown, maxBytes: number): string {
   if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
     throw new CurrentFinalizedEvmCallErrorV1(
       'malformed-return',
@@ -714,7 +714,7 @@ function classifyAttemptFailure(
   return unavailable('Current-finalized endpoint attempt failed closed', cause);
 }
 
-function isTerminalAttemptFailure(error: CurrentFinalizedEvmCallErrorV1): boolean {
+export function isTerminalAttemptFailure(error: CurrentFinalizedEvmCallErrorV1): boolean {
   return error.code === 'unsupported-chain'
     || error.code === 'resource-limit'
     || error.code === 'revert'
@@ -722,7 +722,7 @@ function isTerminalAttemptFailure(error: CurrentFinalizedEvmCallErrorV1): boolea
     || error.code === 'malformed-return';
 }
 
-function createDeadlineScope(
+export function createDeadlineScope(
   parent: AbortSignal,
   timeoutMs: number,
   label: string,
@@ -763,7 +763,7 @@ function snapshotReadRequest(input: unknown): StrictCurrentFinalizedEvmReadReque
   }
 }
 
-function snapshotSnapshotRequest(input: unknown): StrictCurrentFinalizedEvmSnapshotRequestV1 {
+export function snapshotSnapshotRequest(input: unknown): StrictCurrentFinalizedEvmSnapshotRequestV1 {
   try {
     const record = snapshotExactDataRecord(input, SNAPSHOT_REQUEST_KEYS);
     assertCanonicalChainId(record.chainId, 'strict finalized-snapshot chainId');
@@ -777,7 +777,7 @@ function snapshotSnapshotRequest(input: unknown): StrictCurrentFinalizedEvmSnaps
   }
 }
 
-function snapshotSnapshotCalls(
+export function snapshotSnapshotCalls(
   input: unknown,
 ): readonly StrictCurrentFinalizedEvmReadCallV1[] {
   try {
@@ -821,7 +821,7 @@ function snapshotReadCalls(input: unknown): readonly StrictCurrentFinalizedEvmRe
   return Object.freeze(calls);
 }
 
-function snapshotConfig(input: StrictCurrentFinalizedEvmRpcConfigV1): StrictRpcConfigSnapshotV1 {
+export function snapshotConfig(input: StrictCurrentFinalizedEvmRpcConfigV1): StrictRpcConfigSnapshotV1 {
   if (!isPlainRecord(input)) {
     throw new TypeError('Strict current-finalized RPC config must be a plain data record');
   }
@@ -909,7 +909,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function unavailable(message: string, cause?: unknown): CurrentFinalizedEvmCallErrorV1 {
+export function unavailable(message: string, cause?: unknown): CurrentFinalizedEvmCallErrorV1 {
   return new CurrentFinalizedEvmCallErrorV1(
     'rpc-unavailable',
     message,
@@ -917,11 +917,11 @@ function unavailable(message: string, cause?: unknown): CurrentFinalizedEvmCallE
   );
 }
 
-function timedOut(message: string): CurrentFinalizedEvmCallErrorV1 {
+export function timedOut(message: string): CurrentFinalizedEvmCallErrorV1 {
   return new CurrentFinalizedEvmCallErrorV1('rpc-timeout', message);
 }
 
-function resourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
+export function resourceLimited(message: string): CurrentFinalizedEvmCallErrorV1 {
   return new CurrentFinalizedEvmCallErrorV1('resource-limit', message);
 }
 
@@ -940,14 +940,14 @@ function revertedAtFinalizedAnchor(data?: string): CurrentFinalizedEvmCallErrorV
   return error;
 }
 
-function isAnchorDependentResourceLimit(
+export function isAnchorDependentResourceLimit(
   error: CurrentFinalizedEvmCallErrorV1,
 ): boolean {
   return error.code === 'resource-limit'
     && ANCHOR_DEPENDENT_RESOURCE_LIMITS_V1.has(error);
 }
 
-function cancelled(message: string): CurrentFinalizedEvmCallErrorV1 {
+export function cancelled(message: string): CurrentFinalizedEvmCallErrorV1 {
   // Caller intent is authenticated by the verifier-owned AbortSignal. Keep
   // the adapter error retryable so a foreign gateway cannot forge a cancelled
   // disposition merely by throwing a public error code; the verifier observes
