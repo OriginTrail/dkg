@@ -154,6 +154,69 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     ]);
   });
 
+  it('fails over before consumer execution when the capability code probe is malformed', async () => {
+    const baseHandler = successfulHandler();
+    const malformed = await rpcHarness.start((rpcCall, response, rawRequest) => {
+      if (rpcCall.method === 'eth_getCode') {
+        sendJsonRpcResult(response, rpcCall, '0x0');
+        return;
+      }
+      return baseHandler(rpcCall, response, rawRequest);
+    });
+    const backup = await rpcHarness.start(successfulHandler());
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [malformed.url, backup.url],
+    });
+    let consumers = 0;
+
+    await expect(withSnapshot(request(), async (session) => {
+      consumers += 1;
+      return session.read([call(FIRST_DATA)]);
+    })).resolves.toEqual(['0xaaaa']);
+
+    expect(consumers).toBe(1);
+    expect(malformed.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+    ]);
+    expect(backup.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_getCode',
+      'eth_call',
+    ]);
+  });
+
+  it('classifies malformed deployed-code bytes inside a snapshot as RPC failure', async () => {
+    const baseHandler = successfulHandler();
+    const server = await rpcHarness.start((rpcCall, response, rawRequest) => {
+      if (rpcCall.method === 'eth_getCode' && rpcCall.params[0] === TO) {
+        sendJsonRpcResult(response, rpcCall, '0xABC0');
+        return;
+      }
+      return baseHandler(rpcCall, response, rawRequest);
+    });
+    const withSnapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    await expect(withSnapshot(request(), async (session) => (
+      session.read([call(FIRST_DATA)])
+    ))).rejects.toMatchObject({ code: 'rpc-unavailable' });
+    expect(server.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+      'eth_getCode',
+    ]);
+  });
+
   it('never retries or replays the consumer after callback execution begins', async () => {
     const baseHandler = successfulHandler();
     const first = await rpcHarness.start((rpcCall, response, rawRequest) => {

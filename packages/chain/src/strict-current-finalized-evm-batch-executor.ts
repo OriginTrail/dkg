@@ -62,7 +62,7 @@ export async function executeStrictFinalizedEvmBatchV1(
 function assertDeployedCode(input: unknown): void {
   if (typeof input !== 'string' || !CANONICAL_LOWER_HEX_BYTES.test(input)) {
     throw new CurrentFinalizedEvmCallErrorV1(
-      'finalized-state-unavailable',
+      'rpc-unavailable',
       'eth_getCode returned malformed code bytes',
     );
   }

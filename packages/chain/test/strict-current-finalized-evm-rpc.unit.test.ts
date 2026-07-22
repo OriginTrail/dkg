@@ -550,6 +550,39 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     ]);
   });
 
+  it('classifies malformed deployed-code bytes as RPC failure and fails over', async () => {
+    const malformed = await startRpcServer(successfulHandler({ code: '0x0' }));
+    const backup = await startRpcServer(successfulHandler());
+    const adapter = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [malformed.url, backup.url],
+    });
+
+    await expect(adapter(fixedRequest())).resolves.toMatchObject({
+      chainId: CHAIN_ID,
+      blockHash: BLOCK_HASH,
+    });
+    expect(malformed.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+    ]);
+    expect(backup.calls.map(({ method }) => method)).toEqual([
+      'eth_chainId',
+      'eth_getBlockByNumber',
+      'eth_getCode',
+      'eth_call',
+    ]);
+
+    const terminal = createStrictCurrentFinalizedEvmChainAdapterV1({
+      chainId: CHAIN_ID,
+      endpoints: [malformed.url],
+    });
+    await expect(terminal(fixedRequest())).rejects.toMatchObject({
+      code: 'rpc-unavailable',
+    });
+  });
+
   it('never follows a redirect to an endpoint outside trusted local configuration', async () => {
     const unconfigured = await startRpcServer(successfulHandler());
     const configured = await startRpcServer((_call, response) => {
