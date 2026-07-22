@@ -4,13 +4,23 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+  CONTROL_EIP1271_CALL_FROM_V1,
+  CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
+  CONTROL_EIP1271_GAS_LIMIT_V1,
+  CONTROL_EIP1271_MAX_ATTEMPTS_V1,
+  CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
+  CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+  CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+} from './control-object-signature-verifier.js';
+import {
   type CurrentFinalizedEvmCallRequestV1,
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
 } from './current-finalized-evm-call-model.js';
 import {
   CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
-  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
@@ -23,11 +33,20 @@ import {
 } from './strict-local-data.js';
 
 const REQUEST_KEYS = Object.freeze([
+  'attemptTimeoutMs',
+  'ccipReadEnabled',
   'chainId',
   'data',
+  'endpointAttemptPolicy',
+  'from',
+  'gasLimit',
+  'maxAttempts',
+  'maxConcurrentCallsPerChain',
   'maxReturnBytes',
+  'maxRpcResponseBytes',
   'signal',
   'to',
+  'totalDeadlineMs',
 ] as const);
 
 /**
@@ -148,23 +167,49 @@ export function snapshotCurrentFinalizedEvmCallRequestV1(
     const record = snapshotExactDataRecord(input, REQUEST_KEYS);
     assertCanonicalChainId(record.chainId, 'current-finalized request chainId');
     assertCanonicalNonzeroEvmAddress(record.to, 'current-finalized request to');
+    if (record.from !== CONTROL_EIP1271_CALL_FROM_V1) throw new Error('wrong from');
     if (typeof record.data !== 'string') throw new Error('call data is not a string');
-    assertCanonicalAbiCallData(record.data);
-    if (
-      typeof record.maxReturnBytes !== 'number'
-      || !Number.isSafeInteger(record.maxReturnBytes)
-      || record.maxReturnBytes < 1
-      || record.maxReturnBytes > CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1
-    ) {
+    assertCanonicalEip1271CallData(record.data);
+    if (record.gasLimit !== CONTROL_EIP1271_GAS_LIMIT_V1) throw new Error('wrong gas limit');
+    if (record.maxReturnBytes !== CONTROL_EIP1271_MAX_RETURN_BYTES_V1) {
       throw new Error('wrong return cap');
     }
+    if (record.maxRpcResponseBytes !== CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1) {
+      throw new Error('wrong RPC response cap');
+    }
+    if (record.attemptTimeoutMs !== CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1) {
+      throw new Error('wrong attempt timeout');
+    }
+    if (record.maxAttempts !== CONTROL_EIP1271_MAX_ATTEMPTS_V1) {
+      throw new Error('wrong attempt count');
+    }
+    if (record.endpointAttemptPolicy !== CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1) {
+      throw new Error('wrong endpoint policy');
+    }
+    if (
+      record.maxConcurrentCallsPerChain
+      !== CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1
+    ) throw new Error('wrong concurrency ceiling');
+    if (record.totalDeadlineMs !== CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1) {
+      throw new Error('wrong total deadline');
+    }
+    if (record.ccipReadEnabled !== false) throw new Error('CCIP Read must be disabled');
     if (!isAbortSignal(record.signal)) throw new Error('signal is not an AbortSignal');
 
     return Object.freeze({
       chainId: record.chainId,
       to: record.to,
+      from: record.from,
       data: record.data,
+      gasLimit: record.gasLimit,
       maxReturnBytes: record.maxReturnBytes,
+      maxRpcResponseBytes: record.maxRpcResponseBytes,
+      attemptTimeoutMs: record.attemptTimeoutMs,
+      maxAttempts: record.maxAttempts,
+      endpointAttemptPolicy: record.endpointAttemptPolicy,
+      maxConcurrentCallsPerChain: record.maxConcurrentCallsPerChain,
+      totalDeadlineMs: record.totalDeadlineMs,
+      ccipReadEnabled: record.ccipReadEnabled,
       signal: record.signal,
     }) as CurrentFinalizedEvmCallRequestV1;
   } catch {
@@ -175,9 +220,38 @@ export function snapshotCurrentFinalizedEvmCallRequestV1(
   }
 }
 
-function assertCanonicalAbiCallData(data: string): void {
-  if (!/^0x[0-9a-f]{8}(?:[0-9a-f]{2})*$/.test(data)) {
-    throw new Error('call data is not canonical ABI calldata');
+function assertCanonicalEip1271CallData(data: string): void {
+  if (!/^0x[0-9a-f]+$/.test(data)) {
+    throw new Error('call data is not canonical lowercase hex');
+  }
+  const bytes = data.slice(2);
+  const selectorLength = 8;
+  const wordLength = 64;
+  const fixedLength = selectorLength + (wordLength * 3);
+  if (
+    bytes.slice(0, selectorLength) !== '1626ba7e'
+    || bytes.length < fixedLength
+    || bytes.slice(selectorLength + wordLength, selectorLength + (wordLength * 2))
+      !== `${'0'.repeat(62)}40`
+  ) {
+    throw new Error('call data is not canonical isValidSignature(bytes32,bytes) ABI');
+  }
+  const signatureLengthWord = bytes.slice(
+    selectorLength + (wordLength * 2),
+    fixedLength,
+  );
+  const signatureLength = BigInt(`0x${signatureLengthWord}`);
+  if (signatureLength < 1n || signatureLength > 4096n) {
+    throw new Error('EIP-1271 signature length is outside 1..4096 bytes');
+  }
+  const paddedSignatureHexLength = Math.ceil(Number(signatureLength) / 32) * wordLength;
+  const tail = bytes.slice(fixedLength);
+  if (tail.length !== paddedSignatureHexLength) {
+    throw new Error('EIP-1271 signature tail has noncanonical length');
+  }
+  const signatureHexLength = Number(signatureLength) * 2;
+  if (!/^0*$/.test(tail.slice(signatureHexLength))) {
+    throw new Error('EIP-1271 signature tail has nonzero ABI padding');
   }
 }
 

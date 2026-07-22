@@ -801,7 +801,6 @@ function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
     const endpoints = snapshotDenseDataArray(input, {
       label: 'Strict current-finalized RPC endpoints',
       minLength: 1,
-      maxLength: CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
     });
     for (const entry of endpoints) {
       const endpoint = normalizeEndpoint(entry);

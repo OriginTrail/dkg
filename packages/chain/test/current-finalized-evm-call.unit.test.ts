@@ -5,7 +5,15 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+  CONTROL_EIP1271_CALL_FROM_V1,
+  CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
+  CONTROL_EIP1271_GAS_LIMIT_V1,
+  CONTROL_EIP1271_MAX_ATTEMPTS_V1,
+  CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
   CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+  CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
   CurrentFinalizedEvmCallErrorV1,
   type CurrentFinalizedEvmCallRequestV1,
   type CurrentFinalizedEvmCallResultV1,
@@ -15,9 +23,6 @@ import {
   type CurrentFinalizedEvmChainAdapterRegistrationV1,
   type CurrentFinalizedEvmChainAdapterV1,
 } from '../src/current-finalized-evm-call.js';
-import {
-  CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
-} from '../src/current-finalized-evm-read-profile.js';
 
 const CHAIN_A = '20430' as ChainIdV1;
 const CHAIN_B = '100' as ChainIdV1;
@@ -119,33 +124,20 @@ describe('RFC-64 current-finalized EVM call router', () => {
 
   it.each([
     ['from', '0x2222222222222222222222222222222222222222'],
-    ['gasLimit', 1_000_000n],
-    ['maxRpcResponseBytes', 65_536],
-    ['attemptTimeoutMs', 4_000],
-    ['maxAttempts', 2],
-    ['endpointAttemptPolicy', 'each-configured-endpoint-once'],
-    ['maxConcurrentCallsPerChain', 4],
-    ['totalDeadlineMs', 9_000],
-    ['ccipReadEnabled', false],
-  ] as const)('rejects obsolete caller-owned %s transport policy', async (key, value) => {
+    ['gasLimit', CONTROL_EIP1271_GAS_LIMIT_V1 + 1n],
+    ['maxReturnBytes', CONTROL_EIP1271_MAX_RETURN_BYTES_V1 + 1],
+    ['maxRpcResponseBytes', CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1 + 1],
+    ['attemptTimeoutMs', CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1 + 1],
+    ['maxAttempts', CONTROL_EIP1271_MAX_ATTEMPTS_V1 + 1],
+    ['endpointAttemptPolicy', 'retry-same-peer-endpoint'],
+    ['maxConcurrentCallsPerChain', CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1 + 1],
+    ['totalDeadlineMs', CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1 + 1],
+    ['ccipReadEnabled', true],
+  ] as const)('rejects a request with a non-frozen %s profile field', async (key, value) => {
     const adapter = vi.fn(async () => RESULT_A);
     const router = createCurrentFinalizedEvmCallRouterV1([{ chainId: CHAIN_A, adapter }]);
 
-    await expect(router({ ...request(), [key]: value } as CurrentFinalizedEvmCallRequestV1))
-      .rejects.toMatchObject({ code: 'rpc-unavailable' });
-    expect(adapter).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    0,
-    CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1 + 1,
-  ])('rejects maxReturnBytes=%s outside the generic transport envelope', async (value) => {
-    const adapter = vi.fn(async () => RESULT_A);
-    const router = createCurrentFinalizedEvmCallRouterV1([{ chainId: CHAIN_A, adapter }]);
-
-    await expect(router(request({ maxReturnBytes: value }))).rejects.toMatchObject({
-      code: 'rpc-unavailable',
-    });
+    await expect(router(request({ [key]: value }))).rejects.toMatchObject({ code: 'rpc-unavailable' });
     expect(adapter).not.toHaveBeenCalled();
   });
 
@@ -158,6 +150,9 @@ describe('RFC-64 current-finalized EVM call router', () => {
       request({ to: '0xABC' as EvmAddressV1 }),
       request({ data: '0xABC' }),
       request({ data: '0x1234' }),
+      request({ data: CANONICAL_CALL_DATA.replace('1626ba7e', 'ffffffff') }),
+      request({ data: `${CANONICAL_CALL_DATA}00` }),
+      request({ data: `${CANONICAL_CALL_DATA.slice(0, -2)}01` }),
       request({ signal: {} as AbortSignal }),
       { ...request(), rpcUrl: 'https://peer.invalid' },
       { ...request(), blockTag: 'latest' },
@@ -187,20 +182,6 @@ describe('RFC-64 current-finalized EVM call router', () => {
     });
     await expect(router(hostile)).rejects.toMatchObject({ code: 'rpc-unavailable' });
     expect(adapter).not.toHaveBeenCalled();
-  });
-
-  it('keeps the routed call seam ABI-generic while EIP-1271 owns its specialization', async () => {
-    const adapter = vi.fn(async () => RESULT_A);
-    const router = createCurrentFinalizedEvmCallRouterV1([{ chainId: CHAIN_A, adapter }]);
-
-    await expect(router(request({
-      data: '0x12345678',
-      maxReturnBytes: 64,
-    }))).resolves.toBe(RESULT_A);
-    expect(adapter).toHaveBeenCalledWith(expect.objectContaining({
-      data: '0x12345678',
-      maxReturnBytes: 64,
-    }));
   });
 
   it('admits four calls per chain and rejects the fifth immediately without queueing', async () => {
@@ -324,8 +305,17 @@ function request(
   return {
     chainId: CHAIN_A,
     to: TO,
+    from: CONTROL_EIP1271_CALL_FROM_V1,
     data: CANONICAL_CALL_DATA,
+    gasLimit: CONTROL_EIP1271_GAS_LIMIT_V1,
     maxReturnBytes: CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+    maxRpcResponseBytes: CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
+    attemptTimeoutMs: CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+    maxAttempts: CONTROL_EIP1271_MAX_ATTEMPTS_V1,
+    endpointAttemptPolicy: CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
+    maxConcurrentCallsPerChain: CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+    totalDeadlineMs: CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+    ccipReadEnabled: false,
     signal: new AbortController().signal,
     ...overrides,
   };

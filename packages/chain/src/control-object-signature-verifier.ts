@@ -214,11 +214,20 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
     const request = Object.freeze({
       chainId: envelope.signatureEvidence.chainId as ChainIdV1,
       to: envelope.signatureEvidence.contractAddress as EvmAddressV1,
+      from: CONTROL_EIP1271_CALL_FROM_V1,
       data: EIP1271_INTERFACE.encodeFunctionData('isValidSignature', [
         envelope.objectDigest,
         envelope.signature,
       ]).toLowerCase(),
+      gasLimit: CONTROL_EIP1271_GAS_LIMIT_V1,
       maxReturnBytes: CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+      maxRpcResponseBytes: CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
+      attemptTimeoutMs: CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+      maxAttempts: CONTROL_EIP1271_MAX_ATTEMPTS_V1,
+      endpointAttemptPolicy: CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
+      maxConcurrentCallsPerChain: CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+      totalDeadlineMs: CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+      ccipReadEnabled: false,
       signal: controller.signal,
     } satisfies CurrentFinalizedEvmCallRequestV1);
 
