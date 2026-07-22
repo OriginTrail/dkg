@@ -20,7 +20,6 @@ import {
   type CurrentFinalizedEvmCallV1,
 } from './current-finalized-evm-call-model.js';
 import {
-  CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
   CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
@@ -74,7 +73,7 @@ export function createCurrentFinalizedEvmCallRouterV1(
 ): CurrentFinalizedEvmCallV1 {
   const adapters = snapshotAdapterRegistry(registrations);
   const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
-    CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+    CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
   );
 
   const route: CurrentFinalizedEvmCallV1 = async (input) => {
