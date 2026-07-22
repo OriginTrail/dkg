@@ -88,7 +88,6 @@ type CanonicalFinalizedVmSetRowV1 = Readonly<FinalizedVmSetRowV1>
 interface ValidatedFinalizedVmSetRowV1 {
   readonly row: CanonicalFinalizedVmSetRowV1;
   readonly ordinalValue: bigint;
-  readonly assertionVersionValue: bigint;
 }
 
 export type FinalizedVmSetV1ErrorCode =
@@ -234,7 +233,7 @@ function snapshotFinalizedVmSetRowForScopeV1(
     finalizedBlockHash: record.finalizedBlockHash,
     placementEvidenceDigest: record.placementEvidenceDigest,
   }) as CanonicalFinalizedVmSetRowV1;
-  return Object.freeze({ row, ordinalValue, assertionVersionValue });
+  return Object.freeze({ row, ordinalValue });
 }
 
 /** Compute the exact domain-separated RFC-64 leaf digest for one placed row. */
@@ -261,11 +260,7 @@ export function computeEmptyFinalizedVmSetRootV1(): Digest32V1 {
  */
 export class FinalizedVmSetAccumulatorV1 {
   readonly #scope: Readonly<FinalizedVmSetScopeV1>;
-  readonly #frontier = new DomainSeparatedMerkleFrontier(
-    NODE_DOMAIN_BYTES,
-    ODD_DOMAIN_BYTES,
-    EMPTY_DOMAIN_BYTES,
-  );
+  readonly #frontier = new FinalizedVmSetMerkleFrontier();
   #rowCount = 0n;
   #highestFinalizedOrdinal: DecimalU64V1 | null = null;
   #highestOrdinalValue: bigint | null = null;
@@ -344,15 +339,10 @@ function computeFinalizedVmSetLeafDigestBytesV1(
   );
 }
 
-class DomainSeparatedMerkleFrontier {
+/** Feature-local frontier for the fixed finalized-VM set digest domains. */
+class FinalizedVmSetMerkleFrontier {
   readonly #levels: Array<Uint8Array | undefined> = [];
   #finalRoot: Uint8Array | undefined;
-
-  constructor(
-    private readonly nodeDomain: Uint8Array,
-    private readonly oddDomain: Uint8Array,
-    private readonly emptyDomain: Uint8Array,
-  ) {}
 
   append(leafDigest: Uint8Array): void {
     if (this.#finalRoot !== undefined) {
@@ -361,7 +351,7 @@ class DomainSeparatedMerkleFrontier {
     let current = leafDigest;
     let level = 0;
     while (this.#levels[level] !== undefined) {
-      current = digestBytes(this.nodeDomain, this.#levels[level]!, current);
+      current = digestBytes(NODE_DOMAIN_BYTES, this.#levels[level]!, current);
       this.#levels[level] = undefined;
       level += 1;
     }
@@ -382,13 +372,13 @@ class DomainSeparatedMerkleFrontier {
         continue;
       }
       while (pendingLevel < level) {
-        pending = digestBytes(this.oddDomain, pending);
+        pending = digestBytes(ODD_DOMAIN_BYTES, pending);
         pendingLevel += 1;
       }
-      pending = digestBytes(this.nodeDomain, left, pending);
+      pending = digestBytes(NODE_DOMAIN_BYTES, left, pending);
       pendingLevel = level + 1;
     }
-    this.#finalRoot = pending ?? digestBytes(this.emptyDomain);
+    this.#finalRoot = pending ?? digestBytes(EMPTY_DOMAIN_BYTES);
     return this.#finalRoot;
   }
 }

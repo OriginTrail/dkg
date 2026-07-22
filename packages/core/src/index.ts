@@ -52,7 +52,17 @@ export * from './ka-bundle-v1.js';
 export * from './ka-chunk-tree.js';
 export * from './ka-chunk-proof.js';
 export * from './cg-shared-projection.js';
-export * from './finalized-vm-set-v1.js';
+export {
+  FinalizedVmSetAccumulatorV1,
+  FinalizedVmSetV1Error,
+  computeFinalizedVmSetEvidenceV1,
+  computeFinalizedVmSetLeafDigestV1,
+  type FinalizedVmLaneV1,
+  type FinalizedVmSetEvidenceV1,
+  type FinalizedVmSetRowV1,
+  type FinalizedVmSetScopeV1,
+  type FinalizedVmSetV1ErrorCode,
+} from './finalized-vm-set-v1.js';
 export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
