@@ -54,18 +54,57 @@ afterEach(async () => {
 });
 
 describe('RFC-64 finalized VM chain scanner', () => {
-  it('pins its complete-row ceiling to both snapshot resource budgets', () => {
-    const calls = (rows: number) => 2 + (rows * 5);
-    const batches = (rows: number) => 1
-      + Math.ceil(rows / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1)
-      + Math.ceil((rows * 4) / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1);
+  it('executes its exported row ceiling within both snapshot resource budgets', async () => {
+    let batches = 0;
+    let calls = 0;
+    const snapshot = snapshotStub(async (batch) => {
+      batches += 1;
+      calls += batch.length;
+      return batch.map(({ data }) => {
+        const selector = data.slice(0, 10);
+        if (selector === CG_ABI.getFunction('isContextGraphActive')!.selector) {
+          return boolResult(true);
+        }
+        if (selector === CG_ABI.getFunction('getContextGraphKaCount')!.selector) {
+          return uintResult(BigInt(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1));
+        }
+        if (selector === CG_ABI.getFunction('getContextGraphKaAt')!.selector) {
+          const [, ordinal] = CG_ABI.decodeFunctionData('getContextGraphKaAt', data);
+          return uintResult(pack(AUTHOR_A, BigInt(ordinal) + 1n));
+        }
+        if (selector === KA_ABI.getFunction('getKnowledgeAssetUpdateContext')!.selector) {
+          return updateContextResult(1n);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRoot')!.selector) {
+          return bytes32Result(ROOT_A);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRootAuthor')!.selector) {
+          return addressResult(AUTHOR_A);
+        }
+        if (selector === KA_ABI.getFunction('getLatestMerkleRootPublisher')!.selector) {
+          return addressResult(PUBLISHER_A);
+        }
+        throw new Error(`Unexpected selector ${selector}`);
+      });
+    });
+    const scanner = createFinalizedVmChainScannerV1(config(snapshot));
 
-    expect(calls(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1))
-      .toBeLessThanOrEqual(CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1);
-    expect(batches(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1))
-      .toBeLessThanOrEqual(CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1);
-    expect(batches(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 + 1))
-      .toBeGreaterThan(CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1);
+    const inventory = await scanner({
+      contextGraphId: CG_ID,
+      signal: new AbortController().signal,
+    });
+
+    expect(inventory.rows).toHaveLength(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1);
+    expect(inventory.rows.at(-1)?.ordinal)
+      .toBe(String(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 - 1));
+    expect(calls).toBe(2 + (FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 * 5));
+    expect(batches).toBe(
+      1
+      + Math.ceil(FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1 / CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1)
+      + FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+    );
+    expect(calls).toBeLessThanOrEqual(CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CALLS_V1);
+    expect(batches).toBeLessThanOrEqual(CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_BATCHES_V1);
   });
 
   it('derives ordered rootless VM candidates from one pinned snapshot', async () => {
