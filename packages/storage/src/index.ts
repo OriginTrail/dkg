@@ -18,6 +18,7 @@ export {
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
+  tryReplaceSubjectAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -26,6 +27,7 @@ export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
@@ -34,6 +36,7 @@ export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
+  isReplaceSubjectCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {

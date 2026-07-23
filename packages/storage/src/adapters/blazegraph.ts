@@ -28,6 +28,7 @@ import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
@@ -383,6 +384,26 @@ export class BlazegraphStore implements TripleStore {
       ).catch(() => undefined);
       throw error;
     }
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.replaceSubject',
+    });
+    // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
+    // transaction, so the subject is replaced atomically. No staging/cleanup: a
+    // failed request commits nothing.
+    await this.sparqlUpdate(
+      buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
+      { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
+      'replaceSubject',
+    );
   }
 
   // -------------------------------------------------------------------

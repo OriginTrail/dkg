@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, tryReplaceSubjectAtomically } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -93,7 +93,7 @@ import {
   parseIntegerLiteral,
   parseLiteral,
   requestSubject,
-  serializeJob,
+  serializeJobRecord,
   serializeWalletLock,
   walletLockSubject,
   type PersistedFailedJob,
@@ -392,14 +392,15 @@ export class TripleStoreAsyncLiftPublisher
     // Object-bound triple pattern (not a FILTER) so the store resolves it via the
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
     //
-    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
-    // subject as delete-then-insert, so a lookup that races a state transition can
-    // transiently miss the index and return `none`. This window is pre-existing
-    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
-    // claim-locked findActive remains the authoritative dedup guard, so a transient
-    // false `none` cannot by itself create a duplicate active job. Making writeJob
-    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
-    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
+    // #1863 — writeJob now persists the job subject via the atomic
+    // tryReplaceSubjectAtomically capability (one commit boundary), so a lookup
+    // racing a state transition sees the subject fully prior-or-fully-next and
+    // this index row never transiently disappears: no false `none`. On a store
+    // that cannot guarantee one commit boundary (no replaceSubject, or a
+    // non-transactional endpoint that refuses it) writeJob falls back to
+    // delete-then-insert, which retains the bounded pre-#1863 window; there
+    // admission's claim-locked findActive remains the authoritative dedup guard,
+    // so a transient false `none` cannot by itself create a duplicate active job.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
     );
@@ -1106,9 +1107,63 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(serializeJob(job, this.graphUri));
+    await this.persistJobRecord(job);
     await this.appendJournal(job, kind);
+  }
+
+  /**
+   * #1863 — persist the job record as a single-subject atomic replace so a
+   * lock-free reader racing a transition never observes the job subject
+   * transiently empty. Every row for `jobSubject` — the payload, the status, and
+   * the `CONTROL_LIFECYCLE_KEY` intent-index row (emitted inside `serializeJob`
+   * via `serializeVmPublishIntentIndex`) — is replaced in ONE commit, so the
+   * false `kind:'none'` intent-lookup miss / dedup gap that hinges on that index
+   * row disappearing mid-write cannot occur.
+   *
+   * Routed through the storage capability `tryReplaceSubjectAtomically` (a
+   * sibling of `replaceGraph` / `replaceGraphAndSubject`) rather than a raw
+   * `update()` string: the storage layer owns the transaction boundary, literal
+   * externalization, graph-set-index and changelog bookkeeping, and — crucially —
+   * the reserved-plane guard applies to the TARGET GRAPH structurally instead of
+   * scanning a serialized SPARQL string (a raw update would false-reject a job
+   * whose quads merely reference a reserved IRI). `replaceSubject` is a STRICT
+   * single-subject primitive (it rejects co-located subjects), so the two
+   * subjects `serializeJob` emits — the mutable job subject and the immutable
+   * request subject — are persisted separately:
+   *
+   *   1. INSERT the request rows FIRST (idempotent — the request is immutable,
+   *      so this is a no-op re-assert on every transition after creation, and the
+   *      defensive re-assert legacy/partial re-persist relies on).
+   *   2. THEN atomically replace the job subject.
+   *
+   * The ordering is load-bearing: the request must be present before the job
+   * subject becomes observable, or a lock-free reader at CREATION could see a job
+   * referencing an absent request (dangling requestRef). The job-replace must
+   * never land first. A store that cannot guarantee one commit boundary (no
+   * `replaceSubject`, or a non-transactional SPARQL endpoint that refuses it)
+   * takes the BOUNDED pre-#1863 delete-then-insert fallback (job subject only —
+   * the request stays present): it still has the transient job window, but
+   * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
+   * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
+   * `recordDurableBroadcastBeforeSend`, not here.
+   */
+  private async persistJobRecord(job: LiftJob): Promise<void> {
+    // The serializer owns the split (and guards that a job record is exactly the
+    // job + request subjects) — no ad-hoc subject filters on the write path.
+    const { jobRef, jobQuads, requestQuads } = serializeJobRecord(job, this.graphUri);
+    // (1) Request present BEFORE the job subject is observable — ordering matters.
+    await this.store.insert(requestQuads);
+    // (2) Atomically replace the mutable job subject.
+    const replaced = await tryReplaceSubjectAtomically(
+      this.store,
+      this.graphUri,
+      jobRef,
+      jobQuads,
+      { source: 'publisher.asyncLift.writeJob' },
+    );
+    if (replaced) return;
+    await this.store.deleteByPattern({ subject: jobRef, graph: this.graphUri });
+    await this.store.insert(jobQuads);
   }
 
   /**

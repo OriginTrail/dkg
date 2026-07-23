@@ -878,8 +878,15 @@ export class DKGAgent extends DKGAgentBase {
       () => {
         agentRef?.invalidateListContextGraphsCache();
       },
-      (quads) => {
+      (quads, targetGraph) => {
         if (!agentRef) return;
+        // #1863 — a single-graph destructive mutation (replaceSubject) passes its
+        // TARGET GRAPH so the projection is dirtied by graph (covers deleted meta
+        // rows the inserted quads wouldn't reveal); no-op for non-CG graphs.
+        if (targetGraph !== undefined) {
+          agentRef.contextGraphMetaProjection.markDirtyForGraph(targetGraph);
+          return;
+        }
         if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
         else agentRef.contextGraphMetaProjection.markAllDirty();
       },

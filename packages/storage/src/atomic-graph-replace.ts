@@ -120,6 +120,44 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
   return graphUri.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX);
 }
 
+/**
+ * Build one transactional SPARQL Update that atomically replaces every row for a
+ * single subject inside a *shared* named graph, leaving all other subjects in
+ * that graph untouched — unlike `buildAtomicGraphReplaceUpdate`, which replaces
+ * the whole graph.
+ *
+ * Backends DKG uses execute one Update request as a single transaction, so a
+ * concurrent reader observes `subject` either fully in its prior state or fully
+ * in its new state — never the transiently-empty window a separate
+ * delete-then-insert exposes (see #1863: a lock-free reader racing a job
+ * transition would otherwise see zero rows for the subject and report a false
+ * miss). A failed/malformed INSERT DATA aborts the whole request, so the DELETE
+ * rolls back too; no staging graph is needed because there is no MOVE.
+ *
+ * This is a STRICT single-subject primitive: every quad in `insertQuads` must
+ * target `graphUri` AND carry `subject` as its subject (enforced via
+ * `assertSubjectReplacementPayload`, shared with `replaceGraphAndSubject`). A
+ * caller that also needs to write co-located rows for another subject (e.g. an
+ * immutable request record) must do that as its own separate write — the delete
+ * scope and the insert scope are the same single subject, so the name never
+ * diverges from the behaviour. Quads must be blank-node free; object terms are
+ * validated/escaped through the same `formatObject` path as
+ * `buildAtomicGraphReplaceUpdate`, so callers pass already-serialized RDF terms
+ * rather than hand-escaping literals.
+ */
+export function buildAtomicSubjectReplaceUpdate(
+  graphUri: string,
+  subject: string,
+  insertQuads: readonly Quad[],
+): string {
+  const target = assertSafeIri(graphUri);
+  const safeSubject = assertSafeIri(subject);
+  assertSubjectReplacementPayload(graphUri, subject, insertQuads);
+  const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
+  if (insertQuads.length === 0) return del;
+  return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
+}
+
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri) {
@@ -140,13 +178,23 @@ function assertSubjectReplacementPayload(
   subject: string,
   quads: readonly Quad[],
 ): void {
+  // The subject is interpolated as `<subject>` (an IRI). A blank-node label
+  // (`_:b1`) passes `assertSafeIri` but would then be treated as an IRI term,
+  // so the replace would operate on a different RDF term than the caller named
+  // (and never clear the real blank-node rows). Reject it — atomic replacement
+  // requires canonical skolem IRIs. Guards the empty-quads DELETE path too.
+  if (subject.startsWith('_:')) {
+    throw new Error(
+      `Atomic subject replacement requires a canonical skolem IRI subject; "${subject}" is a blank node`,
+    );
+  }
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri || quad.subject !== subject) {
       throw new Error(
         `Atomic subject replacement quad ${index} must target subject "${subject}" in graph "${graphUri}"`,
       );
     }
-    if (quad.object.startsWith('_:')) {
+    if (quad.subject.startsWith('_:') || quad.object.startsWith('_:')) {
       throw new Error(
         `Atomic subject replacement requires canonical skolem IRIs; quad ${index} still contains a blank node`,
       );

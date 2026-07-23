@@ -20,6 +20,7 @@ export default defineConfig({
       'test/async-lift-ka-broadcast-progress.test.ts',
       'test/async-lift-broadcast-durability.test.ts',
       'test/async-lift-intent-lookup.test.ts',
+      'test/async-lift-writejob-atomicity.test.ts',
       'test/async-lift-publish-options.test.ts',
       'test/async-promote-queue.test.ts',
       'test/async-lift-terminal-clear.test.ts',
