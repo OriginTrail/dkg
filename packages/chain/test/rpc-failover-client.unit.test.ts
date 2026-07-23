@@ -58,6 +58,10 @@ const abortedRpcError = () => {
   error.name = 'AbortError';
   return error;
 };
+const abortedRpcCodeError = () => Object.assign(
+  new Error('request aborted'),
+  { code: 'ABORT_ERR' },
+);
 
 const URLS = ['https://primary.example', 'https://backup.example'];
 
@@ -279,6 +283,18 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
 
   it('an AbortError after submit is ambiguous, so the byte-identical signed tx fails over', async () => {
     const primary = { broadcastTransaction: recorder(async () => { throw abortedRpcError(); }) };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).resolves.toBeUndefined();
+    expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(backup.broadcastTransaction.calls).toHaveLength(1);
+    expect(primary.broadcastTransaction.calls[0][0]).toBe('0xsigned');
+    expect(backup.broadcastTransaction.calls[0][0]).toBe('0xsigned');
+  });
+
+  it('a code-only ABORT_ERR after submit also fails over with the byte-identical signed tx', async () => {
+    const primary = { broadcastTransaction: recorder(async () => { throw abortedRpcCodeError(); }) };
     const backup = { broadcastTransaction: recorder(async () => undefined) };
     const client = makeClient([primary, backup], URLS);
 

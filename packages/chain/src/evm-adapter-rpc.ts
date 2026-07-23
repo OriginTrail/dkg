@@ -8,7 +8,13 @@
  * assertions. Bodies are a 1:1 move from the original module.
  */
 import { ethers, FetchRequest } from 'ethers';
-import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
+import {
+  enrichEvmError,
+  errorCode,
+  errorMessage,
+  errorName,
+  errorStatus,
+} from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 
 /**
@@ -118,9 +124,7 @@ export function isRetryableRpcError(err: unknown): boolean {
   const code = errorCode(err);
   const status = errorStatus(err);
   const msg = errorMessage(err).toLowerCase();
-  const name = typeof (err as { name?: unknown } | null)?.name === 'string'
-    ? (err as { name: string }).name
-    : '';
+  const name = errorName(err);
 
   if (code === 'CALL_EXCEPTION' || code === 'INSUFFICIENT_FUNDS' || code === 'NONCE_EXPIRED'
     || code === 'RPC_RECEIPT_LOOKUP_FAILED'
