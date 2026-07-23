@@ -206,6 +206,46 @@ export function serializeJob(job: PromoteJob, graphUri: string): Quad[] {
   return quads;
 }
 
+/**
+ * #1933 — the single subject a promote-job record serializes into. Unlike the lift
+ * publisher's `serializeJobRecord` (job subject + an immutable request subject), a promote
+ * job is a SINGLE subject (`jobSubject(jobId)`), so there is no second group to partition.
+ */
+export interface SerializedPromoteJobRecord {
+  readonly jobRef: string;
+  readonly jobQuads: Quad[];
+}
+
+/**
+ * #1933 — fail-loud guard that a serialized promote-job record is EXACTLY one subject.
+ * `serializeJob` emits rows for only the job subject today, so this never fires in prod; it
+ * is a future-proofing tripwire (and a testability seam): if a new field ever emits a second
+ * subject it throws HERE at the serialization boundary rather than being rejected by the
+ * STRICT single-subject `replaceSubject` in prod, or silently leaked by the delete-then-insert
+ * fallback (which deletes only `jobRef`). Extracted from {@link serializeJobRecord} so the
+ * invariant can be unit-tested on a synthetic stray input.
+ */
+export function assertPromoteJobRecordSingleSubject(jobId: string, jobRef: string, jobQuads: Quad[]): void {
+  const stray = jobQuads.find((q) => q.subject !== jobRef);
+  if (stray) {
+    throw new Error(
+      `serializeJobRecord(${jobId}): serializeJob emitted subject ${stray.subject} outside the ` +
+        `job subject ${jobRef} — it would be rejected by the atomic replace / leaked by the fallback`,
+    );
+  }
+}
+
+/**
+ * #1933 — the grouping the atomic write path needs. Groups `serializeJob`'s output under the
+ * single job subject and guards that invariant (see {@link assertPromoteJobRecordSingleSubject}).
+ */
+export function serializeJobRecord(job: PromoteJob, graphUri: string): SerializedPromoteJobRecord {
+  const jobRef = jobSubject(job.jobId);
+  const jobQuads = serializeJob(job, graphUri);
+  assertPromoteJobRecordSingleSubject(job.jobId, jobRef, jobQuads);
+  return { jobRef, jobQuads };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
