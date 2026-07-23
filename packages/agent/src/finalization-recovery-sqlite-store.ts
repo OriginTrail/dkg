@@ -37,8 +37,7 @@ function sameFinalizationRecoveryIdentity(
   existing: FinalizationRecoveryEntry,
   input: FinalizationRecoveryReceiveInput,
 ): boolean {
-  return existing.sourcePeerId === input.sourcePeerId
-    && existing.chainId === input.chainId
+  return existing.chainId === input.chainId
     && existing.contextGraphId === input.contextGraphId
     && existing.ual === input.ual
     && existing.txHash.toLowerCase() === input.txHash.toLowerCase()
@@ -107,7 +106,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         if (
           existing.envelopeSha256 !== digest
           || !Buffer.from(existing.rawMessage).equals(Buffer.from(input.rawMessage))
-          || existing.sourcePeerId !== input.sourcePeerId
           || existing.chainId !== input.chainId
           || existing.contextGraphId !== input.contextGraphId
           || existing.ual !== input.ual

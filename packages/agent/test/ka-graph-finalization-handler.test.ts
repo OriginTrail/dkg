@@ -524,6 +524,71 @@ describe('graph-scoped finalization handler', () => {
     expect(attacker).toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('accepts a publisher delivery after an identical relay delivery entered recovery', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-relay-duplicate-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const finalization = {
+        ...message,
+        accessPolicy: 'allowList' as const,
+        allowedPeers: ['12D3KooWReader'],
+      };
+      let receiptReady = false;
+      const chain = {
+        chainId: 'base:84532',
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => receiptReady
+          ? canonicalReceipt(finalization)
+          : { status: 'pending' as const },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveringHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      const wire = encodeFinalizationMessage(finalization);
+
+      await recoveringHandler.handleFinalizationMessage(
+        wire,
+        CG,
+        '12D3KooWUntrustedRelay',
+      );
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        sourcePeerId: '12D3KooWUntrustedRelay',
+      }]);
+
+      receiptReady = true;
+      await recoveringHandler.handleFinalizationMessage(
+        wire,
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{
+        state: 'SETTLED',
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        verifiedEvidence: {
+          accessPolicy: 'allowList',
+          allowedPeers: ['12D3KooWReader'],
+        },
+      }]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      const metadata = await store.query(
+        `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+          + `<http://dkg.io/ontology/accessPolicy> "allowList" ; `
+          + `<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }`,
+      );
+      expect(metadata).toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the old VM graph and remains retryable when the atomic swap fails', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;

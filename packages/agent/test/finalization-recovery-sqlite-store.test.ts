@@ -147,7 +147,7 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('never merges conflicting bytes or peer provenance for one identity', async () => {
+  it('never merges conflicting bytes when delivery provenance also changes', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
@@ -161,6 +161,30 @@ describe('SQLite finalization recovery store', () => {
         sourcePeerId: '12D3KooWPublisher',
         rawMessage: RAW,
       }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts byte-identical duplicates from another delivery peer', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      await expect(store.receive(received({
+        sourcePeerId: '12D3KooWUntrustedRelay',
+      }))).resolves.toMatchObject({ status: 'inserted' });
+      await expect(store.receive(received({
+        sourcePeerId: '12D3KooWPublisher',
+      }))).resolves.toMatchObject({
+        status: 'existing',
+        entry: {
+          state: 'RECEIVED',
+          sourcePeerId: '12D3KooWUntrustedRelay',
+          rawMessage: RAW,
+        },
+      });
+      expect(await store.list()).toHaveLength(1);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
