@@ -337,4 +337,34 @@ describe('durable sync worker result transport', () => {
     expect(wireResult.metaOnlyResponses).toBe(1);
     expect(wireResult.rejectedKcs).toBe(0);
   });
+
+  it('reports discarded-only non-IRI meta subjects across the worker wire (#1921)', () => {
+    // Exercises the REAL selection -> processDurableBatchForWire path so a
+    // regression that drops droppedNonIriSubjectTriples between the selector and
+    // the wire result is caught (the requester-progress unit tests inject the
+    // count directly and cannot see this). A metadata-only page of purely
+    // non-IRI subjects must report the full dropped count so the requester can
+    // advance the meta cursor instead of pinning.
+    const meta: Quad[] = [
+      {
+        subject: '_:injected',
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"drop"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: '"literal-subject"',
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"drop-too"',
+        graph: META_GRAPH,
+      },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedNonIriSubjectTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
+  });
 });

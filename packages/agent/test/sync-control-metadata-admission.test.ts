@@ -267,15 +267,14 @@ describe('durable sync control metadata admission', () => {
   // BOTH selector loops, so it fires on every guarded call site.
   const IRI_SUBJECT = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/50';
 
-  it('drops a forged-integrity blank-node _meta subject on the system-override path (#1921)', () => {
-    // The real attack vector: a blank node bearing an INTEGRITY predicate.
-    // `indexIntegrityMetadata` adds ANY merkleRoot subject to `merkleSubjects`
-    // with no IRI check, so this reaches the merkle/marker admission machinery;
-    // legacy verification rejects it (no rootEntity), routing to the system
-    // override where every non-control row is otherwise admitted. Mirrors the
-    // IRI-subject case "does not let the system-graph override authenticate
-    // malformed legacy controls" (which KEEPS the merkleRoot) — the only
-    // difference is the blank-node subject, which #1921 now drops.
+  it('drops a forged-integrity blank-node merkleRoot subject without persisting it (#1921)', () => {
+    // A blank node bearing an INTEGRITY predicate. The #1921 candidate-gate in
+    // `indexIntegrityMetadata` excludes it from `merkleSubjects`, so it never
+    // becomes a verification candidate; with no verified descriptor the batch
+    // takes the descriptor-less admission path, where the selector guard drops
+    // the blank-node rows (persist-drop + count) and keeps the conforming IRI
+    // row. Contrast the IRI-subject case "does not let the system-graph override
+    // authenticate malformed legacy controls" (which KEEPS the merkleRoot).
     const injected = '_:injected';
     const keptRow = quad(IRI_SUBJECT, `${DKG}status`, '"legit"');
     const meta = [
@@ -292,30 +291,36 @@ describe('durable sync control metadata admission', () => {
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 
-  it('drops a blank-node _meta subject before the verified merkle/marker admission branch (#1921)', () => {
-    // A blank node bearing a FULLY VERIFIABLE legacy envelope (merkleRoot +
-    // rootEntity over matching data). Verification keys on the rootEntity, not
-    // the KC UAL, so the blank-node subject verifies and would otherwise reach
-    // `selectAdmittedMetadataIndexes`' merkle/marker branch and be persisted
-    // (compare "preserves batch controls bound to a verified legacy envelope").
-    // The loop-top guard drops it first.
-    const root = 'urn:legacy:root';
-    const injected = '_:injected';
-    const data = [quad(root, 'urn:example:value', '"legacy"', CONTEXT_GRAPH)];
-    const merkleRoot = `"${toHex(computeFlatKCRootV10(data, []))}"`;
-    const meta = [
-      quad(injected, `${DKG}merkleRoot`, merkleRoot),
-      quad(injected, `${DKG}rootEntity`, root),
-      quad(injected, `${DKG}batchId`, integer(41n)),
-    ];
+  for (const [label, injected] of [
+    ['blank-node', '_:injected'],
+    ['literal', '"forged-subject"'],
+  ] as const) {
+    it(`does not let a ${label} _meta subject with dkg:merkleRoot authenticate its data (#1921)`, () => {
+      // #1921 root fix (candidate-gate): a non-IRI subject bearing dkg:merkleRoot
+      // must never become a verification candidate. Otherwise it self-consistently
+      // authenticates its bound DATA (the claimed root is peer-supplied, not
+      // on-chain-anchored), the data is admitted, and only the METADATA is later
+      // dropped — persisting orphaned, peer-forged data. With the gate the batch
+      // fails closed: no verified descriptor, so the data is rejected and NOT
+      // selected. Distinct from the persist-drop/cursor tests above.
+      const root = 'urn:legacy:root';
+      const data = [quad(root, 'urn:example:value', '"legacy"', CONTEXT_GRAPH)];
+      const merkleRoot = `"${toHex(computeFlatKCRootV10(data, []))}"`;
+      const meta = [
+        quad(injected, `${DKG}merkleRoot`, merkleRoot),
+        quad(injected, `${DKG}rootEntity`, root),
+        quad(injected, `${DKG}batchId`, integer(41n)),
+      ];
 
-    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+      const selection = selectVerifiedDurableSyncQuads(data, meta, false);
 
-    expect(selection.metaIndexes).toEqual([]);
-    expect(selection.droppedNonIriSubjectTriples).toBe(3);
-    expect(selection.rejected).toBe(0);
-    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
-  });
+      // Fail closed: the non-IRI envelope authenticates nothing, so neither the
+      // data nor its metadata is persisted.
+      expect(selection.rejected).toBe(1);
+      expect(selection.dataIndexes).toEqual([]);
+      expect(selection.metaIndexes).toEqual([]);
+    });
+  }
 
   it('drops a non-IRI _meta subject on a descriptor-less system page (#1921)', () => {
     // The :401 no-merkle/no-marker branch: `selectAdmittedMetadataIndexes` runs
@@ -332,6 +337,28 @@ describe('durable sync control metadata admission', () => {
 
     expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
     expect(selection.droppedNonIriSubjectTriples).toBe(2);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
+  });
+
+  it('counts an all-non-IRI system-CG metadata-only page as fully consumed so the cursor advances (#1921)', () => {
+    // Livelock-fix-intact guard: after the candidate-gate, an acceptUnverified
+    // (system-CG) metadata-only page consisting ENTIRELY of non-IRI subjects —
+    // even a forged dkg:merkleRoot — is neither rejected nor pinned. The forged
+    // merkle subject is excluded from candidacy, so no verified descriptor
+    // exists; with no data the batch is not rejected, and every row is dropped
+    // and COUNTED (droppedNonIriSubjectTriples === total). That equality is what
+    // lets the requester advance the meta cursor instead of re-fetching forever.
+    const meta = [
+      quad('_:injected', `${DKG}merkleRoot`, `"${'00'.repeat(32)}"`),
+      quad('_:injected', `${DKG}status`, '"forged"'),
+      quad('"literal-subject"', `${DKG}status`, '"drop-too"'),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.rejected).toBe(0);
+    expect(selection.metaIndexes).toEqual([]);
+    expect(selection.droppedNonIriSubjectTriples).toBe(meta.length);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 

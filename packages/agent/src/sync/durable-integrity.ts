@@ -491,6 +491,16 @@ function indexIntegrityMetadata(
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
   for (const quad of metaQuads) {
+    // #1921 — a non-IRI `_meta` subject must never become a verification
+    // candidate. Without this, a peer's blank-node/literal subject bearing
+    // `dkg:merkleRoot` would enter `merkleSubjects`, self-consistently
+    // authenticate its bound DATA (the claimed root is peer-supplied, not
+    // on-chain-anchored), and get that data admitted — after which the
+    // admission-selector guard drops only the METADATA, leaving orphaned,
+    // peer-forged data in the store. Gating candidacy here (not only at
+    // admission) closes that path; the selector guards still handle the
+    // persist-drop + consumed-row counting for descriptive rows.
+    if (!isIriMetaSubject(quad.subject)) continue;
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
     }
@@ -1452,7 +1462,13 @@ function stripLiteral(raw: string): string {
  * and read agree on the contract.
  */
 function isIriMetaSubject(term: string): boolean {
-  return term.length > 0 && !term.startsWith('_:') && !term.startsWith('"');
+  // Defensive on `term`: besides the admission selectors, this now runs inside
+  // `indexIntegrityMetadata`, which the requester's bounded-snapshot planner
+  // (`planBoundedGraphScopedDurableBatch`) invokes on RAW fetched meta before
+  // verification. A conforming quad always carries a non-empty string subject;
+  // tolerate a malformed one (treat as non-IRI → skip) instead of throwing.
+  return typeof term === 'string' && term.length > 0
+    && !term.startsWith('_:') && !term.startsWith('"');
 }
 
 function findLegacyRootOwner(subject: string, roots: ReadonlySet<string>): string | undefined {
