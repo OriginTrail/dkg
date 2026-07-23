@@ -278,6 +278,34 @@ describe('GossipSubManager', () => {
     }
   });
 
+  it('ignores incidental truthy returns from synchronous handlers', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      manager.onMessage(topic, () => 1);
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+      await Promise.resolve();
+
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('publishes and receives messages', async () => {
     const node1 = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],

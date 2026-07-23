@@ -59,14 +59,12 @@ export class GossipSubManager {
         for (const handler of handlers) {
           try {
             const result = handler(topic, data, from);
-            if (result) {
-              void result.catch((err: unknown) => {
-                console.error(
-                  `[GossipSub] handler error on topic "${topic}":`,
-                  err instanceof Error ? err.message : err,
-                );
-              });
-            }
+            void Promise.resolve(result).catch((err: unknown) => {
+              console.error(
+                `[GossipSub] handler error on topic "${topic}":`,
+                err instanceof Error ? err.message : err,
+              );
+            });
           } catch (err) {
             console.error(`[GossipSub] handler error on topic "${topic}":`, err instanceof Error ? err.message : err);
           }

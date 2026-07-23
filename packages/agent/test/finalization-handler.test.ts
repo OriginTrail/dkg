@@ -6,6 +6,7 @@ import {
   type QueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   DKG_ENTITY,
@@ -55,9 +56,13 @@ describe('FinalizationHandler', () => {
     handler = new FinalizationHandler(store, undefined);
   });
 
-  it('accepts the exported legacy positional constructor signature', () => {
+  it('wires the positional resolver through the exported legacy constructor', async () => {
     const eventBus = { emit: () => undefined } as unknown as EventBus;
-    const resolver: ResolveContextGraphOnChainId = async () => '42';
+    const resolvedContextGraphs: string[] = [];
+    const resolver: ResolveContextGraphOnChainId = async (contextGraphId) => {
+      resolvedContextGraphs.push(contextGraphId);
+      return '42';
+    };
     const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
     const lifecycleOptions: FinalizationLifecycleLogOptions = {
       localPeerId: 'legacy-peer',
@@ -71,7 +76,28 @@ describe('FinalizationHandler', () => {
       markDirty,
       lifecycleOptions,
     );
-    expect(legacy).toBeInstanceOf(FinalizationHandler);
+    const author = '0x1111111111111111111111111111111111111111';
+    const packedKaId = (BigInt(author) << 96n) | 7n;
+    await legacy.handleFinalizationMessage(encodeFinalizationMessage({
+      ual: `did:dkg:otp:20430/${author}/7`,
+      contextGraphId: CONTEXT_GRAPH,
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: `0x${'ab'.repeat(32)}`,
+      blockNumber: 100,
+      batchId: 42n,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      publisherAddress: '0x2222222222222222222222222222222222222222',
+      rootEntities: [],
+      timestampMs: Date.now(),
+      operationId: 'legacy-constructor-wiring',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    }), CONTEXT_GRAPH);
+
+    expect(resolvedContextGraphs).toEqual([CONTEXT_GRAPH]);
   });
 
   it('deduplicates messages with same UAL and txHash', async () => {

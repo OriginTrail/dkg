@@ -329,7 +329,9 @@ export function parseGraphScopedFinalization(
     const startKAId = protobufScalarToBigInt(msg.startKAId);
     const endKAId = protobufScalarToBigInt(msg.endKAId);
     const batchId = protobufScalarToBigInt(msg.batchId);
-    if (startKAId !== kaId || endKAId !== kaId || batchId !== kaId) {
+    // Some chain adapters expose batch metadata separately from the packed KA id.
+    // The singleton range and canonical UAL are the graph-scoped identity boundary.
+    if (startKAId !== kaId || endKAId !== kaId) {
       return reject('invalid-ka-identifiers');
     }
     return {

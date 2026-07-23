@@ -265,6 +265,17 @@ describe('graph-scoped finalization handler', () => {
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('accepts adapter batch metadata when the singleton KA range matches the UAL', async () => {
+    const { message, vmGraph } = await stageGraph();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      batchId: 42n,
+    }), CG, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
   it('finalizes a fully private KA without requiring a public root or placeholder triple', async () => {
     const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
     const vmGraph = knowledgeAssetLayerGraphUri(
