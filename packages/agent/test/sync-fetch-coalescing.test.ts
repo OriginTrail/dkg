@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import {
+  DKGAgent,
+  FOREGROUND_CATCHUP_SYNC_PRIORITY,
+} from '../src/index.js';
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -371,6 +374,50 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not join direct durable syncs with different admission priorities', async () => {
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+      fetchCalls++;
+      return emptySyncPage(String(args[4]));
+    };
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const background = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { priority: 0 },
+      );
+      const foreground = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
+      );
+
+      const [backgroundResult, foregroundResult] = await Promise.all([background, foreground]);
+      expect(backgroundResult).not.toBe(foregroundResult);
+      expect(fetchCalls).toBe(4);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not single-flight exact VM syncs with different asset batches', async () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
@@ -543,6 +590,51 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not join direct shared-memory syncs with different admission priorities', async () => {
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const sharedMemorySyncPlan = {
+      eligibleContextGraphIds: ['coalesced-cg'],
+      publicContextGraphIds: ['coalesced-cg'],
+      privateRecoverFromCurator: [],
+    };
+    (agent as any).listSubGraphs = async () => [];
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+      fetchCalls++;
+      return emptySyncPage(String(args[4]));
+    };
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      const background = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        { sharedMemorySyncPlan, priority: 0 },
+      );
+      const foreground = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        { sharedMemorySyncPlan, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
+      );
+
+      const [backgroundResult, foregroundResult] = await Promise.all([background, foreground]);
+      expect(backgroundResult).not.toBe(foregroundResult);
+      expect(fetchCalls).toBe(4);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it.each([
     {
       name: 'private-only',
@@ -686,6 +778,65 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('retries foreground durable admission before starting SWM in the agent path', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    const order: string[] = [];
+    const priorities: Array<number | undefined> = [];
+    let durableCalls = 0;
+
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncFromPeerDetailed = async (
+        _peerId: string,
+        _contextGraphIds: string[],
+        _onPhase: unknown,
+        _onAccessDenied: unknown,
+        _sinceBatchIdFor: unknown,
+        options: { priority?: number } | undefined,
+      ) => {
+        durableCalls += 1;
+        priorities.push(options?.priority);
+        order.push(`durable-${durableCalls}`);
+        return durableCalls === 1
+          ? {
+              ...cleanDurableSyncResult(),
+              completedPhases: 0,
+              deferredBackpressure: 1,
+            }
+          : cleanDurableSyncResult();
+      };
+      (agent as any).syncSharedMemoryFromPeerDetailed = async (
+        _peerId: string,
+        _contextGraphIds: string[],
+        options: { priority?: number } | undefined,
+      ) => {
+        priorities.push(options?.priority);
+        order.push('shared');
+        return cleanSharedMemorySyncResult();
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [remotePeer],
+        { mode: 'foreground' },
+      );
+
+      expect(result.deferredBackpressure).toBe(0);
+      expect(order).toEqual(['durable-1', 'durable-2', 'shared']);
+      expect(priorities).toEqual([
+        FOREGROUND_CATCHUP_SYNC_PRIORITY,
+        FOREGROUND_CATCHUP_SYNC_PRIORITY,
+        FOREGROUND_CATCHUP_SYNC_PRIORITY,
+      ]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not promote catch-up readiness when durable integrity verification rejects a KA', async () => {
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const remotePeer = { toString: () => PEER_A };
@@ -757,12 +908,23 @@ describe('DKGAgent sync fetch coalescing', () => {
   it('does not join catch-up rounds with different shareable identity fields', async () => {
     const cases: Array<{
       name: string;
-      firstOptions?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string };
-      secondOptions?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string };
+      firstOptions?: {
+        includeSharedMemory?: boolean;
+        maxPeers?: number;
+        peerRotationKey?: string;
+        mode?: 'background' | 'foreground';
+      };
+      secondOptions?: {
+        includeSharedMemory?: boolean;
+        maxPeers?: number;
+        peerRotationKey?: string;
+        mode?: 'background' | 'foreground';
+      };
     }> = [
       { name: 'includeSharedMemory', firstOptions: {}, secondOptions: { includeSharedMemory: true } },
       { name: 'maxPeers', firstOptions: { maxPeers: 1 }, secondOptions: { maxPeers: 2 } },
       { name: 'peerRotationKey', firstOptions: { peerRotationKey: 'a' }, secondOptions: { peerRotationKey: 'b' } },
+      { name: 'mode', firstOptions: { mode: 'background' }, secondOptions: { mode: 'foreground' } },
     ];
 
     for (const testCase of cases) {

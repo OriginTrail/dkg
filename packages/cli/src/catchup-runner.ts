@@ -550,12 +550,23 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.waitForSyncProtocol({ toString: () => peerId });
       }
       case 'syncDurable': {
-        const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncFromPeerDetailed(peerId, [contextGraphId]);
+        const [peerId, contextGraphId, priority] = args as [string, string, number | undefined];
+        return agent.syncFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          undefined,
+          priority === undefined ? undefined : { priority },
+        );
       }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
+        const [peerId, contextGraphId, priority] = args as [string, string, number | undefined];
+        return agent.syncSharedMemoryFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          priority === undefined ? undefined : { priority },
+        );
       }
       case 'finalizeCatchup': {
         const [contextGraphId] = args as [string, number, number];
@@ -578,6 +589,7 @@ class InlineCatchupRunner implements CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
+      mode: 'foreground',
     }) as Promise<CatchupJobResult>;
   }
 
