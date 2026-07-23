@@ -466,29 +466,69 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
-  it('resolves an omitted graph-scoped target context graph id', async () => {
+  it('resolves an omitted graph-scoped target context graph id by packed KA id', async () => {
     const { message, vmGraph } = await stageGraph();
-    let resolverCalls = 0;
-    const resolvingHandler = new FinalizationHandler(
-      store,
-      undefined,
-      undefined,
-      async () => {
-        resolverCalls += 1;
-        return '42';
+    const chainLookups: bigint[] = [];
+    let fallbackResolverCalls = 0;
+    const resolvingHandler = new FinalizationHandler(store, {
+      chainId: 'base:84532',
+      getKAContextGraphId: async (kaId) => {
+        chainLookups.push(kaId);
+        return 42n;
       },
-    );
+    } as ChainAdapter, {
+      resolveContextGraphOnChainId: async () => {
+        fallbackResolverCalls += 1;
+        return '99';
+      },
+    });
     (resolvingHandler as unknown as {
       verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
     }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+    const graphScopedApply = (resolvingHandler as unknown as {
+      handleGraphScopedFinalization: (input: { ctxGraphId?: string }) => Promise<unknown>;
+    }).handleGraphScopedFinalization.bind(resolvingHandler);
+    let routedContextGraphId: string | undefined;
+    (resolvingHandler as unknown as {
+      handleGraphScopedFinalization: (input: { ctxGraphId?: string }) => Promise<unknown>;
+    }).handleGraphScopedFinalization = async (input) => {
+      routedContextGraphId = input.ctxGraphId;
+      return graphScopedApply(input);
+    };
 
     await resolvingHandler.handleFinalizationMessage(
-      encodeFinalizationMessage({ ...message, targetContextGraphId: undefined }),
+      encodeFinalizationMessage({
+        ...message,
+        batchId: 42n,
+        targetContextGraphId: undefined,
+      }),
       CG,
     );
 
-    expect(resolverCalls).toBe(1);
+    expect(chainLookups).toEqual([PACKED_KA_ID]);
+    expect(fallbackResolverCalls).toBe(0);
+    expect(routedContextGraphId).toBe('42');
     expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { `
+        + `<${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('keeps the legacy live-path transaction-index fallback without an inbox', async () => {
+    const { message, vmGraph } = await stageGraph();
+    const liveHandler = new FinalizationHandler(store, undefined);
+    (liveHandler as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex?: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR });
+
+    await liveHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { `
+        + `<${UAL}> <http://dkg.io/ontology/materializedVersion> "123:0" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
   it('applies after one transient scheduler timeout without journaling', async () => {
@@ -871,16 +911,20 @@ describe('graph-scoped finalization handler', () => {
       const { message } = await stageGraph();
       let receiptCanonical = true;
       let receiptChecks = 0;
+      let replayCheckedPersistedIdentity = false;
       const chain = {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => message.kcMerkleRoot,
         getMerkleRootCount: async () => 1n,
         getKAContextGraphId: async () => 42n,
-        resolveCanonicalFinalizationReceipt: async () => {
+        resolveCanonicalFinalizationReceipt: async (_txHash, expected = {}) => {
           receiptChecks += 1;
-          return receiptCanonical
-            ? canonicalReceipt(message)
-            : { status: 'reorged' as const };
+          if (receiptCanonical) return canonicalReceipt(message);
+          replayCheckedPersistedIdentity = expected.expectedBlockHash === RECOVERY_BLOCK_HASH
+            && expected.expectedBlockNumber === Number(message.blockNumber);
+          return replayCheckedPersistedIdentity
+            ? { status: 'reorged' as const }
+            : canonicalReceipt(message);
         },
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
@@ -916,6 +960,7 @@ describe('graph-scoped finalization handler', () => {
       )).resolves.toBe('verified-vm-metadata-pending');
 
       expect(receiptChecks).toBeGreaterThanOrEqual(2);
+      expect(replayCheckedPersistedIdentity).toBe(true);
       expect(await inbox.list()).toMatchObject([{
         state: 'REJECTED',
         lastError: 'persisted receipt disagrees with canonical chain truth',

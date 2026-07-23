@@ -4,9 +4,10 @@ import type {
   ChainAdapter,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
-import type {
-  ParsedGraphScopedFinalization,
-  VerifiedGraphScopedFinalizationEvidence,
+import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
+  type ParsedGraphScopedFinalization,
+  type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import type {
   FinalizationRecoveryEntry,
@@ -18,6 +19,18 @@ export type FinalizationRecoveryApplyOutcome =
   | 'applied'
   | 'already-confirmed'
   | 'deferred';
+
+export interface FinalizationRecoveryLiveInput {
+  rawMessage: Uint8Array;
+  contextGraphId: string;
+  sourcePeerId?: string;
+  candidate: ParsedGraphScopedFinalization;
+}
+
+export interface FinalizationRecoveryLiveCallbacks {
+  apply(entry: FinalizationRecoveryEntry): Promise<FinalizationRecoveryApplyOutcome>;
+  isRetryableError(error: unknown): boolean;
+}
 
 interface FinalizationRecoveryLog {
   info(message: string): void;
@@ -31,6 +44,20 @@ export interface FinalizationRecoveryReplayInput {
   ual: string;
   merkleRoot: string;
   kaId: string;
+}
+
+export interface FinalizationRecoveryReplayCallbacks {
+  decode(entry: FinalizationRecoveryEntry): ParsedGraphScopedFinalization | undefined;
+  applyReceived(input: {
+    entry: FinalizationRecoveryEntry;
+    candidate: ParsedGraphScopedFinalization;
+  }): Promise<FinalizationRecoveryApplyOutcome>;
+  applyVerified(input: {
+    entry: FinalizationRecoveryEntry;
+    candidate: ParsedGraphScopedFinalization;
+    evidence: VerifiedGraphScopedFinalizationEvidence;
+  }): Promise<FinalizationRecoveryApplyOutcome>;
+  isRetryableError(error: unknown): boolean;
 }
 
 export type FinalizationCanonicalReceiptOutcome =
@@ -53,22 +80,57 @@ export function finalizationRecoveryEntryKey(input: {
 
 /** Owns durable inbox transitions and chain-gated replay selection. */
 export class FinalizationRecovery {
+  private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
+
   constructor(
     private readonly store: FinalizationRecoveryStore | undefined,
     private readonly chain: ChainAdapter | undefined,
     private readonly log: FinalizationRecoveryLog,
   ) {}
 
-  get enabled(): boolean {
-    return this.store !== undefined;
+  /**
+   * Applies a live graph-scoped finalization behind the durable write-ahead
+   * boundary. Returns false only when no recovery store is configured.
+   */
+  async processLive(
+    input: FinalizationRecoveryLiveInput,
+    callbacks: FinalizationRecoveryLiveCallbacks,
+  ): Promise<boolean> {
+    if (!this.store) return false;
+    const entry = await this.receive(input);
+    // A configured inbox fails closed: capacity, conflict, corruption, and
+    // write failures leave Oxigraph untouched.
+    if (!entry) return true;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const outcome = await callbacks.apply(entry);
+        if (outcome === 'deferred') {
+          await this.recordDeferred(entry, 'finalization processing deferred');
+        } else {
+          await this.settleEntry(entry, outcome);
+        }
+        return true;
+      } catch (error) {
+        if (!callbacks.isRetryableError(error)) throw error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          continue;
+        }
+        this.log.warn(
+          `Finalization recovery materialization remained busy for ${entry.ual}; `
+            + 'keeping inbox entry',
+        );
+        await this.recordDeferred(entry, 'store scheduler remained busy');
+        return true;
+      }
+    }
+    return true;
   }
 
-  async receive(input: {
-    rawMessage: Uint8Array;
-    contextGraphId: string;
-    sourcePeerId?: string;
-    candidate: ParsedGraphScopedFinalization;
-  }): Promise<FinalizationRecoveryEntry | undefined> {
+  async receive(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<FinalizationRecoveryEntry | undefined> {
     if (!this.store) return undefined;
     const { candidate } = input;
     const key = finalizationRecoveryEntryKey({
@@ -230,7 +292,25 @@ export class FinalizationRecovery {
       return [];
     }
 
+    let latestRoot: Uint8Array;
+    let rootCount: bigint;
+    let boundContextGraphId: bigint | null | undefined;
+    try {
+      [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+        this.chain.getLatestMerkleRoot(BigInt(input.kaId)),
+        this.chain.getMerkleRootCount(BigInt(input.kaId)),
+        this.chain.getKAContextGraphId(BigInt(input.kaId)),
+      ]);
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery chain state is not settled for ${input.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+
     const matches: FinalizationRecoveryEntry[] = [];
+    const superseded: FinalizationRecoveryEntry[] = [];
     for (const entry of entries) {
       if (
         entry.targetContextGraphId !== undefined
@@ -238,20 +318,8 @@ export class FinalizationRecovery {
       ) continue;
       try {
         const assertionVersion = BigInt(entry.assertionVersion);
-        const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-          this.chain.getLatestMerkleRoot(BigInt(entry.kaId)),
-          this.chain.getMerkleRootCount(BigInt(entry.kaId)),
-          this.chain.getKAContextGraphId(BigInt(input.kaId)),
-        ]);
         if (rootCount > assertionVersion) {
-          await this.transition(
-            entry,
-            'SUPERSEDED',
-            `canonical assertion version advanced to ${rootCount}`,
-          );
-          this.log.info(
-            `Finalization recovery superseded assertion ${entry.assertionVersion} for ${entry.ual}`,
-          );
+          superseded.push(entry);
           continue;
         }
         if (
@@ -265,12 +333,37 @@ export class FinalizationRecovery {
         matches.push(entry);
       } catch (error) {
         this.log.info(
-          `Finalization recovery chain state is not settled for ${entry.ual}: `
+          `Finalization recovery entry is not comparable for ${entry.ual}: `
             + `${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
+    await Promise.all(superseded.map(async (entry) => {
+      await this.transition(
+        entry,
+        'SUPERSEDED',
+        `canonical assertion version advanced to ${rootCount}`,
+      );
+      this.log.info(
+        `Finalization recovery superseded assertion ${entry.assertionVersion} for ${entry.ual}`,
+      );
+    }));
     return matches;
+  }
+
+  async replayMatching(
+    input: FinalizationRecoveryReplayInput,
+    callbacks: FinalizationRecoveryReplayCallbacks,
+  ): Promise<boolean> {
+    const entries = await this.matchingEntries(input);
+    let recovered = false;
+    for (const entry of entries) {
+      const existing = this.replaySingleFlights.get(entry.key);
+      const replay = existing ?? this.replayEntry(entry, callbacks);
+      if (!existing) this.replaySingleFlights.set(entry.key, replay);
+      if (await replay) recovered = true;
+    }
+    return recovered;
   }
 
   async health(): Promise<FinalizationRecoveryHealth> {
@@ -301,6 +394,89 @@ export class FinalizationRecovery {
       );
       return false;
     }
+  }
+
+  private replayEntry(
+    entry: FinalizationRecoveryEntry,
+    callbacks: FinalizationRecoveryReplayCallbacks,
+  ): Promise<boolean> {
+    const replay = (async () => {
+      try {
+        const candidate = callbacks.decode(entry);
+        if (!candidate) return false;
+
+        let outcome: FinalizationRecoveryApplyOutcome;
+        if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
+          const evidence = entry.verifiedEvidence;
+          if (!VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+            evidence,
+            candidate,
+            entry,
+          )) {
+            this.log.warn(
+              `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
+            );
+            await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
+            return false;
+          }
+          const receiptStatus = await this.verifyPersistedReceipt(candidate, evidence);
+          if (receiptStatus !== 'confirmed') {
+            if (receiptStatus === 'reorged' || receiptStatus === 'rejected') {
+              await this.rejectEntry(
+                entry,
+                'persisted receipt disagrees with canonical chain truth',
+              );
+            } else if (receiptStatus === 'unsupported') {
+              await this.markUnsupported(entry);
+            } else {
+              await this.recordDeferred(entry, `persisted receipt is ${receiptStatus}`);
+            }
+            this.log.info(
+              `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
+            );
+            return false;
+          }
+          outcome = await callbacks.applyVerified({ entry, candidate, evidence });
+        } else {
+          outcome = await callbacks.applyReceived({ entry, candidate });
+        }
+
+        if (outcome === 'deferred') {
+          await this.recordDeferred(entry, 'replay processing deferred');
+          return false;
+        }
+        return this.settleEntry(entry, outcome);
+      } catch (error) {
+        if (!callbacks.isRetryableError(error)) throw error;
+        this.log.info(
+          `Finalization recovery materialization remains busy for ${entry.ual}; `
+            + 'keeping inbox entry',
+        );
+        await this.recordDeferred(entry, 'replay store scheduler remained busy');
+        return false;
+      }
+    })().finally(() => {
+      if (this.replaySingleFlights.get(entry.key) === replay) {
+        this.replaySingleFlights.delete(entry.key);
+      }
+    });
+    return replay;
+  }
+
+  private async verifyPersistedReceipt(
+    candidate: ParsedGraphScopedFinalization,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+  ): Promise<FinalizationCanonicalReceiptOutcome['status']> {
+    const outcome = await this.resolveCanonicalReceipt(candidate, evidence);
+    if (outcome.status !== 'confirmed') return outcome.status;
+    const receipt = outcome.receipt;
+    const expectedAuthor = evidence.authorAddress?.toLowerCase();
+    const canonicalAuthor = receipt.authorAddress?.toLowerCase();
+    return canonicalAuthor === expectedAuthor
+      && receipt.txIndex === evidence.txIndex
+      && receipt.blockHash.toLowerCase() === evidence.blockHash.toLowerCase()
+      ? 'confirmed'
+      : 'rejected';
   }
 }
 

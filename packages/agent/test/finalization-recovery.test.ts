@@ -50,8 +50,8 @@ function message(overrides: Partial<FinalizationMessageMsg> = {}): FinalizationM
   };
 }
 
-function parsedMessage() {
-  const parsed = parseGraphScopedFinalization(message(), CONTEXT_GRAPH);
+function parsedMessage(overrides: Partial<FinalizationMessageMsg> = {}) {
+  const parsed = parseGraphScopedFinalization(message(overrides), CONTEXT_GRAPH);
   if (!parsed.ok) throw new Error(`unexpected admission failure: ${parsed.reason}`);
   return parsed.value;
 }
@@ -150,7 +150,21 @@ describe('graph-scoped finalization recovery admission', () => {
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       let rootCount = 1n;
-      const chain = recoveryChain({ getMerkleRootCount: async () => rootCount });
+      const chainReads = { root: 0, count: 0, binding: 0 };
+      const chain = recoveryChain({
+        getLatestMerkleRoot: async () => {
+          chainReads.root += 1;
+          return new Uint8Array(32);
+        },
+        getMerkleRootCount: async () => {
+          chainReads.count += 1;
+          return rootCount;
+        },
+        getKAContextGraphId: async () => {
+          chainReads.binding += 1;
+          return 42n;
+        },
+      });
       const recovery = new FinalizationRecovery(store, chain, { info: () => {}, warn: () => {} });
       const entry = await recovery.receive({
         rawMessage: encodeFinalizationMessage(message()),
@@ -159,6 +173,14 @@ describe('graph-scoped finalization recovery admission', () => {
         candidate: parsedMessage(),
       });
       expect(entry?.state).toBe('RECEIVED');
+      const secondTxHash = `0x${'bc'.repeat(32)}`;
+      const secondEntry = await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message({ txHash: secondTxHash })),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage({ txHash: secondTxHash }),
+      });
+      expect(secondEntry?.state).toBe('RECEIVED');
       await expect(recovery.matchingEntries({
         chainId: chain.chainId,
         contextGraphId: CONTEXT_GRAPH,
@@ -166,7 +188,8 @@ describe('graph-scoped finalization recovery admission', () => {
         ual: UAL,
         merkleRoot: `0x${'00'.repeat(32)}`,
         kaId: PACKED_KA_ID.toString(),
-      })).resolves.toHaveLength(1);
+      })).resolves.toHaveLength(2);
+      expect(chainReads).toEqual({ root: 1, count: 1, binding: 1 });
 
       rootCount = 2n;
       await expect(recovery.matchingEntries({
@@ -177,7 +200,10 @@ describe('graph-scoped finalization recovery admission', () => {
         merkleRoot: `0x${'00'.repeat(32)}`,
         kaId: PACKED_KA_ID.toString(),
       })).resolves.toEqual([]);
-      expect(await store.list()).toMatchObject([{ state: 'SUPERSEDED' }]);
+      expect(await store.list()).toMatchObject([
+        { state: 'SUPERSEDED' },
+        { state: 'SUPERSEDED' },
+      ]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

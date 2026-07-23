@@ -56,7 +56,7 @@ describe('FinalizationHandler', () => {
     handler = new FinalizationHandler(store, undefined);
   });
 
-  it('wires the positional resolver through the exported legacy constructor', async () => {
+  it('wires named optional dependencies through the explicit options contract', async () => {
     const eventBus = { emit: () => undefined } as unknown as EventBus;
     const resolvedContextGraphs: string[] = [];
     const resolver: ResolveContextGraphOnChainId = async (contextGraphId) => {
@@ -68,17 +68,15 @@ describe('FinalizationHandler', () => {
       localPeerId: 'legacy-peer',
       localNodeIdentityId: '99',
     };
-    const legacy = new FinalizationHandler(
-      store,
-      undefined,
+    const configured = new FinalizationHandler(store, undefined, {
       eventBus,
-      resolver,
-      markDirty,
-      lifecycleOptions,
-    );
+      resolveContextGraphOnChainId: resolver,
+      markContextGraphMetaDirtyFromQuads: markDirty,
+      lifecycleLogOptions: lifecycleOptions,
+    });
     const author = '0x1111111111111111111111111111111111111111';
     const packedKaId = (BigInt(author) << 96n) | 7n;
-    await legacy.handleFinalizationMessage(encodeFinalizationMessage({
+    await configured.handleFinalizationMessage(encodeFinalizationMessage({
       ual: `did:dkg:otp:20430/${author}/7`,
       contextGraphId: CONTEXT_GRAPH,
       kcMerkleRoot: new Uint8Array(32),
@@ -90,7 +88,7 @@ describe('FinalizationHandler', () => {
       publisherAddress: '0x2222222222222222222222222222222222222222',
       rootEntities: [],
       timestampMs: Date.now(),
-      operationId: 'legacy-constructor-wiring',
+      operationId: 'options-constructor-wiring',
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       assertionVersion: '1',
       publicTripleCount: 1,
@@ -308,13 +306,9 @@ describe('FinalizationHandler', () => {
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
     const dirtyQuads: Quad[] = [];
-    const localHandler = new FinalizationHandler(
-      store,
-      undefined,
-      undefined,
-      undefined,
-      (quads) => { dirtyQuads.push(...quads); },
-    );
+    const localHandler = new FinalizationHandler(store, undefined, {
+      markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); },
+    });
 
     await (localHandler as any).promoteSharedMemoryToCanonical(
       CONTEXT_GRAPH,
