@@ -77,6 +77,7 @@ import {
   type FinalizationRecoveryLiveInput,
   type FinalizationRecoveryMaterializer,
   type FinalizationRecoveryPreparedMaterialization,
+  type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
 import type {
   FinalizationRecoveryEntry,
@@ -547,7 +548,7 @@ export class FinalizationHandler {
   private async replayMatchingRecoveryEntries(
     input: ChainReconciledKCInput,
     _ctx: OperationContext,
-  ): Promise<boolean> {
+  ): Promise<FinalizationRecoveryReplayOutcome> {
     return this.recovery.replayMatching({
       chainId: this.chain?.chainId ?? 'none',
       contextGraphId: input.contextGraphId,
@@ -2615,6 +2616,8 @@ export class FinalizationHandler {
    *                            merkleRoot (caller leaves the cursor; sweep retries).
    *   - `'unverified'`      — chain couldn't confirm the CG binding (RPC lag /
    *                            reorg / no chain wired); caller leaves cursor.
+   *   - `'receipt-revalidation-pending'` — durable SETTLED receipt retry is
+   *                            in backoff; caller leaves cursor.
    *   - `'stale-target'`    — a newer update is already materialised.
    */
   async handleChainReconciledKC(input: ChainReconciledKCInput, ctx: OperationContext): Promise<
@@ -2622,6 +2625,7 @@ export class FinalizationHandler {
     | 'already-confirmed'
     | 'no-swm'
     | 'unverified'
+    | 'receipt-revalidation-pending'
     | 'stale-target'
     | 'verified-vm-metadata-pending'
   > {
@@ -2643,8 +2647,9 @@ export class FinalizationHandler {
       return 'unverified';
     }
 
-    const recoveredFromJournal = await this.replayMatchingRecoveryEntries(input, ctx);
-    if (recoveredFromJournal) return 'already-confirmed';
+    const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
+    if (journalReplay === 'recovered') return 'already-confirmed';
+    if (journalReplay === 'retry-pending') return 'receipt-revalidation-pending';
 
     // V2 recovery is O(1) in the number of prior workspace operations: the
     // durable per-KA head names one exact assertion graph and carries its

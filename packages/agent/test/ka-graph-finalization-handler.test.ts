@@ -32,6 +32,11 @@ import {
 } from '../src/finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
+import {
+  reconcileContextGraph,
+  type ChainReconcilerDeps,
+} from '../src/chain-reconciler.js';
+import { createCursorState } from '../src/reconcile-cursor.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -130,6 +135,33 @@ function recoveryOptions(
   return {
     recoveryStore,
     resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+  };
+}
+
+function recoveryReconciler(
+  recoveryHandler: FinalizationHandler,
+  input: Parameters<FinalizationHandler['handleChainReconciledKC']>[0],
+  persistedWatermarks: number[],
+): ChainReconcilerDeps {
+  return {
+    getKCCount: async () => 1,
+    getHeadBlock: async () => undefined,
+    reconcileOrdinal: async () => {
+      const outcome = await recoveryHandler.handleChainReconciledKC(
+        input,
+        createOperationContext('system'),
+      );
+      if (outcome === 'promoted') return { status: 'reconciled', blockNumber: 123 };
+      if (outcome === 'already-confirmed' || outcome === 'stale-target') {
+        return { status: 'already', blockNumber: 123 };
+      }
+      return { status: 'pending' };
+    },
+    persistWatermark: (_contextGraphId, watermark) => {
+      persistedWatermarks.push(watermark);
+    },
+    confirmationDepth: 0,
+    log: () => {},
   };
 }
 
@@ -801,6 +833,7 @@ describe('graph-scoped finalization handler', () => {
         markReorged: inbox.markReorged.bind(inbox),
         clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
         rejectSettled: inbox.rejectSettled.bind(inbox),
+        isAttemptDue: inbox.isAttemptDue.bind(inbox),
         listForKnowledgeAsset: inbox.listForKnowledgeAsset.bind(inbox),
         transition: inbox.transition.bind(inbox),
         recordAttempt: inbox.recordAttempt.bind(inbox),
@@ -872,6 +905,7 @@ describe('graph-scoped finalization handler', () => {
         markReorged: async () => false,
         clearSettledRetry: async () => {},
         rejectSettled: async () => false,
+        isAttemptDue: () => true,
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
         recordAttempt: async () => {},
@@ -1257,6 +1291,147 @@ describe('graph-scoped finalization handler', () => {
       }
     },
   );
+
+  it('holds the production watermark until a SETTLED receipt retry is due and confirmed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-pending-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      let now = 1_000;
+      const { message } = await stageGraph();
+      let receiptPhase: 'confirmed' | 'pending' = 'confirmed';
+      let receiptChecks = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptChecks += 1;
+          return receiptPhase === 'confirmed'
+            ? canonicalReceipt(message)
+            : { status: 'pending' as const };
+        },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED', attemptCount: 0 }]);
+
+      receiptPhase = 'pending';
+      const persistedWatermarks: number[] = [];
+      const cursor = createCursorState(0);
+      const deps = recoveryReconciler(recoveryHandler, {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, persistedWatermarks);
+
+      await expect(reconcileContextGraph(deps, cursor, CG, 42n)).resolves.toMatchObject({
+        watermark: 0,
+        pending: 1,
+      });
+      const [deferred] = await inbox.list();
+      expect(deferred).toMatchObject({ state: 'SETTLED', attemptCount: 1 });
+      const checksBeforeBackoffSweep = receiptChecks;
+      await expect(reconcileContextGraph(deps, cursor, CG, 42n)).resolves.toMatchObject({
+        watermark: 0,
+        pending: 1,
+      });
+      expect(receiptChecks).toBe(checksBeforeBackoffSweep);
+      expect(persistedWatermarks).toEqual([]);
+
+      now = deferred.nextAttemptAt!;
+      receiptPhase = 'confirmed';
+      await expect(reconcileContextGraph(deps, cursor, CG, 42n)).resolves.toMatchObject({
+        watermark: 1,
+        reconciled: 1,
+      });
+      expect(persistedWatermarks).toEqual([1]);
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED', attemptCount: 0 }]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('drives bounded SETTLED not-found probes from production reconciliation sweeps', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-not-found-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      let now = 1_000;
+      const { message } = await stageGraph();
+      let missing = false;
+      let receiptChecks = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptChecks += 1;
+          return missing
+            ? { status: 'not-found' as const }
+            : canonicalReceipt(message);
+        },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      missing = true;
+      const persistedWatermarks: number[] = [];
+      const cursor = createCursorState(0);
+      const deps = recoveryReconciler(recoveryHandler, {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, persistedWatermarks);
+
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const sweep = await reconcileContextGraph(deps, cursor, CG, 42n);
+        const [entry] = await inbox.list();
+        if (attempt < 5) {
+          expect(sweep).toMatchObject({ watermark: 0, pending: 1 });
+          expect(entry).toMatchObject({
+            state: 'SETTLED',
+            attemptCount: attempt,
+            lastError: 'settled canonical receipt is not-found',
+          });
+          now = entry.nextAttemptAt!;
+        } else {
+          expect(sweep).toMatchObject({ watermark: 1, reconciled: 1 });
+          expect(entry).toMatchObject({
+            state: 'REJECTED',
+            attemptCount: 4,
+            lastError: 'canonical receipt disappeared after bounded retries',
+          });
+        }
+      }
+      expect(receiptChecks).toBe(6);
+      expect(persistedWatermarks).toEqual([1]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('retracts only the exact settled VM assertion when its receipt is permanently rejected', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-rejected-'));

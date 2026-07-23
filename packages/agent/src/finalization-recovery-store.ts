@@ -88,6 +88,7 @@ export interface FinalizationRecoveryStore {
   markReorged(key: string, generation: number, lastError: string): Promise<boolean>;
   clearSettledRetry(key: string, generation: number): Promise<void>;
   rejectSettled(key: string, generation: number, lastError: string): Promise<boolean>;
+  isAttemptDue(entry: FinalizationRecoveryEntry): boolean;
   listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;

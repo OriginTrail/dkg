@@ -358,13 +358,53 @@ describe('graph-scoped finalization recovery admission', () => {
           ual: UAL,
           merkleRoot: `0x${'00'.repeat(32)}`,
           kaId: PACKED_KA_ID.toString(),
-        })).resolves.toBe(true);
+        })).resolves.toBe('recovered');
 
         expect(receiptOptions).toContainEqual({
           expectedBlockHash: BLOCK_HASH,
           expectedBlockNumber: 123,
         });
         expect(receiptOptions.at(-1)).toEqual({});
+        expect(applied).toEqual([
+          { blockNumber: 123, txIndex: 4 },
+          { blockNumber: replacementBlockNumber, txIndex: 5 },
+        ]);
+        expect(await store.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 1,
+          verifiedEvidence: {
+            blockNumber: replacementBlockNumber,
+            blockHash: replacementBlockHash,
+            txIndex: 5,
+          },
+        }]);
+
+        await store.close();
+        store = await openSqliteFinalizationRecoveryStore(directory);
+        const recoveryAfterSecondRestart = new FinalizationRecovery(
+          store,
+          chain,
+          { info: () => {}, warn: () => {} },
+          {
+            ...recoveryMaterializer(),
+            apply: async ({ blockNumber, txIndex }) => {
+              applied.push({ blockNumber, txIndex });
+              return 'applied' as const;
+            },
+          },
+        );
+        await expect(recoveryAfterSecondRestart.replayMatching({
+          chainId: chain.chainId,
+          contextGraphId: CONTEXT_GRAPH,
+          onChainCgId: '42',
+          ual: UAL,
+          merkleRoot: `0x${'00'.repeat(32)}`,
+          kaId: PACKED_KA_ID.toString(),
+        })).resolves.toBe('recovered');
+        expect(receiptOptions.at(-1)).toEqual({
+          expectedBlockHash: replacementBlockHash,
+          expectedBlockNumber: replacementBlockNumber,
+        });
         expect(applied).toEqual([
           { blockNumber: 123, txIndex: 4 },
           { blockNumber: replacementBlockNumber, txIndex: 5 },
@@ -429,7 +469,7 @@ describe('graph-scoped finalization recovery admission', () => {
           ual: UAL,
           merkleRoot: reconciledMerkleRoot,
           kaId: PACKED_KA_ID.toString(),
-        })).resolves.toBe(false);
+        })).resolves.toBe('none');
 
         expect(receiptCalls).toBe(2);
         expect(await store.list()).toMatchObject([{
@@ -545,7 +585,7 @@ describe('graph-scoped finalization recovery admission', () => {
         kaId: PACKED_KA_ID.toString(),
       };
 
-      await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+      await expect(recovery.replayMatching(replay)).resolves.toBe('retry-pending');
       let [deferred] = await store.list();
       expect(deferred).toMatchObject({
         state: 'SETTLED',
@@ -554,7 +594,7 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       now = deferred.nextAttemptAt!;
       missing = false;
-      await expect(recovery.replayMatching(replay)).resolves.toBe(true);
+      await expect(recovery.replayMatching(replay)).resolves.toBe('recovered');
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
         attemptCount: 0,
@@ -562,7 +602,7 @@ describe('graph-scoped finalization recovery admission', () => {
       missing = true;
 
       for (let attempt = 1; attempt < 5; attempt += 1) {
-        await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+        await expect(recovery.replayMatching(replay)).resolves.toBe('retry-pending');
         [deferred] = await store.list();
         expect(deferred).toMatchObject({
           state: 'SETTLED',
@@ -571,12 +611,12 @@ describe('graph-scoped finalization recovery admission', () => {
         });
         expect(deferred.nextAttemptAt).toBeGreaterThan(now);
         const callsBeforeBackoffProbe = receiptCalls;
-        await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+        await expect(recovery.replayMatching(replay)).resolves.toBe('retry-pending');
         expect(receiptCalls).toBe(callsBeforeBackoffProbe);
         now = deferred.nextAttemptAt!;
       }
 
-      await expect(recovery.replayMatching(replay)).resolves.toBe(true);
+      await expect(recovery.replayMatching(replay)).resolves.toBe('recovered');
       expect(invalidations).toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',

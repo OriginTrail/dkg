@@ -282,6 +282,10 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
+  isAttemptDue(entry: FinalizationRecoveryEntry): boolean {
+    return entry.nextAttemptAt === undefined || entry.nextAttemptAt <= this.#policy.now();
+  }
+
   async listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;
@@ -291,18 +295,18 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     if (this.#closed || this.#closing) return [];
     await this.#mutationTail;
     if (this.#closed) return [];
+    // Future-due SETTLED rows must remain visible so reconciliation can keep
+    // the current ordinal pending without issuing another receipt RPC early.
     return this.database.prepare(`
       SELECT * FROM finalization_inbox_v1
       WHERE chain_id = ? AND context_graph_id = ? AND ual = ? AND ka_id = ?
         AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
-        AND (state != 'SETTLED' OR next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY created_at, key
     `).all(
       input.chainId,
       input.contextGraphId,
       input.ual,
       input.kaId,
-      this.#policy.now(),
     )
       .map(finalizationRecoveryRowToEntry);
   }

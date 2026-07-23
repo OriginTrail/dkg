@@ -4033,6 +4033,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
         });
         return { status: 'pending' };
+      case 'receipt-revalidation-pending':
       case 'unverified':
       default:
         this.emitReplication({

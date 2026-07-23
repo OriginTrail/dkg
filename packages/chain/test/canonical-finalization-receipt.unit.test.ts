@@ -10,8 +10,11 @@ const AUTHOR = '0x1111111111111111111111111111111111111111';
 const KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
 const MERKLE_ROOT = Uint8Array.from({ length: 32 }, (_, index) => index);
 
-function adapter(overrides: Record<string, unknown> = {}) {
-  return Object.assign(Object.create(PublishMethods.prototype), {
+function adapter(
+  overrides: Record<string, unknown> = {},
+  useProductionV10Parser = false,
+) {
+  const chain = Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
     contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
@@ -20,6 +23,10 @@ function adapter(overrides: Record<string, unknown> = {}) {
     parseV10PublishReceipt: vi.fn(async () => null),
     ...overrides,
   }) as PublishMethods;
+  if (useProductionV10Parser) {
+    delete (chain as unknown as { parseV10PublishReceipt?: unknown }).parseV10PublishReceipt;
+  }
+  return chain;
 }
 
 describe('canonical finalization receipt capability', () => {
@@ -68,29 +75,73 @@ describe('canonical finalization receipt capability', () => {
     })).resolves.toEqual({ status: 'reorged' });
   });
 
-  it('returns mandatory block and ordering provenance for a confirmed publish', async () => {
+  it('resolves canonical V10 evidence through the production receipt parser', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
+    const storageAddress = '0x4444444444444444444444444444444444444444';
+    const unrelatedAddress = '0x5555555555555555555555555555555555555555';
+    const encodedCreated = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeAssetCreated')!,
+      [
+        KA_ID,
+        AUTHOR,
+        'canonical-receipt-test',
+        ethers.hexlify(MERKLE_ROOT),
+        2048n,
+        1n,
+        2n,
+        100n,
+        false,
+      ],
+    );
+    const encodedMinted = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeAssetsMinted')!,
+      [KA_ID, PUBLISHER, KA_ID, KA_ID + 1n],
+    );
+    const unrelatedCreated = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeAssetCreated')!,
+      [
+        KA_ID + 1n,
+        PUBLISHER,
+        'unrelated-contract-log',
+        `0x${'ff'.repeat(32)}`,
+        4096n,
+        1n,
+        2n,
+        200n,
+        false,
+      ],
+    );
     const receipt = {
       hash: TX_HASH,
       status: 1,
       blockNumber: 123,
       blockHash: BLOCK_HASH,
       index: 4,
+      from: AUTHOR,
+      logs: [
+        {
+          address: unrelatedAddress,
+          topics: unrelatedCreated.topics,
+          data: unrelatedCreated.data,
+        },
+        {
+          address: storageAddress,
+          topics: encodedCreated.topics,
+          data: encodedCreated.data,
+        },
+        {
+          address: storageAddress,
+          topics: encodedMinted.topics,
+          data: encodedMinted.data,
+        },
+      ],
     };
     const chain = adapter({
+      contracts: {
+        knowledgeAssetStorage: { interface: storageInterface, target: storageAddress },
+      },
       getTransactionReceiptWithFailover: vi.fn(async () => receipt),
-      parseV10PublishReceipt: vi.fn(async () => ({
-        batchId: KA_ID,
-        kaId: KA_ID,
-        startKAId: KA_ID,
-        endKAId: KA_ID,
-        txHash: TX_HASH,
-        blockNumber: 123,
-        txIndex: 4,
-        merkleRoot: MERKLE_ROOT,
-        publisherAddress: PUBLISHER,
-        authorAddress: AUTHOR,
-      })),
-    });
+    }, true);
 
     await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH)).resolves.toEqual({
       status: 'confirmed',
@@ -106,8 +157,10 @@ describe('canonical finalization receipt capability', () => {
         kaId: KA_ID,
         startKAId: KA_ID,
         endKAId: KA_ID,
+        knowledgeAssetsContract: storageAddress,
       },
     });
+    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
 
   it('resolves canonical V9 evidence through the production receipt parser', async () => {

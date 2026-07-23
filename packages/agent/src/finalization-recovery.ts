@@ -88,6 +88,11 @@ export interface FinalizationRecoveryReplayInput {
   kaId: string;
 }
 
+export type FinalizationRecoveryReplayOutcome =
+  | 'recovered'
+  | 'retry-pending'
+  | 'none';
+
 export type FinalizationRecoveryReplayMaterializationOutcome =
   | 'promoted'
   | 'already-confirmed'
@@ -165,7 +170,10 @@ export function finalizationRecoveryEntryKey(input: {
 export class FinalizationRecovery<
   Prepared extends FinalizationRecoveryPreparedMaterialization,
 > {
-  private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
+  private readonly replaySingleFlights = new Map<
+    string,
+    Promise<FinalizationRecoveryReplayOutcome>
+  >();
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
 
@@ -605,7 +613,11 @@ export class FinalizationRecovery<
       );
       return undefined;
     }
-    const canonical = await this.resolveCanonicalReceipt(input.candidate, evidence);
+    const canonical = await this.resolveCanonicalReceipt(
+      input.candidate,
+      evidence,
+      { acceptCanonicalPlacement: entry.generation > 0 },
+    );
     if (canonical.status === 'rejected') {
       await this.invalidateSettled(
         entry,
@@ -827,16 +839,20 @@ export class FinalizationRecovery<
 
   async replayMatching(
     input: FinalizationRecoveryReplayInput,
-  ): Promise<boolean> {
+  ): Promise<FinalizationRecoveryReplayOutcome> {
     const entries = await this.matchingEntries(input);
-    let recovered = false;
+    let outcome: FinalizationRecoveryReplayOutcome = 'none';
     for (const entry of entries) {
       const existing = this.replaySingleFlights.get(entry.key);
       const replay = existing ?? this.replayEntry(entry, input);
       if (!existing) this.replaySingleFlights.set(entry.key, replay);
-      if (await replay) recovered = true;
+      const entryOutcome = await replay;
+      if (entryOutcome === 'recovered') outcome = 'recovered';
+      else if (entryOutcome === 'retry-pending' && outcome === 'none') {
+        outcome = 'retry-pending';
+      }
     }
-    return recovered;
+    return outcome;
   }
 
   async health(): Promise<FinalizationRecoveryHealth> {
@@ -875,7 +891,7 @@ export class FinalizationRecovery<
     entry: FinalizationRecoveryEntry,
     candidate: ParsedGraphScopedFinalization,
     input: FinalizationRecoveryReplayInput,
-  ): Promise<boolean> {
+  ): Promise<FinalizationRecoveryReplayOutcome> {
     const evidence = entry.verifiedEvidence;
     if (
       !evidence
@@ -888,51 +904,67 @@ export class FinalizationRecovery<
       this.log.warn(
         `Finalization recovery settled evidence does not match its envelope for ${entry.ual}`,
       );
-      return false;
+      return 'none';
     }
 
     const matchesReplayTarget = await this.settledMatchesReplayTarget(entry, input);
-    const canonical = await this.resolveCanonicalReceipt(candidate, evidence);
+    if (!this.getStore()?.isAttemptDue(entry)) {
+      return matchesReplayTarget ? 'retry-pending' : 'none';
+    }
+    const canonical = await this.resolveCanonicalReceipt(
+      candidate,
+      evidence,
+      { acceptCanonicalPlacement: entry.generation > 0 },
+    );
     if (canonical.status === 'confirmed') {
       if (!sameCanonicalFinalizationPlacement(canonical.receipt, evidence)) {
-        return await this.recoverSettledReorg(entry, candidate) && matchesReplayTarget;
+        const recovered = await this.recoverSettledReorg(entry, candidate);
+        if (!matchesReplayTarget) return 'none';
+        return recovered ? 'recovered' : 'retry-pending';
       }
       await this.clearSettledRetry(entry);
-      return matchesReplayTarget;
+      return matchesReplayTarget ? 'recovered' : 'none';
     }
     if (canonical.status === 'reorged') {
-      return await this.recoverSettledReorg(entry, candidate) && matchesReplayTarget;
+      const recovered = await this.recoverSettledReorg(entry, candidate);
+      if (!matchesReplayTarget) return 'none';
+      return recovered ? 'recovered' : 'retry-pending';
     }
     if (canonical.status === 'rejected') {
-      return await this.invalidateSettled(
+      const invalidated = await this.invalidateSettled(
         entry,
         candidate,
         evidence,
         'canonical receipt permanently rejected',
-      ) && matchesReplayTarget;
+      );
+      if (!matchesReplayTarget) return 'none';
+      return invalidated ? 'recovered' : 'retry-pending';
     }
     if (canonical.status === 'not-found') {
       if (entry.attemptCount + 1 >= SETTLED_NOT_FOUND_RETRY_LIMIT) {
-        return this.invalidateSettled(
+        const invalidated = await this.invalidateSettled(
           entry,
           candidate,
           evidence,
           'canonical receipt disappeared after bounded retries',
         );
+        if (!matchesReplayTarget) return 'none';
+        return invalidated ? 'recovered' : 'retry-pending';
       }
       await this.recordSettledRetry(
         entry,
         `settled canonical receipt is ${canonical.status}`,
       );
-      return false;
+      return matchesReplayTarget ? 'retry-pending' : 'none';
     }
     if (canonical.status === 'pending' || canonical.status === 'unsupported') {
       await this.recordSettledRetry(
         entry,
         `settled canonical receipt is ${canonical.status}`,
       );
+      return matchesReplayTarget ? 'retry-pending' : 'none';
     }
-    return false;
+    return 'none';
   }
 
   private async settledMatchesReplayTarget(
@@ -990,11 +1022,11 @@ export class FinalizationRecovery<
   private replayEntry(
     entry: FinalizationRecoveryEntry,
     input: FinalizationRecoveryReplayInput,
-  ): Promise<boolean> {
+  ): Promise<FinalizationRecoveryReplayOutcome> {
     const replay = (async () => {
       try {
         const candidate = this.decodeEntry(entry);
-        if (!candidate) return false;
+        if (!candidate) return 'none' as const;
         if (entry.state === 'SETTLED') {
           return this.replaySettled(entry, candidate, input);
         }
@@ -1018,7 +1050,7 @@ export class FinalizationRecovery<
               `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
             );
             await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
-            return false;
+            return 'none' as const;
           }
           const receiptStatus = await this.verifyPersistedReceipt(
             candidate,
@@ -1044,7 +1076,7 @@ export class FinalizationRecovery<
             this.log.info(
               `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
             );
-            return false;
+            return 'none' as const;
           }
           const replayOutcome = await this.materializer.replayVerified({
             replay: input,
@@ -1071,9 +1103,10 @@ export class FinalizationRecovery<
 
         if (outcome === 'deferred') {
           await this.recordDeferred(entry, 'replay processing deferred');
-          return false;
+          return 'none' as const;
         }
-        return this.settleEntry(entry, outcome);
+        const settled = await this.settleEntry(entry, outcome);
+        return settled ? 'recovered' as const : 'none' as const;
       } catch (error) {
         if (!this.materializer.isRetryableError(error)) throw error;
         this.log.info(
@@ -1081,7 +1114,7 @@ export class FinalizationRecovery<
             + 'keeping inbox entry',
         );
         await this.recordDeferred(entry, 'replay store scheduler remained busy');
-        return false;
+        return 'none' as const;
       }
     })().finally(() => {
       if (this.replaySingleFlights.get(entry.key) === replay) {
