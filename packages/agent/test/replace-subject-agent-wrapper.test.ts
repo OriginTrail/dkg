@@ -24,7 +24,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
+import { contextGraphCatalogUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
@@ -135,9 +135,15 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     // path a replaceSubject on that CG's meta graph takes (covers deletes the
     // inserted quads wouldn't reveal).
     proj.markDirty('music');
-    const before = entries.get('music')!.invalidationVersion;
+    const beforeMeta = entries.get('music')!.invalidationVersion;
     proj.markDirtyForGraph(contextGraphMetaGraphUri('music'));
-    expect(entries.get('music')!.invalidationVersion).toBeGreaterThan(before);
+    expect(entries.get('music')!.invalidationVersion).toBeGreaterThan(beforeMeta);
+
+    // ...and via its _catalog graph — the other CG-graph branch replaceSubject can
+    // target (a replace on the public catalog subgraph must dirty the CG too).
+    const beforeCatalog = entries.get('music')!.invalidationVersion;
+    proj.markDirtyForGraph(contextGraphCatalogUri('music'));
+    expect(entries.get('music')!.invalidationVersion).toBeGreaterThan(beforeCatalog);
 
     // A non-CG graph (e.g. the publisher control-plane graph) is a no-op — no
     // entry created, no whole-cache churn on the hot job-write path.
