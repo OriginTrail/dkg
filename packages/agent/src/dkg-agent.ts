@@ -407,8 +407,12 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
-import { snapshotRfc64PublicCatalogAutoPublishConfigV1 } from './rfc64/catalog-authority-config-v1.js';
+import {
+  snapshotRfc64PublicCatalogAutoPublishConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
+} from './rfc64/catalog-authority-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -695,6 +699,12 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
+    // an impossible ephemeral configuration before constructing a store or
+    // node so start() can never fail after leaving libp2p half-running.
+    if (inputConfig.rfc64PublicCatalogBootstrap !== undefined && !inputConfig.dataDir) {
+      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
+    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const config = normalizeStorageAckConfig({
       ...inputConfig,
@@ -710,6 +720,9 @@ export class DKGAgent extends DKGAgentBase {
     );
     const rfc64PublicCatalogAutoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
       config.rfc64PublicCatalogAutoPublish,
+    );
+    const rfc64PublicCatalogBootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(
+      config.rfc64PublicCatalogBootstrap,
     );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
@@ -818,6 +831,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
       rfc64PublicCatalogAutoPublish,
+      rfc64PublicCatalogBootstrap,
     };
 
     const port = config.listenPort ?? 0;
@@ -1736,6 +1750,7 @@ export class DKGAgent extends DKGAgentBase {
     // router, node, and control-object store are all still live — before
     // node.stop() below and before closeRfc64PersistenceV1() releases the store.
     try {
+      await this.closeRfc64PublicCatalogBootstrapV1();
       await this.closeRfc64PublicCatalogServiceV1();
     } catch (err) {
       this.log.warn(
@@ -3065,5 +3080,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods]);
