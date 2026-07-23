@@ -2,11 +2,11 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { VerifiedGraphScopedFinalizationEvidenceCodec } from '../src/finalization-graph-envelope.js';
 import {
   FINALIZATION_RECOVERY_JOURNAL_FILENAME,
   FinalizationRecoveryJournal,
   FinalizationRecoveryJournalCorruptError,
-  finalizationRecoveryEntryKey,
   type FinalizationRecoveryUpsert,
 } from '../src/finalization-recovery-journal.js';
 
@@ -197,26 +197,22 @@ describe('FinalizationRecoveryJournal', () => {
     }]);
   });
 
-  it('reads legacy JSON-tuple keys and normalizes them in memory', async () => {
-    const directory = await temporaryDirectory();
-    const journal = new FinalizationRecoveryJournal(directory);
-    const candidate = entry(1);
-    await journal.upsert(candidate);
-    const path = join(directory, FINALIZATION_RECOVERY_JOURNAL_FILENAME);
-    const document = JSON.parse(await readFile(path, 'utf8')) as {
-      entries: Array<{ key: string }>;
-    };
-    document.entries[0]!.key = JSON.stringify([
-      candidate.chainId,
-      candidate.contextGraphId,
-      candidate.ual,
-      candidate.txHash.toLowerCase(),
-    ]);
-    await writeFile(path, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+  it('parses verified evidence into an explicit detached value', () => {
+    const allowedPeers = ['peer-a'];
+    const parsed = VerifiedGraphScopedFinalizationEvidenceCodec.parse({
+      ...verifiedEvidence(1),
+      accessPolicy: 'allowList',
+      allowedPeers,
+      ignoredField: 'not part of the persisted contract',
+    });
+    allowedPeers.push('peer-b');
 
-    expect(await new FinalizationRecoveryJournal(directory).list()).toMatchObject([{
-      key: finalizationRecoveryEntryKey(candidate),
-    }]);
+    expect(parsed.allowedPeers).toEqual(['peer-a']);
+    expect(parsed).not.toHaveProperty('ignoredField');
+    expect(() => VerifiedGraphScopedFinalizationEvidenceCodec.parse({
+      ...parsed,
+      txIndex: -1,
+    })).toThrow('verified evidence has invalid txIndex');
   });
 
   it('continues serializing mutations after a queued save fails', async () => {

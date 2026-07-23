@@ -90,116 +90,159 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
-export function buildVerifiedGraphScopedFinalizationEvidence(
-  input: BuildVerifiedGraphScopedFinalizationEvidenceInput,
-): VerifiedGraphScopedFinalizationEvidence {
-  const { candidate } = input;
-  return {
-    assertionVersion: candidate.assertionVersion,
-    publicTripleCount: candidate.publicTripleCount,
-    ...(candidate.privateMerkleRoot
-      ? { privateMerkleRoot: ethers.hexlify(candidate.privateMerkleRoot) }
-      : {}),
-    privateTripleCount: candidate.privateTripleCount,
-    ...(input.publicQuadsDigest ? { publicQuadsDigest: input.publicQuadsDigest } : {}),
-    publisherPeerId: input.publisherPeerId,
-    publisherAddress: candidate.msg.publisherAddress,
-    transactionHash: candidate.msg.txHash,
-    blockNumber: candidate.blockNumber,
-    txIndex: input.txIndex ?? 0,
-    ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
-    accessPolicy: input.accessPolicy,
-    allowedPeers: [...input.allowedPeers],
-    ...(candidate.msg.subGraphName ? { subGraphName: candidate.msg.subGraphName } : {}),
-  };
+function requiredEvidenceString(evidence: Record<string, unknown>, field: string): string {
+  const value = evidence[field];
+  if (!isNonEmptyString(value)) throw new Error(`verified evidence has invalid ${field}`);
+  return value;
 }
 
-export function parseVerifiedGraphScopedFinalizationEvidence(
-  value: unknown,
-): VerifiedGraphScopedFinalizationEvidence {
-  if (!value || typeof value !== 'object') throw new Error('verified evidence is not an object');
-  const evidence = value as Record<string, unknown>;
-  const allowedPeers = evidence.allowedPeers;
-  if (
-    !isNonEmptyString(evidence.assertionVersion)
-    || !Number.isSafeInteger(evidence.publicTripleCount)
-    || Number(evidence.publicTripleCount) < 0
-    || !Number.isSafeInteger(evidence.privateTripleCount)
-    || Number(evidence.privateTripleCount) < 0
-    || (Number(evidence.publicTripleCount) === 0 && Number(evidence.privateTripleCount) === 0)
-    || (evidence.privateMerkleRoot !== undefined && !isNonEmptyString(evidence.privateMerkleRoot))
-    || (evidence.publicQuadsDigest !== undefined && !isNonEmptyString(evidence.publicQuadsDigest))
-    || !isNonEmptyString(evidence.publisherPeerId)
-    || !isNonEmptyString(evidence.publisherAddress)
-    || !isNonEmptyString(evidence.transactionHash)
-    || !Number.isSafeInteger(evidence.blockNumber)
-    || Number(evidence.blockNumber) < 0
-    || !Number.isSafeInteger(evidence.txIndex)
-    || Number(evidence.txIndex) < 0
-    || (evidence.authorAddress !== undefined && !isNonEmptyString(evidence.authorAddress))
-    || (evidence.accessPolicy !== 'public'
-      && evidence.accessPolicy !== 'ownerOnly'
-      && evidence.accessPolicy !== 'allowList')
-    || !Array.isArray(allowedPeers)
-    || allowedPeers.some((peer) => !isNonEmptyString(peer))
-    || new Set(allowedPeers).size !== allowedPeers.length
-    || (evidence.accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (evidence.accessPolicy !== 'allowList' && allowedPeers.length > 0)
-    || (evidence.subGraphName !== undefined && !isNonEmptyString(evidence.subGraphName))
-  ) {
-    throw new Error('verified evidence has an invalid shape');
+function optionalEvidenceString(
+  evidence: Record<string, unknown>,
+  field: string,
+): string | undefined {
+  const value = evidence[field];
+  if (value === undefined) return undefined;
+  if (!isNonEmptyString(value)) throw new Error(`verified evidence has invalid ${field}`);
+  return value;
+}
+
+function evidenceInteger(evidence: Record<string, unknown>, field: string): number {
+  const value = evidence[field];
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`verified evidence has invalid ${field}`);
   }
-  return evidence as unknown as VerifiedGraphScopedFinalizationEvidence;
+  return Number(value);
 }
 
-export function verifiedEvidenceMatchesParsedEnvelope(
-  evidence: VerifiedGraphScopedFinalizationEvidence,
-  candidate: ParsedGraphScopedFinalization,
-  identity: VerifiedGraphScopedFinalizationIdentity,
-): boolean {
-  const messagePrivateRoot = candidate.privateMerkleRoot
-    ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
-    : undefined;
-  return candidate.scope.ual === identity.ual
-    && candidate.kaId.toString() === identity.kaId
-    && candidate.assertionVersion === evidence.assertionVersion
-    && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === identity.merkleRoot.toLowerCase()
-    && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
-    && candidate.msg.publisherAddress.toLowerCase() === evidence.publisherAddress.toLowerCase()
-    && candidate.blockNumber === evidence.blockNumber
-    && candidate.publicTripleCount === evidence.publicTripleCount
-    && candidate.privateTripleCount === evidence.privateTripleCount
-    && messagePrivateRoot === evidence.privateMerkleRoot?.toLowerCase()
-    && (candidate.msg.subGraphName || undefined) === evidence.subGraphName
-    && (candidate.msg.targetContextGraphId || undefined) === identity.targetContextGraphId;
+function evidenceAccessPolicy(evidence: Record<string, unknown>): GraphScopedAccessPolicy {
+  const value = evidence.accessPolicy;
+  if (value !== 'public' && value !== 'ownerOnly' && value !== 'allowList') {
+    throw new Error('verified evidence has invalid accessPolicy');
+  }
+  return value;
 }
 
-function sameOptionalCaseInsensitive(left: string | undefined, right: string | undefined): boolean {
-  return left?.toLowerCase() === right?.toLowerCase();
+function evidenceAllowedPeers(evidence: Record<string, unknown>): string[] {
+  const value = evidence.allowedPeers;
+  if (
+    !Array.isArray(value)
+    || value.some((peer) => !isNonEmptyString(peer))
+    || new Set(value).size !== value.length
+  ) {
+    throw new Error('verified evidence has invalid allowedPeers');
+  }
+  return [...value];
 }
 
-function sameStringSet(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value) => right.includes(value));
-}
+/** The sole construction, persistence-validation, and comparison boundary for recovery evidence. */
+export class VerifiedGraphScopedFinalizationEvidenceCodec {
+  static build(
+    input: BuildVerifiedGraphScopedFinalizationEvidenceInput,
+  ): VerifiedGraphScopedFinalizationEvidence {
+    const { candidate } = input;
+    return this.parse({
+      assertionVersion: candidate.assertionVersion,
+      publicTripleCount: candidate.publicTripleCount,
+      ...(candidate.privateMerkleRoot
+        ? { privateMerkleRoot: ethers.hexlify(candidate.privateMerkleRoot) }
+        : {}),
+      privateTripleCount: candidate.privateTripleCount,
+      ...(input.publicQuadsDigest ? { publicQuadsDigest: input.publicQuadsDigest } : {}),
+      publisherPeerId: input.publisherPeerId,
+      publisherAddress: candidate.msg.publisherAddress,
+      transactionHash: candidate.msg.txHash,
+      blockNumber: candidate.blockNumber,
+      txIndex: input.txIndex ?? 0,
+      ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
+      accessPolicy: input.accessPolicy,
+      allowedPeers: input.allowedPeers,
+      ...(candidate.msg.subGraphName ? { subGraphName: candidate.msg.subGraphName } : {}),
+    });
+  }
 
-export function sameVerifiedGraphScopedFinalizationEvidence(
-  left: VerifiedGraphScopedFinalizationEvidence,
-  right: VerifiedGraphScopedFinalizationEvidence,
-): boolean {
-  return left.assertionVersion === right.assertionVersion
-    && left.publicTripleCount === right.publicTripleCount
-    && sameOptionalCaseInsensitive(left.privateMerkleRoot, right.privateMerkleRoot)
-    && left.privateTripleCount === right.privateTripleCount
-    && sameOptionalCaseInsensitive(left.publicQuadsDigest, right.publicQuadsDigest)
-    && left.publisherPeerId === right.publisherPeerId
-    && left.publisherAddress.toLowerCase() === right.publisherAddress.toLowerCase()
-    && left.transactionHash.toLowerCase() === right.transactionHash.toLowerCase()
-    && left.blockNumber === right.blockNumber
-    && left.txIndex === right.txIndex
-    && sameOptionalCaseInsensitive(left.authorAddress, right.authorAddress)
-    && left.accessPolicy === right.accessPolicy
-    && sameStringSet(left.allowedPeers, right.allowedPeers)
-    && left.subGraphName === right.subGraphName;
+  static parse(value: unknown): VerifiedGraphScopedFinalizationEvidence {
+    if (!value || typeof value !== 'object') throw new Error('verified evidence is not an object');
+    const evidence = value as Record<string, unknown>;
+    const publicTripleCount = evidenceInteger(evidence, 'publicTripleCount');
+    const privateTripleCount = evidenceInteger(evidence, 'privateTripleCount');
+    if (publicTripleCount === 0 && privateTripleCount === 0) {
+      throw new Error('verified evidence has no triples');
+    }
+    const accessPolicy = evidenceAccessPolicy(evidence);
+    const allowedPeers = evidenceAllowedPeers(evidence);
+    if (
+      (accessPolicy === 'allowList' && allowedPeers.length === 0)
+      || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    ) {
+      throw new Error('verified evidence access policy does not match allowedPeers');
+    }
+    const privateMerkleRoot = optionalEvidenceString(evidence, 'privateMerkleRoot');
+    const publicQuadsDigest = optionalEvidenceString(evidence, 'publicQuadsDigest');
+    const authorAddress = optionalEvidenceString(evidence, 'authorAddress');
+    const subGraphName = optionalEvidenceString(evidence, 'subGraphName');
+    return {
+      assertionVersion: requiredEvidenceString(evidence, 'assertionVersion'),
+      publicTripleCount,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      privateTripleCount,
+      ...(publicQuadsDigest ? { publicQuadsDigest } : {}),
+      publisherPeerId: requiredEvidenceString(evidence, 'publisherPeerId'),
+      publisherAddress: requiredEvidenceString(evidence, 'publisherAddress'),
+      transactionHash: requiredEvidenceString(evidence, 'transactionHash'),
+      blockNumber: evidenceInteger(evidence, 'blockNumber'),
+      txIndex: evidenceInteger(evidence, 'txIndex'),
+      ...(authorAddress ? { authorAddress } : {}),
+      accessPolicy,
+      allowedPeers,
+      ...(subGraphName ? { subGraphName } : {}),
+    };
+  }
+
+  static matchesEnvelope(
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    candidate: ParsedGraphScopedFinalization,
+    identity: VerifiedGraphScopedFinalizationIdentity,
+  ): boolean {
+    const messagePrivateRoot = candidate.privateMerkleRoot
+      ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
+      : undefined;
+    return candidate.scope.ual === identity.ual
+      && candidate.kaId.toString() === identity.kaId
+      && candidate.assertionVersion === evidence.assertionVersion
+      && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === identity.merkleRoot.toLowerCase()
+      && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
+      && candidate.msg.publisherAddress.toLowerCase() === evidence.publisherAddress.toLowerCase()
+      && candidate.blockNumber === evidence.blockNumber
+      && candidate.publicTripleCount === evidence.publicTripleCount
+      && candidate.privateTripleCount === evidence.privateTripleCount
+      && messagePrivateRoot === evidence.privateMerkleRoot?.toLowerCase()
+      && (candidate.msg.subGraphName || undefined) === evidence.subGraphName
+      && (candidate.msg.targetContextGraphId || undefined) === identity.targetContextGraphId;
+  }
+
+  static same(
+    left: VerifiedGraphScopedFinalizationEvidence,
+    right: VerifiedGraphScopedFinalizationEvidence,
+  ): boolean {
+    return JSON.stringify(this.comparable(left)) === JSON.stringify(this.comparable(right));
+  }
+
+  private static comparable(value: VerifiedGraphScopedFinalizationEvidence): object {
+    const evidence = this.parse(value);
+    return {
+      ...evidence,
+      ...(evidence.privateMerkleRoot
+        ? { privateMerkleRoot: evidence.privateMerkleRoot.toLowerCase() }
+        : {}),
+      ...(evidence.publicQuadsDigest
+        ? { publicQuadsDigest: evidence.publicQuadsDigest.toLowerCase() }
+        : {}),
+      publisherAddress: evidence.publisherAddress.toLowerCase(),
+      transactionHash: evidence.transactionHash.toLowerCase(),
+      ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress.toLowerCase() } : {}),
+      allowedPeers: [...evidence.allowedPeers].sort(),
+    };
+  }
 }
 
 function reject(reason: GraphScopedFinalizationRejectionReason): GraphScopedFinalizationAdmission {

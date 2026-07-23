@@ -78,9 +78,8 @@ import {
   type FinalizationRecoveryApplyOutcome,
 } from './finalization-recovery.js';
 import {
-  buildVerifiedGraphScopedFinalizationEvidence,
+  VerifiedGraphScopedFinalizationEvidenceCodec,
   parseGraphScopedFinalization,
-  verifiedEvidenceMatchesParsedEnvelope,
   type GraphScopedFinalizationAdmission,
   type GraphScopedAccessPolicy,
   type ParsedGraphScopedFinalization,
@@ -522,7 +521,11 @@ export class FinalizationHandler {
         let outcome: FinalizationRecoveryApplyOutcome;
         if (entry.state === 'verified' && entry.verifiedEvidence) {
           const evidence = entry.verifiedEvidence;
-          if (!verifiedEvidenceMatchesParsedEnvelope(evidence, candidate, entry)) {
+          if (!VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+            evidence,
+            candidate,
+            entry,
+          )) {
             this.log.warn(ctx, `Finalization recovery evidence does not match its envelope for ${entry.ual}`);
             return false;
           }
@@ -1157,7 +1160,7 @@ export class FinalizationHandler {
       contextGraphId,
       ...(sourcePeerId ? { sourcePeerId } : {}),
       candidate: parsed,
-      verifiedEvidence: buildVerifiedGraphScopedFinalizationEvidence({
+      verifiedEvidence: VerifiedGraphScopedFinalizationEvidenceCodec.build({
         candidate: parsed,
         ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
         publisherPeerId: head.publisherPeerId,

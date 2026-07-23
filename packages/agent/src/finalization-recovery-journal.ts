@@ -2,8 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
-  parseVerifiedGraphScopedFinalizationEvidence,
-  sameVerifiedGraphScopedFinalizationEvidence,
+  VerifiedGraphScopedFinalizationEvidenceCodec,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 
@@ -89,17 +88,6 @@ export function finalizationRecoveryEntryKey(
   ].map((part) => `${Buffer.byteLength(part, 'utf8')}:${part}`).join('|')}`;
 }
 
-function legacyFinalizationRecoveryEntryKey(
-  input: Pick<FinalizationRecoveryUpsert, 'chainId' | 'contextGraphId' | 'ual' | 'txHash'>,
-): string {
-  return JSON.stringify([
-    input.chainId,
-    input.contextGraphId,
-    input.ual,
-    normalizedTxHash(input.txHash),
-  ]);
-}
-
 function isString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
@@ -127,7 +115,9 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
   }
   const entry = candidate as unknown as FinalizationRecoveryEntry;
   if (candidate.verifiedEvidence !== undefined) {
-    entry.verifiedEvidence = parseVerifiedGraphScopedFinalizationEvidence(candidate.verifiedEvidence);
+    entry.verifiedEvidence = VerifiedGraphScopedFinalizationEvidenceCodec.parse(
+      candidate.verifiedEvidence,
+    );
   }
   if (
     entry.verifiedEvidence !== undefined
@@ -138,10 +128,9 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
     )
   ) throw new Error('verified evidence does not match entry identity');
   const canonicalKey = finalizationRecoveryEntryKey(entry);
-  if (entry.key !== canonicalKey && entry.key !== legacyFinalizationRecoveryEntryKey(entry)) {
+  if (entry.key !== canonicalKey) {
     throw new Error('entry key does not match identity');
   }
-  entry.key = canonicalKey;
   const canonicalBase64 = Buffer.from(entry.rawMessageBase64, 'base64').toString('base64');
   if (canonicalBase64 !== entry.rawMessageBase64) throw new Error('entry envelope is not canonical base64');
   return entry;
@@ -211,7 +200,7 @@ export class FinalizationRecoveryJournal {
       if (
         existing?.verifiedEvidence
         && input.verifiedEvidence
-        && !sameVerifiedGraphScopedFinalizationEvidence(
+        && !VerifiedGraphScopedFinalizationEvidenceCodec.same(
           existing.verifiedEvidence,
           input.verifiedEvidence,
         )
