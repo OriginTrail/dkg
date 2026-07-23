@@ -1297,7 +1297,7 @@ describe('graph-scoped finalization handler', () => {
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
       let now = 1_000;
-      const { message } = await stageGraph();
+      const { message, vmGraph } = await stageGraph();
       let receiptPhase: 'confirmed' | 'pending' = 'confirmed';
       let receiptChecks = 0;
       const chain = {
@@ -1357,6 +1357,13 @@ describe('graph-scoped finalization handler', () => {
       });
       expect(persistedWatermarks).toEqual([1]);
       expect(await inbox.list()).toMatchObject([{ state: 'SETTLED', attemptCount: 0 }]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + '<http://dkg.io/ontology/status> "confirmed" ; '
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + `<http://dkg.io/ontology/assertionGraph> <${vmGraph}> . } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
     } finally {
       await closeInbox(inbox);
       await rm(directory, { recursive: true, force: true });
@@ -1368,7 +1375,7 @@ describe('graph-scoped finalization handler', () => {
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
       let now = 1_000;
-      const { message } = await stageGraph();
+      const { message, vmGraph } = await stageGraph();
       let missing = false;
       let receiptChecks = 0;
       const chain = {
@@ -1417,7 +1424,7 @@ describe('graph-scoped finalization handler', () => {
           });
           now = entry.nextAttemptAt!;
         } else {
-          expect(sweep).toMatchObject({ watermark: 1, reconciled: 1 });
+          expect(sweep).toMatchObject({ watermark: 0, pending: 1 });
           expect(entry).toMatchObject({
             state: 'REJECTED',
             attemptCount: 4,
@@ -1426,14 +1433,15 @@ describe('graph-scoped finalization handler', () => {
         }
       }
       expect(receiptChecks).toBe(6);
-      expect(persistedWatermarks).toEqual([1]);
+      expect(persistedWatermarks).toEqual([]);
+      expect(await store.countQuads(vmGraph)).toBe(0);
     } finally {
       await closeInbox(inbox);
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it('retracts only the exact settled VM assertion when its receipt is permanently rejected', async () => {
+  it('keeps the production ordinal pending after retracting a permanently rejected receipt', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-rejected-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
@@ -1463,7 +1471,9 @@ describe('graph-scoped finalization handler', () => {
       expect(await store.countQuads(vmGraph)).toBe(2);
 
       rejected = true;
-      await expect(recoveryHandler.handleChainReconciledKC({
+      const persistedWatermarks: number[] = [];
+      const cursor = createCursorState(0);
+      const deps = recoveryReconciler(recoveryHandler, {
         contextGraphId: CG,
         onChainCgId: '42',
         ual: UAL,
@@ -1472,13 +1482,18 @@ describe('graph-scoped finalization handler', () => {
         kaId: PACKED_KA_ID,
         versionBlock: 123,
         authorAddress: AUTHOR,
-      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+      }, persistedWatermarks);
+      await expect(reconcileContextGraph(deps, cursor, CG, 42n)).resolves.toMatchObject({
+        watermark: 0,
+        pending: 1,
+      });
 
       expect(await inbox.list()).toMatchObject([{
         state: 'REJECTED',
         lastError: 'canonical receipt permanently rejected',
       }]);
       expect(await store.countQuads(vmGraph)).toBe(0);
+      expect(persistedWatermarks).toEqual([]);
       await expect(store.query(
         `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
           + '<http://dkg.io/ontology/status> "confirmed" . } }',

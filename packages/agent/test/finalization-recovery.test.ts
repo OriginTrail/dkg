@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -484,6 +484,68 @@ describe('graph-scoped finalization recovery admission', () => {
     },
   );
 
+  it('does not share SETTLED replay outcomes across concurrent chain roots', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-flights-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    let releaseReceipts = () => {};
+    try {
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      let holdReplayReceipts = false;
+      let replayReceiptCalls = 0;
+      const receiptGate = new Promise<void>((resolve) => {
+        releaseReceipts = resolve;
+      });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => {
+          if (holdReplayReceipts) {
+            replayReceiptCalls += 1;
+            await receiptGate;
+          }
+          return { status: 'confirmed', receipt: confirmedReceipt() };
+        },
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      holdReplayReceipts = true;
+      const replay = {
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        kaId: PACKED_KA_ID.toString(),
+      };
+      const currentRootReplay = recovery.replayMatching({
+        ...replay,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+      });
+      await vi.waitFor(() => expect(replayReceiptCalls).toBe(1));
+      const newerRootReplay = recovery.replayMatching({
+        ...replay,
+        merkleRoot: `0x${'ff'.repeat(32)}`,
+      });
+      await vi.waitFor(() => expect(replayReceiptCalls).toBe(2));
+      releaseReceipts();
+
+      await expect(Promise.all([currentRootReplay, newerRootReplay]))
+        .resolves.toEqual(['recovered', 'none']);
+    } finally {
+      releaseReceipts();
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when a SETTLED replacement changes a non-placement field', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-conflict-'));
     try {
@@ -616,7 +678,7 @@ describe('graph-scoped finalization recovery admission', () => {
         now = deferred.nextAttemptAt!;
       }
 
-      await expect(recovery.replayMatching(replay)).resolves.toBe('recovered');
+      await expect(recovery.replayMatching(replay)).resolves.toBe('invalidated');
       expect(invalidations).toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',

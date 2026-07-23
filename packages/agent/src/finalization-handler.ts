@@ -2650,6 +2650,13 @@ export class FinalizationHandler {
     const journalReplay = await this.replayMatchingRecoveryEntries(input, ctx);
     if (journalReplay === 'recovered') return 'already-confirmed';
     if (journalReplay === 'retry-pending') return 'receipt-revalidation-pending';
+    if (journalReplay === 'invalidated') {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: stale finalization evidence for ${ual} was invalidated; `
+          + 'continuing current-target reconciliation',
+      );
+    }
 
     // V2 recovery is O(1) in the number of prior workspace operations: the
     // durable per-KA head names one exact assertion graph and carries its

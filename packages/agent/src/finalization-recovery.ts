@@ -90,6 +90,7 @@ export interface FinalizationRecoveryReplayInput {
 
 export type FinalizationRecoveryReplayOutcome =
   | 'recovered'
+  | 'invalidated'
   | 'retry-pending'
   | 'none';
 
@@ -843,16 +844,34 @@ export class FinalizationRecovery<
     const entries = await this.matchingEntries(input);
     let outcome: FinalizationRecoveryReplayOutcome = 'none';
     for (const entry of entries) {
-      const existing = this.replaySingleFlights.get(entry.key);
-      const replay = existing ?? this.replayEntry(entry, input);
-      if (!existing) this.replaySingleFlights.set(entry.key, replay);
+      const replayKey = this.replaySingleFlightKey(entry, input);
+      const existing = this.replaySingleFlights.get(replayKey);
+      const replay = existing ?? this.replayEntry(entry, input, replayKey);
+      if (!existing) this.replaySingleFlights.set(replayKey, replay);
       const entryOutcome = await replay;
       if (entryOutcome === 'recovered') outcome = 'recovered';
-      else if (entryOutcome === 'retry-pending' && outcome === 'none') {
+      else if (entryOutcome === 'retry-pending' && outcome !== 'recovered') {
         outcome = 'retry-pending';
+      } else if (entryOutcome === 'invalidated' && outcome === 'none') {
+        outcome = 'invalidated';
       }
     }
     return outcome;
+  }
+
+  private replaySingleFlightKey(
+    entry: FinalizationRecoveryEntry,
+    input: FinalizationRecoveryReplayInput,
+  ): string {
+    return JSON.stringify([
+      entry.key,
+      input.chainId,
+      input.contextGraphId,
+      input.onChainCgId,
+      input.ual,
+      input.merkleRoot.toLowerCase(),
+      input.kaId,
+    ]);
   }
 
   async health(): Promise<FinalizationRecoveryHealth> {
@@ -938,7 +957,7 @@ export class FinalizationRecovery<
         'canonical receipt permanently rejected',
       );
       if (!matchesReplayTarget) return 'none';
-      return invalidated ? 'recovered' : 'retry-pending';
+      return invalidated ? 'invalidated' : 'retry-pending';
     }
     if (canonical.status === 'not-found') {
       if (entry.attemptCount + 1 >= SETTLED_NOT_FOUND_RETRY_LIMIT) {
@@ -949,7 +968,7 @@ export class FinalizationRecovery<
           'canonical receipt disappeared after bounded retries',
         );
         if (!matchesReplayTarget) return 'none';
-        return invalidated ? 'recovered' : 'retry-pending';
+        return invalidated ? 'invalidated' : 'retry-pending';
       }
       await this.recordSettledRetry(
         entry,
@@ -1022,6 +1041,7 @@ export class FinalizationRecovery<
   private replayEntry(
     entry: FinalizationRecoveryEntry,
     input: FinalizationRecoveryReplayInput,
+    replayKey: string,
   ): Promise<FinalizationRecoveryReplayOutcome> {
     const replay = (async () => {
       try {
@@ -1117,8 +1137,8 @@ export class FinalizationRecovery<
         return 'none' as const;
       }
     })().finally(() => {
-      if (this.replaySingleFlights.get(entry.key) === replay) {
-        this.replaySingleFlights.delete(entry.key);
+      if (this.replaySingleFlights.get(replayKey) === replay) {
+        this.replaySingleFlights.delete(replayKey);
       }
     });
     return replay;
