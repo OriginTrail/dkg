@@ -13,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
+import { isIriMetaSubject } from './iri-term.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
@@ -1478,25 +1479,6 @@ function hexToBytes(hex: string): Uint8Array {
 function stripLiteral(raw: string): string {
   const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
   return match ? match[1]! : raw;
-}
-
-/**
- * A durable `_meta` subject must be an IRI. Conforming writers only emit IRI
- * subjects (metadata generators build deterministic UALs; the publisher rejects
- * blank nodes; SWM writers skolemize before storage). A blank-node (`_:…`) or
- * literal (`"…"`) subject is only reachable via unverified peer-ingest and has
- * no trustworthy, stable identity, so it is dropped at ingest (#1921) rather
- * than persisted. Mirrors the responder's `isIriTerm` (graph-plan.ts) so ingest
- * and read agree on the contract.
- */
-function isIriMetaSubject(term: string): boolean {
-  // Defensive on `term`: this runs at the verification-input boundary filters
-  // (selectVerifiedDurableSyncQuads and planBoundedGraphScopedDurableBatch, both
-  // on RAW fetched meta) and in the admission selectors. A conforming quad always
-  // carries a non-empty string subject; tolerate a malformed one (treat as
-  // non-IRI → drop) instead of throwing.
-  return typeof term === 'string' && term.length > 0
-    && !term.startsWith('_:') && !term.startsWith('"');
 }
 
 function findLegacyRootOwner(subject: string, roots: ReadonlySet<string>): string | undefined {
