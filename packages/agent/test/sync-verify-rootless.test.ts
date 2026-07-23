@@ -90,7 +90,7 @@ function fixture(options: {
       assertionGraph,
       subGraphName: options.subGraphName,
     },
-    'tentative',
+    { status: 'tentative' },
   );
   if (options.batchId !== undefined) {
     meta.push(quad(

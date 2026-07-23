@@ -41,6 +41,11 @@ import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
+export interface MockChainAdapterOptions {
+  /** Seed the first CG allocation for fixtures that model an existing registry. */
+  initialContextGraphId?: bigint;
+}
+
 interface MockBatch {
   merkleRoot: Uint8Array;
   kaCount: number;
@@ -117,10 +122,19 @@ export class MockChainAdapter implements ChainAdapter {
   // on-chain shape. Multiaddrs are not stored on Profile (RFC 04 §5.2).
   private relayCapableByIdentity = new Map<bigint, boolean>();
 
-  constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
+  constructor(
+    chainId = 'mock:31337',
+    signerAddress = MOCK_DEFAULT_SIGNER,
+    options: Readonly<MockChainAdapterOptions> = {},
+  ) {
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
+    const initialContextGraphId = options.initialContextGraphId ?? 1n;
+    if (initialContextGraphId < 1n) {
+      throw new TypeError('Mock initial context graph id must be positive');
+    }
+    this.nextContextGraphId = initialContextGraphId;
   }
 
   async getIdentityId(): Promise<bigint> {

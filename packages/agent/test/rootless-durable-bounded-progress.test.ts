@@ -68,7 +68,7 @@ function asset(kaNumber: number, tripleCount = 4): AssetFixture {
     privateTripleCount: privateQuads.length,
     ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
     assertionGraph: graph,
-  }, 'tentative');
+  }, { status: 'tentative' });
   return { ual, graph, payload, meta };
 }
 

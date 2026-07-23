@@ -358,6 +358,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -401,6 +402,19 @@ import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
 import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
+import {
+  Rfc64CatalogMethods,
+  snapshotRfc64CatalogAccessPolicyAuthorityV1,
+  snapshotRfc64CatalogDeploymentProfileV1,
+} from './dkg-agent-rfc64-catalog.js';
+import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
+import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import {
+  snapshotRfc64PublicCatalogAutoPublishConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
+} from './rfc64/catalog-authority-config-v1.js';
+import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
 import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
@@ -454,6 +468,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  Rfc64CatalogAccessPolicyAuthorityConfigV1,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -685,6 +700,12 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
+    // an impossible ephemeral configuration before constructing a store or
+    // node so start() can never fail after leaving libp2p half-running.
+    if (inputConfig.rfc64PublicCatalogBootstrap !== undefined && !inputConfig.dataDir) {
+      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
+    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const config = normalizeStorageAckConfig({
       ...inputConfig,
@@ -692,6 +713,18 @@ export class DKGAgent extends DKGAgentBase {
         inputConfig.syncContextGraphPriorities,
       ),
     });
+    const rfc64CatalogDeploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
+      config.rfc64CatalogDeploymentProfile,
+    );
+    const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
+      config.rfc64CatalogAccessPolicyAuthority,
+    );
+    const rfc64PublicCatalogAutoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
+      config.rfc64PublicCatalogAutoPublish,
+    );
+    const rfc64PublicCatalogBootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(
+      config.rfc64PublicCatalogBootstrap,
+    );
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -792,7 +825,15 @@ export class DKGAgent extends DKGAgentBase {
       networkId: computedNetworkId,
       chainId: adapterChainId ?? config.networkIdentity?.chainId,
     };
-    const resolvedConfig: ResolvedDKGAgentConfig = { ...config, genesisId, networkIdentity };
+    const resolvedConfig: ResolvedDKGAgentConfig = {
+      ...config,
+      genesisId,
+      networkIdentity,
+      rfc64CatalogAccessPolicyAuthority,
+      rfc64CatalogDeploymentProfile,
+      rfc64PublicCatalogAutoPublish,
+      rfc64PublicCatalogBootstrap,
+    };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
@@ -1565,6 +1606,11 @@ export class DKGAgent extends DKGAgentBase {
     };
   }
 
+  /** Wait for the chain scan launched during `start()` through a stable public boundary. */
+  async awaitInitialChainPoll(): Promise<void> {
+    await this.chainPoller?.waitForCurrentPoll();
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     if (this.chainPoller) {
@@ -1701,6 +1747,20 @@ export class DKGAgent extends DKGAgentBase {
         );
       }
     }
+    // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
+    // receiver scheduler (awaiting in-flight durable stage writes) while the
+    // router, node, and control-object store are all still live — before
+    // node.stop() below and before closeRfc64PersistenceV1() releases the store.
+    try {
+      await this.closeRfc64PublicCatalogBootstrapV1();
+      await this.closeRfc64PublicCatalogServiceV1();
+    } catch (err) {
+      this.log.warn(
+        createOperationContext('connect'),
+        `RFC-64 public catalog service close failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Tear down any pooled wire-protocol overlays before libp2p
     // stops so per-peer streams close gracefully rather than via
     // libp2p teardown (which would surface as recoverable resets
@@ -1714,6 +1774,19 @@ export class DKGAgent extends DKGAgentBase {
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
+    }
+    // OT-RFC-64 inventory consumers are now stopped. Release the exclusive
+    // inventory foundation before the triple store closes, but finish the
+    // remaining teardown even when close enters its deliberate fail-stop
+    // state. The original close failure is re-thrown after teardown so the
+    // operator receives a failed shutdown rather than a false success.
+    let inventoryCloseFailed = false;
+    let inventoryCloseFailure: unknown;
+    try {
+      await this.closeRfc64PersistenceV1();
+    } catch (error) {
+      inventoryCloseFailed = true;
+      inventoryCloseFailure = error;
     }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
@@ -1736,6 +1809,7 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.started = false;
+    if (inventoryCloseFailed) throw inventoryCloseFailure;
   }
 
   /**
@@ -3013,5 +3087,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64CatalogAutoPublishMethods, Rfc64CatalogBootstrapMethods]);

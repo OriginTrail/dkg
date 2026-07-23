@@ -1551,21 +1551,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
   // is still present as a deeper backstop, but the marker gate wins here.)
   it('FIX 2: unregistered CG + finalized-but-UNSHARED asset rejects BEFORE registration (no gas burned)', async () => {
     const agent = await createAgent('NoQuadsBeforeRegisterBot');
+    // Keep this chain assertion independent from the preceding test, which
+    // deliberately registers CG_ID before it completes. Reusing CG_ID made
+    // the poller race decide whether this test observed that earlier mint.
+    const unregisteredCgId = `${CG_ID}-unshared-precondition`;
     // DELIBERATELY unregistered, local-only CG.
-    await agent.createContextGraph({ id: CG_ID, name: 'No Quads Before Register E2E' });
+    await agent.createContextGraph({ id: unregisteredCgId, name: 'No Quads Before Register E2E' });
 
     const name = 'empty-swm-seal';
-    await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await agent.assertion.create(unregisteredCgId, name);
+    await agent.assertion.write(unregisteredCgId, name, [
       { subject: `${ENTITY_BASE}:nq`, predicate: 'http://schema.org/name', object: '"No Quads"' },
     ]);
     // Finalize the WM draft (seals it) WITHOUT promoting — SWM stays empty and
     // NO full-share marker is set.
-    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.finalize(unregisteredCgId, name);
 
     let thrown: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG_ID, name);
+      await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     } catch (e) {
       thrown = e;
     }
@@ -1576,7 +1580,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(thrown.code).not.toBe('CG_NOT_REGISTERED');
 
     // And the CG was NEVER registered as a side effect (no gas burned).
-    const onChainId = await agent.getContextGraphOnChainId(CG_ID);
+    const onChainId = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainId == null).toBe(true);
   }, 30_000);
 

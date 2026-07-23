@@ -3551,7 +3551,7 @@ export class DKGPublisher implements Publisher {
               ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
               assertionGraph: dataGraph,
             },
-            'tentative',
+            { status: 'tentative' },
           )
         : generateTentativeMetadata(commonMeta, kaMetadata);
       if (options.targetMetaGraphUri) {
@@ -4027,8 +4027,10 @@ export class DKGPublisher implements Publisher {
                   options.subGraphName,
                 ),
               },
-              'confirmed',
-              confirmedProvenance,
+              {
+                status: 'confirmed',
+                confirmation: { kind: 'transaction', provenance: confirmedProvenance },
+              },
             )
           : generateConfirmedFullMetadata(
               confirmedMeta,
@@ -4823,8 +4825,12 @@ export class DKGPublisher implements Publisher {
                 : {}),
               assertionGraph: dataGraph,
             },
-            provenance ? 'confirmed' : 'tentative',
-            provenance,
+            provenance
+              ? {
+                  status: 'confirmed',
+                  confirmation: { kind: 'transaction', provenance },
+                }
+              : { status: 'tentative' },
           );
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,

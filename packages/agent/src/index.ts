@@ -34,6 +34,29 @@ export {
   type SignAgentDelegationParams,
   type VerifyAgentDelegationOptions,
 } from './auth/agent-delegation.js';
+export * from './rfc64/catalog-row-authorship.js';
+export * from './rfc64/finalized-vm-composer-v1.js';
+export {
+  RecoverableAuthorAttestationErrorV1,
+} from './rfc64/recoverable-author-attestation-v1.js';
+export * from './rfc64/author-catalog-producer.js';
+export * from './rfc64/public-catalog-transport-v1.js';
+export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/open-catalog-policy-v1.js';
+export * from './rfc64/public-catalog-receiver-v1.js';
+export * from './rfc64/public-catalog-service-v1.js';
+export * from './rfc64/public-catalog-issuer-delegation-v1.js';
+export * from './rfc64/public-catalog-native-transport-v1.js';
+export * from './rfc64/public-catalog-native-receiver-v1.js';
+export {
+  computeRfc64AppliedInventoryDigestV1,
+  type ComputeRfc64AppliedInventoryDigestInputV1,
+  type Rfc64AppliedInventoryDigestRowV1,
+} from './rfc64/public-catalog-inventory-completeness-v1.js';
+export * from './rfc64/public-catalog-successor-producer-v1.js';
+export * from './rfc64/public-open-catalog-scope-v1.js';
+export * from './rfc64/public-catalog-native-reconciler-v1.js';
+export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {
@@ -93,6 +116,16 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export type {
+  AcceptRfc64CatalogAccessSnapshotParamsV1,
+  PublishAuthorCatalogExactSetSuccessorParamsV1,
+  PublishAuthorCatalogExactSetSuccessorResultV1,
+  PublishAuthorCatalogGenesisParamsV1,
+  Rfc64CatalogAuthorSignerV1,
+} from './dkg-agent-rfc64-catalog.js';
+export type {
+  AcceptedRfc64CatalogAccessSnapshotV1,
+} from './rfc64/catalog-access-policy-v1.js';
 export {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -158,6 +191,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphDiscoveryMetadata,

@@ -1,0 +1,62 @@
+import type { Digest32V1 } from '@origintrail-official/dkg-core';
+import { describe, expect, it } from 'vitest';
+
+import { Rfc64PublicCatalogNativeReceiverErrorV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
+import {
+  RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+  Rfc64PublicCatalogReconciliationFailureRegistryV1,
+} from '../src/rfc64/public-catalog-reconciliation-failure-v1.js';
+
+function digest(index: number): Digest32V1 {
+  return `0x${index.toString(16).padStart(64, '0')}` as Digest32V1;
+}
+
+describe('RFC-64 public catalog terminal failure registry v1', () => {
+  it('retains immutable typed identities with deterministic oldest-first eviction', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const terminalError = new Rfc64PublicCatalogNativeReceiverErrorV1(
+      'catalog-native-receiver-authorization',
+      'nondeterministic message text is deliberately excluded',
+    );
+    for (
+      let index = 1;
+      index <= RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1 + 1;
+      index += 1
+    ) {
+      registry.record(digest(index), terminalError);
+    }
+
+    expect(registry.size).toBe(
+      RFC64_PUBLIC_CATALOG_RECONCILIATION_FAILURE_MAX_ENTRIES_V1,
+    );
+    expect(registry.read(digest(1))).toBeNull();
+    const retained = registry.read(digest(2));
+    expect(retained).toEqual({
+      catalogHeadDigest: digest(2),
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-authorization',
+    });
+    expect(Object.isFrozen(retained)).toBe(true);
+
+    registry.record(digest(2), Object.assign(new Error('later'), { code: 'later-code' }));
+    expect(registry.read(digest(2))).toEqual(retained);
+  });
+
+  it('normalizes unstable identities and clears all process-local state', () => {
+    const registry = new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+    const malformed = Object.assign(new Error('contains /tmp/random/path'), {
+      name: 'invalid name with spaces',
+      code: `x${'!'.repeat(128)}`,
+    });
+    registry.record(digest(1), malformed);
+    expect(registry.read(digest(1))).toEqual({
+      catalogHeadDigest: digest(1),
+      errorName: 'UnknownError',
+      errorCode: null,
+    });
+
+    registry.clear();
+    expect(registry.size).toBe(0);
+    expect(registry.read(digest(1))).toBeNull();
+  });
+});
