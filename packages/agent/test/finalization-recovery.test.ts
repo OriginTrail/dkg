@@ -187,19 +187,27 @@ describe('graph-scoped finalization recovery admission', () => {
   );
 
   it.each([
-    ['the target context graph differs', '43', `0x${'00'.repeat(32)}`],
-    ['the latest root differs', '42', `0x${'ff'.repeat(32)}`],
-  ])('retains the envelope and selects no replay candidate when %s', async (_label, onChainCgId, latestRoot) => {
+    ['the envelope target context graph differs', '43', '42', `0x${'00'.repeat(32)}`],
+    ['the chain binding differs', '42', '43', `0x${'00'.repeat(32)}`],
+    ['the latest root differs', '42', '42', `0x${'ff'.repeat(32)}`],
+  ])('retains the envelope and selects no replay candidate when %s', async (
+    _label,
+    entryTargetContextGraphId,
+    chainContextGraphId,
+    latestRoot,
+  ) => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-gate-'));
     try {
-      const parsed = parseGraphScopedFinalization(message(), CONTEXT_GRAPH);
+      const parsed = parseGraphScopedFinalization(message({
+        targetContextGraphId: entryTargetContextGraphId,
+      }), CONTEXT_GRAPH);
       if (!parsed.ok) throw new Error(`unexpected admission failure: ${parsed.reason}`);
       const journal = new FinalizationRecoveryJournal(directory);
       const chain = {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => Buffer.from(latestRoot.slice(2), 'hex'),
         getMerkleRootCount: async () => 1n,
-        getKAContextGraphId: async () => BigInt(onChainCgId),
+        getKAContextGraphId: async () => BigInt(chainContextGraphId),
       } as ChainAdapter;
       const recovery = new FinalizationRecovery(
         journal,

@@ -815,6 +815,9 @@ export function mapOnChainPublishResultToKnowledgeAssetVmRecovery(
     chainId,
     knowledgeAssetsContract,
   );
+  // Named-KA recovery persists this value as trusted last-writer ordering.
+  // A legacy adapter result without it is inconclusive, not safely equivalent
+  // to transaction zero; retry until the adapter resolves the complete receipt.
   if (
     !recovery
     || !result.merkleRoot

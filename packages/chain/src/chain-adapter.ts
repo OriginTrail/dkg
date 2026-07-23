@@ -186,7 +186,9 @@ export interface OnChainPublishResult {
    * GH#842 last-writer-wins guard so a publish and a same-block update don't
    * compare equal (which would let a late stale publish-promotion clobber the
    * already-applied update). Optional for back-compat with adapters that
-   * don't yet populate it; callers MUST fall back to `0`.
+   * don't yet populate it. Best-effort callers may fall back to `0`; recovery
+   * paths that persist trusted provenance MUST defer or independently resolve
+   * the receipt index rather than inventing ordering evidence.
    */
   txIndex?: number;
   blockTimestamp: number;

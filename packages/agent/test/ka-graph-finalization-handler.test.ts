@@ -512,9 +512,9 @@ describe('graph-scoped finalization handler', () => {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => message.kcMerkleRoot,
         getMerkleRootCount: async () => currentRootCount,
-        getKAContextGraphId: async (batchId: bigint) => {
-          contextGraphBindingLookups.push(batchId);
-          return batchId === 42n ? 42n : 43n;
+        getKAContextGraphId: async (kaId: bigint) => {
+          contextGraphBindingLookups.push(kaId);
+          return kaId === PACKED_KA_ID ? 42n : 43n;
         },
       } as ChainAdapter;
       const journal = new FinalizationRecoveryJournal(directory);
@@ -613,7 +613,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await store.countQuads(vmGraph)).toBe(2);
       expect(await new FinalizationRecoveryJournal(directory).list()).toEqual([]);
       expect(contextGraphBindingLookups.length).toBeGreaterThan(0);
-      expect(contextGraphBindingLookups.every((batchId) => batchId === 42n)).toBe(true);
+      expect(contextGraphBindingLookups.every((kaId) => kaId === PACKED_KA_ID)).toBe(true);
       await expect(store.query(
         `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
           + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
@@ -767,6 +767,7 @@ describe('graph-scoped finalization handler', () => {
     try {
       const { message } = await stageGraph();
       let receiptCanonical = true;
+      let receiptTxIndex = 4;
       let receiptChecks = 0;
       const chain = {
         chainId: 'base:84532',
@@ -786,7 +787,7 @@ describe('graph-scoped finalization handler', () => {
               startKAId: String(message.startKAId),
               endKAId: String(message.endKAId),
               author: AUTHOR,
-              txIndex: 4,
+              txIndex: receiptTxIndex,
             },
           };
         },
@@ -807,8 +808,7 @@ describe('graph-scoped finalization handler', () => {
       store.replaceGraphAndSubject = replaceGraphAndSubject;
       expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
 
-      receiptCanonical = false;
-      await expect(recoveryHandler.handleChainReconciledKC({
+      const reconcileInput = {
         contextGraphId: CG,
         onChainCgId: '42',
         ual: UAL,
@@ -817,9 +817,26 @@ describe('graph-scoped finalization handler', () => {
         kaId: PACKED_KA_ID,
         versionBlock: 123,
         authorAddress: AUTHOR,
-      }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+      };
+      receiptTxIndex = 5;
+      await expect(recoveryHandler.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
 
-      expect(receiptChecks).toBeGreaterThanOrEqual(2);
+      receiptTxIndex = 4;
+      receiptCanonical = false;
+      await expect(recoveryHandler.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+
+      expect(receiptChecks).toBeGreaterThanOrEqual(3);
       expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
       await expect(store.query(
         `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
