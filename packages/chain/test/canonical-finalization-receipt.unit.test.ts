@@ -106,4 +106,46 @@ describe('canonical finalization receipt capability', () => {
       },
     });
   });
+
+  it('resolves a legacy V9 receipt and derives its singleton KA range', async () => {
+    const receipt = {
+      hash: TX_HASH,
+      status: 1,
+      blockNumber: 123,
+      blockHash: BLOCK_HASH,
+      index: 4,
+    };
+    const legacyBatchId = 19n;
+    const parseV9PublishReceipt = vi.fn(async () => ({
+      batchId: legacyBatchId,
+      txHash: TX_HASH,
+      blockNumber: 123,
+      txIndex: 4,
+      merkleRoot: MERKLE_ROOT,
+      publisherAddress: PUBLISHER,
+    }));
+    const chain = adapter({
+      contracts: { knowledgeAssetsStorage: {} },
+      getTransactionReceiptWithFailover: vi.fn(async () => receipt),
+      parseV9PublishReceipt,
+    });
+
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH)).resolves.toEqual({
+      status: 'confirmed',
+      receipt: {
+        txHash: TX_HASH,
+        blockNumber: 123,
+        blockHash: BLOCK_HASH,
+        txIndex: 4,
+        merkleRoot: MERKLE_ROOT,
+        publisherAddress: PUBLISHER,
+        batchId: legacyBatchId,
+        kaId: legacyBatchId,
+        startKAId: legacyBatchId,
+        endKAId: legacyBatchId,
+      },
+    });
+    expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
+    expect(parseV9PublishReceipt).toHaveBeenCalledWith(receipt, {});
+  });
 });

@@ -57,20 +57,38 @@ export class GossipSubManager {
       const handlers = this.topicHandlers.get(topic);
       if (handlers) {
         for (const handler of handlers) {
-          try {
-            const result = handler(topic, data, from);
-            void Promise.resolve(result).catch((err: unknown) => {
-              console.error(
-                `[GossipSub] handler error on topic "${topic}":`,
-                err instanceof Error ? err.message : err,
-              );
-            });
-          } catch (err) {
-            console.error(`[GossipSub] handler error on topic "${topic}":`, err instanceof Error ? err.message : err);
-          }
+          this.dispatchHandler(handler, topic, data, from);
         }
       }
     });
+  }
+
+  /**
+   * Invoke in registration order, then deliberately detach async completion.
+   * Gossip delivery never waits for handler work and shutdown does not drain
+   * it; synchronous throws and detached rejections are contained here.
+   */
+  private dispatchHandler(
+    handler: GossipMessageHandler,
+    topic: string,
+    data: Uint8Array,
+    from: string,
+  ): void {
+    try {
+      const completion = handler(topic, data, from);
+      void Promise.resolve(completion).catch((error: unknown) => {
+        this.logHandlerError(topic, error);
+      });
+    } catch (error) {
+      this.logHandlerError(topic, error);
+    }
+  }
+
+  private logHandlerError(topic: string, error: unknown): void {
+    console.error(
+      `[GossipSub] handler error on topic "${topic}":`,
+      error instanceof Error ? error.message : error,
+    );
   }
 
   subscribe(topic: string): void {

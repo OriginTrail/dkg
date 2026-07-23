@@ -1081,6 +1081,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
+    this.finalizationRuntime.markStarted({
+      localPeerId: this.peerId,
+      localNodeIdentityId: this.identityId.toString(),
+    });
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
     // Public definitions were historically written only to ONTOLOGY while

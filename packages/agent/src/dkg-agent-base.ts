@@ -17,9 +17,9 @@ import {
 } from './rfc64/persistence-v1.js';
 import {
   openSqliteFinalizationRecoveryStore,
-  type SqliteFinalizationRecoveryStore,
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
+import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -1040,8 +1040,8 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
-  /** Durable graph-finalization control state, isolated from Oxigraph and RFC-64 inventory. */
-  protected finalizationRecoveryStore?: SqliteFinalizationRecoveryStore;
+  /** Explicit owner for finalization persistence and network identity lifetimes. */
+  protected readonly finalizationRuntime = new FinalizationRuntime();
   /**
    * RFC-64 Gate 1 public author-catalog service, wired onto the production
    * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
@@ -1640,10 +1640,11 @@ export class DKGAgentBase {
 
   /** Open after RFC-64 ownership and before networking starts. */
   protected async prepareFinalizationRecoveryStore(): Promise<void> {
-    if (!this.config.dataDir || this.finalizationRecoveryStore !== undefined) return;
-    this.finalizationRecoveryStore = await openSqliteFinalizationRecoveryStore(
+    if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
+    const store = await openSqliteFinalizationRecoveryStore(
       this.config.dataDir,
     );
+    this.finalizationRuntime.attachRecoveryStore(store);
   }
 
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
@@ -1663,13 +1664,13 @@ export class DKGAgentBase {
 
   /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
   protected async closeFinalizationRecoveryStore(): Promise<void> {
-    const store = this.finalizationRecoveryStore;
-    this.finalizationRecoveryStore = undefined;
+    const store = this.finalizationRuntime.detachRecoveryStore();
     await store?.close();
   }
 
   async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {
-    if (!this.finalizationRecoveryStore) {
+    const store = this.finalizationRuntime.getRecoveryStore();
+    if (!store) {
       return {
         available: false,
         closed: false,
@@ -1680,7 +1681,7 @@ export class DKGAgentBase {
         livePayloadBytes: 0,
       };
     }
-    const health = await this.finalizationRecoveryStore.health();
+    const health = await store.health();
     const canonicalReceiptCapability = this.chain.chainId !== 'none'
       && typeof this.chain.resolveCanonicalFinalizationReceipt === 'function'
       ? 'supported'

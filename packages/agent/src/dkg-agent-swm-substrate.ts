@@ -1654,15 +1654,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
-          runtimeContext: {
-            getRecoveryStore: () => this.finalizationRecoveryStore,
-            getLifecycleLogOptions: () => this.node.isStarted
-              ? {
-                localPeerId: this.peerId,
-                localNodeIdentityId: this.identityId.toString(),
-              }
-              : undefined,
-          },
+          runtime: this.finalizationRuntime,
         },
       );
     }

@@ -1777,7 +1777,11 @@ export class DKGAgent extends DKGAgentBase {
     } catch {
       // best-effort; libp2p teardown below will close residual streams
     }
-    await this.node.stop();
+    try {
+      await this.node.stop();
+    } finally {
+      this.finalizationRuntime.markStopped();
+    }
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;

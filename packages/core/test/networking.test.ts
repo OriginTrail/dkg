@@ -278,6 +278,44 @@ describe('GossipSubManager', () => {
     }
   });
 
+  it('invokes in registration order without awaiting async completion', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstCompletion = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    manager.onMessage(topic, async () => {
+      order.push('first-started');
+      await firstCompletion;
+      order.push('first-finished');
+    });
+    manager.onMessage(topic, () => {
+      order.push('second');
+    });
+
+    listener({
+      detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+    });
+    expect(order).toEqual(['first-started', 'second']);
+
+    releaseFirst();
+    await firstCompletion;
+    await Promise.resolve();
+    expect(order).toEqual(['first-started', 'second', 'first-finished']);
+  });
+
   it('ignores incidental truthy returns from synchronous handlers', async () => {
     let listener!: (event: {
       detail: { topic: string; data: Uint8Array; from: string };

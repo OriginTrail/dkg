@@ -9,6 +9,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   MockChainAdapter,
+  type CanonicalFinalizationReceipt,
   type ChainAdapter,
 } from '@origintrail-official/dkg-chain';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
@@ -59,6 +60,25 @@ function parsedMessage(overrides: Partial<FinalizationMessageMsg> = {}) {
   return parsed.value;
 }
 
+function confirmedReceipt(
+  overrides: Partial<CanonicalFinalizationReceipt> = {},
+): CanonicalFinalizationReceipt {
+  return {
+    txHash: message().txHash,
+    blockNumber: 123,
+    blockHash: BLOCK_HASH,
+    txIndex: 4,
+    merkleRoot: new Uint8Array(32),
+    publisherAddress: PUBLISHER,
+    authorAddress: AUTHOR,
+    batchId: PACKED_KA_ID,
+    kaId: PACKED_KA_ID,
+    startKAId: PACKED_KA_ID,
+    endKAId: PACKED_KA_ID,
+    ...overrides,
+  };
+}
+
 function recoveryChain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
   return {
     chainId: 'base:84532',
@@ -67,19 +87,7 @@ function recoveryChain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
     getKAContextGraphId: async () => 42n,
     resolveCanonicalFinalizationReceipt: async () => ({
       status: 'confirmed',
-      receipt: {
-        txHash: message().txHash,
-        blockNumber: 123,
-        blockHash: BLOCK_HASH,
-        txIndex: 4,
-        merkleRoot: new Uint8Array(32),
-        publisherAddress: PUBLISHER,
-        authorAddress: AUTHOR,
-        batchId: PACKED_KA_ID,
-        kaId: PACKED_KA_ID,
-        startKAId: PACKED_KA_ID,
-        endKAId: PACKED_KA_ID,
-      },
+      receipt: confirmedReceipt(),
     }),
     ...overrides,
   } as ChainAdapter;
@@ -157,6 +165,13 @@ describe('graph-scoped finalization recovery admission', () => {
         available: true,
         stateCounts: { RECEIVED: 1 },
       });
+      await agent.stop();
+      expect(agent.getOrCreateFinalizationHandler()).toBe(preStartHandler);
+      expect(await agent.getFinalizationRecoveryHealth()).toMatchObject({
+        available: false,
+        ready: false,
+        degradedReason: 'not-configured',
+      });
     } finally {
       await agent?.stop().catch(() => {});
       await agent?.store.close().catch(() => {});
@@ -232,6 +247,29 @@ describe('graph-scoped finalization recovery admission', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('distinguishes reorged block placement from permanent receipt content mismatch', async () => {
+    const resolve = async (receipt: CanonicalFinalizationReceipt) => {
+      const recovery = new FinalizationRecovery(
+        undefined,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => ({
+            status: 'confirmed',
+            receipt,
+          }),
+        }),
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      return recovery.resolveCanonicalReceipt(parsedMessage());
+    };
+
+    await expect(resolve(confirmedReceipt({ blockNumber: 124 })))
+      .resolves.toEqual({ status: 'reorged' });
+    await expect(resolve(confirmedReceipt({
+      merkleRoot: Uint8Array.from({ length: 32 }, () => 1),
+    }))).resolves.toEqual({ status: 'rejected' });
   });
 
   it('makes unsupported adapter capability explicit without fabricating ordering', async () => {

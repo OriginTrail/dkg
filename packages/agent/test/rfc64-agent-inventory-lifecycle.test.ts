@@ -15,6 +15,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
+import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   INVENTORY_V1_RELATIVE_PATH,
   openInventoryV1,
@@ -48,6 +49,7 @@ function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
+    finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
   });
   return agent;
@@ -144,6 +146,11 @@ function minimalStartedAgent(
   },
 ): any {
   const agent = syntheticAgent();
+  agent.finalizationRuntime.attachRecoveryStore({ close: recoveryClose } as any);
+  agent.finalizationRuntime.markStarted({
+    localPeerId: '12D3KooWLifecycleTest',
+    localNodeIdentityId: '1',
+  });
   Object.assign(agent, {
     started: true,
     chainPoller: null,
@@ -158,7 +165,6 @@ function minimalStartedAgent(
     router: { closePooling: vi.fn(async () => {}) },
     node: { stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
-    finalizationRecoveryStore: { close: recoveryClose },
     rfc64PersistenceV1: {
       close: () => {
         order.push('control-store');
@@ -398,7 +404,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
         agent.rfc64PersistenceV1 = { close: inventoryClose };
       }),
       prepareFinalizationRecoveryStore: vi.fn(async () => {
-        agent.finalizationRecoveryStore = { close: recoveryClose };
+        agent.finalizationRuntime.attachRecoveryStore({ close: recoveryClose } as any);
       }),
       node: { start: vi.fn(async () => { throw failure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
@@ -413,14 +419,14 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await vi.waitFor(() => expect(recoveryClose).toHaveBeenCalledOnce());
     await Promise.resolve();
     expect(settled).toBe(false);
-    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(inventoryClose).not.toHaveBeenCalled();
 
     cleanup.resolve();
     await expect(start).rejects.toBe(failure);
     expect(recoveryClose).toHaveBeenCalledOnce();
     expect(inventoryClose).toHaveBeenCalledOnce();
-    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
@@ -439,7 +445,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
         agent.rfc64PersistenceV1 = { close: inventoryClose };
       }),
       prepareFinalizationRecoveryStore: vi.fn(async () => {
-        agent.finalizationRecoveryStore = { close: recoveryClose };
+        agent.finalizationRuntime.attachRecoveryStore({ close: recoveryClose } as any);
       }),
       node: { start: vi.fn(async () => { throw startupFailure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
@@ -454,7 +460,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     ]);
     expect(recoveryClose).toHaveBeenCalledOnce();
     expect(inventoryClose).toHaveBeenCalledOnce();
-    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
@@ -476,7 +482,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       'store',
     ]);
     expect(inventoryClose).toHaveBeenCalledOnce();
-    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
@@ -606,7 +612,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       'inventory',
       'store',
     ]);
-    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
     await expect(agent.stop()).resolves.toBeUndefined();

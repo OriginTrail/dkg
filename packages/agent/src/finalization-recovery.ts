@@ -66,6 +66,7 @@ export type FinalizationMaterializationVerification =
     reason:
       | 'legacy-verification-pending'
       | 'canonical-receipt-pending'
+      | 'canonical-receipt-reorged'
       | 'canonical-receipt-rejected'
       | 'canonical-receipt-unsupported'
       | 'context-graph-binding-pending'
@@ -112,8 +113,9 @@ export interface FinalizationRecoveryMaterializer<
   isRetryableError(error: unknown): boolean;
 }
 
-export type FinalizationRecoveryStoreProvider =
-  () => FinalizationRecoveryStore | undefined;
+export interface FinalizationRecoveryStoreSource {
+  getRecoveryStore(): FinalizationRecoveryStore | undefined;
+}
 
 type FinalizationVerificationContext =
   | { kind: 'live' }
@@ -142,15 +144,26 @@ export class FinalizationRecovery<
   Prepared extends FinalizationRecoveryPreparedMaterialization,
 > {
   private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
-  private readonly getStore: FinalizationRecoveryStoreProvider;
+  private readonly store: FinalizationRecoveryStore | undefined;
+  private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
 
   constructor(
-    store: FinalizationRecoveryStore | FinalizationRecoveryStoreProvider | undefined,
+    store: FinalizationRecoveryStore | FinalizationRecoveryStoreSource | undefined,
     private readonly chain: ChainAdapter | undefined,
     private readonly log: FinalizationRecoveryLog,
     private readonly materializer: FinalizationRecoveryMaterializer<Prepared>,
   ) {
-    this.getStore = typeof store === 'function' ? store : () => store;
+    if (store && 'getRecoveryStore' in store) {
+      this.storeSource = store;
+      this.store = undefined;
+    } else {
+      this.store = store;
+      this.storeSource = undefined;
+    }
+  }
+
+  private getStore(): FinalizationRecoveryStore | undefined {
+    return this.storeSource?.getRecoveryStore() ?? this.store;
   }
 
   /** Decode and admit graph-scoped wire input before any persistence or RDF work. */
@@ -273,8 +286,16 @@ export class FinalizationRecovery<
           : {}),
         rawMessage: input.rawMessage,
       });
-      if (result.status === 'inserted' || result.status === 'existing') {
-        if (result.entry.state === 'RECEIVED' || result.entry.state === 'VERIFIED') {
+      if (
+        result.status === 'inserted'
+        || result.status === 'existing'
+        || result.status === 'rearmed'
+      ) {
+        if (
+          result.entry.state === 'RECEIVED'
+          || result.entry.state === 'VERIFIED'
+          || result.entry.state === 'REORGED'
+        ) {
           return result.entry;
         }
         return undefined;
@@ -323,7 +344,6 @@ export class FinalizationRecovery<
     const { receipt } = resolution;
     if (
       receipt.txHash.toLowerCase() !== candidate.msg.txHash.toLowerCase()
-      || receipt.blockNumber !== candidate.blockNumber
       || !equalBytes(receipt.merkleRoot, candidate.msg.kcMerkleRoot)
       || receipt.publisherAddress.toLowerCase() !== candidate.msg.publisherAddress.toLowerCase()
       || receipt.batchId !== candidate.batchId
@@ -334,8 +354,9 @@ export class FinalizationRecovery<
       || receipt.txIndex < 0
       || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash)
     ) {
-      return { status: 'reorged' };
+      return { status: 'rejected' };
     }
+    if (receipt.blockNumber !== candidate.blockNumber) return { status: 'reorged' };
     return { status: 'confirmed', receipt };
   }
 
@@ -370,15 +391,20 @@ export class FinalizationRecovery<
       );
       return { status: 'deferred', reason: 'canonical-receipt-unsupported' };
     }
-    if (canonical.status === 'reorged' || canonical.status === 'rejected') {
+    if (canonical.status === 'reorged') {
+      await this.markReorged(entry, 'canonical receipt mismatch or reorg');
+      this.log.warn(
+        `Finalization recovery canonical receipt is reorged for ${entry.ual}`,
+      );
+      return { status: 'deferred', reason: 'canonical-receipt-reorged' };
+    }
+    if (canonical.status === 'rejected') {
       await this.rejectEntry(
         entry,
-        canonical.status === 'reorged'
-          ? 'canonical receipt mismatch or reorg'
-          : 'transaction failed or contains no finalization event',
+        'transaction failed or contains no finalization event',
       );
       this.log.warn(
-        `Finalization recovery canonical receipt is ${canonical.status} for ${entry.ual}`,
+        `Finalization recovery canonical receipt is rejected for ${entry.ual}`,
       );
       return { status: 'deferred', reason: 'canonical-receipt-rejected' };
     }
@@ -457,7 +483,7 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return undefined;
     try {
-      const result = await store.markVerified(entry.key, evidence);
+      const result = await store.markVerified(entry.key, entry.generation, evidence);
       if (result.status === 'verified' || result.status === 'existing') return result.entry;
       this.log.warn(
         `Finalization recovery inbox refused VERIFIED for ${entry.ual}: ${result.status}`,
@@ -483,7 +509,7 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return;
     try {
-      await store.recordAttempt(entry.key, reason);
+      await store.recordAttempt(entry.key, entry.generation, reason);
     } catch (error) {
       this.log.warn(
         `Finalization recovery attempt update failed for ${entry.ual}: `
@@ -494,6 +520,20 @@ export class FinalizationRecovery<
 
   async rejectEntry(entry: FinalizationRecoveryEntry, reason: string): Promise<boolean> {
     return this.transition(entry, 'REJECTED', reason);
+  }
+
+  async markReorged(entry: FinalizationRecoveryEntry, reason: string): Promise<boolean> {
+    const store = this.getStore();
+    if (!store) return false;
+    try {
+      return await store.markReorged(entry.key, entry.generation, reason);
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery reorg transition failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   async markUnsupported(entry: FinalizationRecoveryEntry): Promise<boolean> {
@@ -618,7 +658,7 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return false;
     try {
-      return await store.transition(entry.key, state, reason);
+      return await store.transition(entry.key, entry.generation, state, reason);
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `
@@ -653,10 +693,15 @@ export class FinalizationRecovery<
           }
           const receiptStatus = await this.verifyPersistedReceipt(candidate, evidence);
           if (receiptStatus !== 'confirmed') {
-            if (receiptStatus === 'reorged' || receiptStatus === 'rejected') {
-              await this.rejectEntry(
+            if (receiptStatus === 'reorged') {
+              await this.markReorged(
                 entry,
                 'persisted receipt disagrees with canonical chain truth',
+              );
+            } else if (receiptStatus === 'rejected') {
+              await this.rejectEntry(
+                entry,
+                'persisted transaction failed or contains no finalization event',
               );
             } else if (receiptStatus === 'unsupported') {
               await this.markUnsupported(entry);

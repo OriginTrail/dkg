@@ -69,6 +69,7 @@ import {
   finalizationLifecycleDecision,
   type FinalizationLifecycleLogOptions,
 } from './finalization-lifecycle-logger.js';
+import type { FinalizationRuntime } from './finalization-runtime.js';
 import {
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
@@ -287,12 +288,7 @@ export interface FinalizationHandlerOptions {
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
-  runtimeContext?: FinalizationHandlerRuntimeContext;
-}
-
-export interface FinalizationHandlerRuntimeContext {
-  getRecoveryStore(): FinalizationRecoveryStore | undefined;
-  getLifecycleLogOptions(): FinalizationLifecycleLogOptions | undefined;
+  runtime?: FinalizationRuntime;
 }
 
 function isLegacyFinalizationEventBus(
@@ -417,12 +413,9 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
-    const runtimeContext = options.runtimeContext;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
-      runtimeContext
-        ? () => runtimeContext.getLifecycleLogOptions()
-        : options.lifecycleLogOptions,
+      options.runtime ?? options.lifecycleLogOptions,
     );
     const materializer: FinalizationRecoveryMaterializer<PreparedGraphScopedMaterialization> = {
       prepare: (input) => this.prepareGraphScopedMaterialization(input),
@@ -443,9 +436,7 @@ export class FinalizationHandler {
       isRetryableError: (error) => error instanceof StoreSchedulerBusyError,
     };
     this.recovery = new FinalizationRecovery(
-      runtimeContext
-        ? () => runtimeContext.getRecoveryStore()
-        : options.recoveryStore,
+      options.runtime ?? options.recoveryStore,
       chain,
       {
         info: (message) => this.log.info(createOperationContext('system'), message),

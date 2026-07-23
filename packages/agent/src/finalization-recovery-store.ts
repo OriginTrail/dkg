@@ -7,6 +7,7 @@ export const FINALIZATION_INBOX_DATABASE_FILENAME = 'finalization-inbox-v1.sqlit
 export type FinalizationRecoveryState =
   | 'RECEIVED'
   | 'VERIFIED'
+  | 'REORGED'
   | 'SETTLED'
   | 'SUPERSEDED'
   | 'REJECTED'
@@ -28,6 +29,7 @@ export interface FinalizationRecoveryEntry {
   envelopeSha256: string;
   rawMessage: Uint8Array;
   verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
+  generation: number;
   attemptCount: number;
   nextAttemptAt?: number;
   lastError?: string;
@@ -53,6 +55,7 @@ export interface FinalizationRecoveryReceiveInput {
 export type FinalizationRecoveryReceiveResult =
   | { status: 'inserted'; entry: FinalizationRecoveryEntry }
   | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'rearmed'; entry: FinalizationRecoveryEntry }
   | { status: 'conflict' }
   | { status: 'capacity' }
   | { status: 'closed' };
@@ -80,8 +83,10 @@ export interface FinalizationRecoveryStore {
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   markVerified(
     key: string,
+    generation: number,
     evidence: VerifiedGraphScopedFinalizationEvidence,
   ): Promise<FinalizationRecoveryVerifyResult>;
+  markReorged(key: string, generation: number, lastError: string): Promise<boolean>;
   listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;
@@ -90,13 +95,19 @@ export interface FinalizationRecoveryStore {
   }): Promise<FinalizationRecoveryEntry[]>;
   transition(
     key: string,
+    generation: number,
     state: Extract<
       FinalizationRecoveryState,
       'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED'
     >,
     lastError?: string,
   ): Promise<boolean>;
-  recordAttempt(key: string, lastError?: string, nextAttemptAt?: number): Promise<void>;
+  recordAttempt(
+    key: string,
+    generation: number,
+    lastError?: string,
+    nextAttemptAt?: number,
+  ): Promise<void>;
   health(): Promise<FinalizationRecoveryHealth>;
   close(): Promise<void>;
 }

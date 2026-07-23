@@ -42,13 +42,17 @@ const VERSION = '1';
 const PACKED_KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
 const RECOVERY_BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 
-function canonicalReceipt(message: FinalizationMessageMsg, txIndex = 4) {
+function canonicalReceipt(
+  message: FinalizationMessageMsg,
+  txIndex = 4,
+  blockHash = RECOVERY_BLOCK_HASH,
+) {
   return {
     status: 'confirmed' as const,
     receipt: {
       txHash: message.txHash,
       blockNumber: Number(message.blockNumber),
-      blockHash: RECOVERY_BLOCK_HASH,
+      blockHash,
       txIndex,
       merkleRoot: message.kcMerkleRoot,
       publisherAddress: message.publisherAddress,
@@ -794,6 +798,7 @@ describe('graph-scoped finalization handler', () => {
         get closed() { return inbox!.closed; },
         receive: inbox.receive.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
+        markReorged: inbox.markReorged.bind(inbox),
         listForKnowledgeAsset: inbox.listForKnowledgeAsset.bind(inbox),
         transition: inbox.transition.bind(inbox),
         recordAttempt: inbox.recordAttempt.bind(inbox),
@@ -862,6 +867,7 @@ describe('graph-scoped finalization handler', () => {
         markVerified: async () => {
           throw new Error('markVerified must not run after failed admission');
         },
+        markReorged: async () => false,
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
         recordAttempt: async () => {},
@@ -1129,76 +1135,132 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
-  it('rejects verified recovery when the persisted receipt is no longer canonical', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
-    let inbox: SqliteFinalizationRecoveryStore | undefined;
-    try {
-      const { message } = await stageGraph();
-      let receiptCanonical = true;
-      let receiptChecks = 0;
-      let replayCheckedPersistedIdentity = false;
-      const chain = {
-        chainId: 'base:84532',
-        getLatestMerkleRoot: async () => message.kcMerkleRoot,
-        getMerkleRootCount: async () => 1n,
-        getKAContextGraphId: async () => 42n,
-        resolveCanonicalFinalizationReceipt: async (_txHash, expected = {}) => {
-          receiptChecks += 1;
-          if (receiptCanonical) return canonicalReceipt(message);
-          replayCheckedPersistedIdentity = expected.expectedBlockHash === RECOVERY_BLOCK_HASH
-            && expected.expectedBlockNumber === Number(message.blockNumber);
-          return replayCheckedPersistedIdentity
-            ? { status: 'reorged' as const }
-            : canonicalReceipt(message);
-        },
-      } as ChainAdapter;
-      inbox = await openSqliteFinalizationRecoveryStore(directory);
-      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+  it.each([
+    ['a later block', 124],
+    ['a same-height replacement block', 123],
+  ] as const)(
+    'rearms verified recovery when the transaction is re-included in %s',
+    async (_case, replacementBlockNumber) => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const { message } = await stageGraph();
+        const replacementBlockHash = `0x${'ef'.repeat(32)}`;
+        const reIncludedMessage = {
+          ...message,
+          blockNumber: replacementBlockNumber,
+        };
+        let receiptPhase: 'block-a' | 'reorged' | 'block-b' = 'block-a';
+        let receiptChecks = 0;
+        let replayCheckedPersistedIdentity = false;
+        let replacementCheckedWithoutStaleIdentity = false;
+        const chain = {
+          chainId: 'base:84532',
+          getLatestMerkleRoot: async () => message.kcMerkleRoot,
+          getMerkleRootCount: async () => 1n,
+          getKAContextGraphId: async () => 42n,
+          resolveCanonicalFinalizationReceipt: async (_txHash, expected = {}) => {
+            receiptChecks += 1;
+            if (receiptPhase === 'block-a') return canonicalReceipt(message);
+            if (receiptPhase === 'reorged') {
+              replayCheckedPersistedIdentity = expected.expectedBlockHash
+                === RECOVERY_BLOCK_HASH
+                && expected.expectedBlockNumber === Number(message.blockNumber);
+              return { status: 'reorged' as const };
+            }
+            replacementCheckedWithoutStaleIdentity = expected.expectedBlockHash === undefined
+              && expected.expectedBlockNumber === undefined;
+            if (!replacementCheckedWithoutStaleIdentity) {
+              return { status: 'reorged' as const };
+            }
+            return canonicalReceipt(reIncludedMessage, 4, replacementBlockHash);
+          },
+        } as ChainAdapter;
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const recoveryHandler = new FinalizationHandler(
+          store,
+          chain,
+          recoveryOptions(inbox),
+        );
 
-      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
-      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
-      store.replaceGraphAndSubject = async () => {
-        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
-      };
-      await recoveryHandler.handleFinalizationMessage(
-        encodeFinalizationMessage(message),
-        CG,
-        '12D3KooWPublisher',
-      );
-      store.replaceGraphAndSubject = replaceGraphAndSubject;
-      expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
+        const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+        if (!replaceGraphAndSubject) {
+          throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+        }
+        store.replaceGraphAndSubject = async () => {
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'sparql-http.update',
+          );
+        };
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+        store.replaceGraphAndSubject = replaceGraphAndSubject;
+        expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
 
-      const reconcileInput = {
-        contextGraphId: CG,
-        onChainCgId: '42',
-        ual: UAL,
-        merkleRoot: message.kcMerkleRoot,
-        publisherAddress: PUBLISHER,
-        kaId: PACKED_KA_ID,
-        versionBlock: 123,
-        authorAddress: AUTHOR,
-      };
-      receiptCanonical = false;
-      await expect(recoveryHandler.handleChainReconciledKC(
-        reconcileInput,
-        createOperationContext('system'),
-      )).resolves.toBe('verified-vm-metadata-pending');
+        const reconcileInput = {
+          contextGraphId: CG,
+          onChainCgId: '42',
+          ual: UAL,
+          merkleRoot: message.kcMerkleRoot,
+          publisherAddress: PUBLISHER,
+          kaId: PACKED_KA_ID,
+          versionBlock: 123,
+          authorAddress: AUTHOR,
+        };
+        receiptPhase = 'reorged';
+        await expect(recoveryHandler.handleChainReconciledKC(
+          reconcileInput,
+          createOperationContext('system'),
+        )).resolves.toBe('verified-vm-metadata-pending');
 
-      expect(receiptChecks).toBeGreaterThanOrEqual(2);
-      expect(replayCheckedPersistedIdentity).toBe(true);
-      expect(await inbox.list()).toMatchObject([{
-        state: 'REJECTED',
-        lastError: 'persisted receipt disagrees with canonical chain truth',
-      }]);
-      await expect(store.query(
-        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
-          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
-      )).resolves.toMatchObject({ type: 'boolean', value: false });
-    } finally {
-      await closeInbox(inbox);
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+        expect(receiptChecks).toBeGreaterThanOrEqual(2);
+        expect(replayCheckedPersistedIdentity).toBe(true);
+        const [reorged] = await inbox.list();
+        expect(reorged).toMatchObject({
+          state: 'REORGED',
+          generation: 1,
+          lastError: 'persisted receipt disagrees with canonical chain truth',
+        });
+        expect(reorged).not.toHaveProperty('verifiedEvidence');
+        await expect(store.query(
+          `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+            + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
+        )).resolves.toMatchObject({ type: 'boolean', value: false });
+
+        receiptPhase = 'block-b';
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(reIncludedMessage),
+          CG,
+          '12D3KooWPublisher',
+        );
+
+        expect(replacementCheckedWithoutStaleIdentity).toBe(true);
+        expect(await inbox.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 2,
+          verifiedEvidence: {
+            transactionHash: message.txHash,
+            blockNumber: replacementBlockNumber,
+            blockHash: replacementBlockHash,
+          },
+        }]);
+        await expect(store.query(
+          `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+            + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+            + `<http://dkg.io/ontology/materializedVersion> `
+            + `"${replacementBlockNumber}:4" . } }`,
+        )).resolves.toMatchObject({ type: 'boolean', value: true });
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('never persists structurally invalid or legacy envelopes under store pressure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));

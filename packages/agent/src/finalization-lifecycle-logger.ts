@@ -11,8 +11,9 @@ export interface FinalizationLifecycleLogOptions {
   localNodeIdentityId?: string | number | bigint;
 }
 
-export type FinalizationLifecycleLogOptionsProvider =
-  () => FinalizationLifecycleLogOptions | undefined;
+export interface FinalizationLifecycleLogOptionsSource {
+  getLifecycleLogOptions(): FinalizationLifecycleLogOptions | undefined;
+}
 
 export interface FinalizationLifecycleFields {
   ual?: string;
@@ -48,15 +49,15 @@ export class FinalizationLifecycleLogger {
     private readonly log: Logger,
     private readonly options:
       | FinalizationLifecycleLogOptions
-      | FinalizationLifecycleLogOptionsProvider
+      | FinalizationLifecycleLogOptionsSource
       | undefined,
   ) {}
 
   record(ctx: OperationContext, decision: FinalizationLifecycleDecision): void {
     const msg = decision.fields;
     if (!msg.ual) return;
-    const options = typeof this.options === 'function'
-      ? this.options()
+    const options = this.options && 'getLifecycleLogOptions' in this.options
+      ? this.options.getLifecycleLogOptions()
       : this.options;
     logKaLifecycleEvent(this.log, ctx, {
       level: msg.level,
