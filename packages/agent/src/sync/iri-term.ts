@@ -54,7 +54,16 @@ export function isIriTerm(term: string): boolean {
  * subject; tolerate a malformed one (treat as non-IRI → drop) instead of
  * throwing. This is why it diverges from the lenient {@link isIriTerm}, which
  * runs on the responder's own trusted rows (#1940).
+ *
+ * The parameter is typed `unknown` on purpose (not `string`): this IS the shared
+ * fail-closed validator for raw peer-ingest values, so a caller holding an
+ * untyped/unknown-valued subject can delegate directly without a cast. The guard
+ * narrows to a non-empty `string` before {@link isIriTermCore}, so tsc stays
+ * clean and the behavior is byte-identical to the previous `string` signature
+ * for the conforming call sites (`quad.subject` is already `string`). The
+ * `string`-vs-`unknown` split across the two exports honestly reflects
+ * trusted-input (responder read) vs fail-closed-untrusted-input (ingest).
  */
-export function isIriMetaSubject(term: string): boolean {
+export function isIriMetaSubject(term: unknown): boolean {
   return typeof term === 'string' && term.length > 0 && isIriTermCore(term);
 }

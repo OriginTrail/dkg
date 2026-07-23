@@ -50,9 +50,12 @@ describe('iri-term classifiers', () => {
 
     it('non-string subject: isIriMetaSubject fails closed without throwing', () => {
       // The verification-input boundary runs on RAW peer-fetched meta; tolerate
-      // a malformed subject (treat as non-IRI → drop) instead of throwing.
-      for (const bad of [undefined, null, 0, {}, []]) {
-        expect(isIriMetaSubject(bad as unknown as string)).toBe(false);
+      // a malformed subject (treat as non-IRI → drop) instead of throwing. The
+      // `unknown` param means these need no cast — an untyped ingest caller can
+      // delegate directly, which is the point of widening the type (#1940 review).
+      const badInputs: unknown[] = [undefined, null, 0, {}, []];
+      for (const bad of badInputs) {
+        expect(isIriMetaSubject(bad)).toBe(false);
       }
     });
   });
