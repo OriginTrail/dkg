@@ -425,10 +425,15 @@ export function serializeWorkspacePublicSnapshotQuads(quads: readonly Quad[]): s
 
 export function workspacePublicQuadsDigest(quads: readonly Quad[]): string {
   const canonical = quads
-    .map((quad) => [quad.subject, quad.predicate, quad.object, ''])
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    .map((quad) => JSON.stringify([quad.subject, quad.predicate, quad.object, '']))
+    .sort((a, b) => a.localeCompare(b));
   const hash = createHash('sha256');
-  hash.update(JSON.stringify(canonical));
+  hash.update('[');
+  canonical.forEach((row, index) => {
+    if (index > 0) hash.update(',');
+    hash.update(row);
+  });
+  hash.update(']');
   return `sha256:${hash.digest('hex')}`;
 }
 
