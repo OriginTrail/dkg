@@ -48,6 +48,7 @@ import {
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
   PROMOTE_UNIQUENESS_KEY,
+  assertPromoteJobRecordSingleSubject,
   classifyJobPayload,
   comparePromoteJobs,
   defaultBackoffMs,
@@ -59,7 +60,7 @@ import {
   parseJobPayload,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
-  serializeJobRecord,
+  serializeJob,
   uniquenessKey,
   uniquenessLookupKeys,
   type PromoteUniquenessInput,
@@ -623,9 +624,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * atomic replace preserves its retain semantics by construction.
    */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
-    // The serializer owns the invariant that a job record is EXACTLY the job subject —
-    // no ad-hoc subject filters on the write path.
-    const { jobRef, jobQuads } = serializeJobRecord(job, this.graphUri);
+    const jobRef = jobSubject(job.jobId);
+    const jobQuads = serializeJob(job, this.graphUri);
+    // Fail loud if the record is ever not EXACTLY the job subject (see the guard) before it
+    // reaches the STRICT single-subject replace / the jobRef-only fallback delete.
+    assertPromoteJobRecordSingleSubject(job.jobId, jobRef, jobQuads);
     const replaced = await tryReplaceSubjectAtomically(
       this.store,
       this.graphUri,

@@ -32,7 +32,6 @@ import {
   jobSubject,
   parseJobPayload,
   serializeJob,
-  serializeJobRecord,
 } from '../src/async-promote-queue-utils.js';
 import {
   type AsyncPromoteQueueConfig,
@@ -244,18 +243,18 @@ describe('#1933 async-promote-queue writeJob atomicity', () => {
     expect(counts.jobGraphDeletes).toBeGreaterThan(0);
   });
 
-  it('serializeJobRecord returns exactly the job subject and its guard is fail-loud on a stray subject', async () => {
-    const graphUri = 'urn:test:promote:serialize-job-record';
+  it('the single-subject guard accepts serializeJob output and is fail-loud on a stray subject', async () => {
+    const graphUri = 'urn:test:promote:single-subject-guard';
     const queue = createQueue(new OxigraphStore(), graphUri);
     const jobId = await queue.enqueue(makeRequest());
     const job = (await queue.getStatus(jobId))!;
 
-    const record = serializeJobRecord(job, graphUri);
-    expect(record.jobRef).toBe(jobSubject(jobId));
-    expect(record.jobQuads.length).toBeGreaterThan(0);
-    expect(record.jobQuads.every((q) => q.subject === jobSubject(jobId))).toBe(true);
-    // Nothing dropped: the record is the full serializeJob output under one subject.
-    expect(record.jobQuads.length).toBe(serializeJob(job, graphUri).length);
+    const jobRef = jobSubject(jobId);
+    const jobQuads = serializeJob(job, graphUri);
+    expect(jobQuads.length).toBeGreaterThan(0);
+    expect(jobQuads.every((q) => q.subject === jobRef)).toBe(true);
+    // serializeJob's output is exactly one subject → the writer's guard passes.
+    expect(() => assertPromoteJobRecordSingleSubject(jobId, jobRef, jobQuads)).not.toThrow();
 
     // Guard (future-proofing tripwire): a stray-subject quad must throw at the boundary
     // rather than reach the STRICT single-subject replace / leak past the fallback delete.
@@ -266,7 +265,7 @@ describe('#1933 async-promote-queue writeJob atomicity', () => {
       graph: graphUri,
     };
     expect(() =>
-      assertPromoteJobRecordSingleSubject(jobId, record.jobRef, [...record.jobQuads, strayQuad]),
+      assertPromoteJobRecordSingleSubject(jobId, jobRef, [...jobQuads, strayQuad]),
     ).toThrow(/outside the job subject/);
   });
 });
