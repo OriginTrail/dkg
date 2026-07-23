@@ -76,7 +76,6 @@ export interface FinalizationRecoveryHealth {
 }
 
 export interface FinalizationRecoveryStore {
-  readonly databasePath: string;
   readonly closed: boolean;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   markVerified(

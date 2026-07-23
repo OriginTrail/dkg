@@ -85,6 +85,21 @@ function recoveryChain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
   } as ChainAdapter;
 }
 
+function recoveryMaterializer() {
+  return {
+    prepare: async () => ({
+      onChainContextGraphId: '42',
+      localTopicOnChainContextGraphId: '42',
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public' as const,
+      allowedPeers: [],
+    }),
+    apply: async () => 'applied' as const,
+    replayVerified: async () => 'promoted' as const,
+    isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
+  };
+}
+
 describe('graph-scoped finalization recovery admission', () => {
   it('returns a typed parsed envelope for a valid singleton finalization', () => {
     expect(parseGraphScopedFinalization(message(), CONTEXT_GRAPH)).toMatchObject({
@@ -120,7 +135,7 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       const preStartHandler = agent.getOrCreateFinalizationHandler();
       await agent.start();
-      expect(agent.getOrCreateFinalizationHandler()).not.toBe(preStartHandler);
+      expect(agent.getOrCreateFinalizationHandler()).toBe(preStartHandler);
       const originalQuery = agent.store.query.bind(agent.store);
       agent.store.query = async () => {
         throw new StoreSchedulerBusyError(
@@ -130,7 +145,7 @@ describe('graph-scoped finalization recovery admission', () => {
         );
       };
       try {
-        await agent.getOrCreateFinalizationHandler().handleFinalizationMessage(
+        await preStartHandler.handleFinalizationMessage(
           encodeFinalizationMessage(message()),
           CONTEXT_GRAPH,
           '12D3KooWPublisher',
@@ -169,7 +184,12 @@ describe('graph-scoped finalization recovery admission', () => {
           return 42n;
         },
       });
-      const recovery = new FinalizationRecovery(store, chain, { info: () => {}, warn: () => {} });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
       const entry = await recovery.receive({
         rawMessage: encodeFinalizationMessage(message()),
         contextGraphId: CONTEXT_GRAPH,
@@ -219,7 +239,12 @@ describe('graph-scoped finalization recovery admission', () => {
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       const chain = recoveryChain({ resolveCanonicalFinalizationReceipt: undefined });
-      const recovery = new FinalizationRecovery(store, chain, { info: () => {}, warn: () => {} });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
       const entry = await recovery.receive({
         rawMessage: encodeFinalizationMessage(message()),
         contextGraphId: CONTEXT_GRAPH,

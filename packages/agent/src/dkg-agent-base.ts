@@ -1644,9 +1644,6 @@ export class DKGAgentBase {
     this.finalizationRecoveryStore = await openSqliteFinalizationRecoveryStore(
       this.config.dataDir,
     );
-    // A caller may inspect the handler before start(). Do not let that
-    // pre-lifecycle instance remain the network consumer without the inbox.
-    this.finalizationHandler = undefined;
   }
 
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */

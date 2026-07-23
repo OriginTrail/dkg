@@ -2,10 +2,17 @@ import type {
   CanonicalFinalizationReceipt,
   CanonicalFinalizationReceiptResolution,
   ChainAdapter,
+  EventFilter,
 } from '@origintrail-official/dkg-chain';
+import {
+  decodeFinalizationMessage,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+} from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
+  parseGraphScopedFinalization,
+  type GraphScopedAccessPolicy,
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
@@ -27,27 +34,25 @@ export interface FinalizationRecoveryLiveInput {
   candidate: ParsedGraphScopedFinalization;
 }
 
-export interface FinalizationRecoveryLiveCallbacks {
-  apply(entry: FinalizationRecoveryEntry): Promise<FinalizationRecoveryApplyOutcome>;
-  isRetryableError(error: unknown): boolean;
-}
+export type FinalizationRecoveryLiveAdmission =
+  | {
+    status: 'admitted';
+    input: FinalizationRecoveryLiveInput;
+    message: ReturnType<typeof decodeFinalizationMessage>;
+  }
+  | { status: 'invalid' }
+  | { status: 'not-graph-scoped' };
 
-export type FinalizationVerificationContext =
-  | { kind: 'live' }
-  | { kind: 'recovery'; entry: FinalizationRecoveryEntry };
-
-export interface LegacyFinalizationVerification {
-  verified: boolean;
-  authorAddress?: string;
-  txIndex?: number;
-}
-
-export interface FinalizationMaterializationVerificationCallbacks {
-  verifyLegacy(): Promise<LegacyFinalizationVerification>;
-  verifyContextGraphBinding(): Promise<boolean>;
-  buildEvidence(
-    receipt: CanonicalFinalizationReceipt,
-  ): VerifiedGraphScopedFinalizationEvidence;
+export interface FinalizationRecoveryPreparedMaterialization {
+  /** Compatibility target used only by the unjournaled legacy verifier. */
+  onChainContextGraphId?: string;
+  /** Independently resolved identity of the local gossip topic. */
+  localTopicOnChainContextGraphId?: string;
+  publicQuadsDigest?: string;
+  publisherPeerId: string;
+  accessPolicy: GraphScopedAccessPolicy;
+  allowedPeers: string[];
+  workspaceSubGraphName?: string;
 }
 
 export type FinalizationMaterializationVerification =
@@ -81,19 +86,38 @@ export interface FinalizationRecoveryReplayInput {
   kaId: string;
 }
 
-export interface FinalizationRecoveryReplayCallbacks {
-  decode(entry: FinalizationRecoveryEntry): ParsedGraphScopedFinalization | undefined;
-  applyReceived(input: {
-    entry: FinalizationRecoveryEntry;
-    candidate: ParsedGraphScopedFinalization;
+export type FinalizationRecoveryReplayMaterializationOutcome =
+  | 'promoted'
+  | 'already-confirmed'
+  | 'stale-target'
+  | 'no-swm'
+  | 'verified-vm-metadata-pending'
+  | undefined;
+
+export interface FinalizationRecoveryMaterializer<
+  Prepared extends FinalizationRecoveryPreparedMaterialization,
+> {
+  prepare(input: FinalizationRecoveryLiveInput): Promise<Prepared | undefined>;
+  apply(input: {
+    prepared: Prepared;
+    txIndex: number;
+    authorAddress?: string;
   }): Promise<FinalizationRecoveryApplyOutcome>;
-  applyVerified(input: {
+  replayVerified(input: {
+    replay: FinalizationRecoveryReplayInput;
     entry: FinalizationRecoveryEntry;
     candidate: ParsedGraphScopedFinalization;
     evidence: VerifiedGraphScopedFinalizationEvidence;
-  }): Promise<FinalizationRecoveryApplyOutcome>;
+  }): Promise<FinalizationRecoveryReplayMaterializationOutcome>;
   isRetryableError(error: unknown): boolean;
 }
+
+export type FinalizationRecoveryStoreProvider =
+  () => FinalizationRecoveryStore | undefined;
+
+type FinalizationVerificationContext =
+  | { kind: 'live' }
+  | { kind: 'recovery'; entry: FinalizationRecoveryEntry };
 
 export type FinalizationCanonicalReceiptOutcome =
   | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt }
@@ -114,14 +138,55 @@ export function finalizationRecoveryEntryKey(input: {
 }
 
 /** Owns durable inbox transitions and chain-gated replay selection. */
-export class FinalizationRecovery {
+export class FinalizationRecovery<
+  Prepared extends FinalizationRecoveryPreparedMaterialization,
+> {
   private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
+  private readonly getStore: FinalizationRecoveryStoreProvider;
 
   constructor(
-    private readonly store: FinalizationRecoveryStore | undefined,
+    store: FinalizationRecoveryStore | FinalizationRecoveryStoreProvider | undefined,
     private readonly chain: ChainAdapter | undefined,
     private readonly log: FinalizationRecoveryLog,
-  ) {}
+    private readonly materializer: FinalizationRecoveryMaterializer<Prepared>,
+  ) {
+    this.getStore = typeof store === 'function' ? store : () => store;
+  }
+
+  /** Decode and admit graph-scoped wire input before any persistence or RDF work. */
+  admitLive(input: {
+    rawMessage: Uint8Array;
+    contextGraphId: string;
+    sourcePeerId?: string;
+  }): FinalizationRecoveryLiveAdmission {
+    let message: ReturnType<typeof decodeFinalizationMessage>;
+    try {
+      message = decodeFinalizationMessage(input.rawMessage);
+    } catch {
+      return { status: 'not-graph-scoped' };
+    }
+    if (message.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+      return { status: 'not-graph-scoped' };
+    }
+    const admission = parseGraphScopedFinalization(message, input.contextGraphId);
+    if (!admission.ok) {
+      this.log.warn(
+        `Finalization recovery rejected graph-scoped envelope for `
+          + `${message.ual || '(missing UAL)'}: ${admission.reason}`,
+      );
+      return { status: 'invalid' };
+    }
+    return {
+      status: 'admitted',
+      message,
+      input: {
+        rawMessage: input.rawMessage,
+        contextGraphId: input.contextGraphId,
+        ...(input.sourcePeerId ? { sourcePeerId: input.sourcePeerId } : {}),
+        candidate: admission.value,
+      },
+    };
+  }
 
   /**
    * Applies a live graph-scoped finalization behind the durable write-ahead
@@ -130,13 +195,13 @@ export class FinalizationRecovery {
    */
   async processLive(
     input: FinalizationRecoveryLiveInput,
-    callbacks: FinalizationRecoveryLiveCallbacks,
   ): Promise<boolean> {
+    const store = this.getStore();
     // The receipt API is intentionally optional on ChainAdapter. Preserve the
     // legacy live path when it is absent instead of admitting an envelope that
     // this runtime can never promote to VERIFIED.
     if (
-      !this.store
+      !store
       || !this.chain
       || this.chain.chainId === 'none'
       || !this.chain.resolveCanonicalFinalizationReceipt
@@ -148,7 +213,7 @@ export class FinalizationRecovery {
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const outcome = await callbacks.apply(entry);
+        const outcome = await this.materialize(input, { kind: 'recovery', entry });
         if (outcome === 'deferred') {
           await this.recordDeferred(entry, 'finalization processing deferred');
         } else {
@@ -156,7 +221,7 @@ export class FinalizationRecovery {
         }
         return true;
       } catch (error) {
-        if (!callbacks.isRetryableError(error)) throw error;
+        if (!this.materializer.isRetryableError(error)) throw error;
         if (attempt === 0) {
           await new Promise((resolve) => setTimeout(resolve, 50));
           continue;
@@ -172,10 +237,18 @@ export class FinalizationRecovery {
     return true;
   }
 
+  /** Processes the compatibility path when no durable inbox can be used. */
+  processUnjournaled(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<FinalizationRecoveryApplyOutcome> {
+    return this.materialize(input, { kind: 'live' });
+  }
+
   async receive(
     input: FinalizationRecoveryLiveInput,
   ): Promise<FinalizationRecoveryEntry | undefined> {
-    if (!this.store) return undefined;
+    const store = this.getStore();
+    if (!store) return undefined;
     const { candidate } = input;
     const key = finalizationRecoveryEntryKey({
       chainId: this.chain?.chainId ?? 'none',
@@ -184,7 +257,7 @@ export class FinalizationRecovery {
       txHash: candidate.msg.txHash,
     });
     try {
-      const result = await this.store.receive({
+      const result = await store.receive({
         key,
         chainId: this.chain?.chainId ?? 'none',
         contextGraphId: input.contextGraphId,
@@ -266,19 +339,14 @@ export class FinalizationRecovery {
     return { status: 'confirmed', receipt };
   }
 
-  /**
-   * Produces the chain-verified fields required by graph materialization.
-   * Recovery-specific receipt interpretation and durable transitions remain
-   * here; the handler supplies only legacy verification, CG binding, and
-   * evidence construction callbacks.
-   */
-  async verifyMaterialization(
+  /** Produces and durably commits the chain evidence required by materialization. */
+  private async verifyMaterialization(
     candidate: ParsedGraphScopedFinalization,
     context: FinalizationVerificationContext,
-    callbacks: FinalizationMaterializationVerificationCallbacks,
+    prepared: Prepared,
   ): Promise<FinalizationMaterializationVerification> {
     if (context.kind === 'live') {
-      const legacy = await callbacks.verifyLegacy();
+      const legacy = await this.verifyLegacy(candidate, prepared.onChainContextGraphId);
       if (!legacy.verified) {
         return { status: 'deferred', reason: 'legacy-verification-pending' };
       }
@@ -320,14 +388,28 @@ export class FinalizationRecovery {
       );
       return { status: 'deferred', reason: 'canonical-receipt-pending' };
     }
-    if (!await callbacks.verifyContextGraphBinding()) {
+    if (!await this.verifyContextGraphBinding(candidate, prepared)) {
       this.log.info(
         `Finalization recovery context-graph binding is pending for ${entry.ual}`,
       );
       return { status: 'deferred', reason: 'context-graph-binding-pending' };
     }
 
-    const evidence = callbacks.buildEvidence(canonical.receipt);
+    const evidence = VerifiedGraphScopedFinalizationEvidenceCodec.build({
+      candidate,
+      ...(prepared.publicQuadsDigest
+        ? { publicQuadsDigest: prepared.publicQuadsDigest }
+        : {}),
+      publisherPeerId: prepared.publisherPeerId,
+      blockHash: canonical.receipt.blockHash,
+      txIndex: canonical.receipt.txIndex,
+      ...(canonical.receipt.authorAddress
+        ? { authorAddress: canonical.receipt.authorAddress }
+        : {}),
+      accessPolicy: prepared.accessPolicy,
+      allowedPeers: prepared.allowedPeers,
+      workspaceSubGraphName: prepared.workspaceSubGraphName,
+    });
     const committed = await this.recordVerified(entry, evidence);
     if (!committed) {
       return { status: 'deferred', reason: 'verified-evidence-commit-failed' };
@@ -341,13 +423,41 @@ export class FinalizationRecovery {
     };
   }
 
+  private async materialize(
+    input: FinalizationRecoveryLiveInput,
+    context: FinalizationVerificationContext,
+  ): Promise<FinalizationRecoveryApplyOutcome> {
+    const prepared = await this.materializer.prepare(input);
+    if (!prepared) return 'deferred';
+    const verification = await this.verifyMaterialization(
+      input.candidate,
+      context,
+      prepared,
+    );
+    if (verification.status === 'deferred') {
+      this.log.info(
+        `Finalization verification deferred for ${input.candidate.scope.ual} `
+          + `(${verification.reason})`,
+      );
+      return 'deferred';
+    }
+    return this.materializer.apply({
+      prepared,
+      txIndex: verification.txIndex,
+      ...(verification.authorAddress
+        ? { authorAddress: verification.authorAddress }
+        : {}),
+    });
+  }
+
   async recordVerified(
     entry: FinalizationRecoveryEntry,
     evidence: VerifiedGraphScopedFinalizationEvidence,
   ): Promise<FinalizationRecoveryEntry | undefined> {
-    if (!this.store) return undefined;
+    const store = this.getStore();
+    if (!store) return undefined;
     try {
-      const result = await this.store.markVerified(entry.key, evidence);
+      const result = await store.markVerified(entry.key, evidence);
       if (result.status === 'verified' || result.status === 'existing') return result.entry;
       this.log.warn(
         `Finalization recovery inbox refused VERIFIED for ${entry.ual}: ${result.status}`,
@@ -365,14 +475,15 @@ export class FinalizationRecovery {
     entry: FinalizationRecoveryEntry,
     outcome: FinalizationRecoveryApplyOutcome,
   ): Promise<boolean> {
-    if (!this.store || outcome === 'deferred') return false;
+    if (!this.getStore() || outcome === 'deferred') return false;
     return this.transition(entry, 'SETTLED');
   }
 
   async recordDeferred(entry: FinalizationRecoveryEntry, reason: string): Promise<void> {
-    if (!this.store) return;
+    const store = this.getStore();
+    if (!store) return;
     try {
-      await this.store.recordAttempt(entry.key, reason);
+      await store.recordAttempt(entry.key, reason);
     } catch (error) {
       this.log.warn(
         `Finalization recovery attempt update failed for ${entry.ual}: `
@@ -394,7 +505,8 @@ export class FinalizationRecovery {
   }
 
   async matchingEntries(input: FinalizationRecoveryReplayInput): Promise<FinalizationRecoveryEntry[]> {
-    if (!this.store) return [];
+    const store = this.getStore();
+    if (!store) return [];
     if (
       !this.chain?.getLatestMerkleRoot
       || !this.chain.getMerkleRootCount
@@ -403,7 +515,7 @@ export class FinalizationRecovery {
 
     let entries: FinalizationRecoveryEntry[];
     try {
-      entries = await this.store.listForKnowledgeAsset(input);
+      entries = await store.listForKnowledgeAsset(input);
     } catch (error) {
       this.log.warn(
         `Finalization recovery inbox read failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -472,13 +584,12 @@ export class FinalizationRecovery {
 
   async replayMatching(
     input: FinalizationRecoveryReplayInput,
-    callbacks: FinalizationRecoveryReplayCallbacks,
   ): Promise<boolean> {
     const entries = await this.matchingEntries(input);
     let recovered = false;
     for (const entry of entries) {
       const existing = this.replaySingleFlights.get(entry.key);
-      const replay = existing ?? this.replayEntry(entry, callbacks);
+      const replay = existing ?? this.replayEntry(entry, input);
       if (!existing) this.replaySingleFlights.set(entry.key, replay);
       if (await replay) recovered = true;
     }
@@ -486,7 +597,8 @@ export class FinalizationRecovery {
   }
 
   async health(): Promise<FinalizationRecoveryHealth> {
-    if (!this.store) {
+    const store = this.getStore();
+    if (!store) {
       return {
         available: false,
         closed: false,
@@ -495,7 +607,7 @@ export class FinalizationRecovery {
         livePayloadBytes: 0,
       };
     }
-    return this.store.health();
+    return store.health();
   }
 
   private async transition(
@@ -503,9 +615,10 @@ export class FinalizationRecovery {
     state: 'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED',
     reason?: string,
   ): Promise<boolean> {
-    if (!this.store) return false;
+    const store = this.getStore();
+    if (!store) return false;
     try {
-      return await this.store.transition(entry.key, state, reason);
+      return await store.transition(entry.key, state, reason);
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `
@@ -517,11 +630,11 @@ export class FinalizationRecovery {
 
   private replayEntry(
     entry: FinalizationRecoveryEntry,
-    callbacks: FinalizationRecoveryReplayCallbacks,
+    input: FinalizationRecoveryReplayInput,
   ): Promise<boolean> {
     const replay = (async () => {
       try {
-        const candidate = callbacks.decode(entry);
+        const candidate = this.decodeEntry(entry);
         if (!candidate) return false;
 
         let outcome: FinalizationRecoveryApplyOutcome;
@@ -555,9 +668,27 @@ export class FinalizationRecovery {
             );
             return false;
           }
-          outcome = await callbacks.applyVerified({ entry, candidate, evidence });
+          const replayOutcome = await this.materializer.replayVerified({
+            replay: input,
+            entry,
+            candidate,
+            evidence,
+          });
+          outcome = replayOutcome === 'promoted'
+            ? 'applied'
+            : replayOutcome === 'already-confirmed' || replayOutcome === 'stale-target'
+              ? 'already-confirmed'
+              : 'deferred';
         } else {
-          outcome = await callbacks.applyReceived({ entry, candidate });
+          outcome = await this.materialize(
+            {
+              rawMessage: entry.rawMessage,
+              contextGraphId: entry.contextGraphId,
+              ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+              candidate,
+            },
+            { kind: 'recovery', entry },
+          );
         }
 
         if (outcome === 'deferred') {
@@ -566,7 +697,7 @@ export class FinalizationRecovery {
         }
         return this.settleEntry(entry, outcome);
       } catch (error) {
-        if (!callbacks.isRetryableError(error)) throw error;
+        if (!this.materializer.isRetryableError(error)) throw error;
         this.log.info(
           `Finalization recovery materialization remains busy for ${entry.ual}; `
             + 'keeping inbox entry',
@@ -580,6 +711,158 @@ export class FinalizationRecovery {
       }
     });
     return replay;
+  }
+
+  private decodeEntry(
+    entry: FinalizationRecoveryEntry,
+  ): ParsedGraphScopedFinalization | undefined {
+    try {
+      const message = decodeFinalizationMessage(entry.rawMessage);
+      if (message.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) return undefined;
+      const admission = parseGraphScopedFinalization(message, entry.contextGraphId);
+      return admission.ok ? admission.value : undefined;
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery envelope decode failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  private async verifyContextGraphBinding(
+    candidate: ParsedGraphScopedFinalization,
+    prepared: Prepared,
+  ): Promise<boolean> {
+    const localTopicBinding = prepared.localTopicOnChainContextGraphId;
+    if (!localTopicBinding) return false;
+    const wireTarget = candidate.msg.targetContextGraphId;
+    if (wireTarget && !sameBigIntValue(wireTarget, localTopicBinding)) {
+      this.log.warn(
+        `Finalization recovery wire context graph ${wireTarget} disagrees with `
+          + `local topic mapping ${localTopicBinding} for ${candidate.scope.ual}`,
+      );
+      return false;
+    }
+    if (
+      !this.chain
+      || this.chain.chainId === 'none'
+      || !this.chain.getKAContextGraphId
+    ) return false;
+    try {
+      const bound = await this.chain.getKAContextGraphId(candidate.kaId);
+      return bound !== null
+        && bound !== undefined
+        && sameBigIntValue(bound, localTopicBinding);
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery context-graph binding is pending for KA ${candidate.kaId}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  private async verifyLegacy(
+    candidate: ParsedGraphScopedFinalization,
+    onChainContextGraphId?: string,
+  ): Promise<{ verified: boolean; authorAddress?: string; txIndex?: number }> {
+    if (!this.chain || this.chain.chainId === 'none' || candidate.blockNumber <= 0) {
+      return { verified: false };
+    }
+    try {
+      const filter: EventFilter = {
+        eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
+        fromBlock: candidate.blockNumber,
+        toBlock: candidate.blockNumber,
+      };
+      let authorAddress: string | undefined;
+      let txIndex: number | undefined;
+      let batchVerified = false;
+      for await (const event of this.chain.listenForEvents(filter)) {
+        if (event.blockNumber !== candidate.blockNumber) continue;
+        const eventTxHash = event.data['txHash'];
+        if (
+          typeof eventTxHash !== 'string'
+          || eventTxHash.toLowerCase() !== candidate.msg.txHash.toLowerCase()
+        ) continue;
+        const eventMerkle = typeof event.data['merkleRoot'] === 'string'
+          ? ethers.getBytes(event.data['merkleRoot'])
+          : event.data['merkleRoot'] as Uint8Array;
+        const publisher = String(event.data['publisherAddress'] ?? '');
+        const startKAId = BigInt(event.data['startKAId'] as string ?? '0');
+        const endKAId = BigInt(event.data['endKAId'] as string ?? '0');
+        if (
+          !equalBytes(eventMerkle, candidate.msg.kcMerkleRoot)
+          || publisher.toLowerCase() !== candidate.msg.publisherAddress.toLowerCase()
+          || startKAId !== candidate.startKAId
+          || endKAId !== candidate.endKAId
+        ) continue;
+        batchVerified = true;
+        const author = event.data['author'];
+        if (typeof author === 'string' && author) authorAddress = author;
+        const rawTxIndex = event.data['txIndex'];
+        if (
+          typeof rawTxIndex === 'number'
+          && Number.isSafeInteger(rawTxIndex)
+          && rawTxIndex >= 0
+        ) txIndex = rawTxIndex;
+        break;
+      }
+      if (!batchVerified) return { verified: false };
+      if (!onChainContextGraphId) {
+        return {
+          verified: true,
+          ...(authorAddress ? { authorAddress } : {}),
+          ...(txIndex !== undefined ? { txIndex } : {}),
+        };
+      }
+      if (this.chain.isV10Ready?.()) {
+        return {
+          verified: true,
+          ...(authorAddress ? { authorAddress } : {}),
+          ...(txIndex !== undefined ? { txIndex } : {}),
+        };
+      }
+      try {
+        const scanWindow = 256;
+        const headBlock = this.chain.getBlockNumber
+          ? await this.chain.getBlockNumber()
+          : candidate.blockNumber + scanWindow;
+        const contextGraphFilter: EventFilter = {
+          eventTypes: ['ContextGraphExpanded'],
+          fromBlock: candidate.blockNumber,
+          toBlock: Math.min(candidate.blockNumber + scanWindow, headBlock),
+        };
+        for await (const event of this.chain.listenForEvents(contextGraphFilter)) {
+          const eventContextGraphId = String(event.data['contextGraphId'] ?? '');
+          const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
+          if (
+            eventContextGraphId === onChainContextGraphId
+            && eventBatchId === candidate.batchId
+          ) {
+            return {
+              verified: true,
+              ...(authorAddress ? { authorAddress } : {}),
+              ...(txIndex !== undefined ? { txIndex } : {}),
+            };
+          }
+        }
+        return { verified: false };
+      } catch {
+        return {
+          verified: true,
+          ...(authorAddress ? { authorAddress } : {}),
+          ...(txIndex !== undefined ? { txIndex } : {}),
+        };
+      }
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery legacy verification is pending for `
+          + `${candidate.scope.ual}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { verified: false };
+    }
   }
 
   private async verifyPersistedReceipt(
@@ -602,4 +885,15 @@ export class FinalizationRecovery {
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length
     && left.every((byte, index) => byte === right[index]);
+}
+
+function sameBigIntValue(
+  left: string | number | bigint,
+  right: string | number | bigint,
+): boolean {
+  try {
+    return BigInt(left) === BigInt(right);
+  } catch {
+    return false;
+  }
 }

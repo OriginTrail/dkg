@@ -385,16 +385,20 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     },
   );
 
-  it('awaits asynchronous persistence cleanup before rejecting node startup', async () => {
+  it('awaits finalization inbox cleanup and clears its field before rejecting startup', async () => {
     const failure = new Error('node start failed');
     const cleanup = deferred();
-    const close = vi.fn(() => cleanup.promise);
+    const recoveryClose = vi.fn(() => cleanup.promise);
+    const inventoryClose = vi.fn(async () => {});
     const agent = syntheticAgent();
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
       prepareRfc64PersistenceV1: vi.fn(async () => {
-        agent.rfc64PersistenceV1 = { close };
+        agent.rfc64PersistenceV1 = { close: inventoryClose };
+      }),
+      prepareFinalizationRecoveryStore: vi.fn(async () => {
+        agent.finalizationRecoveryStore = { close: recoveryClose };
       }),
       node: { start: vi.fn(async () => { throw failure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
@@ -406,28 +410,36 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       () => { settled = true; },
       () => { settled = true; },
     );
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(recoveryClose).toHaveBeenCalledOnce());
     await Promise.resolve();
     expect(settled).toBe(false);
-    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.finalizationRecoveryStore).toBeUndefined();
+    expect(inventoryClose).not.toHaveBeenCalled();
 
     cleanup.resolve();
     await expect(start).rejects.toBe(failure);
-    expect(close).toHaveBeenCalledOnce();
+    expect(recoveryClose).toHaveBeenCalledOnce();
+    expect(inventoryClose).toHaveBeenCalledOnce();
+    expect(agent.finalizationRecoveryStore).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });
 
-  it('aggregates asynchronous persistence cleanup failure with node startup failure', async () => {
+  it('aggregates finalization and RFC-64 cleanup failures with startup failure', async () => {
     const startupFailure = new Error('node start failed');
-    const cleanupFailure = new Error('persistence cleanup failed');
-    const close = vi.fn(async () => { throw cleanupFailure; });
+    const recoveryCleanupFailure = new Error('finalization cleanup failed');
+    const inventoryCleanupFailure = new Error('RFC-64 cleanup failed');
+    const recoveryClose = vi.fn(async () => { throw recoveryCleanupFailure; });
+    const inventoryClose = vi.fn(async () => { throw inventoryCleanupFailure; });
     const agent = syntheticAgent();
     Object.assign(agent, {
       started: false,
       coreHostRecordingGeneration: 0,
       prepareRfc64PersistenceV1: vi.fn(async () => {
-        agent.rfc64PersistenceV1 = { close };
+        agent.rfc64PersistenceV1 = { close: inventoryClose };
+      }),
+      prepareFinalizationRecoveryStore: vi.fn(async () => {
+        agent.finalizationRecoveryStore = { close: recoveryClose };
       }),
       node: { start: vi.fn(async () => { throw startupFailure; }) },
       log: { info: vi.fn(), warn: vi.fn() },
@@ -437,9 +449,12 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(rejection).toBeInstanceOf(AggregateError);
     expect((rejection as AggregateError).errors).toEqual([
       startupFailure,
-      cleanupFailure,
+      recoveryCleanupFailure,
+      inventoryCleanupFailure,
     ]);
-    expect(close).toHaveBeenCalledOnce();
+    expect(recoveryClose).toHaveBeenCalledOnce();
+    expect(inventoryClose).toHaveBeenCalledOnce();
+    expect(agent.finalizationRecoveryStore).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
   });

@@ -61,8 +61,72 @@ function canonicalReceipt(message: FinalizationMessageMsg, txIndex = 4) {
   };
 }
 
+function legacyFinalizationChain(
+  txIndex: number | null = 4,
+  overrides: Partial<ChainAdapter> = {},
+): ChainAdapter {
+  const privateMerkleRoot = computePrivateRootV10([{
+    subject: 'urn:asset:secret',
+    predicate: 'urn:predicate:value',
+    object: '"hidden"',
+    graph: '',
+  }]);
+  const privateOnlyMerkleRoot = computePrivateRootV10([{
+    subject: 'urn:asset:private-only',
+    predicate: 'urn:predicate:value',
+    object: '"hidden"',
+    graph: '',
+  }]);
+  if (!privateMerkleRoot || !privateOnlyMerkleRoot) {
+    throw new Error('expected test private commitments');
+  }
+  const standardRoot = computeFlatKCRootV10([
+    { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: '' },
+    { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: '"two"', graph: '' },
+  ], [privateMerkleRoot]);
+  const privateOnlyRoot = computeFlatKCRootV10([], [privateOnlyMerkleRoot]);
+  return {
+    chainId: 'legacy:1',
+    isV10Ready: () => true,
+    listenForEvents: async function* (filter) {
+      if (
+        !filter.eventTypes.includes('KCCreated')
+        && !filter.eventTypes.includes('KnowledgeBatchCreated')
+      ) return;
+      for (const [txHash, merkleRoot] of [
+        [`0x${'ab'.repeat(32)}`, standardRoot],
+        [`0x${'cd'.repeat(32)}`, privateOnlyRoot],
+      ] as const) {
+        yield {
+          blockNumber: 123,
+          data: {
+            txHash,
+            merkleRoot,
+            publisherAddress: PUBLISHER,
+            startKAId: PACKED_KA_ID.toString(),
+            endKAId: PACKED_KA_ID.toString(),
+            author: AUTHOR,
+            ...(txIndex !== null ? { txIndex } : {}),
+          },
+        };
+      }
+    },
+    ...overrides,
+  } as ChainAdapter;
+}
+
 async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): Promise<void> {
   await inbox?.close().catch(() => {});
+}
+
+function recoveryOptions(
+  recoveryStore: FinalizationRecoveryStore,
+  localTopicOnChainContextGraphId = '42',
+) {
+  return {
+    recoveryStore,
+    resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+  };
 }
 
 describe('graph-scoped finalization handler', () => {
@@ -73,14 +137,7 @@ describe('graph-scoped finalization handler', () => {
   beforeEach(() => {
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    handler = new FinalizationHandler(store, undefined);
-    (handler as unknown as {
-      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
-    }).verifyOnChain = async () => ({
-      verified: true,
-      authorAddress: AUTHOR,
-      txIndex: 4,
-    });
+    handler = new FinalizationHandler(store, legacyFinalizationChain());
   });
 
   async function stageGraph(durableAccess?: {
@@ -319,10 +376,7 @@ describe('graph-scoped finalization handler', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-scope-binding-'));
     try {
       const { message, swmGraph, vmGraph } = await stageGraph(undefined, 'named-scope');
-      const scopedHandler = new FinalizationHandler(store, undefined);
-      (scopedHandler as unknown as {
-        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
-      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      const scopedHandler = new FinalizationHandler(store, legacyFinalizationChain());
 
       await scopedHandler.handleFinalizationMessage(encodeFinalizationMessage({
         ...message,
@@ -469,33 +523,18 @@ describe('graph-scoped finalization handler', () => {
   it('resolves an omitted graph-scoped target context graph id by packed KA id', async () => {
     const { message, vmGraph } = await stageGraph();
     const chainLookups: bigint[] = [];
-    let fallbackResolverCalls = 0;
-    const resolvingHandler = new FinalizationHandler(store, {
-      chainId: 'base:84532',
+    let localTopicResolverCalls = 0;
+    const resolvingHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
       getKAContextGraphId: async (kaId) => {
         chainLookups.push(kaId);
         return 42n;
       },
-    } as ChainAdapter, {
+    }), {
       resolveContextGraphOnChainId: async () => {
-        fallbackResolverCalls += 1;
+        localTopicResolverCalls += 1;
         return '99';
       },
     });
-    (resolvingHandler as unknown as {
-      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
-    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
-    const graphScopedApply = (resolvingHandler as unknown as {
-      handleGraphScopedFinalization: (input: { ctxGraphId?: string }) => Promise<unknown>;
-    }).handleGraphScopedFinalization.bind(resolvingHandler);
-    let routedContextGraphId: string | undefined;
-    (resolvingHandler as unknown as {
-      handleGraphScopedFinalization: (input: { ctxGraphId?: string }) => Promise<unknown>;
-    }).handleGraphScopedFinalization = async (input) => {
-      routedContextGraphId = input.ctxGraphId;
-      return graphScopedApply(input);
-    };
-
     await resolvingHandler.handleFinalizationMessage(
       encodeFinalizationMessage({
         ...message,
@@ -506,8 +545,7 @@ describe('graph-scoped finalization handler', () => {
     );
 
     expect(chainLookups).toEqual([PACKED_KA_ID]);
-    expect(fallbackResolverCalls).toBe(0);
-    expect(routedContextGraphId).toBe('42');
+    expect(localTopicResolverCalls).toBe(1);
     expect(await store.countQuads(vmGraph)).toBe(2);
     await expect(store.query(
       `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { `
@@ -517,10 +555,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('keeps the legacy live-path transaction-index fallback without an inbox', async () => {
     const { message, vmGraph } = await stageGraph();
-    const liveHandler = new FinalizationHandler(store, undefined);
-    (liveHandler as unknown as {
-      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex?: number }>;
-    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR });
+    const liveHandler = new FinalizationHandler(store, legacyFinalizationChain(null));
 
     await liveHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -560,7 +595,7 @@ describe('graph-scoped finalization handler', () => {
         },
       } as unknown as ChainAdapter;
       const liveHandler = new FinalizationHandler(store, legacyChain, {
-        recoveryStore: inbox,
+        ...recoveryOptions(inbox),
       });
 
       await liveHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
@@ -578,10 +613,7 @@ describe('graph-scoped finalization handler', () => {
     const query = store.query.bind(store);
     try {
       const { message, vmGraph } = await stageGraph();
-      const retryingHandler = new FinalizationHandler(store, undefined);
-      (retryingHandler as unknown as {
-        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
-      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      const retryingHandler = new FinalizationHandler(store, legacyFinalizationChain());
       let busyReads = 1;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
@@ -641,7 +673,7 @@ describe('graph-scoped finalization handler', () => {
       const pressured = new FinalizationHandler(
         store,
         chain,
-        { recoveryStore: inbox },
+        recoveryOptions(inbox),
       );
 
       const query = store.query.bind(store);
@@ -670,7 +702,7 @@ describe('graph-scoped finalization handler', () => {
       const restarted = new FinalizationHandler(
         store,
         chain,
-        { recoveryStore: inbox },
+        recoveryOptions(inbox),
       );
       const internals = restarted as unknown as {
         verifyChainCgBinding: () => Promise<boolean>;
@@ -759,7 +791,6 @@ describe('graph-scoped finalization handler', () => {
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
       const failingVerifiedStore: FinalizationRecoveryStore = {
-        databasePath: inbox.databasePath,
         get closed() { return inbox!.closed; },
         receive: inbox.receive.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
@@ -770,7 +801,7 @@ describe('graph-scoped finalization handler', () => {
         close: inbox.close.bind(inbox),
       };
       const recoveryHandler = new FinalizationHandler(store, chain, {
-        recoveryStore: failingVerifiedStore,
+        ...recoveryOptions(failingVerifiedStore),
       });
       const createGraph = store.createGraph.bind(store);
       let createGraphCalls = 0;
@@ -805,6 +836,69 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it.each(['capacity', 'write-failure'] as const)(
+    'fails closed at the handler boundary when inbox admission reports %s',
+    async (failureMode) => {
+      const { message, vmGraph } = await stageGraph();
+      let canonicalReceiptCalls = 0;
+      let contextGraphBindingCalls = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getKAContextGraphId: async () => {
+          contextGraphBindingCalls += 1;
+          return 42n;
+        },
+        resolveCanonicalFinalizationReceipt: async () => {
+          canonicalReceiptCalls += 1;
+          return canonicalReceipt(message);
+        },
+      } as ChainAdapter;
+      const rejectedStore: FinalizationRecoveryStore = {
+        closed: false,
+        receive: async () => {
+          if (failureMode === 'write-failure') throw new Error('disk full');
+          return { status: 'capacity' };
+        },
+        markVerified: async () => {
+          throw new Error('markVerified must not run after failed admission');
+        },
+        listForKnowledgeAsset: async () => [],
+        transition: async () => false,
+        recordAttempt: async () => {},
+        health: async () => ({
+          available: true,
+          closed: false,
+          stateCounts: {},
+          livePayloadBytes: 0,
+        }),
+        close: async () => {},
+      };
+      const recoveryHandler = new FinalizationHandler(store, chain, {
+        ...recoveryOptions(rejectedStore),
+      });
+      const query = store.query.bind(store);
+      let materializationReads = 0;
+      store.query = async (sparql, options) => {
+        materializationReads += 1;
+        return query(sparql, options);
+      };
+      try {
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+      } finally {
+        store.query = query;
+      }
+
+      expect(materializationReads).toBe(0);
+      expect(canonicalReceiptCalls).toBe(0);
+      expect(contextGraphBindingCalls).toBe(0);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    },
+  );
+
   it('requires the canonical KA-to-context-graph binding before materialization', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-binding-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -821,7 +915,7 @@ describe('graph-scoped finalization handler', () => {
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
       const recoveryHandler = new FinalizationHandler(store, chain, {
-        recoveryStore: inbox,
+        ...recoveryOptions(inbox),
       });
 
       await recoveryHandler.handleFinalizationMessage(
@@ -852,6 +946,48 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('requires local topic, wire target, and canonical KA binding to agree', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-topic-binding-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const replayedMessage = {
+        ...message,
+        targetContextGraphId: '43',
+      };
+      const chain = {
+        chainId: 'base:84532',
+        getKAContextGraphId: async (kaId: bigint) => {
+          expect(kaId).toBe(PACKED_KA_ID);
+          return 43n;
+        },
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(replayedMessage),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox, '42'),
+      );
+
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(replayedMessage),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(await store.countQuads(vmGraph)).toBe(1);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 1,
+        lastError: 'finalization processing deferred',
+      }]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('retains a terminal recovery record after chain truth supersedes it', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -867,7 +1003,7 @@ describe('graph-scoped finalization handler', () => {
         resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
-      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
       const internals = recoveryHandler as unknown as {
         verifyChainCgBinding: () => Promise<boolean>;
       };
@@ -927,7 +1063,7 @@ describe('graph-scoped finalization handler', () => {
         resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
-      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
       const internals = recoveryHandler as unknown as {
         verifyChainCgBinding: () => Promise<boolean>;
       };
@@ -1017,7 +1153,7 @@ describe('graph-scoped finalization handler', () => {
         },
       } as ChainAdapter;
       inbox = await openSqliteFinalizationRecoveryStore(directory);
-      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
 
       const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
       if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
@@ -1073,7 +1209,7 @@ describe('graph-scoped finalization handler', () => {
       const pressured = new FinalizationHandler(
         store,
         undefined,
-        { recoveryStore: inbox },
+        recoveryOptions(inbox),
       );
       await pressured.handleFinalizationMessage(encodeFinalizationMessage({
         ...message,
@@ -1446,14 +1582,7 @@ describe('graph-scoped finalization handler', () => {
       graph: metaGraph,
     }]);
 
-    const replayHandler = new FinalizationHandler(store, undefined);
-    (replayHandler as unknown as {
-      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
-    }).verifyOnChain = async () => ({
-      verified: true,
-      authorAddress: AUTHOR,
-      txIndex: 4,
-    });
+    const replayHandler = new FinalizationHandler(store, legacyFinalizationChain());
     await replayHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     const repairedTransactionHash = await store.query(
