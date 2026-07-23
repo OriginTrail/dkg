@@ -259,4 +259,106 @@ describe('durable sync control metadata admission', () => {
 
     expect(selectedMeta(data, meta)).toEqual(meta);
   });
+
+  // #1921 — a durable `_meta` subject must be a conforming IRI. A peer can only
+  // reach the unverified system-CG ingest path with a blank-node (or literal)
+  // subject; it has no trustworthy identity, so it is dropped (never persisted,
+  // never skolemized) at the selection chokepoint. The guard sits at the top of
+  // BOTH selector loops, so it fires on every guarded call site.
+  const IRI_SUBJECT = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/50';
+
+  it('drops a forged-integrity blank-node _meta subject on the system-override path (#1921)', () => {
+    // The real attack vector: a blank node bearing an INTEGRITY predicate.
+    // `indexIntegrityMetadata` adds ANY merkleRoot subject to `merkleSubjects`
+    // with no IRI check, so this reaches the merkle/marker admission machinery;
+    // legacy verification rejects it (no rootEntity), routing to the system
+    // override where every non-control row is otherwise admitted. Mirrors the
+    // IRI-subject case "does not let the system-graph override authenticate
+    // malformed legacy controls" (which KEEPS the merkleRoot) — the only
+    // difference is the blank-node subject, which #1921 now drops.
+    const injected = '_:injected';
+    const keptRow = quad(IRI_SUBJECT, `${DKG}status`, '"legit"');
+    const meta = [
+      quad(injected, `${DKG}merkleRoot`, `"${'00'.repeat(32)}"`),
+      quad(injected, `${DKG}status`, '"forged"'),
+      quad(injected, `${DKG}batchId`, integer(999n)),
+      keptRow,
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
+    expect(selection.droppedNonIriSubjects).toBe(3);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
+  });
+
+  it('drops a blank-node _meta subject before the verified merkle/marker admission branch (#1921)', () => {
+    // A blank node bearing a FULLY VERIFIABLE legacy envelope (merkleRoot +
+    // rootEntity over matching data). Verification keys on the rootEntity, not
+    // the KC UAL, so the blank-node subject verifies and would otherwise reach
+    // `selectAdmittedMetadataIndexes`' merkle/marker branch and be persisted
+    // (compare "preserves batch controls bound to a verified legacy envelope").
+    // The loop-top guard drops it first.
+    const root = 'urn:legacy:root';
+    const injected = '_:injected';
+    const data = [quad(root, 'urn:example:value', '"legacy"', CONTEXT_GRAPH)];
+    const merkleRoot = `"${toHex(computeFlatKCRootV10(data, []))}"`;
+    const meta = [
+      quad(injected, `${DKG}merkleRoot`, merkleRoot),
+      quad(injected, `${DKG}rootEntity`, root),
+      quad(injected, `${DKG}batchId`, integer(41n)),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+
+    expect(selection.metaIndexes).toEqual([]);
+    expect(selection.droppedNonIriSubjects).toBe(3);
+    expect(selection.rejected).toBe(0);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
+  });
+
+  it('drops a non-IRI _meta subject on a descriptor-less system page (#1921)', () => {
+    // The :401 no-merkle/no-marker branch: `selectAdmittedMetadataIndexes` runs
+    // with empty admission sets, so every row falls through the descriptive
+    // path. Exercises the third guarded call site's warn wiring.
+    const keptRow = quad(IRI_SUBJECT, `${DKG}status`, '"keep"');
+    const meta = [
+      keptRow,
+      quad('_:injected', `${DKG}status`, '"drop"'),
+      quad('_:injected', `${DKG}label`, '"drop-too"'),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
+    expect(selection.droppedNonIriSubjects).toBe(2);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
+  });
+
+  it('keeps a conforming IRI _meta subject untouched (no #1921 drop)', () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, '1');
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = [quad('urn:verified:entity', 'urn:example:value', '"verified"', assertionGraph)];
+    const meta = generateGraphKnowledgeAssetMetadata({
+      ual: UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(data, []),
+      publisherPeerId: 'verified-publisher',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: data.length,
+      assertionGraph,
+    }, { status: 'tentative' });
+
+    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+
+    expect(selection.droppedNonIriSubjects).toBe(0);
+    expect(selection.logs.every((entry) => !/non-IRI/.test(entry.message))).toBe(true);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual(meta);
+  });
 });
