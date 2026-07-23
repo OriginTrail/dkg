@@ -25,6 +25,7 @@ export {
 } from './triple-store.js';
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  assertSubjectReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
