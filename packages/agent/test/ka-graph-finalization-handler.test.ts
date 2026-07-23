@@ -57,7 +57,7 @@ describe('graph-scoped finalization handler', () => {
   async function stageGraph(durableAccess?: {
     accessPolicy: 'ownerOnly' | 'allowList';
     allowedPeers?: string[];
-  }): Promise<{
+  }, subGraphName?: string): Promise<{
     message: FinalizationMessageMsg;
     swmGraph: string;
     vmGraph: string;
@@ -67,11 +67,13 @@ describe('graph-scoped finalization handler', () => {
       CG,
       MemoryLayer.SharedWorkingMemory,
       scope,
+      subGraphName,
     );
     const vmGraph = knowledgeAssetLayerGraphUri(
       CG,
       MemoryLayer.VerifiableMemory,
       scope,
+      subGraphName,
     );
     const publicQuads: Quad[] = [
       { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: swmGraph },
@@ -107,6 +109,7 @@ describe('graph-scoped finalization handler', () => {
       publisherPeerId: '12D3KooWPublisher',
       accessPolicy: durableAccess?.accessPolicy,
       allowedPeers: durableAccess?.allowedPeers,
+      subGraphName,
     });
     await storeKnowledgeAssetWorkspaceHead({
       store,
@@ -115,6 +118,7 @@ describe('graph-scoped finalization handler', () => {
       shareOperationId: SHARE_ID,
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
+      subGraphName,
     });
 
     return {
@@ -140,6 +144,7 @@ describe('graph-scoped finalization handler', () => {
         publicTripleCount: publicQuads.length,
         privateMerkleRoot,
         privateTripleCount: privateQuads.length,
+        subGraphName,
       },
     };
   }
@@ -274,6 +279,30 @@ describe('graph-scoped finalization handler', () => {
     }), CG, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('does not borrow named-subgraph workspace evidence for a root finalization', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-scope-binding-'));
+    try {
+      const { message, swmGraph, vmGraph } = await stageGraph(undefined, 'named-scope');
+      const journal = new FinalizationRecoveryJournal(directory);
+      const scopedHandler = new FinalizationHandler(store, undefined, { recoveryJournal: journal });
+      (scopedHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+
+      await scopedHandler.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        subGraphName: undefined,
+        operationId: 'root-finalization-cannot-borrow-named-head',
+      }), CG, '12D3KooWPublisher');
+
+      expect(await journal.list()).toEqual([]);
+      expect(await store.countQuads(swmGraph)).toBe(2);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('finalizes a fully private KA without requiring a public root or placeholder triple', async () => {
@@ -470,17 +499,23 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
-  it('recovers original transaction provenance after a pre-verification store timeout and restart', async () => {
+  it('recovers adapter-batch provenance after a pre-verification store timeout and restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     try {
-      const { message, vmGraph } = await stageGraph();
+      const staged = await stageGraph();
+      const message = { ...staged.message, batchId: 42n };
+      const { vmGraph } = staged;
       const wire = encodeFinalizationMessage(message);
       let currentRootCount = 0n;
+      const contextGraphBindingLookups: bigint[] = [];
       const chain = {
         chainId: 'base:84532',
         getLatestMerkleRoot: async () => message.kcMerkleRoot,
         getMerkleRootCount: async () => currentRootCount,
-        getKAContextGraphId: async () => 42n,
+        getKAContextGraphId: async (batchId: bigint) => {
+          contextGraphBindingLookups.push(batchId);
+          return batchId === 42n ? 42n : 43n;
+        },
       } as ChainAdapter;
       const journal = new FinalizationRecoveryJournal(directory);
       const pressured = new FinalizationHandler(
@@ -506,6 +541,8 @@ describe('graph-scoped finalization handler', () => {
         state: 'raw',
         sourcePeerId: '12D3KooWPublisher',
         txHash: message.txHash,
+        kaId: PACKED_KA_ID.toString(),
+        batchId: '42',
       }]);
       store.query = query;
 
@@ -575,6 +612,8 @@ describe('graph-scoped finalization handler', () => {
       )).resolves.toBe('already-confirmed');
       expect(await store.countQuads(vmGraph)).toBe(2);
       expect(await new FinalizationRecoveryJournal(directory).list()).toEqual([]);
+      expect(contextGraphBindingLookups.length).toBeGreaterThan(0);
+      expect(contextGraphBindingLookups.every((batchId) => batchId === 42n)).toBe(true);
       await expect(store.query(
         `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
           + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `

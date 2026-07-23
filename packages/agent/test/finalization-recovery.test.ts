@@ -12,6 +12,7 @@ import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
   parseGraphScopedFinalization,
+  VerifiedGraphScopedFinalizationEvidenceCodec,
 } from '../src/finalization-graph-envelope.js';
 import { FinalizationRecovery } from '../src/finalization-recovery.js';
 import { FinalizationRecoveryJournal } from '../src/finalization-recovery-journal.js';
@@ -76,6 +77,25 @@ describe('graph-scoped finalization recovery admission', () => {
       message({ targetContextGraphId: '' }),
       CONTEXT_GRAPH,
     )).toMatchObject({ ok: true });
+  });
+
+  it('binds verified evidence to the workspace subgraph used for verification', () => {
+    const parsed = parseGraphScopedFinalization(
+      message({ subGraphName: 'named-scope' }),
+      CONTEXT_GRAPH,
+    );
+    if (!parsed.ok) throw new Error(`unexpected admission failure: ${parsed.reason}`);
+    const build = (workspaceSubGraphName: string | undefined) =>
+      VerifiedGraphScopedFinalizationEvidenceCodec.build({
+        candidate: parsed.value,
+        publisherPeerId: '12D3KooWPublisher',
+        accessPolicy: 'ownerOnly',
+        allowedPeers: [],
+        workspaceSubGraphName,
+      });
+
+    expect(() => build(undefined)).toThrow('workspace subgraph does not match');
+    expect(build('named-scope')).toMatchObject({ subGraphName: 'named-scope' });
   });
 
   it('wires the data-directory journal through the production agent factory', async () => {

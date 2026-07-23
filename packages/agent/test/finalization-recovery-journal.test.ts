@@ -29,6 +29,7 @@ function entry(index: number, overrides: Partial<FinalizationRecoveryUpsert> = {
     assertionVersion: '1',
     merkleRoot: `0x${'ab'.repeat(32)}`,
     kaId: String(index),
+    batchId: String(index),
     targetContextGraphId: '129',
     rawMessage: Uint8Array.from([index]),
     ...overrides,
@@ -213,6 +214,26 @@ describe('FinalizationRecoveryJournal', () => {
       ...parsed,
       txIndex: -1,
     })).toThrow('verified evidence has invalid txIndex');
+  });
+
+  it('drops unknown fields from persisted entries before the next save', async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, FINALIZATION_RECOVERY_JOURNAL_FILENAME);
+    const journal = new FinalizationRecoveryJournal(directory);
+    await journal.upsert(entry(1));
+    const document = JSON.parse(await readFile(path, 'utf8')) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    document.entries[0].debugBlob = { shouldNotPersist: true };
+    await writeFile(path, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+
+    const restarted = new FinalizationRecoveryJournal(directory);
+    expect((await restarted.list())[0]).not.toHaveProperty('debugBlob');
+    await restarted.upsert(entry(2));
+    const saved = JSON.parse(await readFile(path, 'utf8')) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    expect(saved.entries[0]).not.toHaveProperty('debugBlob');
   });
 
   it('continues serializing mutations after a queued save fails', async () => {

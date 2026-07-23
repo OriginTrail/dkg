@@ -72,6 +72,7 @@ export interface VerifiedGraphScopedFinalizationEvidence {
 export interface VerifiedGraphScopedFinalizationIdentity {
   ual: string;
   kaId: string;
+  batchId: string;
   merkleRoot: string;
   targetContextGraphId?: string;
 }
@@ -84,6 +85,7 @@ export interface BuildVerifiedGraphScopedFinalizationEvidenceInput {
   authorAddress?: string;
   accessPolicy: GraphScopedAccessPolicy;
   allowedPeers: string[];
+  workspaceSubGraphName: string | undefined;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -140,6 +142,10 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
     input: BuildVerifiedGraphScopedFinalizationEvidenceInput,
   ): VerifiedGraphScopedFinalizationEvidence {
     const { candidate } = input;
+    const messageSubGraphName = candidate.msg.subGraphName || undefined;
+    if (messageSubGraphName !== input.workspaceSubGraphName) {
+      throw new Error('verified evidence workspace subgraph does not match its envelope');
+    }
     return this.parse({
       assertionVersion: candidate.assertionVersion,
       publicTripleCount: candidate.publicTripleCount,
@@ -156,7 +162,7 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
       ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
       accessPolicy: input.accessPolicy,
       allowedPeers: input.allowedPeers,
-      ...(candidate.msg.subGraphName ? { subGraphName: candidate.msg.subGraphName } : {}),
+      ...(input.workspaceSubGraphName ? { subGraphName: input.workspaceSubGraphName } : {}),
     });
   }
 
@@ -208,6 +214,7 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
       : undefined;
     return candidate.scope.ual === identity.ual
       && candidate.kaId.toString() === identity.kaId
+      && candidate.batchId.toString() === identity.batchId
       && candidate.assertionVersion === evidence.assertionVersion
       && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === identity.merkleRoot.toLowerCase()
       && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()

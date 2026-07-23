@@ -1168,6 +1168,7 @@ export class FinalizationHandler {
         ...(verified.authorAddress ? { authorAddress: verified.authorAddress } : {}),
         accessPolicy: verifiedAccess.accessPolicy,
         allowedPeers: verifiedAccess.allowedPeers,
+        workspaceSubGraphName: subGraphName,
       }),
     });
     const materializedVersion = {

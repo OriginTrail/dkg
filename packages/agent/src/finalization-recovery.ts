@@ -113,7 +113,7 @@ export class FinalizationRecovery {
         const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
           this.chain.getLatestMerkleRoot(BigInt(entry.kaId)),
           this.chain.getMerkleRootCount(BigInt(entry.kaId)),
-          this.chain.getKAContextGraphId(BigInt(entry.kaId)),
+          this.chain.getKAContextGraphId(BigInt(entry.batchId)),
         ]);
         if (rootCount > assertionVersion) {
           await this.journal.remove(entry.key);
@@ -162,6 +162,7 @@ export class FinalizationRecovery {
         assertionVersion: candidate.assertionVersion,
         merkleRoot: ethers.hexlify(candidate.msg.kcMerkleRoot),
         kaId: candidate.kaId.toString(),
+        batchId: candidate.batchId.toString(),
         ...(candidate.msg.targetContextGraphId
           ? { targetContextGraphId: candidate.msg.targetContextGraphId }
           : {}),

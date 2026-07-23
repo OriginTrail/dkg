@@ -27,6 +27,7 @@ export interface FinalizationRecoveryEntry {
   assertionVersion: string;
   merkleRoot: string;
   kaId: string;
+  batchId: string;
   targetContextGraphId?: string;
   rawMessageBase64: string;
   verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
@@ -57,6 +58,7 @@ export interface FinalizationRecoveryUpsert {
   assertionVersion: string;
   merkleRoot: string;
   kaId: string;
+  batchId: string;
   targetContextGraphId?: string;
   rawMessage: Uint8Array;
   verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
@@ -106,6 +108,7 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
     || !isString(candidate.assertionVersion)
     || !isString(candidate.merkleRoot)
     || !isString(candidate.kaId)
+    || !isString(candidate.batchId)
     || (candidate.targetContextGraphId !== undefined && !isString(candidate.targetContextGraphId))
     || !isString(candidate.rawMessageBase64)
     || !Number.isSafeInteger(candidate.createdAt)
@@ -113,12 +116,29 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
   ) {
     throw new Error('entry has an invalid shape');
   }
-  const entry = candidate as unknown as FinalizationRecoveryEntry;
-  if (candidate.verifiedEvidence !== undefined) {
-    entry.verifiedEvidence = VerifiedGraphScopedFinalizationEvidenceCodec.parse(
-      candidate.verifiedEvidence,
-    );
-  }
+  const verifiedEvidence = candidate.verifiedEvidence === undefined
+    ? undefined
+    : VerifiedGraphScopedFinalizationEvidenceCodec.parse(candidate.verifiedEvidence);
+  const entry: FinalizationRecoveryEntry = {
+    key: candidate.key,
+    state: candidate.state,
+    chainId: candidate.chainId,
+    contextGraphId: candidate.contextGraphId,
+    ...(candidate.sourcePeerId ? { sourcePeerId: candidate.sourcePeerId } : {}),
+    ual: candidate.ual,
+    txHash: candidate.txHash,
+    assertionVersion: candidate.assertionVersion,
+    merkleRoot: candidate.merkleRoot,
+    kaId: candidate.kaId,
+    batchId: candidate.batchId,
+    ...(candidate.targetContextGraphId
+      ? { targetContextGraphId: candidate.targetContextGraphId }
+      : {}),
+    rawMessageBase64: candidate.rawMessageBase64,
+    ...(verifiedEvidence ? { verifiedEvidence } : {}),
+    createdAt: Number(candidate.createdAt),
+    updatedAt: Number(candidate.updatedAt),
+  };
   if (
     entry.verifiedEvidence !== undefined
     && (
@@ -220,6 +240,7 @@ export class FinalizationRecoveryJournal {
         assertionVersion: input.assertionVersion,
         merkleRoot: input.merkleRoot,
         kaId: input.kaId,
+        batchId: input.batchId,
         ...(input.targetContextGraphId
           ? { targetContextGraphId: input.targetContextGraphId }
           : {}),
