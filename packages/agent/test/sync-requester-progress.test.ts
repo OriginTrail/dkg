@@ -57,7 +57,7 @@ function durableProcessResult() {
   return {
     verifiedData: [] as Quad[],
     verifiedMeta: [] as Quad[],
-    droppedSyncControlTriples: 0,
+    consumedUnpersistedMetaTriples: 0,
     totalFetchedDataQuads: 0,
     totalFetchedMetaQuads: 0,
     rejectedKcs: 0,
@@ -515,7 +515,9 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 3,
+        // Pure-sync-control page: worker aggregates 3 discarded controls into
+        // consumedUnpersistedMetaTriples. Regression guard for the shipped path.
+        consumedUnpersistedMetaTriples: 3,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert,
@@ -556,7 +558,7 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 2,
+        consumedUnpersistedMetaTriples: 2,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert: async () => {},
@@ -569,6 +571,96 @@ describe('sync requester progress accounting', () => {
 
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toEqual([]);
+  });
+
+  it('advances the meta cursor when the whole page is non-IRI subjects dropped at ingest (#1921)', async () => {
+    // All-non-IRI metadata-only page: the worker aggregates every dropped row
+    // into consumedUnpersistedMetaTriples === totalFetchedMetaQuads and no meta
+    // is persisted. The requester must still advance the meta cursor (the rows
+    // were deliberately consumed) or durable sync pins on the same poisoned page.
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-non-iri'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        consumedUnpersistedMetaTriples: 3,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-non-iri:meta', 3]]);
+  });
+
+  it('advances the meta cursor when a mixed page is fully discarded by controls + non-IRI drops (#1921)', async () => {
+    // A mixed all-discarded page (some unverified controls + some non-IRI rows):
+    // the worker sums both reasons into consumedUnpersistedMetaTriples === the
+    // fetched total, so the requester advances the cursor rather than pinning.
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-mixed'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        consumedUnpersistedMetaTriples: 3,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-mixed:meta', 3]]);
   });
 
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {

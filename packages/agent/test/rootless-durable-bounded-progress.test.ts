@@ -148,6 +148,50 @@ describe('bounded rootless durable progress', () => {
     ]);
   });
 
+  it('ignores a non-IRI dkg:partOf poison row and still projects the valid boundary (#1921)', () => {
+    // A peer can attach `_:bad dkg:partOf "<valid-ual>"` to a valid graph-scoped
+    // manifest. Without the bounded planner's #1921 verification-input sanitize,
+    // readIntegrityMetadata's PART_OF scan would invalidate that valid UAL →
+    // planBoundedGraphScopedDurableBatch returns null → timed-out graph-scoped
+    // progress is lost (sync pins). The sanitize keeps non-IRI subjects out of
+    // verification, so the planner still projects the same safe prefix as the
+    // clean case above. Mutation check: remove the iriMetaQuads filter from
+    // planBoundedGraphScopedDurableBatch and this returns null.
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const poison: Quad = {
+      subject: '_:bad',
+      predicate: 'http://dkg.io/ontology/partOf',
+      object: `"${fixtures[0]!.ual}"`,
+      graph: `${CONTEXT_GRAPH_URI}/_meta`,
+    };
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload,
+      ...fixtures[2]!.payload.slice(0, 2),
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      [...meta, poison],
+      0,
+      rawData.length,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(8);
+    expect(plan?.completedGraphCount).toBe(2);
+    expect(plan?.changedDataGraphs).toEqual([
+      fixtures[0]!.graph,
+      fixtures[1]!.graph,
+    ]);
+    expect(plan?.dataQuads).toEqual([
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload,
+    ]);
+  });
+
   it('replays one complete graph when timeout lands exactly on a boundary', () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);

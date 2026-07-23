@@ -171,6 +171,7 @@ function makeContext(options: {
         return {
           verifiedData,
           verifiedMeta,
+          consumedUnpersistedMetaTriples: 0,
           totalFetchedDataQuads: options.processResult?.totalFetchedDataQuads ?? dataQuads.length,
           totalFetchedMetaQuads: options.processResult?.totalFetchedMetaQuads ?? metaQuads.length,
           rejectedKcs: 0,

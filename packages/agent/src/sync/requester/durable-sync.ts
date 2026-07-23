@@ -117,7 +117,13 @@ interface DurableSyncContext {
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     verifiedGraphScopedDataGraphs?: string[];
-    droppedSyncControlTriples?: number;
+    /**
+     * Worker-owned aggregate of meta rows deliberately consumed but not
+     * persisted. REQUIRED (#1921): it is the single checkpoint-advance signal,
+     * so every producer must set it — an optional field silently reading 0
+     * would let the meta cursor pin with no type error.
+     */
+    consumedUnpersistedMetaTriples: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -472,12 +478,20 @@ export async function runDurableSync(
       };
 
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const droppedSyncControlTriples = processed.droppedSyncControlTriples ?? 0;
+      // The worker reports, as ONE reason-agnostic count, how many fetched meta
+      // rows the verifier deliberately consumed but did NOT persist — unverified
+      // sync controls plus non-IRI `_meta` subjects (#1921). A metadata-only page
+      // discarded ENTIRELY this way carries no verifiedMeta, so the meta cursor
+      // must still advance or durable sync pins on the same page. Depending on the
+      // aggregate (not per-reason counters) keeps checkpoint orchestration
+      // decoupled from verifier discard policy; the per-reason counts remain as
+      // verifier-side diagnostics only.
+      const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples;
       const discardedOnlyMetadataResponse = metadataOnlyResponse
         && processed.verifiedData.length === 0
         && processed.verifiedMeta.length === 0
-        && droppedSyncControlTriples > 0
-        && droppedSyncControlTriples === processed.totalFetchedMetaQuads;
+        && consumedUnpersistedMetaTriples > 0
+        && consumedUnpersistedMetaTriples === processed.totalFetchedMetaQuads;
       const updateMetaCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && (

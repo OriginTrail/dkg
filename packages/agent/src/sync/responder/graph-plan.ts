@@ -613,13 +613,16 @@ type MetaOversizedSubjectPolicy = 'byte-fit' | 'fail-loud';
  * partial-metadata loss + a #1788 seal split). Failing loud is strictly better
  * than silent loss here: a byte-budget-negotiating requester never hits this (it
  * uses empty=EOF pagination), and the oversized `_meta` subject itself is only
- * reachable via unverified peer-ingest, fixed at the root by #1921.
+ * reachable via unverified peer-ingest. Closing that SIZE vector at the root is
+ * tracked by #1923 (SyncPagePolicy) — it is orthogonal to #1921's IRI-only
+ * ingest guard, since a peer can inject a valid-IRI subject bearing a giant
+ * literal.
  *
  * Contract: this is a HARD, NON-RETRYABLE failure. The sync responder surfaces it
  * as `outcome:'error'` and re-throws it (it is deliberately NOT wrapped in a
  * retryable error, and NEVER converted to an empty — EOF — body), because a retry
  * cannot make an oversized subject servable to a legacy requester; the only
- * resolutions are a requester upgrade or the #1921 ingest fix. The budget it is
+ * resolutions are a requester upgrade or the #1923 ingest fix. The budget it is
  * checked against is `SYNC_BYTE_BUDGET_RESPONSE_BYTES` (the router read cap minus
  * the frame headroom) — the largest response body guaranteed to fit one transport
  * frame — so a page within it is always sendable and only a genuinely oversized
@@ -636,7 +639,7 @@ export class DurableMetaPageFrameError extends Error {
       + `non-negotiated (legacy) requester: a subject-atomic page of ${params.bytes} bytes `
       + `exceeds the ${params.limit}-byte frame budget. A byte-budget-negotiating requester `
       + `(testnet-canary+) paginates this via empty=EOF; upgrade the requester or reject the `
-      + `oversized _meta subject at ingest (#1921).`,
+      + `oversized _meta subject at ingest (#1923).`,
     );
     this.name = 'DurableMetaPageFrameError';
     this.contextGraphId = params.contextGraphId;
@@ -3795,10 +3798,13 @@ async function readDurableMetaRowsPage(
  * but within a single self-contained window its label — and therefore the
  * `(g, s)` boundary comparison — is consistent. Conforming writers only emit
  * IRI `_meta` subjects (metadata generators build deterministic IRIs; the
- * publisher rejects blank nodes), but a blank-node subject is reachable via the
- * unverified system-CG peer-ingest path, so subject atomicity must cover it too;
- * enforcing the IRI invariant at ingest (defense-in-depth) is tracked
- * separately.
+ * publisher rejects blank nodes). NEW unverified peer ingest now enforces this
+ * IRI invariant at the durable-meta selection (#1921), so it no longer admits a
+ * blank-node subject — but that guard operates on incoming quads only and does
+ * NOT sweep already-persisted data, so a blank-node `_meta` subject written by a
+ * pre-fix peer may still reside in the store. Subject atomicity must therefore
+ * still cover it, and this per-query relabel accommodation stays as
+ * defense-in-depth.
  *
  * `_meta` subjects are small (a seal is 14 quads ≈ a few KB), so this converges
  * in about one read. The returned page is BOTH subject-atomic AND ≤
