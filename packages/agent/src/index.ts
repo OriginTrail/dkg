@@ -306,6 +306,17 @@ export {
 export { mapWithConcurrency } from './map-with-concurrency.js';
 export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
+  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  catchupPriorityForMode,
+  runCatchupPlanesWithPolicy,
+  type CatchupMode,
+  type CatchupPlaneContext,
+  type CatchupPlanePolicyOptions,
+  type CatchupPlanePolicyResult,
+  type CatchupPlaneResult,
+} from './sync/catchup-policy.js';
+export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
   isDurableSyncComplete,
