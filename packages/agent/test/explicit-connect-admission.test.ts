@@ -18,6 +18,9 @@ const PEER_ID_CID = peerIdFromString(PEER_ID).toCID().toString();
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const DIRECT_MULTIADDR = `/ip4/127.0.0.1/tcp/9090/p2p/${PEER_ID}`;
 const DIRECT_MULTIADDR_CID = `/ip4/127.0.0.1/tcp/9090/p2p/${PEER_ID_CID}`;
+const RELAY_MULTIADDR =
+  '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const CIRCUIT_MULTIADDR = `${RELAY_MULTIADDR}/p2p-circuit/p2p/${PEER_ID}`;
 
 function makeAgent(overrides: Record<string, unknown> = {}): any {
   const agent: any = {
@@ -180,5 +183,33 @@ describe('explicit connect network admission', () => {
       expect.objectContaining({ operationName: 'connect' }),
       expect.stringContaining('Already connected'),
     );
+  });
+
+  it('walks an explicit resolver circuit when the target has no public direct address', async () => {
+    const agent = makeAgent({
+      peerResolver: {
+        resolve: vi.fn(async () => [
+          DIRECT_MULTIADDR,
+          CIRCUIT_MULTIADDR,
+        ]),
+      },
+      networkAdmissionCoordinator: admittedCoordinator(PEER_ID),
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).resolves.toBeUndefined();
+
+    expect(peerConnectMocks.connectToMultiaddr).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        kind: 'circuit',
+        multiaddress: CIRCUIT_MULTIADDR,
+        targetPeerId: PEER_ID,
+      }),
+      expect.any(Function),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
   });
 });

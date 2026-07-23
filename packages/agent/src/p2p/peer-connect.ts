@@ -5,7 +5,7 @@ import {
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
-  dial(peer: unknown): Promise<unknown>;
+  dial(peer: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
   peerStore: {
     merge(peer: unknown, update: { multiaddrs: unknown[] }): Promise<void>;
   };
@@ -13,15 +13,28 @@ interface Libp2pLike {
 
 const CONNECT_WAIT_TIMEOUT_MS = 5000;
 const CONNECT_WAIT_INTERVAL_MS = 100;
+const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
 const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
+
+function dialWithOptionalSignal(
+  libp2p: Libp2pLike,
+  target: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return signal
+    ? libp2p.dial(target, { signal })
+    : libp2p.dial(target);
+}
 
 async function waitForPeerConnection(
   libp2p: Libp2pLike,
   peerId: string,
   timeoutMs = CONNECT_WAIT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    if (signal?.aborted) return false;
     const connected = libp2p.getConnections().some((conn) => conn.remotePeer.toString() === peerId);
     if (connected) {
       return true;
@@ -35,6 +48,7 @@ export async function connectToMultiaddr(
   libp2p: Libp2pLike,
   connectTarget: MultiaddrConnectTarget,
   log?: (message: string) => void,
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
@@ -43,9 +57,18 @@ export async function connectToMultiaddr(
   if (connectTarget.kind === 'direct') {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
     const directTargetPeerId = connectTarget.targetPeerId;
-    await libp2p.dial(multiaddr(multiaddress));
+    await dialWithOptionalSignal(
+      libp2p,
+      multiaddr(multiaddress),
+      options?.signal,
+    );
     if (directTargetPeerId) {
-      const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
+      const connected = await waitForPeerConnection(
+        libp2p,
+        directTargetPeerId,
+        CONNECT_WAIT_TIMEOUT_MS,
+        options?.signal,
+      );
       debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directTargetPeerId}`);
       if (!connected) {
         throw new Error(`Direct target peer ${directTargetPeerId} not observed before timeout`);
@@ -57,15 +80,24 @@ export async function connectToMultiaddr(
   const { relayMultiaddress, targetPeerId } = connectTarget;
 
   debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddress} targetPeer=${targetPeerId}`);
-  await libp2p.dial(multiaddr(relayMultiaddress));
+  await dialWithOptionalSignal(
+    libp2p,
+    multiaddr(relayMultiaddress),
+    options?.signal,
+  );
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
   debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
   debugLog?.(`Dialing final circuit target peer: ${targetPeerId}`);
-  await libp2p.dial(targetPid);
-  const connected = await waitForPeerConnection(libp2p, targetPeerId);
+  await dialWithOptionalSignal(libp2p, targetPid, options?.signal);
+  const connected = await waitForPeerConnection(
+    libp2p,
+    targetPeerId,
+    CONNECT_WAIT_TIMEOUT_MS,
+    options?.signal,
+  );
   debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
   if (!connected) {
     throw new Error(`Circuit target peer ${targetPeerId} not observed before timeout`);
@@ -76,6 +108,7 @@ export async function ensurePeerConnected(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,
   peerId: string,
+  configuredRelayPeers: readonly string[] = [],
 ): Promise<void> {
   const existingConnections = libp2p.getConnections()
     .filter((conn) => conn.remotePeer.toString() === peerId);
@@ -91,13 +124,43 @@ export async function ensurePeerConnected(
       await libp2p.dial(pid);
       return;
     } catch {
-      const agent = await discovery.findAgentByPeerId(peerId);
-      if (!agent?.relayAddress) return;
-
       const { multiaddr } = await import('@multiformats/multiaddr');
-      const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${peerId}`);
-      await libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-      await libp2p.dial(pid);
+      const relayCandidates: string[] = [];
+      relayCandidates.push(
+        ...configuredRelayPeers.slice(0, MAX_CONFIGURED_RELAY_FALLBACKS),
+      );
+      try {
+        const agent = await discovery.findAgentByPeerId(peerId);
+        if (agent?.relayAddress) relayCandidates.push(agent.relayAddress);
+      } catch {
+        // A missing or overloaded agents-CG must not suppress the
+        // operator-configured relay fallback below.
+      }
+      const seen = new Set<string>();
+      for (const rawRelay of relayCandidates) {
+        const relay = rawRelay.replace(/\/+$/, '');
+        if (
+          seen.has(relay) ||
+          relay.includes('/p2p-circuit') ||
+          !/\/p2p\/[^/]+$/.test(relay)
+        ) {
+          continue;
+        }
+        seen.add(relay);
+        try {
+          const circuitAddr = multiaddr(`${relay}/p2p-circuit/p2p/${peerId}`);
+          await libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+          await libp2p.dial(multiaddr(relay), {
+            signal: AbortSignal.timeout(CONNECT_WAIT_TIMEOUT_MS),
+          });
+          await libp2p.dial(pid, {
+            signal: AbortSignal.timeout(CONNECT_WAIT_TIMEOUT_MS),
+          });
+          return;
+        } catch {
+          // Try the next bounded operator-configured relay.
+        }
+      }
     }
   } catch {
     // Non-fatal — peer may be unreachable.

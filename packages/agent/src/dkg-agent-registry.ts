@@ -93,6 +93,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  isPublicLikeAddress,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
@@ -153,6 +154,7 @@ import {
 import {
   MultiaddrPeerTargetParseError,
   parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget,
+  parseMultiaddrConnectTarget,
 } from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
@@ -1998,11 +2000,43 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     this.log.info(ctx, `Resolved ${peerIdStr} → ${addrs.length} addr(s); dialling...`);
 
-    // peerStore is already primed by the resolver. dial(peerId) finds
-    // the addresses there and goes — same AbortSignal so the overall
-    // budget is honoured end-to-end.
+    // Prefer explicit circuits for a relayed-only target. libp2p's bare
+    // peer-id dial can collapse several circuit candidates to one stale
+    // address; walking the resolver's ordered candidates preserves the
+    // configured-relay fallback proved by the live RFC-64 cold-edge test.
+    const hasPublicDirect = addrs.some(
+      (addr) => !addr.includes('/p2p-circuit') && isPublicLikeAddress(addr),
+    );
+    const circuitAddrs = addrs.filter((addr) => addr.includes('/p2p-circuit'));
+    let connectedViaExplicitCircuit = false;
+    let lastCircuitError: unknown;
+    if (!hasPublicDirect) {
+      for (const circuitAddr of circuitAddrs) {
+        if (signal.aborted) break;
+        try {
+          const target = parseMultiaddrConnectTarget(circuitAddr);
+          if (target.targetPeerId !== peerIdStr) continue;
+          await connectToMultiaddr(
+            this.node.libp2p as any,
+            target,
+            (message) => this.log.info(ctx, message),
+            { signal },
+          );
+          connectedViaExplicitCircuit = true;
+          break;
+        } catch (err) {
+          lastCircuitError = err;
+        }
+      }
+    }
+
+    // peerStore is already primed by the resolver. Keep the legacy bare
+    // peer-id dial for public-direct targets and as a final fallback if every
+    // explicit circuit failed. The same AbortSignal bounds the full attempt.
     try {
-      await this.node.libp2p.dial(peerId, { signal });
+      if (!connectedViaExplicitCircuit) {
+        await this.node.libp2p.dial(peerId, { signal });
+      }
     } catch (err: any) {
       // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
       // covers BOTH resolution and dial. If most of the budget went
@@ -2029,7 +2063,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
         (error as any).code = 'CONNECT_TIMEOUT';
         throw error;
       }
-      const error = new Error(`DIAL_FAILED: ${err?.message ?? String(err)}`);
+      const finalDialError = lastCircuitError ?? err;
+      const error = new Error(
+        `DIAL_FAILED: ${finalDialError instanceof Error ? finalDialError.message : String(finalDialError)}`,
+      );
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }

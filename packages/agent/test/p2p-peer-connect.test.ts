@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
-import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
+import {
+  connectToMultiaddr,
+  ensurePeerConnected,
+  primeCatchupConnections,
+} from '../src/p2p/peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -126,5 +130,63 @@ describe('primeCatchupConnections', () => {
     expect(merge.calls).toHaveLength(2);
     expect(dial.calls).toHaveLength(2);
     expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
+  });
+});
+
+describe('ensurePeerConnected', () => {
+  it('falls back to operator-configured relays when discovery has no target profile', async () => {
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const dial = recorder(async (target: any) => {
+      if (target.toString() === targetPeerId && dial.calls.length === 1) {
+        throw new Error('private DHT addresses are unreachable');
+      }
+      return undefined;
+    });
+    const merge = recorder(async () => undefined);
+
+    await ensurePeerConnected({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge },
+    }, {
+      findAgentByPeerId: async () => null,
+    } as any, targetPeerId, [relayAddress]);
+
+    expect(dial.calls.map(([target]) => target.toString())).toEqual([
+      targetPeerId,
+      relayAddress,
+      targetPeerId,
+    ]);
+    expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([
+      `${relayAddress}/p2p-circuit/p2p/${targetPeerId}`,
+    ]);
+  });
+
+  it('continues to configured relays when agent-directory lookup throws', async () => {
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const dial = recorder(async (target: any) => {
+      if (target.toString() === targetPeerId && dial.calls.length === 1) {
+        throw new Error('no known usable route');
+      }
+      return undefined;
+    });
+
+    await ensurePeerConnected({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, {
+      findAgentByPeerId: async () => {
+        throw new Error('agents store overloaded');
+      },
+    } as any, targetPeerId, [relayAddress]);
+
+    expect(dial.calls.map(([target]) => target.toString())).toEqual([
+      targetPeerId,
+      relayAddress,
+      targetPeerId,
+    ]);
   });
 });
