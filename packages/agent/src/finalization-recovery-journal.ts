@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { VerifiedGraphScopedFinalizationEvidence } from './finalization-graph-envelope.js';
 
 export const FINALIZATION_RECOVERY_JOURNAL_FILENAME = 'pending-finalizations.json';
 
@@ -25,6 +26,7 @@ export interface FinalizationRecoveryEntry {
   kaId: string;
   targetContextGraphId?: string;
   rawMessageBase64: string;
+  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
   createdAt: number;
   updatedAt: number;
 }
@@ -54,6 +56,7 @@ export interface FinalizationRecoveryUpsert {
   kaId: string;
   targetContextGraphId?: string;
   rawMessage: Uint8Array;
+  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
 }
 
 export class FinalizationRecoveryJournalCorruptError extends Error {
@@ -86,6 +89,42 @@ function isString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+function parseVerifiedEvidence(value: unknown): VerifiedGraphScopedFinalizationEvidence {
+  if (!value || typeof value !== 'object') throw new Error('verified evidence is not an object');
+  const evidence = value as Record<string, unknown>;
+  const allowedPeers = evidence.allowedPeers;
+  if (
+    !isString(evidence.assertionVersion)
+    || !Number.isSafeInteger(evidence.publicTripleCount)
+    || Number(evidence.publicTripleCount) < 0
+    || !Number.isSafeInteger(evidence.privateTripleCount)
+    || Number(evidence.privateTripleCount) < 0
+    || (Number(evidence.publicTripleCount) === 0 && Number(evidence.privateTripleCount) === 0)
+    || (evidence.privateMerkleRoot !== undefined && !isString(evidence.privateMerkleRoot))
+    || (evidence.publicQuadsDigest !== undefined && !isString(evidence.publicQuadsDigest))
+    || !isString(evidence.publisherPeerId)
+    || !isString(evidence.publisherAddress)
+    || !isString(evidence.transactionHash)
+    || !Number.isSafeInteger(evidence.blockNumber)
+    || Number(evidence.blockNumber) < 0
+    || !Number.isSafeInteger(evidence.txIndex)
+    || Number(evidence.txIndex) < 0
+    || (evidence.authorAddress !== undefined && !isString(evidence.authorAddress))
+    || (evidence.accessPolicy !== 'public'
+      && evidence.accessPolicy !== 'ownerOnly'
+      && evidence.accessPolicy !== 'allowList')
+    || !Array.isArray(allowedPeers)
+    || allowedPeers.some((peer) => !isString(peer))
+    || new Set(allowedPeers).size !== allowedPeers.length
+    || (evidence.accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (evidence.accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    || (evidence.subGraphName !== undefined && !isString(evidence.subGraphName))
+  ) {
+    throw new Error('verified evidence has an invalid shape');
+  }
+  return evidence as unknown as VerifiedGraphScopedFinalizationEvidence;
+}
+
 function parseEntry(value: unknown): FinalizationRecoveryEntry {
   if (!value || typeof value !== 'object') throw new Error('entry is not an object');
   const candidate = value as Record<string, unknown>;
@@ -108,6 +147,17 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
     throw new Error('entry has an invalid shape');
   }
   const entry = candidate as unknown as FinalizationRecoveryEntry;
+  if (candidate.verifiedEvidence !== undefined) {
+    entry.verifiedEvidence = parseVerifiedEvidence(candidate.verifiedEvidence);
+  }
+  if (
+    entry.verifiedEvidence !== undefined
+    && (
+      entry.state !== 'verified'
+      || entry.verifiedEvidence.assertionVersion !== entry.assertionVersion
+      || entry.verifiedEvidence.transactionHash.toLowerCase() !== entry.txHash.toLowerCase()
+    )
+  ) throw new Error('verified evidence does not match entry identity');
   if (entry.key !== finalizationRecoveryEntryKey(entry)) throw new Error('entry key does not match identity');
   const canonicalBase64 = Buffer.from(entry.rawMessageBase64, 'base64').toString('base64');
   if (canonicalBase64 !== entry.rawMessageBase64) throw new Error('entry envelope is not canonical base64');
@@ -116,8 +166,9 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
 
 /**
  * Bounded receiver-local persistence for provenance-bearing V2 finalization
- * envelopes. Journal state is durability evidence only; callers must replay the
- * original envelope through all normal chain, access, and content validation.
+ * envelopes. Raw entries replay through normal admission; verified entries may
+ * additionally carry immutable receipt and assertion-head evidence, but callers
+ * must still gate them against current chain truth and exact VM/SWM content.
  */
 export class FinalizationRecoveryJournal {
   readonly filePath: string;
@@ -174,6 +225,13 @@ export class FinalizationRecoveryJournal {
       if (existing && existing.rawMessageBase64 !== rawMessageBase64) {
         return { changed: false, value: false };
       }
+      if (
+        existing?.verifiedEvidence
+        && input.verifiedEvidence
+        && JSON.stringify(existing.verifiedEvidence) !== JSON.stringify(input.verifiedEvidence)
+      ) {
+        return { changed: false, value: false };
+      }
       const next: FinalizationRecoveryEntry = {
         key,
         state: existing?.state === 'verified' ? 'verified' : input.state,
@@ -191,6 +249,9 @@ export class FinalizationRecoveryJournal {
           ? { targetContextGraphId: input.targetContextGraphId }
           : {}),
         rawMessageBase64,
+        ...(existing?.verifiedEvidence || input.verifiedEvidence
+          ? { verifiedEvidence: existing?.verifiedEvidence ?? input.verifiedEvidence }
+          : {}),
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };

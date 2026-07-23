@@ -71,15 +71,19 @@ import {
 } from './finalization-lifecycle-logger.js';
 import {
   FinalizationRecoveryJournal,
+  type FinalizationRecoveryEntry,
 } from './finalization-recovery-journal.js';
 import {
   FinalizationRecovery,
-  parseGraphScopedFinalization,
   type FinalizationRecoveryApplyOutcome,
+} from './finalization-recovery.js';
+import {
+  parseGraphScopedFinalization,
   type GraphScopedFinalizationAdmission,
   type GraphScopedAccessPolicy,
   type ParsedGraphScopedFinalization,
-} from './finalization-recovery.js';
+  type VerifiedGraphScopedFinalizationEvidence,
+} from './finalization-graph-envelope.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -196,13 +200,7 @@ type GraphScopedMaterializationEnvelope = Pick<
 >;
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
-interface TrustedGraphScopedAssertionEvidence extends GraphScopedMaterializationEnvelope {
-  assertionVersion: string;
-  publicQuadsDigest?: string;
-  transactionHash: string;
-  accessPolicy: GraphScopedAccessPolicy;
-  allowedPeers: string[];
-}
+type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
 
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
@@ -320,7 +318,20 @@ interface DecodedFinalizationEnvelope {
   graphAdmission?: GraphScopedFinalizationAdmission;
 }
 
-class FinalizationHandlerCore {
+interface ChainReconciledKCInput {
+  contextGraphId: string;
+  onChainCgId: string;
+  ual: string;
+  merkleRoot: Uint8Array;
+  publisherAddress: string;
+  kaId: bigint;
+  versionBlock: number;
+  authorAddress?: string;
+  subGraphName?: string;
+  trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+}
+
+export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly eventBus: EventBus | undefined;
@@ -349,12 +360,39 @@ class FinalizationHandlerCore {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  /** Equivalent durable replay attempts share one handler-owned promise. */
+  private readonly recoveryReplaySingleFlights = new Map<string, Promise<boolean>>();
 
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    options: FinalizationHandlerOptions = {},
+    options?: FinalizationHandlerOptions,
+  );
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    eventBus?: EventBus,
+    resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    lifecycleLogOptions?: FinalizationLifecycleLogOptions,
+    recoveryJournal?: FinalizationRecoveryJournal,
+  );
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    optionsOrEventBus?: FinalizationHandlerOptions | EventBus,
+    legacyResolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    legacyMarkContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    legacyLifecycleLogOptions?: FinalizationLifecycleLogOptions,
+    legacyRecoveryJournal?: FinalizationRecoveryJournal,
   ) {
+    const options = normalizeFinalizationHandlerOptions(
+      optionsOrEventBus,
+      legacyResolveContextGraphOnChainId,
+      legacyMarkContextGraphMetaDirtyFromQuads,
+      legacyLifecycleLogOptions,
+      legacyRecoveryJournal,
+    );
     this.store = store;
     this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
@@ -365,12 +403,6 @@ class FinalizationHandlerCore {
     this.recovery = new FinalizationRecovery(
       options.recoveryJournal,
       chain,
-      (rawMessage, contextGraphId, sourcePeerId) => {
-        const envelope = this.decodeFinalizationEnvelope(rawMessage, contextGraphId);
-        return envelope
-          ? this.processFinalizationEnvelope(envelope, contextGraphId, sourcePeerId)
-          : Promise.resolve('deferred');
-      },
       {
         info: (message) => this.log.info(createOperationContext('system'), message),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
@@ -449,6 +481,109 @@ class FinalizationHandlerCore {
       }
       return undefined;
     }
+  }
+
+  private async replayMatchingRecoveryEntries(
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const entries = await this.recovery.matchingEntries({
+      chainId: this.chain?.chainId ?? 'none',
+      contextGraphId: input.contextGraphId,
+      onChainCgId: input.onChainCgId,
+      ual: input.ual,
+      merkleRoot: ethers.hexlify(input.merkleRoot),
+      kaId: input.kaId.toString(),
+    });
+    let recovered = false;
+    for (const entry of entries) {
+      const existing = this.recoveryReplaySingleFlights.get(entry.key);
+      const replay = existing ?? this.replayRecoveryEntry(entry, input, ctx);
+      if (!existing) this.recoveryReplaySingleFlights.set(entry.key, replay);
+      if (await replay) recovered = true;
+    }
+    return recovered;
+  }
+
+  private replayRecoveryEntry(
+    entry: FinalizationRecoveryEntry,
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const replay = (async () => {
+      try {
+        let outcome: FinalizationRecoveryApplyOutcome = 'deferred';
+        const envelope = this.decodeFinalizationEnvelope(
+          Buffer.from(entry.rawMessageBase64, 'base64'),
+          entry.contextGraphId,
+        );
+        if (!envelope) return false;
+        if (entry.state === 'verified' && entry.verifiedEvidence) {
+          const evidence = entry.verifiedEvidence;
+          if (
+            !envelope.graphAdmission?.ok
+            || !this.verifiedRecoveryEvidenceMatchesEnvelope(entry, evidence, envelope.graphAdmission.value)
+          ) {
+            this.log.warn(ctx, `Finalization recovery evidence does not match its envelope for ${entry.ual}`);
+            return false;
+          }
+          const reconcileOutcome = await this.reconcileGraphScopedKC({
+            contextGraphId: input.contextGraphId,
+            ual: input.ual,
+            merkleRoot: input.merkleRoot,
+            publisherAddress: evidence.publisherAddress,
+            kaId: input.kaId,
+            versionBlock: evidence.blockNumber,
+            ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
+            ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
+            trustedAssertionEvidence: evidence,
+          }, ctx);
+          outcome = reconcileOutcome === 'promoted'
+            ? 'applied'
+            : reconcileOutcome === 'already-confirmed' || reconcileOutcome === 'stale-target'
+              ? 'already-confirmed'
+              : 'deferred';
+        } else {
+          outcome = await this.processFinalizationEnvelope(
+            envelope,
+            entry.contextGraphId,
+            entry.sourcePeerId,
+          );
+        }
+        return this.recovery.settleEntry(entry, outcome);
+      } catch (error) {
+        if (!(error instanceof StoreSchedulerBusyError)) throw error;
+        this.log.info(ctx, `Finalization recovery store remains busy for ${entry.ual}; keeping journal entry`);
+        return false;
+      }
+    })().finally(() => {
+      if (this.recoveryReplaySingleFlights.get(entry.key) === replay) {
+        this.recoveryReplaySingleFlights.delete(entry.key);
+      }
+    });
+    return replay;
+  }
+
+  private verifiedRecoveryEvidenceMatchesEnvelope(
+    entry: FinalizationRecoveryEntry,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    candidate: ParsedGraphScopedFinalization,
+  ): boolean {
+    const messagePrivateRoot = candidate.privateMerkleRoot
+      ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
+      : undefined;
+    return candidate.scope.ual === entry.ual
+      && candidate.kaId.toString() === entry.kaId
+      && candidate.assertionVersion === evidence.assertionVersion
+      && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === entry.merkleRoot.toLowerCase()
+      && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
+      && candidate.msg.publisherAddress.toLowerCase() === evidence.publisherAddress.toLowerCase()
+      && candidate.blockNumber === evidence.blockNumber
+      && candidate.publicTripleCount === evidence.publicTripleCount
+      && candidate.privateTripleCount === evidence.privateTripleCount
+      && messagePrivateRoot === evidence.privateMerkleRoot?.toLowerCase()
+      && (candidate.msg.subGraphName || undefined) === evidence.subGraphName
+      && (candidate.msg.targetContextGraphId || undefined) === entry.targetContextGraphId;
   }
 
   private async processFinalizationEnvelope(
@@ -588,9 +723,10 @@ class FinalizationHandlerCore {
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
         : `did:dkg:context-graph:${contextGraphId}/_meta`;
       if (isGraphScoped) {
+        if (!graphAdmission?.ok) return 'deferred';
         const graphOutcome = await this.handleGraphScopedFinalization({
           rawMessage,
-          candidate: graphAdmission!.value,
+          candidate: graphAdmission.value,
           contextGraphId,
           ctxGraphId,
           subGraphName,
@@ -976,22 +1112,38 @@ class FinalizationHandlerCore {
       this.log.info(ctx, `Finalization: on-chain verification pending for graph-scoped KA ${scope.ual}`);
       return 'deferred';
     }
+    const verifiedAccess = resolveGraphScopedAccessEnvelope(
+      head,
+      requestedAccessPolicy,
+      requestedAllowedPeers,
+    );
     await this.recovery.recordVerified({
       rawMessage,
       contextGraphId,
       ...(sourcePeerId ? { sourcePeerId } : {}),
       candidate: parsed,
+      verifiedEvidence: {
+        assertionVersion,
+        publicTripleCount,
+        ...(privateMerkleRoot ? { privateMerkleRoot: ethers.hexlify(privateMerkleRoot) } : {}),
+        privateTripleCount,
+        ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
+        publisherPeerId: head.publisherPeerId,
+        publisherAddress: msg.publisherAddress,
+        transactionHash: msg.txHash,
+        blockNumber,
+        txIndex: verified.txIndex ?? 0,
+        ...(verified.authorAddress ? { authorAddress: verified.authorAddress } : {}),
+        accessPolicy: verifiedAccess.accessPolicy,
+        allowedPeers: verifiedAccess.allowedPeers,
+        ...(subGraphName ? { subGraphName } : {}),
+      },
     });
     const materializedVersion = {
       blockNumber,
       txIndex: verified.txIndex ?? 0,
     };
     if (vmVerification.status === 'verified') {
-      const access = resolveGraphScopedAccessEnvelope(
-        head,
-        requestedAccessPolicy,
-        requestedAllowedPeers,
-      );
       const metadataState = await this.graphScopedMetadataState({
         contextGraphId,
         scope,
@@ -1000,8 +1152,8 @@ class FinalizationHandlerCore {
         batchId,
         expectedTxHash: msg.txHash,
         materializedVersion,
-        accessPolicy: access.accessPolicy,
-        allowedPeers: access.allowedPeers,
+        accessPolicy: verifiedAccess.accessPolicy,
+        allowedPeers: verifiedAccess.allowedPeers,
         authorAddress: verified.authorAddress,
         subGraphName,
       });
@@ -1024,8 +1176,8 @@ class FinalizationHandlerCore {
       batchId,
       authorAddress: verified.authorAddress,
       materializedVersion,
-      accessPolicy: requestedAccessPolicy,
-      allowedPeers: requestedAllowedPeers,
+      accessPolicy: verifiedAccess.accessPolicy,
+      allowedPeers: verifiedAccess.allowedPeers,
       subGraphName,
       source: 'finalization',
       contentAlreadyMaterialized: vmVerification.status === 'verified',
@@ -1255,6 +1407,12 @@ class FinalizationHandlerCore {
           allowedPeers: [...trustedAssertionEvidence.allowedPeers],
         }
       : workspaceHead!;
+    const evidencePublisherAddress = trustedAssertionEvidence?.publisherAddress ?? publisherAddress;
+    const evidenceAuthorAddress = trustedAssertionEvidence?.authorAddress ?? authorAddress;
+    const evidenceBlockNumber = trustedAssertionEvidence?.blockNumber ?? versionBlock;
+    const materializedVersion = trustedAssertionEvidence
+      ? { blockNumber: trustedAssertionEvidence.blockNumber, txIndex: trustedAssertionEvidence.txIndex }
+      : { blockNumber: versionBlock, txIndex: 0 };
     const preserveNewerWorkspaceLifecycle = trustedAssertionEvidence !== undefined
       && workspaceHead !== undefined
       && BigInt(workspaceHead.assertionVersion)
@@ -1294,7 +1452,6 @@ class FinalizationHandlerCore {
       subGraphName,
     });
     if (vmVerification.status === 'verified') {
-      const materializedVersion = { blockNumber: versionBlock, txIndex: 0 };
       const access = resolveGraphScopedAccessEnvelope(
         head,
         trustedAssertionEvidence?.accessPolicy,
@@ -1309,7 +1466,7 @@ class FinalizationHandlerCore {
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
-        authorAddress,
+        authorAddress: evidenceAuthorAddress,
         subGraphName,
       });
       if (metadataState === 'matching') {
@@ -1365,11 +1522,11 @@ class FinalizationHandlerCore {
         head,
         privateMerkleRoot,
         computedMerkleRoot: vmVerification.merkleRoot,
-        publisherAddress,
+        publisherAddress: evidencePublisherAddress,
         txHash: trustedAssertionEvidence.transactionHash,
-        blockNumber: versionBlock,
+        blockNumber: evidenceBlockNumber,
         batchId: kaId,
-        authorAddress,
+        authorAddress: evidenceAuthorAddress,
         materializedVersion,
         accessPolicy: trustedAssertionEvidence?.accessPolicy,
         allowedPeers: trustedAssertionEvidence?.allowedPeers,
@@ -1445,12 +1602,12 @@ class FinalizationHandlerCore {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      publisherAddress,
+      publisherAddress: evidencePublisherAddress,
       txHash: trustedAssertionEvidence.transactionHash,
-      blockNumber: versionBlock,
+      blockNumber: evidenceBlockNumber,
       batchId: kaId,
-      authorAddress,
-      materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+      authorAddress: evidenceAuthorAddress,
+      materializedVersion,
       accessPolicy: trustedAssertionEvidence?.accessPolicy,
       allowedPeers: trustedAssertionEvidence?.allowedPeers,
       subGraphName,
@@ -2365,24 +2522,7 @@ class FinalizationHandlerCore {
    *                            reorg / no chain wired); caller leaves cursor.
    *   - `'stale-target'`    — a newer update is already materialised.
    */
-  async handleChainReconciledKC(input: {
-    /** Local CG id (topic/name), e.g. the value in `subscribedContextGraphs`. */
-    contextGraphId: string;
-    /** On-chain numeric CG id as a string. Required — drives the binding check + per-cgId meta routing. */
-    onChainCgId: string;
-    ual: string;
-    merkleRoot: Uint8Array;
-    publisherAddress: string;
-    kaId: bigint;
-    /** Chain head block at reconcile time — stamped as the materialization version. */
-    versionBlock: number;
-    /** Optional EIP-712 author recovered from chain (KnowledgeAssetCreated.author). */
-    authorAddress?: string;
-    /** Optional sub-graph the publish targeted (defaults to root workspace). */
-    subGraphName?: string;
-    /** Receipt/seal-validated assertion policy supplied only by named recovery. */
-    trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
-  }, ctx: OperationContext): Promise<
+  async handleChainReconciledKC(input: ChainReconciledKCInput, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
     | 'no-swm'
@@ -2408,14 +2548,7 @@ class FinalizationHandlerCore {
       return 'unverified';
     }
 
-    const recoveredFromJournal = await this.recovery.replayMatching({
-      chainId: this.chain?.chainId ?? 'none',
-      contextGraphId,
-      onChainCgId,
-      ual,
-      merkleRoot: ethers.hexlify(merkleRoot),
-      kaId: kaId.toString(),
-    });
+    const recoveredFromJournal = await this.replayMatchingRecoveryEntries(input, ctx);
     if (recoveredFromJournal) return 'already-confirmed';
 
     // V2 recovery is O(1) in the number of prior workspace operations: the
@@ -3435,44 +3568,6 @@ class FinalizationHandlerCore {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }
-  }
-}
-
-/**
- * Public compatibility boundary. New call sites use named options; the legacy
- * positional signature remains accepted here without leaking into the core.
- */
-export class FinalizationHandler extends FinalizationHandlerCore {
-  constructor(
-    store: TripleStore,
-    chain: ChainAdapter | undefined,
-    options?: FinalizationHandlerOptions,
-  );
-  constructor(
-    store: TripleStore,
-    chain: ChainAdapter | undefined,
-    eventBus?: EventBus,
-    resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
-    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
-    lifecycleLogOptions?: FinalizationLifecycleLogOptions,
-    recoveryJournal?: FinalizationRecoveryJournal,
-  );
-  constructor(
-    store: TripleStore,
-    chain: ChainAdapter | undefined,
-    optionsOrEventBus?: FinalizationHandlerOptions | EventBus,
-    legacyResolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
-    legacyMarkContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
-    legacyLifecycleLogOptions?: FinalizationLifecycleLogOptions,
-    legacyRecoveryJournal?: FinalizationRecoveryJournal,
-  ) {
-    super(store, chain, normalizeFinalizationHandlerOptions(
-      optionsOrEventBus,
-      legacyResolveContextGraphOnChainId,
-      legacyMarkContextGraphMetaDirtyFromQuads,
-      legacyLifecycleLogOptions,
-      legacyRecoveryJournal,
-    ));
   }
 }
 

@@ -1,13 +1,10 @@
-import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  createGraphKnowledgeAssetScope,
-  validateContextGraphId,
-  validateSubGraphName,
-  type FinalizationMessageMsg,
-} from '@origintrail-official/dkg-core';
+import type { FinalizationMessageMsg } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import type {
+  ParsedGraphScopedFinalization,
+  VerifiedGraphScopedFinalizationEvidence,
+} from './finalization-graph-envelope.js';
 import {
   FinalizationRecoveryJournal,
   finalizationRecoveryEntryKey,
@@ -15,179 +12,10 @@ import {
   type FinalizationRecoveryTrust,
 } from './finalization-recovery-journal.js';
 
-export type GraphScopedAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
-
-export interface ParsedGraphScopedFinalization {
-  msg: FinalizationMessageMsg;
-  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  assertionVersion: string;
-  kaId: bigint;
-  blockNumber: number;
-  startKAId: bigint;
-  endKAId: bigint;
-  batchId: bigint;
-  publicTripleCount: number;
-  privateTripleCount: number;
-  privateMerkleRoot?: Uint8Array;
-  wireAccessPolicy?: GraphScopedAccessPolicy;
-  allowedPeers: string[];
-}
-
-export type GraphScopedFinalizationRejectionReason =
-  | 'decode-failed'
-  | 'unsupported-content-scope'
-  | 'missing-ual'
-  | 'invalid-transaction-hash'
-  | 'invalid-merkle-root'
-  | 'invalid-publisher-address'
-  | 'legacy-root-entities'
-  | 'context-graph-mismatch'
-  | 'invalid-context-graph'
-  | 'invalid-subgraph'
-  | 'missing-assertion-version'
-  | 'invalid-identity'
-  | 'non-canonical-ual'
-  | 'invalid-triple-count'
-  | 'invalid-private-commitment'
-  | 'invalid-access-policy'
-  | 'invalid-allowed-peers'
-  | 'invalid-block-number'
-  | 'invalid-target-context-graph'
-  | 'invalid-ka-identifiers';
-
-export type GraphScopedFinalizationAdmission =
-  | { ok: true; value: ParsedGraphScopedFinalization }
-  | { ok: false; reason: GraphScopedFinalizationRejectionReason };
-
 export type FinalizationRecoveryApplyOutcome =
   | 'applied'
   | 'already-confirmed'
   | 'deferred';
-
-function reject(reason: GraphScopedFinalizationRejectionReason): GraphScopedFinalizationAdmission {
-  return { ok: false, reason };
-}
-
-function protoToNumber(value: number | bigint | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof value === 'bigint') return Number(value);
-  if (typeof value === 'number') return value;
-  return ((value.high >>> 0) * 0x100000000) + (value.low >>> 0);
-}
-
-function protoToBigInt(
-  value: string | number | bigint | { low: number; high: number; unsigned: boolean },
-): bigint {
-  if (typeof value === 'string') return BigInt(value);
-  if (typeof value === 'bigint') return value;
-  if (typeof value === 'number') return BigInt(value);
-  return (BigInt(value.high >>> 0) << 32n) | BigInt(value.low >>> 0);
-}
-
-/** Single typed admission boundary shared by live processing and durable replay. */
-export function parseGraphScopedFinalization(
-  msg: FinalizationMessageMsg,
-  topicContextGraphId: string,
-): GraphScopedFinalizationAdmission {
-  if (msg.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-    return reject('unsupported-content-scope');
-  }
-  if (!msg.ual) return reject('missing-ual');
-  if (!/^0x[0-9a-fA-F]{64}$/.test(msg.txHash)) return reject('invalid-transaction-hash');
-  if (msg.kcMerkleRoot.length !== 32) return reject('invalid-merkle-root');
-  if (!ethers.isAddress(msg.publisherAddress)) return reject('invalid-publisher-address');
-  if (msg.rootEntities.length !== 0) return reject('legacy-root-entities');
-  if (msg.contextGraphId && msg.contextGraphId !== topicContextGraphId) {
-    return reject('context-graph-mismatch');
-  }
-  if (msg.contextGraphId && !validateContextGraphId(msg.contextGraphId).valid) {
-    return reject('invalid-context-graph');
-  }
-  if (msg.subGraphName && !validateSubGraphName(msg.subGraphName).valid) {
-    return reject('invalid-subgraph');
-  }
-
-  const assertionVersion = String(msg.assertionVersion ?? '').trim();
-  if (!assertionVersion) return reject('missing-assertion-version');
-  let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  try {
-    scope = createGraphKnowledgeAssetScope(msg.ual, assertionVersion);
-  } catch {
-    return reject('invalid-identity');
-  }
-  if (scope.ual !== msg.ual) return reject('non-canonical-ual');
-
-  const publicTripleCount = Number(msg.publicTripleCount ?? 0);
-  const privateTripleCount = Number(msg.privateTripleCount ?? 0);
-  if (
-    !Number.isSafeInteger(publicTripleCount)
-    || publicTripleCount < 0
-    || !Number.isSafeInteger(privateTripleCount)
-    || privateTripleCount < 0
-    || (publicTripleCount === 0 && privateTripleCount === 0)
-  ) return reject('invalid-triple-count');
-
-  const privateMerkleRoot = msg.privateMerkleRoot?.length
-    ? new Uint8Array(msg.privateMerkleRoot)
-    : undefined;
-  if (
-    (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-  ) return reject('invalid-private-commitment');
-
-  const accessPolicy = msg.accessPolicy || undefined;
-  if (
-    accessPolicy !== undefined
-    && accessPolicy !== 'public'
-    && accessPolicy !== 'ownerOnly'
-    && accessPolicy !== 'allowList'
-  ) return reject('invalid-access-policy');
-  const rawAllowedPeers = msg.allowedPeers ?? [];
-  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
-  if (
-    allowedPeers.length !== rawAllowedPeers.length
-    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) return reject('invalid-allowed-peers');
-
-  try {
-    const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    const blockNumber = protoToNumber(msg.blockNumber);
-    if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
-      return reject('invalid-block-number');
-    }
-    const targetContextGraphId = msg.targetContextGraphId || undefined;
-    if (
-      targetContextGraphId !== undefined
-      && (!/^\d+$/.test(targetContextGraphId) || BigInt(targetContextGraphId) <= 0n)
-    ) return reject('invalid-target-context-graph');
-    const startKAId = protoToBigInt(msg.startKAId);
-    const endKAId = protoToBigInt(msg.endKAId);
-    const batchId = protoToBigInt(msg.batchId);
-    if (startKAId !== kaId || endKAId !== kaId || batchId !== kaId) {
-      return reject('invalid-ka-identifiers');
-    }
-    return {
-      ok: true,
-      value: {
-        msg,
-        scope,
-        assertionVersion,
-        kaId,
-        blockNumber,
-        startKAId,
-        endKAId,
-        batchId,
-        publicTripleCount,
-        privateTripleCount,
-        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-        ...(accessPolicy ? { wireAccessPolicy: accessPolicy } : {}),
-        allowedPeers,
-      },
-    };
-  } catch {
-    return reject('invalid-ka-identifiers');
-  }
-}
 
 interface FinalizationRecoveryLog {
   info(message: string): void;
@@ -203,17 +31,15 @@ export interface FinalizationRecoveryReplayInput {
   kaId: string;
 }
 
+/**
+ * Owns bounded journal persistence and chain-gated candidate selection. The
+ * handler remains the sole replay coordinator, so recovery never calls back
+ * into the handler that owns it.
+ */
 export class FinalizationRecovery {
-  private readonly replaySingleFlights = new Map<string, Promise<boolean>>();
-
   constructor(
     private readonly journal: FinalizationRecoveryJournal | undefined,
     private readonly chain: ChainAdapter | undefined,
-    private readonly apply: (
-      rawMessage: Uint8Array,
-      contextGraphId: string,
-      sourcePeerId?: string,
-    ) => Promise<FinalizationRecoveryApplyOutcome>,
     private readonly log: FinalizationRecoveryLog,
   ) {}
 
@@ -231,6 +57,7 @@ export class FinalizationRecovery {
     contextGraphId: string;
     sourcePeerId?: string;
     candidate: ParsedGraphScopedFinalization;
+    verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
   }): Promise<boolean> {
     return this.record({ ...input, state: 'verified' });
   }
@@ -249,13 +76,21 @@ export class FinalizationRecovery {
     }), msg.ual);
   }
 
-  async replayMatching(input: FinalizationRecoveryReplayInput): Promise<boolean> {
-    if (!this.journal) return false;
+  async settleEntry(
+    entry: FinalizationRecoveryEntry,
+    outcome: FinalizationRecoveryApplyOutcome,
+  ): Promise<boolean> {
+    if (outcome === 'deferred') return false;
+    return this.remove(entry.key, entry.ual);
+  }
+
+  async matchingEntries(input: FinalizationRecoveryReplayInput): Promise<FinalizationRecoveryEntry[]> {
+    if (!this.journal) return [];
     if (
       !this.chain?.getLatestMerkleRoot
       || !this.chain.getMerkleRootCount
       || !this.chain.getKAContextGraphId
-    ) return false;
+    ) return [];
 
     let entries: FinalizationRecoveryEntry[];
     try {
@@ -264,10 +99,10 @@ export class FinalizationRecovery {
       this.log.warn(
         `Finalization recovery journal read failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return false;
+      return [];
     }
 
-    let recoveredCurrentAssertion = false;
+    const matches: FinalizationRecoveryEntry[] = [];
     for (const entry of entries) {
       if (
         entry.targetContextGraphId !== undefined
@@ -295,20 +130,15 @@ export class FinalizationRecovery {
           || boundContextGraphId === undefined
           || BigInt(boundContextGraphId).toString() !== input.onChainCgId
         ) continue;
+        matches.push(entry);
       } catch (error) {
         this.log.info(
           `Finalization recovery chain state is not settled for ${entry.ual}: `
             + `${error instanceof Error ? error.message : String(error)}`,
         );
-        continue;
       }
-
-      const existing = this.replaySingleFlights.get(entry.key);
-      const replay = existing ?? this.replayEntry(entry);
-      if (!existing) this.replaySingleFlights.set(entry.key, replay);
-      if (await replay) recoveredCurrentAssertion = true;
     }
-    return recoveredCurrentAssertion;
+    return matches;
   }
 
   private async record(input: {
@@ -317,6 +147,7 @@ export class FinalizationRecovery {
     sourcePeerId?: string;
     candidate: ParsedGraphScopedFinalization;
     state: FinalizationRecoveryTrust;
+    verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
   }): Promise<boolean> {
     if (!this.journal) return false;
     const { candidate } = input;
@@ -335,11 +166,12 @@ export class FinalizationRecovery {
           ? { targetContextGraphId: candidate.msg.targetContextGraphId }
           : {}),
         rawMessage: input.rawMessage,
+        ...(input.verifiedEvidence ? { verifiedEvidence: input.verifiedEvidence } : {}),
       });
       if (!persisted) {
         this.log.warn(
           `Finalization recovery journal rejected ${candidate.scope.ual}; `
-            + 'capacity, envelope limit, or conflicting identity-bound bytes',
+            + 'capacity, envelope limit, or conflicting identity-bound evidence',
         );
       }
       return persisted;
@@ -350,28 +182,6 @@ export class FinalizationRecovery {
       );
       return false;
     }
-  }
-
-  private replayEntry(entry: FinalizationRecoveryEntry): Promise<boolean> {
-    const replay = this.apply(
-      Buffer.from(entry.rawMessageBase64, 'base64'),
-      entry.contextGraphId,
-      entry.sourcePeerId,
-    ).then(async (outcome) => {
-      if (outcome === 'deferred') return false;
-      return this.remove(entry.key, entry.ual);
-    }).catch((error: unknown) => {
-      if (!(error instanceof StoreSchedulerBusyError)) throw error;
-      this.log.info(
-        `Finalization recovery store remains busy for ${entry.ual}; keeping journal entry`,
-      );
-      return false;
-    }).finally(() => {
-      if (this.replaySingleFlights.get(entry.key) === replay) {
-        this.replaySingleFlights.delete(entry.key);
-      }
-    });
-    return replay;
   }
 
   private async remove(key: string, ual: string): Promise<boolean> {

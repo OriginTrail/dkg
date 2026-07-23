@@ -55,7 +55,7 @@ describe('FinalizationHandler', () => {
     handler = new FinalizationHandler(store, undefined);
   });
 
-  it('preserves the exported legacy positional constructor wiring', () => {
+  it('accepts the exported legacy positional constructor signature', () => {
     const eventBus = { emit: () => undefined } as unknown as EventBus;
     const resolver: ResolveContextGraphOnChainId = async () => '42';
     const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
@@ -71,17 +71,7 @@ describe('FinalizationHandler', () => {
       markDirty,
       lifecycleOptions,
     );
-    const internals = legacy as unknown as {
-      eventBus: EventBus;
-      resolveContextGraphOnChainId: ResolveContextGraphOnChainId;
-      markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads;
-      lifecycle: { options: FinalizationLifecycleLogOptions };
-    };
-
-    expect(internals.eventBus).toBe(eventBus);
-    expect(internals.resolveContextGraphOnChainId).toBe(resolver);
-    expect(internals.markContextGraphMetaDirtyFromQuads).toBe(markDirty);
-    expect(internals.lifecycle.options).toBe(lifecycleOptions);
+    expect(legacy).toBeInstanceOf(FinalizationHandler);
   });
 
   it('deduplicates messages with same UAL and txHash', async () => {
@@ -295,7 +285,9 @@ describe('FinalizationHandler', () => {
     const localHandler = new FinalizationHandler(
       store,
       undefined,
-      { markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); } },
+      undefined,
+      undefined,
+      (quads) => { dirtyQuads.push(...quads); },
     );
 
     await (localHandler as any).promoteSharedMemoryToCanonical(

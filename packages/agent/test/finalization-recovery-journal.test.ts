@@ -34,6 +34,22 @@ function entry(index: number, overrides: Partial<FinalizationRecoveryUpsert> = {
   };
 }
 
+function verifiedEvidence(index: number) {
+  return {
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    publisherPeerId: '12D3KooWPublisher',
+    publisherAddress: `0x${'22'.repeat(20)}`,
+    transactionHash: entry(index).txHash,
+    blockNumber: 123,
+    txIndex: 4,
+    authorAddress: `0x${'11'.repeat(20)}`,
+    accessPolicy: 'ownerOnly' as const,
+    allowedPeers: [],
+  };
+}
+
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true }),
@@ -53,9 +69,13 @@ describe('FinalizationRecoveryJournal', () => {
       sourcePeerId: '12D3KooWPublisher',
       ual: entry(1).ual,
     }]);
-    expect(await restarted.upsert(entry(1, { state: 'verified' }))).toBe(true);
+    expect(await restarted.upsert(entry(1, {
+      state: 'verified',
+      verifiedEvidence: verifiedEvidence(1),
+    }))).toBe(true);
     const [verified] = await restarted.list();
     expect(verified.state).toBe('verified');
+    expect(verified.verifiedEvidence).toEqual(verifiedEvidence(1));
     expect(await restarted.remove(verified.key)).toBe(true);
     expect(await new FinalizationRecoveryJournal(directory).list()).toEqual([]);
 

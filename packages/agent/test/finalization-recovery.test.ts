@@ -7,12 +7,10 @@ import {
   type FinalizationMessageMsg,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
-  FinalizationRecovery,
   parseGraphScopedFinalization,
-  type FinalizationRecoveryApplyOutcome,
-} from '../src/finalization-recovery.js';
+} from '../src/finalization-graph-envelope.js';
+import { FinalizationRecovery } from '../src/finalization-recovery.js';
 import { FinalizationRecoveryJournal } from '../src/finalization-recovery-journal.js';
 
 const CONTEXT_GRAPH = 'finalization-recovery-admission';
@@ -78,13 +76,12 @@ describe('graph-scoped finalization recovery admission', () => {
   });
 
   it.each([
-    ['applied', true, 0],
-    ['already-confirmed', true, 0],
-    ['deferred', false, 1],
-    ['busy', false, 1],
+    ['applied', 0],
+    ['already-confirmed', 0],
+    ['deferred', 1],
   ] as const)(
     'drives journal transition from the explicit %s replay outcome',
-    async (applyOutcome, expectedRecovered, expectedEntries) => {
+    async (applyOutcome, expectedEntries) => {
       const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-outcome-'));
       try {
         const parsed = parseGraphScopedFinalization(message(), CONTEXT_GRAPH);
@@ -99,16 +96,6 @@ describe('graph-scoped finalization recovery admission', () => {
         const recovery = new FinalizationRecovery(
           journal,
           chain,
-          async () => {
-            if (applyOutcome === 'busy') {
-              throw new StoreSchedulerBusyError(
-                'queue_wait_timeout',
-                'normal',
-                'sparql-http.query',
-              );
-            }
-            return applyOutcome as FinalizationRecoveryApplyOutcome;
-          },
           { info: () => {}, warn: () => {} },
         );
         await recovery.recordRawOnBusy({
@@ -118,18 +105,61 @@ describe('graph-scoped finalization recovery admission', () => {
           candidate: parsed.value,
         });
 
-        await expect(recovery.replayMatching({
+        const entries = await recovery.matchingEntries({
           chainId: chain.chainId,
           contextGraphId: CONTEXT_GRAPH,
           onChainCgId: '42',
           ual: UAL,
           merkleRoot: `0x${'00'.repeat(32)}`,
           kaId: PACKED_KA_ID.toString(),
-        })).resolves.toBe(expectedRecovered);
+        });
+        expect(entries).toHaveLength(1);
+        await recovery.settleEntry(entries[0], applyOutcome);
         expect(await journal.list()).toHaveLength(expectedEntries);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
     },
   );
+
+  it.each([
+    ['the target context graph differs', '43', `0x${'00'.repeat(32)}`],
+    ['the latest root differs', '42', `0x${'ff'.repeat(32)}`],
+  ])('retains the envelope and selects no replay candidate when %s', async (_label, onChainCgId, latestRoot) => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-gate-'));
+    try {
+      const parsed = parseGraphScopedFinalization(message(), CONTEXT_GRAPH);
+      if (!parsed.ok) throw new Error(`unexpected admission failure: ${parsed.reason}`);
+      const journal = new FinalizationRecoveryJournal(directory);
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => Buffer.from(latestRoot.slice(2), 'hex'),
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => BigInt(onChainCgId),
+      } as ChainAdapter;
+      const recovery = new FinalizationRecovery(
+        journal,
+        chain,
+        { info: () => {}, warn: () => {} },
+      );
+      await recovery.recordRawOnBusy({
+        rawMessage: Uint8Array.from([1]),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsed.value,
+      });
+
+      await expect(recovery.matchingEntries({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toEqual([]);
+      expect(await journal.list()).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

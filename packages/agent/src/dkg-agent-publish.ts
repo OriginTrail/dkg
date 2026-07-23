@@ -4860,9 +4860,14 @@ export class PublishMethods extends DKGAgentBase {
           : {}),
         privateTripleCount: request.privateTripleCount,
         publisherPeerId: trustedPublisherPeerId,
+        publisherAddress: recovered.materialization.publisherAddress,
         transactionHash: recovered.txHash,
+        blockNumber: recovered.materialization.versionBlock,
+        txIndex: 0,
+        authorAddress: recovered.materialization.authorAddress,
         accessPolicy: request.accessPolicy ?? 'ownerOnly',
         allowedPeers: [...(request.allowedPeers ?? [])],
+        ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
       },
     }, ctx);
     if (

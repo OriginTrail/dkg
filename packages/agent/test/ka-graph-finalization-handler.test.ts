@@ -203,7 +203,11 @@ describe('graph-scoped finalization handler', () => {
         : {}),
       privateTripleCount: message.privateTripleCount!,
       publisherPeerId: '12D3KooWPublisher',
+      publisherAddress: message.publisherAddress,
       transactionHash: message.txHash,
+      blockNumber: Number(message.blockNumber),
+      txIndex: Number(message.txIndex ?? 0),
+      authorAddress: AUTHOR,
       accessPolicy,
       allowedPeers,
     };
@@ -393,12 +397,15 @@ describe('graph-scoped finalization handler', () => {
   it('resolves an omitted graph-scoped target context graph id', async () => {
     const { message, vmGraph } = await stageGraph();
     let resolverCalls = 0;
-    const resolvingHandler = new FinalizationHandler(store, undefined, {
-      resolveContextGraphOnChainId: async () => {
+    const resolvingHandler = new FinalizationHandler(
+      store,
+      undefined,
+      undefined,
+      async () => {
         resolverCalls += 1;
         return '42';
       },
-    });
+    );
     (resolvingHandler as unknown as {
       verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
     }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
@@ -616,6 +623,90 @@ describe('graph-scoped finalization handler', () => {
 
       expect(await journal.list()).toEqual([]);
       expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs verified metadata after a newer SWM assertion replaces the mutable head', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    try {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      const staged = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      );
+      if (staged.type !== 'quads') throw new Error('expected staged graph-scoped quads');
+      await store.dropGraph(vmGraph);
+      await store.insert(staged.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+      } as ChainAdapter;
+      const journal = new FinalizationRecoveryJournal(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryJournal: journal });
+      const internals = recoveryHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      internals.verifyChainCgBinding = async () => true;
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await journal.list()).toMatchObject([{
+        state: 'verified',
+        verifiedEvidence: {
+          assertionVersion: '1',
+          transactionHash: message.txHash,
+          txIndex: 4,
+        },
+      }]);
+
+      await stageNewerWorkspaceAssertion(
+        swmGraph,
+        message.privateMerkleRoot,
+        message.privateTripleCount,
+      );
+      await expect(recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 999,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+      expect(await journal.list()).toEqual([]);
+      const currentHead = await resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      });
+      expect(currentHead?.assertionVersion).toBe('2');
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + '<http://dkg.io/ontology/materializedVersion> "123:4" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query(
+        `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+          + '<urn:predicate:value> "newer" } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -1064,7 +1155,7 @@ describe('graph-scoped finalization handler', () => {
           <http://dkg.io/ontology/privateTripleCount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/privateMerkleRoot> "${Buffer.from(message.privateMerkleRoot).toString('hex')}" ;
           <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" .
+          <http://dkg.io/ontology/materializedVersion> "123:4" .
       } }`,
     );
     expect(repaired).toMatchObject({ type: 'boolean', value: true });
@@ -1107,7 +1198,7 @@ describe('graph-scoped finalization handler', () => {
 
     const repairedVersion = await store.query(
       `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <${materializedVersionPredicate}> "123:0" .
+        <${UAL}> <${materializedVersionPredicate}> "123:4" .
       } }`,
     );
     expect(repairedVersion).toMatchObject({ type: 'boolean', value: true });
@@ -1292,7 +1383,7 @@ describe('graph-scoped finalization handler', () => {
           <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/assertionGraph> <${vmGraph}> ;
           <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" .
+          <http://dkg.io/ontology/materializedVersion> "123:4" .
       } }`,
     );
     expect(repaired).toMatchObject({ type: 'boolean', value: true });
