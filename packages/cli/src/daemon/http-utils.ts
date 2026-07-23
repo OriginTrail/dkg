@@ -289,7 +289,14 @@ export function classifyChainRpcTransportStatus(
   // classifier can never silently inherit timeout/504 semantics for a new code.
   switch (code) {
     case "RPC_ENDPOINTS_EXHAUSTED":
-      return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+      return {
+        status: 503,
+        body: {
+          error: msg || "Configured chain RPC endpoints were exhausted.",
+          code,
+          ...(txHash ? { txHash } : {}),
+        },
+      };
     case "RPC_RECEIPT_LOOKUP_FAILED":
       return {
         status: 503,

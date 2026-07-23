@@ -118,6 +118,9 @@ export function isRetryableRpcError(err: unknown): boolean {
   const code = errorCode(err);
   const status = errorStatus(err);
   const msg = errorMessage(err).toLowerCase();
+  const name = typeof (err as { name?: unknown } | null)?.name === 'string'
+    ? (err as { name: string }).name
+    : '';
 
   if (code === 'CALL_EXCEPTION' || code === 'INSUFFICIENT_FUNDS' || code === 'NONCE_EXPIRED'
     || code === 'RPC_RECEIPT_LOOKUP_FAILED'
@@ -131,6 +134,16 @@ export function isRetryableRpcError(err: unknown): boolean {
     || msg.includes('intrinsic gas too low') || msg.includes('exceeds block gas limit')) {
     return false;
   }
+
+  // Node/undici/ethers surface an aborted fetch as DOMException
+  // `{ name: 'AbortError' }` (and some Node paths also stamp `ABORT_ERR`).
+  // At the chain-RPC boundary this is a transport interruption, not a
+  // deterministic EVM result. Treat it like the timeout/network cases below so
+  // the SAME signed transaction or point read fails over to another endpoint.
+  // This is especially important after `eth_sendRawTransaction`: an RPC can
+  // accept the tx and then abort the client response, so fail-fast would report
+  // publish failure even though the mint is already on chain.
+  if (name === 'AbortError' || code === 'ABORT_ERR') return true;
 
   if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
   if (code === 'TIMEOUT' || code === 'RPC_TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'

@@ -607,7 +607,7 @@ export class RpcFailoverClient {
           throw new ChainRpcTransportError(
             'RPC_ENDPOINTS_EXHAUSTED',
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
-            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl) },
+            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
         } finally {
           metrics.chainRpcDuration.record(Date.now() - startedAt, {
