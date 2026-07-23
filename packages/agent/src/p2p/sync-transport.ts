@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { markSyncTransportFailure } from '../sync/error-tags.js';
+import { isSyncResponderSessionInvalidError } from '../sync/durable-session.js';
 import type { Messenger } from './messenger.js';
 
 /**
@@ -129,7 +130,13 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           params.signal,
         );
       } catch (error) {
-        markSyncTransportFailure(error);
+        // Superseded/expired responder sessions are an application-level
+        // terminal response, not a broken network path. Retrying this exact
+        // token can never succeed and incorrectly charges the peer's transport
+        // health; page-fetch rotates the token after this error escapes.
+        if (!isSyncResponderSessionInvalidError(error)) {
+          markSyncTransportFailure(error);
+        }
         throw error;
       }
       throwIfAborted(params.signal);
@@ -141,7 +148,10 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
-      isRetryable: () => params.signal?.aborted !== true,
+      isRetryable: (error) => (
+        params.signal?.aborted !== true
+        && !isSyncResponderSessionInvalidError(error)
+      ),
       onRetry: params.onRetry,
     },
         );

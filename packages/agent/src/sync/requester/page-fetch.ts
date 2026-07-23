@@ -13,6 +13,7 @@ import {
   createDurableDataSyncSessionId,
   createSyncResponderSessionId,
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
+  isSyncResponderSessionInvalidError,
 } from '../durable-session.js';
 import {
   createRequesterPhaseTelemetry,
@@ -86,15 +87,6 @@ function forgetUnfinishedSyncResponderSession(
 ): void {
   unfinishedSyncResponderSessions.delete(checkpointKey);
   checkpointStore.clearResponderSession?.(checkpointKey);
-}
-
-function isSyncResponderSessionInvalidError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const message = err.message.toLowerCase();
-  return message.includes('sync session') && (
-    message.includes('superseded')
-    || message.includes('expired')
-  );
 }
 
 function usesResponderSession(includeSharedMemory: boolean, phase: SyncPhase): boolean {

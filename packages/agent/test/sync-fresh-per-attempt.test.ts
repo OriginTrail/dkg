@@ -1013,6 +1013,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     );
     const observedSessionIds: Array<string | undefined> = [];
     let expired = true;
+    let expiredSendCalls = 0;
 
     const runFetch = () => runFetchWithFakeTimers(fetchSyncPages({
       ctx: makeCtx(),
@@ -1024,7 +1025,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       deadline: Date.now() + 60_000,
       syncPageTimeoutMs: 5_000,
       syncRouterAttempts: 1,
-      syncPageRetryAttempts: 1,
+      syncPageRetryAttempts: 3,
       syncPageSize: 1,
       syncDeniedResponse: '#DENIED',
       debugSyncProgress: false,
@@ -1046,7 +1047,10 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       },
       parseAndFilter: singleQuadParser,
       send: async () => {
-        if (expired) throw new Error('Durable data sync session snapshot expired before page completion');
+        if (expired) {
+          expiredSendCalls += 1;
+          throw new Error('Durable data sync session snapshot expired before page completion');
+        }
         return new TextEncoder().encode('');
       },
       logWarn: noopLog,
@@ -1056,6 +1060,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
 
     await expect(runFetch()).rejects.toThrow('snapshot expired before page completion');
     expect(observedSessionIds.at(-1)).toBe('expired-responder-token');
+    expect(expiredSendCalls).toBe(1);
     expect(checkpointStore.get(checkpointKey)).toBeUndefined();
 
     expired = false;
