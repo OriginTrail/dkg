@@ -712,6 +712,74 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('retains verified recovery when the journaled receipt is no longer canonical', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    try {
+      const { message } = await stageGraph();
+      let receiptCanonical = true;
+      let receiptChecks = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        isV10Ready: () => true,
+        listenForEvents: async function* () {
+          receiptChecks += 1;
+          if (!receiptCanonical) return;
+          yield {
+            blockNumber: Number(message.blockNumber),
+            data: {
+              txHash: message.txHash,
+              merkleRoot: message.kcMerkleRoot,
+              publisherAddress: message.publisherAddress,
+              startKAId: String(message.startKAId),
+              endKAId: String(message.endKAId),
+              author: AUTHOR,
+              txIndex: 4,
+            },
+          };
+        },
+      } as ChainAdapter;
+      const journal = new FinalizationRecoveryJournal(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryJournal: journal });
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
+
+      receiptCanonical = false;
+      await expect(recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+      expect(receiptChecks).toBeGreaterThanOrEqual(2);
+      expect(await journal.list()).toMatchObject([{ state: 'verified' }]);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('never journals structurally invalid or legacy envelopes under store pressure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     try {

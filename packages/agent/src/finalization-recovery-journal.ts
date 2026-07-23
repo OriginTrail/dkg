@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { VerifiedGraphScopedFinalizationEvidence } from './finalization-graph-envelope.js';
+import {
+  parseVerifiedGraphScopedFinalizationEvidence,
+  type VerifiedGraphScopedFinalizationEvidence,
+} from './finalization-graph-envelope.js';
 
 export const FINALIZATION_RECOVERY_JOURNAL_FILENAME = 'pending-finalizations.json';
 
@@ -89,42 +92,6 @@ function isString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
-function parseVerifiedEvidence(value: unknown): VerifiedGraphScopedFinalizationEvidence {
-  if (!value || typeof value !== 'object') throw new Error('verified evidence is not an object');
-  const evidence = value as Record<string, unknown>;
-  const allowedPeers = evidence.allowedPeers;
-  if (
-    !isString(evidence.assertionVersion)
-    || !Number.isSafeInteger(evidence.publicTripleCount)
-    || Number(evidence.publicTripleCount) < 0
-    || !Number.isSafeInteger(evidence.privateTripleCount)
-    || Number(evidence.privateTripleCount) < 0
-    || (Number(evidence.publicTripleCount) === 0 && Number(evidence.privateTripleCount) === 0)
-    || (evidence.privateMerkleRoot !== undefined && !isString(evidence.privateMerkleRoot))
-    || (evidence.publicQuadsDigest !== undefined && !isString(evidence.publicQuadsDigest))
-    || !isString(evidence.publisherPeerId)
-    || !isString(evidence.publisherAddress)
-    || !isString(evidence.transactionHash)
-    || !Number.isSafeInteger(evidence.blockNumber)
-    || Number(evidence.blockNumber) < 0
-    || !Number.isSafeInteger(evidence.txIndex)
-    || Number(evidence.txIndex) < 0
-    || (evidence.authorAddress !== undefined && !isString(evidence.authorAddress))
-    || (evidence.accessPolicy !== 'public'
-      && evidence.accessPolicy !== 'ownerOnly'
-      && evidence.accessPolicy !== 'allowList')
-    || !Array.isArray(allowedPeers)
-    || allowedPeers.some((peer) => !isString(peer))
-    || new Set(allowedPeers).size !== allowedPeers.length
-    || (evidence.accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (evidence.accessPolicy !== 'allowList' && allowedPeers.length > 0)
-    || (evidence.subGraphName !== undefined && !isString(evidence.subGraphName))
-  ) {
-    throw new Error('verified evidence has an invalid shape');
-  }
-  return evidence as unknown as VerifiedGraphScopedFinalizationEvidence;
-}
-
 function parseEntry(value: unknown): FinalizationRecoveryEntry {
   if (!value || typeof value !== 'object') throw new Error('entry is not an object');
   const candidate = value as Record<string, unknown>;
@@ -148,7 +115,7 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
   }
   const entry = candidate as unknown as FinalizationRecoveryEntry;
   if (candidate.verifiedEvidence !== undefined) {
-    entry.verifiedEvidence = parseVerifiedEvidence(candidate.verifiedEvidence);
+    entry.verifiedEvidence = parseVerifiedGraphScopedFinalizationEvidence(candidate.verifiedEvidence);
   }
   if (
     entry.verifiedEvidence !== undefined

@@ -68,6 +68,111 @@ export interface VerifiedGraphScopedFinalizationEvidence {
   subGraphName?: string;
 }
 
+export interface VerifiedGraphScopedFinalizationIdentity {
+  ual: string;
+  kaId: string;
+  merkleRoot: string;
+  targetContextGraphId?: string;
+}
+
+export interface BuildVerifiedGraphScopedFinalizationEvidenceInput {
+  candidate: ParsedGraphScopedFinalization;
+  publicQuadsDigest?: string;
+  publisherPeerId: string;
+  txIndex?: number;
+  authorAddress?: string;
+  accessPolicy: GraphScopedAccessPolicy;
+  allowedPeers: string[];
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+export function buildVerifiedGraphScopedFinalizationEvidence(
+  input: BuildVerifiedGraphScopedFinalizationEvidenceInput,
+): VerifiedGraphScopedFinalizationEvidence {
+  const { candidate } = input;
+  return {
+    assertionVersion: candidate.assertionVersion,
+    publicTripleCount: candidate.publicTripleCount,
+    ...(candidate.privateMerkleRoot
+      ? { privateMerkleRoot: ethers.hexlify(candidate.privateMerkleRoot) }
+      : {}),
+    privateTripleCount: candidate.privateTripleCount,
+    ...(input.publicQuadsDigest ? { publicQuadsDigest: input.publicQuadsDigest } : {}),
+    publisherPeerId: input.publisherPeerId,
+    publisherAddress: candidate.msg.publisherAddress,
+    transactionHash: candidate.msg.txHash,
+    blockNumber: candidate.blockNumber,
+    txIndex: input.txIndex ?? 0,
+    ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
+    accessPolicy: input.accessPolicy,
+    allowedPeers: [...input.allowedPeers],
+    ...(candidate.msg.subGraphName ? { subGraphName: candidate.msg.subGraphName } : {}),
+  };
+}
+
+export function parseVerifiedGraphScopedFinalizationEvidence(
+  value: unknown,
+): VerifiedGraphScopedFinalizationEvidence {
+  if (!value || typeof value !== 'object') throw new Error('verified evidence is not an object');
+  const evidence = value as Record<string, unknown>;
+  const allowedPeers = evidence.allowedPeers;
+  if (
+    !isNonEmptyString(evidence.assertionVersion)
+    || !Number.isSafeInteger(evidence.publicTripleCount)
+    || Number(evidence.publicTripleCount) < 0
+    || !Number.isSafeInteger(evidence.privateTripleCount)
+    || Number(evidence.privateTripleCount) < 0
+    || (Number(evidence.publicTripleCount) === 0 && Number(evidence.privateTripleCount) === 0)
+    || (evidence.privateMerkleRoot !== undefined && !isNonEmptyString(evidence.privateMerkleRoot))
+    || (evidence.publicQuadsDigest !== undefined && !isNonEmptyString(evidence.publicQuadsDigest))
+    || !isNonEmptyString(evidence.publisherPeerId)
+    || !isNonEmptyString(evidence.publisherAddress)
+    || !isNonEmptyString(evidence.transactionHash)
+    || !Number.isSafeInteger(evidence.blockNumber)
+    || Number(evidence.blockNumber) < 0
+    || !Number.isSafeInteger(evidence.txIndex)
+    || Number(evidence.txIndex) < 0
+    || (evidence.authorAddress !== undefined && !isNonEmptyString(evidence.authorAddress))
+    || (evidence.accessPolicy !== 'public'
+      && evidence.accessPolicy !== 'ownerOnly'
+      && evidence.accessPolicy !== 'allowList')
+    || !Array.isArray(allowedPeers)
+    || allowedPeers.some((peer) => !isNonEmptyString(peer))
+    || new Set(allowedPeers).size !== allowedPeers.length
+    || (evidence.accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (evidence.accessPolicy !== 'allowList' && allowedPeers.length > 0)
+    || (evidence.subGraphName !== undefined && !isNonEmptyString(evidence.subGraphName))
+  ) {
+    throw new Error('verified evidence has an invalid shape');
+  }
+  return evidence as unknown as VerifiedGraphScopedFinalizationEvidence;
+}
+
+export function verifiedEvidenceMatchesParsedEnvelope(
+  evidence: VerifiedGraphScopedFinalizationEvidence,
+  candidate: ParsedGraphScopedFinalization,
+  identity: VerifiedGraphScopedFinalizationIdentity,
+): boolean {
+  const messagePrivateRoot = candidate.privateMerkleRoot
+    ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
+    : undefined;
+  return candidate.scope.ual === identity.ual
+    && candidate.kaId.toString() === identity.kaId
+    && candidate.assertionVersion === evidence.assertionVersion
+    && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === identity.merkleRoot.toLowerCase()
+    && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
+    && candidate.msg.publisherAddress.toLowerCase() === evidence.publisherAddress.toLowerCase()
+    && candidate.blockNumber === evidence.blockNumber
+    && candidate.publicTripleCount === evidence.publicTripleCount
+    && candidate.privateTripleCount === evidence.privateTripleCount
+    && messagePrivateRoot === evidence.privateMerkleRoot?.toLowerCase()
+    && (candidate.msg.subGraphName || undefined) === evidence.subGraphName
+    && (candidate.msg.targetContextGraphId || undefined) === identity.targetContextGraphId;
+}
+
 function reject(reason: GraphScopedFinalizationRejectionReason): GraphScopedFinalizationAdmission {
   return { ok: false, reason };
 }
