@@ -150,6 +150,34 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
+  recordTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<boolean> {
+    if (
+      this.#closed
+      || this.#closing
+      || publisherPeerId.length === 0
+      || publisherPeerId.trim() !== publisherPeerId
+    ) return Promise.resolve(false);
+    return this.mutate(() => {
+      if (this.#closed) return false;
+      const now = this.#policy.now();
+      const result = this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET trusted_publisher_peer_id = ?, updated_at = ?
+        WHERE key = ? AND generation = ?
+          AND state IN ('RECEIVED','VERIFIED','REORGED')
+          AND (
+            trusted_publisher_peer_id IS NULL
+            OR trusted_publisher_peer_id = ?
+          )
+      `).run(publisherPeerId, now, key, generation, publisherPeerId);
+      return result.changes > 0;
+    });
+  }
+
   markVerified(
     key: string,
     generation: number,
@@ -333,10 +361,14 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         const now = this.#policy.now();
         const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
-          SET state = ?, last_error = ?, next_attempt_at = NULL, updated_at = ?
+          SET state = ?,
+              attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
+              last_error = ?,
+              next_attempt_at = NULL,
+              updated_at = ?
           WHERE key = ? AND generation = ?
             AND state IN ('RECEIVED','VERIFIED','REORGED')
-        `).run(state, lastError ?? null, now, key, generation);
+        `).run(state, state, lastError ?? null, now, key, generation);
         changed = result.changes > 0;
         this.pruneWithinTransaction(now);
       });

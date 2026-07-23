@@ -147,6 +147,36 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('starts SETTLED receipt retries with a fresh attempt budget', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      expect((await store.receive(received())).status).toBe('inserted');
+      expect((await store.markVerified('entry-1', 0, evidence())).status).toBe('verified');
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await store.recordAttempt('entry-1', 0, 'store scheduler remained busy', 1_000);
+      }
+      expect(await store.list()).toMatchObject([{
+        state: 'VERIFIED',
+        attemptCount: 4,
+        lastError: 'store scheduler remained busy',
+        nextAttemptAt: expect.any(Number),
+      }]);
+
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 0,
+      }]);
+      const [settled] = await store.list();
+      expect(settled).not.toHaveProperty('lastError');
+      expect(settled).not.toHaveProperty('nextAttemptAt');
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('never merges conflicting bytes when delivery provenance also changes', async () => {
     const directory = await temporaryDirectory();
     try {
@@ -185,6 +215,53 @@ describe('SQLite finalization recovery store', () => {
         },
       });
       expect(await store.list()).toHaveLength(1);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('records publisher authority monotonically for the current generation', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      expect((await store.receive(received({
+        sourcePeerId: '12D3KooWUntrustedRelay',
+      }))).status).toBe('inserted');
+
+      await expect(store.recordTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).resolves.toBe(true);
+      await expect(store.recordTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).resolves.toBe(true);
+      await expect(store.recordTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWAttacker',
+      )).resolves.toBe(false);
+      expect(await store.list()).toMatchObject([{
+        state: 'RECEIVED',
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+      }]);
+
+      expect(await store.markReorged('entry-1', 0, 'canonical reorg')).toBe(true);
+      await expect(store.recordTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).resolves.toBe(false);
+      expect(await store.list()).toMatchObject([{
+        state: 'REORGED',
+        generation: 1,
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+      }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

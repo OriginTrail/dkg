@@ -92,6 +92,9 @@ export function finalizationRecoveryRowToEntry(
     ...(optionalString(row.source_peer_id)
       ? { sourcePeerId: String(row.source_peer_id) }
       : {}),
+    ...(optionalString(row.trusted_publisher_peer_id)
+      ? { trustedPublisherPeerId: String(row.trusted_publisher_peer_id) }
+      : {}),
     ual: String(row.ual),
     txHash: String(row.tx_hash),
     assertionVersion: String(row.assertion_version),

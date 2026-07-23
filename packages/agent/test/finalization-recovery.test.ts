@@ -691,6 +691,75 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('does not spend the SETTLED receipt budget on pre-materialization attempts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-fresh-budget-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let now = 1_000;
+      let missing = false;
+      let applyCalls = 0;
+      let invalidations = 0;
+      store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => missing
+          ? { status: 'not-found' as const }
+          : { status: 'confirmed' as const, receipt: confirmedReceipt() },
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            applyCalls += 1;
+            return applyCalls <= 4 ? 'deferred' as const : 'applied' as const;
+          },
+          invalidateVerified: async () => {
+            invalidations += 1;
+            return 'invalidated' as const;
+          },
+        },
+      );
+      const liveInput = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      };
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await recovery.processLive(liveInput);
+      }
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 0,
+      }]);
+
+      missing = true;
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('retry-pending');
+      expect(invalidations).toBe(0);
+      const [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'SETTLED',
+        attemptCount: 1,
+        lastError: 'settled canonical receipt is not-found',
+      });
+      expect(deferred.nextAttemptAt).toBeGreaterThan(now);
+      now = deferred.nextAttemptAt!;
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not let duplicate live gossip bypass SETTLED receipt backoff', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-live-backoff-'));
     let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;

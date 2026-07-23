@@ -524,7 +524,7 @@ describe('graph-scoped finalization handler', () => {
     expect(attacker).toMatchObject({ type: 'boolean', value: false });
   });
 
-  it('accepts a publisher delivery after an identical relay delivery entered recovery', async () => {
+  it('persists publisher authority for relay-first recovery across restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-relay-duplicate-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
@@ -537,6 +537,8 @@ describe('graph-scoped finalization handler', () => {
       let receiptReady = false;
       const chain = {
         chainId: 'base:84532',
+        getLatestMerkleRoot: async () => finalization.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
         getKAContextGraphId: async () => 42n,
         resolveCanonicalFinalizationReceipt: async () => receiptReady
           ? canonicalReceipt(finalization)
@@ -560,15 +562,39 @@ describe('graph-scoped finalization handler', () => {
         sourcePeerId: '12D3KooWUntrustedRelay',
       }]);
 
-      receiptReady = true;
       await recoveringHandler.handleFinalizationMessage(
         wire,
         CG,
         '12D3KooWPublisher',
       );
       expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+      }]);
+
+      await inbox.close();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      receiptReady = true;
+      const restartedHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      await expect(restartedHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: finalization.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+      expect(await inbox.list()).toMatchObject([{
         state: 'SETTLED',
         sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
         verifiedEvidence: {
           accessPolicy: 'allowList',
           allowedPeers: ['12D3KooWReader'],
@@ -894,6 +920,7 @@ describe('graph-scoped finalization handler', () => {
       const failingVerifiedStore: FinalizationRecoveryStore = {
         get closed() { return inbox!.closed; },
         receive: inbox.receive.bind(inbox),
+        recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
         markReorged: inbox.markReorged.bind(inbox),
         clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
@@ -963,6 +990,9 @@ describe('graph-scoped finalization handler', () => {
         receive: async () => {
           if (failureMode === 'write-failure') throw new Error('disk full');
           return { status: 'capacity' };
+        },
+        recordTrustedPublisher: async () => {
+          throw new Error('recordTrustedPublisher must not run after failed admission');
         },
         markVerified: async () => {
           throw new Error('markVerified must not run after failed admission');
@@ -1356,6 +1386,62 @@ describe('graph-scoped finalization handler', () => {
       }
     },
   );
+
+  it('repairs missing VM content before a SETTLED recovery row advances the watermark', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-vm-repair-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+
+      await store.dropGraph(vmGraph);
+      expect(await store.countQuads(vmGraph)).toBe(0);
+
+      const persistedWatermarks: number[] = [];
+      const cursor = createCursorState(0);
+      const deps = recoveryReconciler(recoveryHandler, {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, persistedWatermarks);
+      await expect(reconcileContextGraph(deps, cursor, CG, 42n)).resolves.toMatchObject({
+        watermark: 1,
+        reconciled: 1,
+      });
+
+      expect(persistedWatermarks).toEqual([1]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + '<http://dkg.io/ontology/status> "confirmed" ; '
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + `<http://dkg.io/ontology/assertionGraph> <${vmGraph}> . } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('holds the production watermark until a SETTLED receipt retry is due and confirmed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-pending-'));

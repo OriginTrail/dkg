@@ -511,8 +511,21 @@ export class FinalizationRecovery<
     input: FinalizationRecoveryLiveInput,
     context: FinalizationVerificationContext,
   ): Promise<FinalizationRecoveryApplyOutcome> {
-    const prepared = await this.materializer.prepare(input);
+    const preparationInput = context.kind === 'recovery'
+      && context.entry.trustedPublisherPeerId
+      ? {
+          ...input,
+          sourcePeerId: context.entry.trustedPublisherPeerId,
+        }
+      : input;
+    const prepared = await this.materializer.prepare(preparationInput);
     if (!prepared) return 'deferred';
+    if (
+      context.kind === 'recovery'
+      && input.sourcePeerId !== undefined
+      && input.sourcePeerId === prepared.publisherPeerId
+      && !await this.recordTrustedPublisher(context.entry, prepared.publisherPeerId)
+    ) return 'deferred';
     const verification = await this.verifyMaterialization(
       input.candidate,
       context,
@@ -533,6 +546,31 @@ export class FinalizationRecovery<
         ? { authorAddress: verification.authorAddress }
         : {}),
     });
+  }
+
+  private async recordTrustedPublisher(
+    entry: FinalizationRecoveryEntry,
+    publisherPeerId: string,
+  ): Promise<boolean> {
+    const store = this.getStore();
+    if (!store) return false;
+    try {
+      const recorded = await store.recordTrustedPublisher(
+        entry.key,
+        entry.generation,
+        publisherPeerId,
+      );
+      if (recorded) return true;
+      this.log.warn(
+        `Finalization recovery inbox refused trusted publisher observation for ${entry.ual}`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery trusted publisher commit failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return false;
   }
 
   async recordVerified(
@@ -944,7 +982,18 @@ export class FinalizationRecovery<
         return recovered ? 'recovered' : 'retry-pending';
       }
       await this.clearSettledRetry(entry);
-      return matchesReplayTarget ? 'recovered' : 'none';
+      if (!matchesReplayTarget) return 'none';
+      const replayOutcome = await this.materializer.replayVerified({
+        replay: input,
+        entry,
+        candidate,
+        evidence,
+      });
+      return replayOutcome === 'promoted'
+        || replayOutcome === 'already-confirmed'
+        || replayOutcome === 'stale-target'
+        ? 'recovered'
+        : 'none';
     }
     if (canonical.status === 'reorged') {
       const recovered = await this.recoverSettledReorg(entry, candidate);
@@ -1017,10 +1066,11 @@ export class FinalizationRecovery<
       entry,
       'settled receipt disagrees with canonical chain truth',
     )) return false;
+    const recoverySourcePeerId = entry.trustedPublisherPeerId ?? entry.sourcePeerId;
     const reorged = await this.receive({
       rawMessage: entry.rawMessage,
       contextGraphId: entry.contextGraphId,
-      ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+      ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
       candidate,
     });
     if (!reorged || reorged.state !== 'REORGED') return false;
@@ -1028,7 +1078,7 @@ export class FinalizationRecovery<
       {
         rawMessage: entry.rawMessage,
         contextGraphId: entry.contextGraphId,
-        ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+        ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
         candidate,
       },
       { kind: 'recovery', entry: reorged },
@@ -1112,11 +1162,12 @@ export class FinalizationRecovery<
               ? 'already-confirmed'
               : 'deferred';
         } else {
+          const recoverySourcePeerId = entry.trustedPublisherPeerId ?? entry.sourcePeerId;
           outcome = await this.materialize(
             {
               rawMessage: entry.rawMessage,
               contextGraphId: entry.contextGraphId,
-              ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+              ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
               candidate,
             },
             { kind: 'recovery', entry },

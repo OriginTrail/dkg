@@ -19,6 +19,7 @@ export interface FinalizationRecoveryEntry {
   chainId: string;
   contextGraphId: string;
   sourcePeerId?: string;
+  trustedPublisherPeerId?: string;
   ual: string;
   txHash: string;
   assertionVersion: string;
@@ -80,6 +81,11 @@ export interface FinalizationRecoveryHealth {
 export interface FinalizationRecoveryStore {
   readonly closed: boolean;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
+  recordTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<boolean>;
   markVerified(
     key: string,
     generation: number,

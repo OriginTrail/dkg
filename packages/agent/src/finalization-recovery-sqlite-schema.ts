@@ -38,6 +38,7 @@ CREATE TABLE finalization_inbox_v1 (
   chain_id TEXT NOT NULL,
   context_graph_id TEXT NOT NULL,
   source_peer_id TEXT,
+  trusted_publisher_peer_id TEXT,
   ual TEXT NOT NULL,
   tx_hash TEXT NOT NULL,
   assertion_version TEXT NOT NULL,
