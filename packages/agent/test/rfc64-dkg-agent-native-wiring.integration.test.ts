@@ -373,6 +373,23 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
   });
 
+  it('rejects bootstrap without persistence before node startup', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await expect(DKGAgent.create({
+      name: 'ephemeral-bootstrap-is-invalid',
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [{ authorAddress: AUTHOR, providers: ['12D3KooProvider'] }],
+        }],
+      },
+    })).rejects.toThrow(/rfc64PublicCatalogBootstrap requires dataDir/u);
+  });
+
   it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
     const receiver = await startNativeAgent('auto-publish-receiver');
     const author = await startNativeAgent(
