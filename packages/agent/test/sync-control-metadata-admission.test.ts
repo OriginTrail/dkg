@@ -288,7 +288,7 @@ describe('durable sync control metadata admission', () => {
     const selection = selectVerifiedDurableSyncQuads([], meta, true);
 
     expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
-    expect(selection.droppedNonIriSubjects).toBe(3);
+    expect(selection.droppedNonIriSubjectTriples).toBe(3);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 
@@ -312,7 +312,7 @@ describe('durable sync control metadata admission', () => {
     const selection = selectVerifiedDurableSyncQuads(data, meta, false);
 
     expect(selection.metaIndexes).toEqual([]);
-    expect(selection.droppedNonIriSubjects).toBe(3);
+    expect(selection.droppedNonIriSubjectTriples).toBe(3);
     expect(selection.rejected).toBe(0);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
@@ -331,7 +331,7 @@ describe('durable sync control metadata admission', () => {
     const selection = selectVerifiedDurableSyncQuads([], meta, true);
 
     expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
-    expect(selection.droppedNonIriSubjects).toBe(2);
+    expect(selection.droppedNonIriSubjectTriples).toBe(2);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 
@@ -357,8 +357,26 @@ describe('durable sync control metadata admission', () => {
 
     const selection = selectVerifiedDurableSyncQuads(data, meta, false);
 
-    expect(selection.droppedNonIriSubjects).toBe(0);
+    expect(selection.droppedNonIriSubjectTriples).toBe(0);
     expect(selection.logs.every((entry) => !/non-IRI/.test(entry.message))).toBe(true);
     expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual(meta);
+  });
+
+  it('drops a literal `_meta` subject at ingest (#1921)', () => {
+    // The guard rejects BOTH blank-node and literal subjects as non-IRI. A
+    // literal subject term (begins with `"`) is malformed for a `_meta` subject
+    // and must be dropped, counted, and warned exactly like a blank node — this
+    // proves the second half of the advertised ingest contract.
+    const keptRow = quad(IRI_SUBJECT, `${DKG}status`, '"keep"');
+    const meta = [
+      keptRow,
+      quad('"literal-subject"', `${DKG}status`, '"drop"'),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptRow]);
+    expect(selection.droppedNonIriSubjectTriples).toBe(1);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
 });

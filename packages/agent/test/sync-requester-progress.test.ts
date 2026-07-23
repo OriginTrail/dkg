@@ -571,6 +571,99 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toEqual([]);
   });
 
+  it('advances the meta cursor when the whole page is non-IRI subjects dropped at ingest (#1921)', async () => {
+    // A metadata-only page consisting solely of non-IRI `_meta` rows is fully
+    // discarded by the #1921 guard: verifiedMeta=[] and droppedSyncControlTriples=0,
+    // but droppedNonIriSubjectTriples === totalFetchedMetaQuads. The meta cursor
+    // must still advance (the rows were deliberately consumed) or durable sync
+    // pins on the same poisoned page. Fails before the propagate fix.
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-non-iri'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 0,
+        droppedNonIriSubjectTriples: 3,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-non-iri:meta', 3]]);
+  });
+
+  it('advances the meta cursor when a mixed page is fully discarded by controls + non-IRI drops (#1921)', async () => {
+    // A mixed all-discarded page (some unverified controls + some non-IRI rows)
+    // also pins today because neither count alone equals the fetched total. The
+    // summed deliberate-drop check advances the cursor. Fails before the fix.
+    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const deleteCheckpoint = recorder((_key: string) => {});
+    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const fetchSyncPages = recorder(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['discarded-mixed'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        droppedSyncControlTriples: 1,
+        droppedNonIriSubjectTriples: 2,
+        totalFetchedMetaQuads: 3,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(storeInsert.calls).toEqual([]);
+    expect(deleteCheckpoint.calls).toEqual([]);
+    expect(setCheckpoint.calls).toEqual([['discarded-mixed:meta', 3]]);
+  });
+
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-complete-meta');
     const storeInsert = recorder(async (_quads: Quad[]) => {});

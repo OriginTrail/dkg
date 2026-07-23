@@ -105,7 +105,7 @@ export interface DurableIntegritySelection {
   /** Unauthenticated cursor/routing rows deliberately consumed but not persisted. */
   droppedSyncControlTriples: number;
   /** Non-IRI (blank-node/literal) `_meta` subject rows dropped at peer ingest (#1921). */
-  droppedNonIriSubjects: number;
+  droppedNonIriSubjectTriples: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
@@ -367,7 +367,7 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
-        droppedNonIriSubjects: 0,
+        droppedNonIriSubjectTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -378,7 +378,7 @@ export function selectVerifiedDurableSyncQuads(
       metaIndexes: [],
       rejected: 0,
       droppedSyncControlTriples: 0,
-      droppedNonIriSubjects: 0,
+      droppedNonIriSubjectTriples: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -397,7 +397,7 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
-        droppedNonIriSubjects: 0,
+        droppedNonIriSubjectTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -411,13 +411,13 @@ export function selectVerifiedDurableSyncQuads(
       new Set(),
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
-    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjects);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
-      droppedNonIriSubjects: selectedMetadata.droppedNonIriSubjects,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -1026,13 +1026,13 @@ function selectVerifiedQuads(
       outcome.kaToKc,
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
-    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjects);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
-      droppedNonIriSubjects: selectedMetadata.droppedNonIriSubjects,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -1044,7 +1044,7 @@ function selectVerifiedQuads(
       metaIndexes: [],
       rejected,
       droppedSyncControlTriples: 0,
-      droppedNonIriSubjects: 0,
+      droppedNonIriSubjectTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       // Keep this list aligned with the selected data + metadata indexes.
       // A fatal batch deliberately selects neither. Returning the names of
@@ -1064,14 +1064,14 @@ function selectVerifiedQuads(
     outcome.authenticatedMetadataUals,
   );
   logDroppedSyncControls(logs, selectedMetadata.droppedControls);
-  logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjects);
+  logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
 
   return {
     dataIndexes,
     metaIndexes: selectedMetadata.indexes,
     rejected,
     droppedSyncControlTriples: selectedMetadata.droppedControls,
-    droppedNonIriSubjects: selectedMetadata.droppedNonIriSubjects,
+    droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
     logs,
@@ -1084,10 +1084,10 @@ function selectAdmittedMetadataIndexes(
   admittedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
   authenticatedMetadataUals: ReadonlySet<string>,
-): { indexes: number[]; droppedControls: number; droppedNonIriSubjects: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
-  let droppedNonIriSubjects = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
     // #1921 — a durable `_meta` subject must be a conforming IRI. Drop a
@@ -1102,7 +1102,7 @@ function selectAdmittedMetadataIndexes(
     // relabel. Rejecting at the loop top preserves the store invariant that
     // every durable `_meta` subject is a conforming IRI.
     if (!isIriMetaSubject(quad.subject)) {
-      droppedNonIriSubjects += 1;
+      droppedNonIriSubjectTriples += 1;
       continue;
     }
     if (
@@ -1158,7 +1158,7 @@ function selectAdmittedMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls, droppedNonIriSubjects };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 function selectSystemOverrideMetadataIndexes(
@@ -1166,10 +1166,10 @@ function selectSystemOverrideMetadataIndexes(
   metadata: IntegrityMetadataIndex,
   authenticatedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
-): { indexes: number[]; droppedControls: number; droppedNonIriSubjects: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
-  let droppedNonIriSubjects = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
     // #1921 — reject a non-IRI durable `_meta` subject at ingest. This terminal
@@ -1177,7 +1177,7 @@ function selectSystemOverrideMetadataIndexes(
     // blank-node subject bearing ANY descriptive or integrity predicate
     // (e.g. `dkg:merkleRoot`) would be persisted and later served back.
     if (!isIriMetaSubject(quad.subject)) {
-      droppedNonIriSubjects += 1;
+      droppedNonIriSubjectTriples += 1;
       continue;
     }
     if (
@@ -1195,7 +1195,7 @@ function selectSystemOverrideMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls, droppedNonIriSubjects };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 /**

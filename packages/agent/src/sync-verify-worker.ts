@@ -48,6 +48,14 @@ export interface DurableBatchProcessResult {
   verifiedGraphScopedDataGraphs: string[];
   /** Metadata controls deliberately consumed after failing authentication. */
   droppedSyncControlTriples: number;
+  /**
+   * Non-IRI (blank-node/literal) `_meta` subject rows deliberately dropped at
+   * ingest (#1921). Surfaced beside {@link droppedSyncControlTriples} so the
+   * requester counts them as consumed metadata for meta-checkpoint advancement
+   * (a metadata-only page discarded entirely by the guard must still advance
+   * the cursor, not pin durable sync on the same page).
+   */
+  droppedNonIriSubjectTriples: number;
   /** Clean batches containing verified V2 assets with no public assertion triples. */
   verifiedPrivateOnlyResponses: number;
   totalFetchedDataQuads: number;

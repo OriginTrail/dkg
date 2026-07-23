@@ -118,6 +118,7 @@ interface DurableSyncContext {
     verifiedMeta: Quad[];
     verifiedGraphScopedDataGraphs?: string[];
     droppedSyncControlTriples?: number;
+    droppedNonIriSubjectTriples?: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -473,11 +474,20 @@ export async function runDurableSync(
 
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
       const droppedSyncControlTriples = processed.droppedSyncControlTriples ?? 0;
+      // Rows the verifier deliberately consumed but did not persist: unverified
+      // sync controls (existing) plus non-IRI `_meta` subjects dropped at ingest
+      // (#1921). A metadata-only page discarded ENTIRELY by these guards carries
+      // no verifiedMeta, so — like the all-controls case — the meta cursor only
+      // advances if we still count the page as consumed. Summing both kinds also
+      // covers a MIXED all-discarded page (some controls + some non-IRI), which
+      // otherwise pins because neither count alone equals the fetched total.
+      const deliberatelyDroppedMeta =
+        droppedSyncControlTriples + (processed.droppedNonIriSubjectTriples ?? 0);
       const discardedOnlyMetadataResponse = metadataOnlyResponse
         && processed.verifiedData.length === 0
         && processed.verifiedMeta.length === 0
-        && droppedSyncControlTriples > 0
-        && droppedSyncControlTriples === processed.totalFetchedMetaQuads;
+        && deliberatelyDroppedMeta > 0
+        && deliberatelyDroppedMeta === processed.totalFetchedMetaQuads;
       const updateMetaCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && (
