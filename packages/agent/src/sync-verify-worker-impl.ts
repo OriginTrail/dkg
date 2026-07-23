@@ -389,8 +389,10 @@ function processDurableBatch(
     verifiedGraphScopedDataGraphs: verifiedSelection.verifiedGraphScopedDataGraphs,
     droppedSyncControlTriples: verifiedSelection.droppedSyncControlTriples,
     droppedNonIriSubjectTriples: verifiedSelection.droppedNonIriSubjectTriples,
-    consumedUnpersistedMetaTriples:
-      verifiedSelection.droppedSyncControlTriples + verifiedSelection.droppedNonIriSubjectTriples,
+    // Transport the verifier-owned aggregate (#1921) — do NOT recompute the sum
+    // here. The early-return branches above (empty page / data-without-meta)
+    // bypass selection and set consumedUnpersistedMetaTriples: 0 explicitly.
+    consumedUnpersistedMetaTriples: verifiedSelection.consumedUnpersistedMetaTriples,
     verifiedPrivateOnlyResponses: verifiedFullyPrivateResponse ? 1 : 0,
     totalFetchedDataQuads,
     totalFetchedMetaQuads,

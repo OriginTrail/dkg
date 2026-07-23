@@ -460,4 +460,45 @@ describe('durable sync control metadata admission', () => {
     expect(selection.droppedNonIriSubjectTriples).toBe(2);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
+
+  it('owns consumedUnpersistedMetaTriples as the sum of the per-reason drop counts (#1921)', () => {
+    // The verifier owns the checkpoint aggregate: it must always equal
+    // droppedSyncControlTriples + droppedNonIriSubjectTriples across every drop
+    // composition — pure sync-control, all-non-IRI, and mixed.
+    const controlSubject = 'urn:system:unverified-control';
+
+    // (a) pure sync-control: 3 unauthenticated controls dropped, 0 non-IRI.
+    const controlOnly = selectVerifiedDurableSyncQuads([], [
+      quad(controlSubject, `${DKG}status`, '"keep"'),
+      quad(controlSubject, `${DKG}batchId`, integer(999n)),
+      quad(controlSubject, `${DKG}assertionGraph`, 'urn:attacker:graph'),
+      quad(controlSubject, `${DKG}assertionVersion`, integer(999n)),
+    ], true);
+    expect(controlOnly.droppedSyncControlTriples).toBe(3);
+    expect(controlOnly.droppedNonIriSubjectTriples).toBe(0);
+    expect(controlOnly.consumedUnpersistedMetaTriples)
+      .toBe(controlOnly.droppedSyncControlTriples + controlOnly.droppedNonIriSubjectTriples);
+
+    // (b) all-non-IRI: 0 controls, 2 non-IRI dropped.
+    const nonIriOnly = selectVerifiedDurableSyncQuads([], [
+      quad('_:injected', `${DKG}status`, '"drop"'),
+      quad('"literal-subject"', `${DKG}status`, '"drop-too"'),
+    ], true);
+    expect(nonIriOnly.droppedSyncControlTriples).toBe(0);
+    expect(nonIriOnly.droppedNonIriSubjectTriples).toBe(2);
+    expect(nonIriOnly.consumedUnpersistedMetaTriples)
+      .toBe(nonIriOnly.droppedSyncControlTriples + nonIriOnly.droppedNonIriSubjectTriples);
+
+    // (c) mixed: both reasons contribute.
+    const mixed = selectVerifiedDurableSyncQuads([], [
+      quad(controlSubject, `${DKG}batchId`, integer(999n)),
+      quad(controlSubject, `${DKG}assertionGraph`, 'urn:attacker:graph'),
+      quad('_:injected', `${DKG}status`, '"drop"'),
+      quad('"literal-subject"', `${DKG}label`, '"drop-too"'),
+    ], true);
+    expect(mixed.droppedSyncControlTriples).toBeGreaterThan(0);
+    expect(mixed.droppedNonIriSubjectTriples).toBe(2);
+    expect(mixed.consumedUnpersistedMetaTriples)
+      .toBe(mixed.droppedSyncControlTriples + mixed.droppedNonIriSubjectTriples);
+  });
 });

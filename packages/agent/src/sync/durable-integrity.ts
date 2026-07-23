@@ -102,10 +102,19 @@ export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
   rejected: number;
-  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted. */
+  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted (diagnostic). */
   droppedSyncControlTriples: number;
-  /** Non-IRI (blank-node/literal) `_meta` subject rows dropped at peer ingest (#1921). */
+  /** Non-IRI (blank-node/literal) `_meta` subject rows dropped at peer ingest (#1921) (diagnostic). */
   droppedNonIriSubjectTriples: number;
+  /**
+   * Reason-agnostic aggregate of `_meta` rows deliberately consumed but NOT
+   * persisted (= droppedSyncControlTriples + droppedNonIriSubjectTriples). Owned
+   * here by the verifier that classifies the drops (#1921): the worker transports
+   * it and the requester uses it as the single meta-checkpoint-advance signal, so
+   * checkpoint policy never has to enumerate verifier discard reasons. The two
+   * per-reason fields above stay as diagnostics.
+   */
+  consumedUnpersistedMetaTriples: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
@@ -374,6 +383,7 @@ export function selectVerifiedDurableSyncQuads(
         rejected: 1,
         droppedSyncControlTriples: 0,
         droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -385,6 +395,7 @@ export function selectVerifiedDurableSyncQuads(
       rejected: 0,
       droppedSyncControlTriples: 0,
       droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -414,6 +425,7 @@ export function selectVerifiedDurableSyncQuads(
         rejected: 1,
         droppedSyncControlTriples: 0,
         droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -434,6 +446,7 @@ export function selectVerifiedDurableSyncQuads(
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
       droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -1059,6 +1072,7 @@ function selectVerifiedQuads(
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
       droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -1071,6 +1085,7 @@ function selectVerifiedQuads(
       rejected,
       droppedSyncControlTriples: 0,
       droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       // Keep this list aligned with the selected data + metadata indexes.
       // A fatal batch deliberately selects neither. Returning the names of
@@ -1098,6 +1113,7 @@ function selectVerifiedQuads(
     rejected,
     droppedSyncControlTriples: selectedMetadata.droppedControls,
     droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+    consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
     logs,
