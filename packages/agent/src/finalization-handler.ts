@@ -1150,6 +1150,18 @@ export class FinalizationHandler {
       this.log.info(ctx, `Finalization: on-chain verification pending for graph-scoped KA ${scope.ual}`);
       return 'deferred';
     }
+    const verifiedTxIndex = verified.txIndex;
+    if (
+      verifiedTxIndex === undefined
+      || !Number.isSafeInteger(verifiedTxIndex)
+      || verifiedTxIndex < 0
+    ) {
+      this.log.info(
+        ctx,
+        `Finalization: canonical receipt ordering is unavailable for graph-scoped KA ${scope.ual}`,
+      );
+      return 'deferred';
+    }
     const verifiedAccess = resolveGraphScopedAccessEnvelope(
       head,
       requestedAccessPolicy,
@@ -1164,7 +1176,7 @@ export class FinalizationHandler {
         candidate: parsed,
         ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
         publisherPeerId: head.publisherPeerId,
-        txIndex: verified.txIndex ?? 0,
+        txIndex: verifiedTxIndex,
         ...(verified.authorAddress ? { authorAddress: verified.authorAddress } : {}),
         accessPolicy: verifiedAccess.accessPolicy,
         allowedPeers: verifiedAccess.allowedPeers,
@@ -1173,7 +1185,7 @@ export class FinalizationHandler {
     });
     const materializedVersion = {
       blockNumber,
-      txIndex: verified.txIndex ?? 0,
+      txIndex: verifiedTxIndex,
     };
     if (vmVerification.status === 'verified') {
       const metadataState = await this.graphScopedMetadataState({
@@ -3095,10 +3107,16 @@ export class FinalizationHandler {
       candidate.batchId,
     );
     if (!receipt.verified) return false;
+    const receiptTxIndex = receipt.txIndex;
+    if (
+      receiptTxIndex === undefined
+      || !Number.isSafeInteger(receiptTxIndex)
+      || receiptTxIndex < 0
+    ) return false;
     const expectedAuthor = evidence.authorAddress?.toLowerCase();
     const canonicalAuthor = receipt.authorAddress?.toLowerCase();
     return canonicalAuthor === expectedAuthor
-      && (receipt.txIndex ?? 0) === evidence.txIndex;
+      && receiptTxIndex === evidence.txIndex;
   }
 
   private async verifyOnChain(

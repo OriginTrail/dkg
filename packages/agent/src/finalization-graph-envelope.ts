@@ -81,7 +81,7 @@ export interface BuildVerifiedGraphScopedFinalizationEvidenceInput {
   candidate: ParsedGraphScopedFinalization;
   publicQuadsDigest?: string;
   publisherPeerId: string;
-  txIndex?: number;
+  txIndex: number;
   authorAddress?: string;
   accessPolicy: GraphScopedAccessPolicy;
   allowedPeers: string[];
@@ -158,7 +158,7 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
       publisherAddress: candidate.msg.publisherAddress,
       transactionHash: candidate.msg.txHash,
       blockNumber: candidate.blockNumber,
-      txIndex: input.txIndex ?? 0,
+      txIndex: input.txIndex,
       ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
       accessPolicy: input.accessPolicy,
       allowedPeers: input.allowedPeers,

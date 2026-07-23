@@ -89,6 +89,7 @@ describe('graph-scoped finalization recovery admission', () => {
       VerifiedGraphScopedFinalizationEvidenceCodec.build({
         candidate: parsed.value,
         publisherPeerId: '12D3KooWPublisher',
+        txIndex: 4,
         accessPolicy: 'ownerOnly',
         allowedPeers: [],
         workspaceSubGraphName,

@@ -556,10 +556,15 @@ describe('graph-scoped finalization handler', () => {
         verifyChainCgBinding: () => Promise<boolean>;
       };
       let receiptVerified = false;
+      let receiptTxIndex: number | undefined;
       let verifyCalls = 0;
       internals.verifyOnChain = async () => {
         verifyCalls += 1;
-        return { verified: receiptVerified, authorAddress: AUTHOR, txIndex: 4 };
+        return {
+          verified: receiptVerified,
+          authorAddress: AUTHOR,
+          ...(receiptTxIndex !== undefined ? { txIndex: receiptTxIndex } : {}),
+        };
       };
       internals.verifyChainCgBinding = async () => true;
 
@@ -589,6 +594,14 @@ describe('graph-scoped finalization handler', () => {
       expect(await store.countQuads(vmGraph)).toBe(1);
 
       receiptVerified = true;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await journal.list()).toMatchObject([{ state: 'raw' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      receiptTxIndex = 4;
       const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
       if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
       store.replaceGraphAndSubject = async () => {

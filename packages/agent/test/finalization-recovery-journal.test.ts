@@ -109,7 +109,7 @@ describe('FinalizationRecoveryJournal', () => {
     expect((await journal.list()).map((candidate) => candidate.kaId).sort()).toEqual(['2', '3']);
   });
 
-  it('rejects count, total-byte, and envelope-byte overflow without evicting verified entries', async () => {
+  it('rejects count and envelope-byte overflow without evicting verified entries', async () => {
     const directory = await temporaryDirectory();
     const journal = new FinalizationRecoveryJournal(directory, {
       maxEntries: 1,
@@ -120,6 +120,26 @@ describe('FinalizationRecoveryJournal', () => {
     expect(await journal.upsert(entry(2))).toBe(false);
     expect(await journal.upsert(entry(3, { rawMessage: new Uint8Array(5) }))).toBe(false);
     expect(await journal.list()).toMatchObject([{ kaId: '1', state: 'verified' }]);
+  });
+
+  it('rejects total-byte overflow independently of count and envelope limits', async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, FINALIZATION_RECOVERY_JOURNAL_FILENAME);
+    const seed = new FinalizationRecoveryJournal(directory, {
+      maxEntries: 4,
+      maxTotalBytes: 16_000,
+      maxEnvelopeBytes: 1_024,
+    });
+    expect(await seed.upsert(entry(1))).toBe(true);
+    const firstDocumentBytes = Buffer.byteLength(await readFile(path, 'utf8'), 'utf8');
+    const capped = new FinalizationRecoveryJournal(directory, {
+      maxEntries: 4,
+      maxTotalBytes: firstDocumentBytes + 10,
+      maxEnvelopeBytes: 1_024,
+    });
+
+    expect(await capped.upsert(entry(2))).toBe(false);
+    expect(await capped.list()).toMatchObject([{ kaId: '1' }]);
   });
 
   it('preserves a corrupt journal and refuses to overwrite it', async () => {
