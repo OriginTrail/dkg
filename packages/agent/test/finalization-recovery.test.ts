@@ -691,6 +691,78 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('does not let duplicate live gossip bypass SETTLED receipt backoff', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-live-backoff-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let now = 1_000;
+      let missing = false;
+      let receiptCalls = 0;
+      let invalidations = 0;
+      store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptCalls += 1;
+          return missing
+            ? { status: 'not-found' as const }
+            : { status: 'confirmed' as const, receipt: confirmedReceipt() };
+        },
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          invalidateVerified: async () => {
+            invalidations += 1;
+            return 'invalidated' as const;
+          },
+        },
+      );
+      const liveInput = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      };
+      await recovery.processLive(liveInput);
+
+      missing = true;
+      await recovery.processLive(liveInput);
+      const [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'SETTLED',
+        attemptCount: 1,
+        lastError: 'settled canonical receipt is not-found',
+      });
+      expect(receiptCalls).toBe(2);
+
+      for (let duplicate = 0; duplicate < 5; duplicate += 1) {
+        await recovery.processLive(liveInput);
+      }
+      expect(receiptCalls).toBe(2);
+      expect(invalidations).toBe(0);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 1,
+        nextAttemptAt: deferred.nextAttemptAt,
+      }]);
+
+      now = deferred.nextAttemptAt!;
+      await recovery.processLive(liveInput);
+      expect(receiptCalls).toBe(3);
+      expect(invalidations).toBe(0);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 2,
+      }]);
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('makes unsupported adapter capability explicit without fabricating ordering', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-unsupported-'));
     try {

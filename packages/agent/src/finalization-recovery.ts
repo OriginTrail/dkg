@@ -614,6 +614,8 @@ export class FinalizationRecovery<
       );
       return undefined;
     }
+    const store = this.getStore();
+    if (!store?.isAttemptDue(entry)) return undefined;
     const canonical = await this.resolveCanonicalReceipt(
       input.candidate,
       evidence,
