@@ -34,6 +34,7 @@ import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
+import { isIriTerm } from '../iri-term.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -3738,10 +3739,6 @@ function filterDurableMetaSnapshotRows(
       !(isIriTerm(row.s) && row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)),
     )
     .sort(compareRows);
-}
-
-function isIriTerm(term: string): boolean {
-  return !term.startsWith('_:') && !term.startsWith('"');
 }
 
 /**
