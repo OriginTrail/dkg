@@ -156,8 +156,8 @@ export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
       ? String((err as { code?: unknown }).code ?? '').toLowerCase()
       : '';
 
-  // 1. 10 MB gossip cap — surfaced as
-  //    "Promoted assertion too large for gossip (XXXX KB, limit 10 MB)"
+  // 1. 4 MiB gossip cap — surfaced as
+  //    "Promoted assertion too large for gossip (XXXX KB, limit 4 MB)"
   //    by the daemon's promote pipeline.
   if (
     code === 'swm_gossip_payload_too_large' ||

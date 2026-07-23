@@ -1,5 +1,5 @@
 /**
- * SHARE / SWM 10 MB gossip-size boundary, exercised from the agent layer.
+ * SHARE / SWM 4 MiB gossip-size boundary, exercised from the agent layer.
  *
  * Audit findings covered:
  *   A-2 (CRITICAL) — `DKGPublisher#_shareImpl` rejects encoded SWM messages
@@ -13,7 +13,7 @@
  *             split-into-smaller-share() batches.
  *          3. Boundary: callers that hit the limit see a *clear* error, not
  *             a silent libp2p-level drop. Error message contains both the
- *             observed KB and the 10 MB limit so operators can react.
+ *             observed KB and the 4 MiB limit so operators can react.
  *
  * No mocks — real `DKGAgent` + real libp2p + real chain (only used to boot
  * the agent; share() never submits a tx).
@@ -87,12 +87,12 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
-describe('A-2: SHARE 10 MB gossip-size boundary', () => {
-  it('share() with a payload well below 10 MB succeeds and lands in SWM', async () => {
+describe('A-2: SHARE 4 MiB gossip-size boundary', () => {
+  it('share() with a payload well below 4 MiB succeeds and lands in SWM', async () => {
     const cgId = freshCgId('bnd-lo');
     await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Lo', description: '' });
 
-    // Target ~100 KB of literal payload — well under the 10 MB cap.
+    // Target ~100 KB of literal payload — well under the 4 MiB cap.
     // Split across multiple literals to mimic realistic agent output.
     const chunkCount = 10;
     const chunkLen = 10 * 1024; // 10 KB per chunk
@@ -118,7 +118,7 @@ describe('A-2: SHARE 10 MB gossip-size boundary', () => {
     }
   });
 
-  it('share() with a payload well above 10 MB is rejected with the expected error message', async () => {
+  it('share() with a payload well above 4 MiB is rejected with the expected error message', async () => {
     const cgId = freshCgId('bnd-hi');
     await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Hi', description: '' });
 
@@ -133,9 +133,9 @@ describe('A-2: SHARE 10 MB gossip-size boundary', () => {
       caught = e as Error;
     }
     expect(caught, 'share() should reject an oversized payload with a size-limit error').not.toBeNull();
-    // Spec text from dkg-publisher.ts: "SWM message too large (<KB> KB, limit 10 MB)."
+    // Spec text from dkg-publisher.ts: "SWM message too large (<KB> KB, limit 4 MB)."
     expect(caught!.message).toMatch(/SWM message too large/);
-    expect(caught!.message).toMatch(/limit\s+10\s*MB/);
+    expect(caught!.message).toMatch(/limit\s+4\s*MB/);
     // Operator-actionable guidance: split into multiple share() calls.
     expect(caught!.message.toLowerCase()).toMatch(/split|multiple share/);
   });

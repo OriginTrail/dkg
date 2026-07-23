@@ -1,4 +1,5 @@
 import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
+import { STORAGE_ACK_MAX_STAGING_BYTES } from './protocol-limits.js';
 import { assertSafeIri } from './sparql-safe.js';
 
 // ── V10 Protocol Stream IDs ─────────────────────────────────────────────
@@ -226,8 +227,12 @@ export function logicalTopicFromWireTopic(networkId: string | undefined, wireTop
   return `dkg/${suffix}`;
 }
 
-/** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
-export const DKG_GOSSIP_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
+/**
+ * Maximum application payload size allowed for one DKG GossipSub message.
+ * Kept equal to the 4 MiB inline StorageACK staging ceiling so one Knowledge
+ * Asset has one consistent application-payload limit across SWM and ACK paths.
+ */
+export const DKG_GOSSIP_MAX_MESSAGE_BYTES = STORAGE_ACK_MAX_STAGING_BYTES;
 
 /** Allows GossipSub RPC framing around one max-sized application payload. */
 export const DKG_GOSSIP_MAX_RPC_BYTES = DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024;

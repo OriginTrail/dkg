@@ -59,7 +59,7 @@ export const ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION = 2;
  * the error message.
  *
  * - `transient`  — network blip, daemon overload, retry with backoff.
- * - `cap_exceeded` — 256 KB body cap or 10 MB gossip cap. The worker may
+ * - `cap_exceeded` — 256 KB body cap or 4 MiB gossip cap. The worker may
  *                   shrink the entity batch and retry, OR mark the whole
  *                   job failed if it can't subdivide further.
  * - `fatal`      — validation failure, unknown assertion, etc.; no retry.
