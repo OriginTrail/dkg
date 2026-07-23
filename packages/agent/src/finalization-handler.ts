@@ -72,6 +72,7 @@ import {
 import {
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
+  type FinalizationVerificationContext,
 } from './finalization-recovery.js';
 import type {
   FinalizationRecoveryEntry,
@@ -289,6 +290,33 @@ export interface FinalizationHandlerOptions {
   recoveryStore?: FinalizationRecoveryStore;
 }
 
+function isLegacyFinalizationEventBus(
+  value: FinalizationHandlerOptions | EventBus | undefined,
+): value is EventBus {
+  return value !== undefined
+    && typeof (value as EventBus).emit === 'function';
+}
+
+function normalizeFinalizationHandlerOptions(
+  optionsOrEventBus: FinalizationHandlerOptions | EventBus | undefined,
+  resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined,
+  markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined,
+  lifecycleLogOptions: FinalizationLifecycleLogOptions | undefined,
+): FinalizationHandlerOptions {
+  const hasLegacyTail = resolveContextGraphOnChainId !== undefined
+    || markContextGraphMetaDirtyFromQuads !== undefined
+    || lifecycleLogOptions !== undefined;
+  if (!hasLegacyTail && !isLegacyFinalizationEventBus(optionsOrEventBus)) {
+    return (optionsOrEventBus as FinalizationHandlerOptions | undefined) ?? {};
+  }
+  return {
+    ...(optionsOrEventBus ? { eventBus: optionsOrEventBus as EventBus } : {}),
+    ...(resolveContextGraphOnChainId ? { resolveContextGraphOnChainId } : {}),
+    ...(markContextGraphMetaDirtyFromQuads ? { markContextGraphMetaDirtyFromQuads } : {}),
+    ...(lifecycleLogOptions ? { lifecycleLogOptions } : {}),
+  };
+}
+
 interface DecodedFinalizationEnvelope {
   rawMessage: Uint8Array;
   msg: FinalizationMessageMsg;
@@ -337,11 +365,35 @@ export class FinalizationHandler {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    options: FinalizationHandlerOptions = {},
+    options?: FinalizationHandlerOptions,
+  );
+  /** @deprecated Use the explicit `FinalizationHandlerOptions` constructor. */
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    eventBus?: EventBus,
+    resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    lifecycleLogOptions?: FinalizationLifecycleLogOptions,
+  );
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    optionsOrEventBus?: FinalizationHandlerOptions | EventBus,
+    legacyResolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    legacyMarkContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    legacyLifecycleLogOptions?: FinalizationLifecycleLogOptions,
   ) {
+    const options = normalizeFinalizationHandlerOptions(
+      optionsOrEventBus,
+      legacyResolveContextGraphOnChainId,
+      legacyMarkContextGraphMetaDirtyFromQuads,
+      legacyLifecycleLogOptions,
+    );
     this.store = store;
     this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
@@ -465,7 +517,7 @@ export class FinalizationHandler {
         candidate,
         entry.contextGraphId,
         entry.sourcePeerId,
-        entry,
+        { kind: 'recovery', entry },
       ),
       applyVerified: async ({ evidence }) => {
         const reconcileOutcome = await this.reconcileGraphScopedKC({
@@ -554,7 +606,7 @@ export class FinalizationHandler {
     candidate: ParsedGraphScopedFinalization,
     contextGraphId: string,
     sourcePeerId?: string,
-    recoveryEntry?: FinalizationRecoveryEntry,
+    verificationContext: FinalizationVerificationContext = { kind: 'live' },
   ): Promise<FinalizationRecoveryApplyOutcome> {
     const { msg } = candidate;
     const ctx = msg.operationId
@@ -580,7 +632,7 @@ export class FinalizationHandler {
         ...(resolvedTargetContextGraphId ? { ctxGraphId: resolvedTargetContextGraphId } : {}),
         ...(msg.subGraphName ? { subGraphName: msg.subGraphName } : {}),
         ...(sourcePeerId ? { sourcePeerId } : {}),
-        ...(recoveryEntry ? { recoveryEntry } : {}),
+        verificationContext,
         ctx,
       });
       if (outcome === 'applied' || outcome === 'already-confirmed') this.markProcessed(dedupeKey);
@@ -633,7 +685,9 @@ export class FinalizationHandler {
           graphAdmission.value,
           contextGraphId,
           sourcePeerId,
-          recoveryEntry,
+          recoveryEntry
+            ? { kind: 'recovery', entry: recoveryEntry }
+            : { kind: 'live' },
         );
       }
 
@@ -943,7 +997,7 @@ export class FinalizationHandler {
     ctxGraphId?: string;
     subGraphName?: string;
     sourcePeerId?: string;
-    recoveryEntry?: FinalizationRecoveryEntry;
+    verificationContext: FinalizationVerificationContext;
     ctx: OperationContext;
   }): Promise<FinalizationRecoveryApplyOutcome> {
     const {
@@ -952,7 +1006,7 @@ export class FinalizationHandler {
       ctxGraphId,
       subGraphName,
       sourcePeerId,
-      recoveryEntry,
+      verificationContext,
       ctx,
     } = input;
     const { msg } = parsed;
@@ -1057,79 +1111,52 @@ export class FinalizationHandler {
       }
     }
 
-    const canonical = recoveryEntry
-      ? await this.recovery.resolveCanonicalReceipt(parsed, recoveryEntry.verifiedEvidence)
-      : undefined;
-    if (canonical?.status === 'unsupported') {
-      await this.recovery.markUnsupported(recoveryEntry!);
-      this.log.warn(ctx, `Finalization: canonical receipt recovery is unsupported for ${scope.ual}`);
-      return 'deferred';
-    }
-    if (canonical?.status === 'reorged' || canonical?.status === 'rejected') {
-      const reason = canonical.status === 'reorged'
-        ? 'canonical receipt mismatch or reorg'
-        : 'transaction failed or contains no finalization event';
-      await this.recovery.rejectEntry(recoveryEntry!, reason);
-      this.log.warn(ctx, `Finalization: canonical receipt ${canonical.status} for graph-scoped KA ${scope.ual}`);
-      return 'deferred';
-    }
-    if (canonical && canonical.status !== 'confirmed') {
-      this.log.info(ctx, `Finalization: canonical receipt ${canonical.status} for graph-scoped KA ${scope.ual}`);
-      return 'deferred';
-    }
-    const legacyVerified = canonical ? undefined : await this.verifyOnChain(
-      msg.txHash,
-      blockNumber,
-      msg.kcMerkleRoot,
-      msg.publisherAddress,
-      startKAId,
-      endKAId,
-      ctx,
-      ctxGraphId,
-      batchId,
-    );
-    if (!canonical && !legacyVerified?.verified) {
-      this.log.info(ctx, `Finalization: on-chain verification pending for graph-scoped KA ${scope.ual}`);
-      return 'deferred';
-    }
-    // Durable recovery requires exact canonical ordering. The no-inbox live
-    // path retains the legacy adapter contract where event scans may omit it.
-    const verifiedTxIndex = recoveryEntry
-      ? canonical?.receipt.txIndex
-      : (legacyVerified?.txIndex ?? 0);
-    if (verifiedTxIndex === undefined || !Number.isSafeInteger(verifiedTxIndex) || verifiedTxIndex < 0) {
-      this.log.info(ctx, `Finalization: canonical receipt ordering is unavailable for graph-scoped KA ${scope.ual}`);
-      return 'deferred';
-    }
-    const verifiedAuthorAddress = canonical?.receipt.authorAddress ?? legacyVerified?.authorAddress;
-    const verifiedBlockHash = canonical?.receipt.blockHash;
     const verifiedAccess = resolveGraphScopedAccessEnvelope(
       head,
       requestedAccessPolicy,
       requestedAllowedPeers,
     );
-    if (recoveryEntry) {
-      if (!verifiedBlockHash) {
-        await this.recovery.rejectEntry(recoveryEntry, 'canonical receipt block hash is missing');
-        return 'deferred';
-      }
-      const verifiedEvidence = VerifiedGraphScopedFinalizationEvidenceCodec.build({
-        candidate: parsed,
-        ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
-        publisherPeerId: head.publisherPeerId,
-        blockHash: verifiedBlockHash,
-        txIndex: verifiedTxIndex,
-        ...(verifiedAuthorAddress ? { authorAddress: verifiedAuthorAddress } : {}),
-        accessPolicy: verifiedAccess.accessPolicy,
-        allowedPeers: verifiedAccess.allowedPeers,
-        workspaceSubGraphName: subGraphName,
-      });
-      const committed = await this.recovery.recordVerified(recoveryEntry, verifiedEvidence);
-      if (!committed) {
-        this.log.warn(ctx, `Finalization: VERIFIED inbox commit failed for ${scope.ual}; deferring`);
-        return 'deferred';
-      }
+    const verification = await this.recovery.verifyMaterialization(
+      parsed,
+      verificationContext,
+      {
+        verifyLegacy: () => this.verifyOnChain(
+          msg.txHash,
+          blockNumber,
+          msg.kcMerkleRoot,
+          msg.publisherAddress,
+          startKAId,
+          endKAId,
+          ctx,
+          ctxGraphId,
+          batchId,
+        ),
+        verifyContextGraphBinding: () => ctxGraphId
+          ? this.verifyChainCgBinding(parsed.kaId, ctxGraphId, ctx)
+          : Promise.resolve(false),
+        buildEvidence: (receipt) => VerifiedGraphScopedFinalizationEvidenceCodec.build({
+          candidate: parsed,
+          ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
+          publisherPeerId: head.publisherPeerId,
+          blockHash: receipt.blockHash,
+          txIndex: receipt.txIndex,
+          ...(receipt.authorAddress ? { authorAddress: receipt.authorAddress } : {}),
+          accessPolicy: verifiedAccess.accessPolicy,
+          allowedPeers: verifiedAccess.allowedPeers,
+          workspaceSubGraphName: subGraphName,
+        }),
+      },
+    );
+    if (verification.status === 'deferred') {
+      this.log.info(
+        ctx,
+        `Finalization: verification deferred for graph-scoped KA ${scope.ual} `
+          + `(${verification.reason})`,
+      );
+      return 'deferred';
     }
+    const verifiedTxIndex = verification.txIndex;
+    const verifiedAuthorAddress = verification.authorAddress;
     const materializedVersion = {
       blockNumber,
       txIndex: verifiedTxIndex,

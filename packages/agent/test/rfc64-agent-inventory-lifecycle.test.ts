@@ -139,6 +139,9 @@ function candidateLoadCount(dataDirectory: string): number {
 function minimalStartedAgent(
   order: string[],
   inventoryClose: () => void | Promise<void>,
+  recoveryClose: () => void | Promise<void> = () => {
+    order.push('recovery');
+  },
 ): any {
   const agent = syntheticAgent();
   Object.assign(agent, {
@@ -155,6 +158,7 @@ function minimalStartedAgent(
     router: { closePooling: vi.fn(async () => {}) },
     node: { stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
+    finalizationRecoveryStore: { close: recoveryClose },
     rfc64PersistenceV1: {
       close: () => {
         order.push('control-store');
@@ -448,9 +452,54 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await agent.stop();
     await agent.stop();
 
-    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'recovery',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
     expect(inventoryClose).toHaveBeenCalledOnce();
+    expect(agent.finalizationRecoveryStore).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.started).toBe(false);
+  });
+
+  it('awaits finalization inbox drain before RFC-64 persistence and store teardown', async () => {
+    const order: string[] = [];
+    const drain = deferred();
+    const recoveryClose = vi.fn(async () => {
+      await drain.promise;
+      order.push('recovery');
+    });
+    const agent = minimalStartedAgent(
+      order,
+      () => { order.push('inventory'); },
+      recoveryClose,
+    );
+
+    const stop = agent.stop();
+    let settled = false;
+    void stop.finally(() => { settled = true; });
+    await vi.waitFor(() => expect(recoveryClose).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(order).toEqual(['node', 'sync-worker']);
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    expect(settled).toBe(false);
+
+    drain.resolve();
+    await expect(stop).resolves.toBeUndefined();
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'recovery',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
     expect(agent.started).toBe(false);
   });
 
@@ -469,7 +518,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await vi.waitFor(() => expect(persistenceClose).toHaveBeenCalledOnce());
     await Promise.resolve();
 
-    expect(order).toEqual(['node', 'sync-worker', 'control-store']);
+    expect(order).toEqual(['node', 'sync-worker', 'recovery', 'control-store']);
     expect(agent.store.close).not.toHaveBeenCalled();
     expect(agent.started).toBe(true);
     expect(settled).toBe(false);
@@ -479,6 +528,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(order).toEqual([
       'node',
       'sync-worker',
+      'recovery',
       'control-store',
       'inventory',
       'store',
@@ -497,7 +547,51 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
 
     await expect(agent.stop()).rejects.toBe(failure);
 
-    expect(order).toEqual(['node', 'sync-worker', 'control-store', 'inventory', 'store']);
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'recovery',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
+    expect(agent.rfc64PersistenceV1).toBeUndefined();
+    expect(agent.started).toBe(false);
+    await expect(agent.stop()).resolves.toBeUndefined();
+  });
+
+  it('continues teardown and aggregates finalization and RFC-64 close failures', async () => {
+    const order: string[] = [];
+    const recoveryFailure = new Error('finalization recovery close failed');
+    const inventoryFailure = new Error('inventory close failed');
+    const agent = minimalStartedAgent(
+      order,
+      async () => {
+        order.push('inventory');
+        throw inventoryFailure;
+      },
+      async () => {
+        order.push('recovery');
+        throw recoveryFailure;
+      },
+    );
+
+    const rejection = await agent.stop().catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(AggregateError);
+    expect((rejection as AggregateError).errors).toEqual([
+      recoveryFailure,
+      inventoryFailure,
+    ]);
+    expect(order).toEqual([
+      'node',
+      'sync-worker',
+      'recovery',
+      'control-store',
+      'inventory',
+      'store',
+    ]);
+    expect(agent.finalizationRecoveryStore).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
     await expect(agent.stop()).resolves.toBeUndefined();

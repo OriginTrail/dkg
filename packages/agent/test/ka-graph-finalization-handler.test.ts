@@ -531,6 +531,48 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('falls back to legacy live verification when canonical receipts are unsupported', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-unsupported-live-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const legacyChain = {
+        chainId: 'legacy:1',
+        isV10Ready: () => true,
+        listenForEvents: async function* (filter: { eventTypes: string[] }) {
+          if (
+            !filter.eventTypes.includes('KCCreated')
+            && !filter.eventTypes.includes('KnowledgeBatchCreated')
+          ) return;
+          yield {
+            blockNumber: Number(message.blockNumber),
+            data: {
+              txHash: message.txHash,
+              merkleRoot: message.kcMerkleRoot,
+              publisherAddress: message.publisherAddress,
+              startKAId: PACKED_KA_ID.toString(),
+              endKAId: PACKED_KA_ID.toString(),
+              author: AUTHOR,
+              txIndex: 4,
+            },
+          };
+        },
+      } as unknown as ChainAdapter;
+      const liveHandler = new FinalizationHandler(store, legacyChain, {
+        recoveryStore: inbox,
+      });
+
+      await liveHandler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+      expect(await inbox.list()).toEqual([]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('applies after one transient scheduler timeout without journaling', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     const query = store.query.bind(store);
@@ -757,6 +799,53 @@ describe('graph-scoped finalization handler', () => {
         state: 'RECEIVED',
         attemptCount: 1,
       }]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires the canonical KA-to-context-graph binding before materialization', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-binding-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      let boundContextGraphId = 43n;
+      const chain = {
+        chainId: 'base:84532',
+        getKAContextGraphId: async (kaId: bigint) => {
+          expect(kaId).toBe(PACKED_KA_ID);
+          return boundContextGraphId;
+        },
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, {
+        recoveryStore: inbox,
+      });
+
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(await store.countQuads(vmGraph)).toBe(1);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 1,
+        lastError: 'finalization processing deferred',
+      }]);
+
+      boundContextGraphId = 42n;
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
     } finally {
       await closeInbox(inbox);
       await rm(directory, { recursive: true, force: true });

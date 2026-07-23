@@ -98,6 +98,35 @@ describe('FinalizationHandler', () => {
     expect(resolvedContextGraphs).toEqual([CONTEXT_GRAPH]);
   });
 
+  it('preserves the exported positional constructor contract', async () => {
+    const eventBus = { emit: () => undefined } as unknown as EventBus;
+    const resolver: ResolveContextGraphOnChainId = async () => '42';
+    const markDirty: MarkContextGraphMetaDirtyFromQuads = () => {};
+    const lifecycleOptions: FinalizationLifecycleLogOptions = {
+      localPeerId: 'legacy-peer',
+      localNodeIdentityId: '99',
+    };
+    const legacy = new FinalizationHandler(
+      store,
+      undefined,
+      eventBus,
+      resolver,
+      markDirty,
+      lifecycleOptions,
+    );
+    const wired = legacy as unknown as {
+      eventBus: EventBus;
+      resolveContextGraphOnChainId: ResolveContextGraphOnChainId;
+      markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads;
+      lifecycle: { options: FinalizationLifecycleLogOptions };
+    };
+
+    expect(wired.eventBus).toBe(eventBus);
+    expect(wired.resolveContextGraphOnChainId).toBe(resolver);
+    expect(wired.markContextGraphMetaDirtyFromQuads).toBe(markDirty);
+    expect(wired.lifecycle.options).toEqual(lifecycleOptions);
+  });
+
   it('deduplicates messages with same UAL and txHash', async () => {
     const msg = makeFinalizationMsg();
     const data = encodeFinalizationMessage(msg);

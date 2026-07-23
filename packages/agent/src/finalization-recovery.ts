@@ -32,6 +32,41 @@ export interface FinalizationRecoveryLiveCallbacks {
   isRetryableError(error: unknown): boolean;
 }
 
+export type FinalizationVerificationContext =
+  | { kind: 'live' }
+  | { kind: 'recovery'; entry: FinalizationRecoveryEntry };
+
+export interface LegacyFinalizationVerification {
+  verified: boolean;
+  authorAddress?: string;
+  txIndex?: number;
+}
+
+export interface FinalizationMaterializationVerificationCallbacks {
+  verifyLegacy(): Promise<LegacyFinalizationVerification>;
+  verifyContextGraphBinding(): Promise<boolean>;
+  buildEvidence(
+    receipt: CanonicalFinalizationReceipt,
+  ): VerifiedGraphScopedFinalizationEvidence;
+}
+
+export type FinalizationMaterializationVerification =
+  | {
+    status: 'verified';
+    txIndex: number;
+    authorAddress?: string;
+  }
+  | {
+    status: 'deferred';
+    reason:
+      | 'legacy-verification-pending'
+      | 'canonical-receipt-pending'
+      | 'canonical-receipt-rejected'
+      | 'canonical-receipt-unsupported'
+      | 'context-graph-binding-pending'
+      | 'verified-evidence-commit-failed';
+  };
+
 interface FinalizationRecoveryLog {
   info(message: string): void;
   warn(message: string): void;
@@ -90,13 +125,22 @@ export class FinalizationRecovery {
 
   /**
    * Applies a live graph-scoped finalization behind the durable write-ahead
-   * boundary. Returns false only when no recovery store is configured.
+   * boundary. Returns false when durable recovery is unavailable so the caller
+   * can preserve the legacy live-verification path.
    */
   async processLive(
     input: FinalizationRecoveryLiveInput,
     callbacks: FinalizationRecoveryLiveCallbacks,
   ): Promise<boolean> {
-    if (!this.store) return false;
+    // The receipt API is intentionally optional on ChainAdapter. Preserve the
+    // legacy live path when it is absent instead of admitting an envelope that
+    // this runtime can never promote to VERIFIED.
+    if (
+      !this.store
+      || !this.chain
+      || this.chain.chainId === 'none'
+      || !this.chain.resolveCanonicalFinalizationReceipt
+    ) return false;
     const entry = await this.receive(input);
     // A configured inbox fails closed: capacity, conflict, corruption, and
     // write failures leave Oxigraph untouched.
@@ -220,6 +264,81 @@ export class FinalizationRecovery {
       return { status: 'reorged' };
     }
     return { status: 'confirmed', receipt };
+  }
+
+  /**
+   * Produces the chain-verified fields required by graph materialization.
+   * Recovery-specific receipt interpretation and durable transitions remain
+   * here; the handler supplies only legacy verification, CG binding, and
+   * evidence construction callbacks.
+   */
+  async verifyMaterialization(
+    candidate: ParsedGraphScopedFinalization,
+    context: FinalizationVerificationContext,
+    callbacks: FinalizationMaterializationVerificationCallbacks,
+  ): Promise<FinalizationMaterializationVerification> {
+    if (context.kind === 'live') {
+      const legacy = await callbacks.verifyLegacy();
+      if (!legacy.verified) {
+        return { status: 'deferred', reason: 'legacy-verification-pending' };
+      }
+      const txIndex = legacy.txIndex ?? 0;
+      if (!Number.isSafeInteger(txIndex) || txIndex < 0) {
+        return { status: 'deferred', reason: 'legacy-verification-pending' };
+      }
+      return {
+        status: 'verified',
+        txIndex,
+        ...(legacy.authorAddress ? { authorAddress: legacy.authorAddress } : {}),
+      };
+    }
+
+    const { entry } = context;
+    const canonical = await this.resolveCanonicalReceipt(candidate, entry.verifiedEvidence);
+    if (canonical.status === 'unsupported') {
+      await this.markUnsupported(entry);
+      this.log.warn(
+        `Finalization recovery canonical receipt is unsupported for ${entry.ual}`,
+      );
+      return { status: 'deferred', reason: 'canonical-receipt-unsupported' };
+    }
+    if (canonical.status === 'reorged' || canonical.status === 'rejected') {
+      await this.rejectEntry(
+        entry,
+        canonical.status === 'reorged'
+          ? 'canonical receipt mismatch or reorg'
+          : 'transaction failed or contains no finalization event',
+      );
+      this.log.warn(
+        `Finalization recovery canonical receipt is ${canonical.status} for ${entry.ual}`,
+      );
+      return { status: 'deferred', reason: 'canonical-receipt-rejected' };
+    }
+    if (canonical.status !== 'confirmed') {
+      this.log.info(
+        `Finalization recovery canonical receipt is ${canonical.status} for ${entry.ual}`,
+      );
+      return { status: 'deferred', reason: 'canonical-receipt-pending' };
+    }
+    if (!await callbacks.verifyContextGraphBinding()) {
+      this.log.info(
+        `Finalization recovery context-graph binding is pending for ${entry.ual}`,
+      );
+      return { status: 'deferred', reason: 'context-graph-binding-pending' };
+    }
+
+    const evidence = callbacks.buildEvidence(canonical.receipt);
+    const committed = await this.recordVerified(entry, evidence);
+    if (!committed) {
+      return { status: 'deferred', reason: 'verified-evidence-commit-failed' };
+    }
+    return {
+      status: 'verified',
+      txIndex: canonical.receipt.txIndex,
+      ...(canonical.receipt.authorAddress
+        ? { authorAddress: canonical.receipt.authorAddress }
+        : {}),
+    };
   }
 
   async recordVerified(

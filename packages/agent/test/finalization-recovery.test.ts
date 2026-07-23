@@ -7,7 +7,10 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   type FinalizationMessageMsg,
 } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  type ChainAdapter,
+} from '@origintrail-official/dkg-chain';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
@@ -113,6 +116,7 @@ describe('graph-scoped finalization recovery admission', () => {
         name: 'FinalizationRecoveryWiringBot',
         dataDir: directory,
         listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
       });
       const preStartHandler = agent.getOrCreateFinalizationHandler();
       await agent.start();
