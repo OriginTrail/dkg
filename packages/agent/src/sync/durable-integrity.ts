@@ -173,7 +173,13 @@ export function planBoundedGraphScopedDurableBatch(
     || metaQuads.length === 0
   ) return null;
 
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  // #1921 — verification must never see non-IRI `_meta` subjects: a peer's
+  // `_:bad dkg:partOf "<valid-ual>"` row would otherwise be scanned by
+  // readIntegrityMetadata and falsely invalidate the valid graph-scoped UAL.
+  // Sanitize before indexing. The bounded planner returns only data offsets,
+  // so dropping non-IRI meta rows here is loss-free.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   const parsed = readIntegrityMetadata(metadata, false);
   if (
     parsed.fatalUnscopedFailure
@@ -385,7 +391,17 @@ export function selectVerifiedDurableSyncQuads(
     };
   }
 
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  // #1921 — sanitize the verification inputs ONCE at this boundary so a non-IRI
+  // `_meta` subject can neither authenticate data (it never becomes a candidate)
+  // NOR poison verification (the readIntegrityMetadata PART_OF scan and
+  // verifyLegacyCandidates' raw scan never see it, so a `_:bad dkg:partOf
+  // "<valid-ual>"` row cannot falsely invalidate a valid batch). Admission below
+  // deliberately runs on the ORIGINAL metaQuads: the selectors still drop+count
+  // non-IRI rows (persist-drop + meta-cursor advance) and index into the
+  // original array. The verification outcome is subject-keyed, so no positional
+  // remap is needed across the sanitized/original split.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   if (metadata.merkleSubjects.size === 0 && metadata.markerSubjects.size === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
       logs.push({
@@ -434,7 +450,7 @@ export function selectVerifiedDurableSyncQuads(
   );
   const legacy = verifyLegacyCandidates(
     dataQuads,
-    metaQuads,
+    iriMetaQuads,
     metadata,
     parsed.candidates,
     acceptUnverified,
@@ -490,17 +506,14 @@ function indexIntegrityMetadata(
 
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
+  // #1921 — callers pass IRI-only `_meta` quads: both selectVerifiedDurableSyncQuads
+  // and planBoundedGraphScopedDurableBatch sanitize non-IRI subjects at their
+  // boundary before indexing. So no blank-node/literal subject reaches candidacy
+  // OR the metaBySubject-based verification scans (readIntegrityMetadata's PART_OF
+  // scan, parseGraphScopedDescriptor), meaning a non-IRI subject can neither
+  // authenticate data nor poison a valid batch. Admission (the selectors) runs on
+  // the ORIGINAL metaQuads and is where non-IRI rows are dropped + counted.
   for (const quad of metaQuads) {
-    // #1921 — a non-IRI `_meta` subject must never become a verification
-    // candidate. Without this, a peer's blank-node/literal subject bearing
-    // `dkg:merkleRoot` would enter `merkleSubjects`, self-consistently
-    // authenticate its bound DATA (the claimed root is peer-supplied, not
-    // on-chain-anchored), and get that data admitted — after which the
-    // admission-selector guard drops only the METADATA, leaving orphaned,
-    // peer-forged data in the store. Gating candidacy here (not only at
-    // admission) closes that path; the selector guards still handle the
-    // persist-drop + consumed-row counting for descriptive rows.
-    if (!isIriMetaSubject(quad.subject)) continue;
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
     }
@@ -1462,11 +1475,11 @@ function stripLiteral(raw: string): string {
  * and read agree on the contract.
  */
 function isIriMetaSubject(term: string): boolean {
-  // Defensive on `term`: besides the admission selectors, this now runs inside
-  // `indexIntegrityMetadata`, which the requester's bounded-snapshot planner
-  // (`planBoundedGraphScopedDurableBatch`) invokes on RAW fetched meta before
-  // verification. A conforming quad always carries a non-empty string subject;
-  // tolerate a malformed one (treat as non-IRI → skip) instead of throwing.
+  // Defensive on `term`: this runs at the verification-input boundary filters
+  // (selectVerifiedDurableSyncQuads and planBoundedGraphScopedDurableBatch, both
+  // on RAW fetched meta) and in the admission selectors. A conforming quad always
+  // carries a non-empty string subject; tolerate a malformed one (treat as
+  // non-IRI → drop) instead of throwing.
   return typeof term === 'string' && term.length > 0
     && !term.startsWith('_:') && !term.startsWith('"');
 }

@@ -117,8 +117,13 @@ interface DurableSyncContext {
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     verifiedGraphScopedDataGraphs?: string[];
-    /** Worker-owned aggregate of meta rows deliberately consumed but not persisted. */
-    consumedUnpersistedMetaTriples?: number;
+    /**
+     * Worker-owned aggregate of meta rows deliberately consumed but not
+     * persisted. REQUIRED (#1921): it is the single checkpoint-advance signal,
+     * so every producer must set it — an optional field silently reading 0
+     * would let the meta cursor pin with no type error.
+     */
+    consumedUnpersistedMetaTriples: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -481,7 +486,7 @@ export async function runDurableSync(
       // aggregate (not per-reason counters) keeps checkpoint orchestration
       // decoupled from verifier discard policy; the per-reason counts remain as
       // verifier-side diagnostics only.
-      const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples ?? 0;
+      const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples;
       const discardedOnlyMetadataResponse = metadataOnlyResponse
         && processed.verifiedData.length === 0
         && processed.verifiedMeta.length === 0

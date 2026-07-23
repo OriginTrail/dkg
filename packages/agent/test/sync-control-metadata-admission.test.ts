@@ -406,4 +406,58 @@ describe('durable sync control metadata admission', () => {
     expect(selection.droppedNonIriSubjectTriples).toBe(1);
     expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
   });
+
+  it('verifies a graph-scoped asset even when a non-IRI dkg:partOf row is present (#1921)', () => {
+    // A peer can attach `_:bad dkg:partOf "<valid-ual>"` beside a valid
+    // graph-scoped descriptor. Before the #1921 verification-input sanitize,
+    // readIntegrityMetadata's PART_OF scan over metaBySubject saw that non-IRI
+    // row and falsely invalidated the valid UAL → the whole batch was rejected
+    // → durable sync pinned (a poison/DoS vector). The boundary sanitize keeps
+    // non-IRI subjects out of verification, so the asset still verifies while
+    // the bad row is dropped + counted (never persisted).
+    const scope = createGraphKnowledgeAssetScope(UAL, '1');
+    const assertionGraph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, scope);
+    const data = [quad('urn:verified:entity', 'urn:example:value', '"verified"', assertionGraph)];
+    const verified = generateGraphKnowledgeAssetMetadata({
+      ual: UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(data, []),
+      publisherPeerId: 'verified-publisher',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: data.length,
+      assertionGraph,
+    }, { status: 'tentative' });
+    const poison = quad('_:bad', `${DKG}partOf`, `"${UAL}"`);
+    const meta = [...verified, poison];
+
+    const selection = selectVerifiedDurableSyncQuads(data, meta, false);
+
+    expect(selection.rejected).toBe(0);
+    expect(selection.dataIndexes).toEqual([0]);
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual(verified);
+    expect(selection.droppedNonIriSubjectTriples).toBe(1);
+  });
+
+  it('drops a non-IRI _meta subject on the system-override path (#1921)', () => {
+    // Directly exercises selectSystemOverrideMetadataIndexes: an IRI merkle
+    // subject that fails legacy verification (no rootEntity) forces the
+    // accept-unverified system-override path (rejected>0 && acceptUnverified),
+    // where every non-control row is otherwise admitted. The non-IRI rows must
+    // be dropped + counted on THIS branch, not persisted.
+    const iriSubject = 'urn:system:malformed-legacy';
+    const keptMerkle = quad(iriSubject, `${DKG}merkleRoot`, `"${'00'.repeat(32)}"`);
+    const meta = [
+      keptMerkle,
+      quad('_:injected', `${DKG}status`, '"drop"'),
+      quad('"literal-subject"', `${DKG}label`, '"drop-too"'),
+    ];
+
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+
+    expect(selection.metaIndexes.map((index) => meta[index]!)).toEqual([keptMerkle]);
+    expect(selection.droppedNonIriSubjectTriples).toBe(2);
+    expect(selection.logs.some((entry) => /non-IRI durable _meta subject/.test(entry.message))).toBe(true);
+  });
 });
