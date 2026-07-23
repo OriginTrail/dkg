@@ -86,6 +86,8 @@ export interface FinalizationRecoveryStore {
     evidence: VerifiedGraphScopedFinalizationEvidence,
   ): Promise<FinalizationRecoveryVerifyResult>;
   markReorged(key: string, generation: number, lastError: string): Promise<boolean>;
+  clearSettledRetry(key: string, generation: number): Promise<void>;
+  rejectSettled(key: string, generation: number, lastError: string): Promise<boolean>;
   listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;
@@ -105,7 +107,7 @@ export interface FinalizationRecoveryStore {
     key: string,
     generation: number,
     lastError?: string,
-    nextAttemptAt?: number,
+    retryDelayMs?: number,
   ): Promise<void>;
   health(): Promise<FinalizationRecoveryHealth>;
   close(): Promise<void>;

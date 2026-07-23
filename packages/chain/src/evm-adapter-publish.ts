@@ -623,10 +623,14 @@ export class PublishMethods extends EVMChainAdapterBase {
     let batchId = 0n;
     let startKAId = 0n;
     let endKAId = 0n;
+    let merkleRoot: Uint8Array | undefined;
     let publisherAddress = '';
     let foundBatchCreated = false;
+    const storageAddress = String(storage.target).toLowerCase();
 
     for (const log of receipt.logs) {
+      const logAddress = typeof log.address === 'string' ? log.address.toLowerCase() : '';
+      if (logAddress !== storageAddress) continue;
       try {
         const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (parsed?.name === 'UALRangeReserved') {
@@ -636,6 +640,10 @@ export class PublishMethods extends EVMChainAdapterBase {
         }
         if (parsed?.name === 'KnowledgeBatchCreated') {
           batchId = BigInt(parsed.args.batchId);
+          publisherAddress = String(parsed.args.publisher);
+          merkleRoot = ethers.getBytes(parsed.args.merkleRoot);
+          startKAId = BigInt(parsed.args.startKAId);
+          endKAId = BigInt(parsed.args.endKAId);
           foundBatchCreated = true;
         }
       } catch {
@@ -651,6 +659,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       batchId,
       startKAId,
       endKAId,
+      merkleRoot,
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,

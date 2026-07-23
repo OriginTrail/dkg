@@ -1,4 +1,6 @@
+import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
+import { loadAbi } from '../src/evm-adapter-abi.js';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
@@ -14,6 +16,7 @@ function adapter(overrides: Record<string, unknown> = {}) {
     contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
+    getBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
     ...overrides,
   }) as PublishMethods;
@@ -107,27 +110,43 @@ describe('canonical finalization receipt capability', () => {
     });
   });
 
-  it('resolves a legacy V9 receipt and derives its singleton KA range', async () => {
+  it('resolves canonical V9 evidence through the production receipt parser', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('KnowledgeAssetsStorage'));
+    const storageAddress = '0x3333333333333333333333333333333333333333';
+    const legacyBatchId = 19n;
+    const encodedBatch = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeBatchCreated')!,
+      [
+        legacyBatchId,
+        PUBLISHER,
+        ethers.hexlify(MERKLE_ROOT),
+        1024n,
+        1n,
+        legacyBatchId,
+        legacyBatchId,
+        1n,
+        2n,
+        100n,
+        false,
+      ],
+    );
     const receipt = {
       hash: TX_HASH,
       status: 1,
       blockNumber: 123,
       blockHash: BLOCK_HASH,
       index: 4,
+      logs: [{
+        address: storageAddress,
+        topics: encodedBatch.topics,
+        data: encodedBatch.data,
+      }],
     };
-    const legacyBatchId = 19n;
-    const parseV9PublishReceipt = vi.fn(async () => ({
-      batchId: legacyBatchId,
-      txHash: TX_HASH,
-      blockNumber: 123,
-      txIndex: 4,
-      merkleRoot: MERKLE_ROOT,
-      publisherAddress: PUBLISHER,
-    }));
     const chain = adapter({
-      contracts: { knowledgeAssetsStorage: {} },
+      contracts: {
+        knowledgeAssetsStorage: { interface: storageInterface, target: storageAddress },
+      },
       getTransactionReceiptWithFailover: vi.fn(async () => receipt),
-      parseV9PublishReceipt,
     });
 
     await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH)).resolves.toEqual({
@@ -146,6 +165,6 @@ describe('canonical finalization receipt capability', () => {
       },
     });
     expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
-    expect(parseV9PublishReceipt).toHaveBeenCalledWith(receipt, {});
+    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
 });

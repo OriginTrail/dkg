@@ -233,12 +233,50 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               author_address = NULL,
               verified_evidence_json = NULL,
               generation = generation + 1,
+              attempt_count = 0,
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
           WHERE key = ? AND generation = ? AND state IN ('RECEIVED','VERIFIED','SETTLED')
         `).run(lastError, now, key, generation);
         changed = result.changes > 0;
+      });
+      return changed;
+    });
+  }
+
+  clearSettledRetry(key: string, generation: number): Promise<void> {
+    if (this.#closed || this.#closing) return Promise.resolve();
+    return this.mutate(() => {
+      if (this.#closed) return;
+      this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET attempt_count = 0,
+            next_attempt_at = NULL,
+            last_error = NULL,
+            updated_at = ?
+        WHERE key = ? AND generation = ? AND state = 'SETTLED'
+      `).run(this.#policy.now(), key, generation);
+    });
+  }
+
+  rejectSettled(key: string, generation: number, lastError: string): Promise<boolean> {
+    if (this.#closed || this.#closing) return Promise.resolve(false);
+    return this.mutate(() => {
+      if (this.#closed) return false;
+      let changed = false;
+      this.transaction(() => {
+        const now = this.#policy.now();
+        const result = this.database.prepare(`
+          UPDATE finalization_inbox_v1
+          SET state = 'REJECTED',
+              next_attempt_at = NULL,
+              last_error = ?,
+              updated_at = ?
+          WHERE key = ? AND generation = ? AND state = 'SETTLED'
+        `).run(lastError, now, key, generation);
+        changed = result.changes > 0;
+        this.pruneWithinTransaction(now);
       });
       return changed;
     });
@@ -256,9 +294,16 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return this.database.prepare(`
       SELECT * FROM finalization_inbox_v1
       WHERE chain_id = ? AND context_graph_id = ? AND ual = ? AND ka_id = ?
-        AND state IN ('RECEIVED','VERIFIED','REORGED')
+        AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
+        AND (state != 'SETTLED' OR next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY created_at, key
-    `).all(input.chainId, input.contextGraphId, input.ual, input.kaId)
+    `).all(
+      input.chainId,
+      input.contextGraphId,
+      input.ual,
+      input.kaId,
+      this.#policy.now(),
+    )
       .map(finalizationRecoveryRowToEntry);
   }
 
@@ -301,11 +346,12 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     key: string,
     generation: number,
     lastError?: string,
-    nextAttemptAt?: number,
+    retryDelayMs?: number,
   ): Promise<void> {
     if (this.#closed || this.#closing) return Promise.resolve();
     return this.mutate(() => {
       if (this.#closed) return;
+      const now = this.#policy.now();
       this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET attempt_count = attempt_count + 1,
@@ -313,11 +359,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             next_attempt_at = ?,
             updated_at = ?
         WHERE key = ? AND generation = ?
-          AND state IN ('RECEIVED','VERIFIED','REORGED')
+          AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
       `).run(
         lastError ?? null,
-        nextAttemptAt ?? null,
-        this.#policy.now(),
+        retryDelayMs === undefined ? null : now + retryDelayMs,
+        now,
         key,
         generation,
       );

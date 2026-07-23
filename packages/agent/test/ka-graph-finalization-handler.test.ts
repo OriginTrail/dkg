@@ -799,6 +799,8 @@ describe('graph-scoped finalization handler', () => {
         receive: inbox.receive.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
         markReorged: inbox.markReorged.bind(inbox),
+        clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
+        rejectSettled: inbox.rejectSettled.bind(inbox),
         listForKnowledgeAsset: inbox.listForKnowledgeAsset.bind(inbox),
         transition: inbox.transition.bind(inbox),
         recordAttempt: inbox.recordAttempt.bind(inbox),
@@ -868,6 +870,8 @@ describe('graph-scoped finalization handler', () => {
           throw new Error('markVerified must not run after failed admission');
         },
         markReorged: async () => false,
+        clearSettledRetry: async () => {},
+        rejectSettled: async () => false,
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
         recordAttempt: async () => {},
@@ -1150,7 +1154,7 @@ describe('graph-scoped finalization handler', () => {
           ...message,
           blockNumber: replacementBlockNumber,
         };
-        let receiptPhase: 'block-a' | 'reorged' | 'block-b' = 'block-a';
+        let receiptPhase: 'block-a' | 'block-b' = 'block-a';
         let receiptChecks = 0;
         let replayCheckedPersistedIdentity = false;
         let replacementCheckedWithoutStaleIdentity = false;
@@ -1162,7 +1166,10 @@ describe('graph-scoped finalization handler', () => {
           resolveCanonicalFinalizationReceipt: async (_txHash, expected = {}) => {
             receiptChecks += 1;
             if (receiptPhase === 'block-a') return canonicalReceipt(message);
-            if (receiptPhase === 'reorged') {
+            if (
+              expected.expectedBlockHash === RECOVERY_BLOCK_HASH
+              && expected.expectedBlockNumber === Number(message.blockNumber)
+            ) {
               replayCheckedPersistedIdentity = expected.expectedBlockHash
                 === RECOVERY_BLOCK_HASH
                 && expected.expectedBlockNumber === Number(message.blockNumber);
@@ -1183,24 +1190,24 @@ describe('graph-scoped finalization handler', () => {
           recoveryOptions(inbox),
         );
 
-        const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
-        if (!replaceGraphAndSubject) {
-          throw new Error('Oxigraph replaceGraphAndSubject unavailable');
-        }
-        store.replaceGraphAndSubject = async () => {
-          throw new StoreSchedulerBusyError(
-            'queue_wait_timeout',
-            'normal',
-            'sparql-http.update',
-          );
-        };
         await recoveryHandler.handleFinalizationMessage(
           encodeFinalizationMessage(message),
           CG,
           '12D3KooWPublisher',
         );
-        store.replaceGraphAndSubject = replaceGraphAndSubject;
-        expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
+        expect(await inbox.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 0,
+          verifiedEvidence: {
+            blockNumber: Number(message.blockNumber),
+            blockHash: RECOVERY_BLOCK_HASH,
+          },
+        }]);
+        await expect(store.query(
+          `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+            + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+            + '<http://dkg.io/ontology/materializedVersion> "123:4" . } }',
+        )).resolves.toMatchObject({ type: 'boolean', value: true });
 
         const reconcileInput = {
           contextGraphId: CG,
@@ -1212,25 +1219,6 @@ describe('graph-scoped finalization handler', () => {
           versionBlock: 123,
           authorAddress: AUTHOR,
         };
-        receiptPhase = 'reorged';
-        await expect(recoveryHandler.handleChainReconciledKC(
-          reconcileInput,
-          createOperationContext('system'),
-        )).resolves.toBe('verified-vm-metadata-pending');
-
-        expect(receiptChecks).toBeGreaterThanOrEqual(2);
-        expect(replayCheckedPersistedIdentity).toBe(true);
-        const [reorged] = await inbox.list();
-        expect(reorged).toMatchObject({
-          state: 'REORGED',
-          generation: 1,
-          lastError: 'persisted receipt disagrees with canonical chain truth',
-        });
-        expect(reorged).not.toHaveProperty('verifiedEvidence');
-        await expect(store.query(
-          `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
-            + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
-        )).resolves.toMatchObject({ type: 'boolean', value: false });
 
         await inbox.close();
         inbox = await openSqliteFinalizationRecoveryStore(directory);
@@ -1245,6 +1233,8 @@ describe('graph-scoped finalization handler', () => {
           createOperationContext('system'),
         )).resolves.toBe('already-confirmed');
 
+        expect(receiptChecks).toBeGreaterThanOrEqual(3);
+        expect(replayCheckedPersistedIdentity).toBe(true);
         expect(replacementCheckedWithoutStaleIdentity).toBe(true);
         expect(await inbox.list()).toMatchObject([{
           state: 'SETTLED',
@@ -1267,6 +1257,62 @@ describe('graph-scoped finalization handler', () => {
       }
     },
   );
+
+  it('retracts only the exact settled VM assertion when its receipt is permanently rejected', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-rejected-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      let rejected = false;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () =>
+          rejected ? { status: 'rejected' as const } : canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+
+      rejected = true;
+      await expect(recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+      expect(await inbox.list()).toMatchObject([{
+        state: 'REJECTED',
+        lastError: 'canonical receipt permanently rejected',
+      }]);
+      expect(await store.countQuads(vmGraph)).toBe(0);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + '<http://dkg.io/ontology/status> "confirmed" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('never persists structurally invalid or legacy envelopes under store pressure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));

@@ -73,11 +73,13 @@ import type { FinalizationRuntime } from './finalization-runtime.js';
 import {
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
+  type FinalizationRecoveryInvalidationOutcome,
   type FinalizationRecoveryLiveInput,
   type FinalizationRecoveryMaterializer,
   type FinalizationRecoveryPreparedMaterialization,
 } from './finalization-recovery.js';
 import type {
+  FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
 import {
@@ -433,6 +435,7 @@ export class FinalizationHandler {
       }, candidate.msg.operationId
         ? createOperationContext('sync', candidate.msg.operationId)
         : createOperationContext('sync')),
+      invalidateVerified: (input) => this.invalidateVerifiedGraphScopedFinalization(input),
       isRetryableError: (error) => error instanceof StoreSchedulerBusyError,
     };
     this.recovery = new FinalizationRecovery(
@@ -1202,6 +1205,86 @@ export class FinalizationHandler {
       `Finalization: promoted graph-scoped KA ${scope.ual} (${publicTripleCount} public, ${privateTripleCount} private)`,
     );
     return 'applied';
+  }
+
+  /** Remove only the VM assertion still owned by permanently invalid receipt evidence. */
+  private async invalidateVerifiedGraphScopedFinalization(input: {
+    entry: FinalizationRecoveryEntry;
+    candidate: ParsedGraphScopedFinalization;
+    evidence: VerifiedGraphScopedFinalizationEvidence;
+    reason: string;
+  }): Promise<FinalizationRecoveryInvalidationOutcome> {
+    const {
+      entry,
+      candidate,
+      evidence,
+      reason,
+    } = input;
+    const { scope } = candidate;
+    const contextGraphId = entry.contextGraphId;
+    const subGraphName = evidence.subGraphName;
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      scope,
+      subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const head: GraphScopedMaterializationEnvelope = {
+      publicTripleCount: evidence.publicTripleCount,
+      ...(evidence.privateMerkleRoot
+        ? { privateMerkleRoot: evidence.privateMerkleRoot }
+        : {}),
+      privateTripleCount: evidence.privateTripleCount,
+      publisherPeerId: evidence.publisherPeerId,
+      accessPolicy: evidence.accessPolicy,
+      allowedPeers: [...evidence.allowedPeers],
+    };
+    const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
+      const metadataState = await this.graphScopedMetadataState({
+        contextGraphId,
+        scope,
+        head,
+        merkleRoot: candidate.msg.kcMerkleRoot,
+        batchId: candidate.batchId,
+        expectedTxHash: evidence.transactionHash,
+        materializedVersion: {
+          blockNumber: evidence.blockNumber,
+          txIndex: evidence.txIndex,
+        },
+        accessPolicy: evidence.accessPolicy,
+        allowedPeers: evidence.allowedPeers,
+        authorAddress: evidence.authorAddress,
+        subGraphName,
+      });
+      if (metadataState === 'absent') return 'already-absent' as const;
+      if (metadataState === 'different') return 'stale-target' as const;
+      const replaced = await tryReplaceGraphAndSubjectAtomically(
+        this.store,
+        vmGraph,
+        [],
+        metaGraph,
+        scope.ual,
+        [],
+        { source: 'agent.finalization.graphScopedCanonicalInvalidation' },
+      );
+      return replaced ? 'invalidated' as const : 'deferred' as const;
+    });
+    if (outcome === 'invalidated') {
+      this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
+        contextGraphId,
+        layers: ['vm'],
+        subGraphName,
+        operation: 'verifiable_memory_invalidated',
+        source: 'chain-reconcile',
+        counts: { roots: 0, triples: evidence.publicTripleCount },
+      });
+      this.log.warn(
+        createOperationContext('sync'),
+        `Retracted graph-scoped VM assertion ${scope.ual}: ${reason}`,
+      );
+    }
+    return outcome;
   }
 
   /** Load and verify one exact graph-scoped layer using the shared count/root rules. */

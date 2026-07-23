@@ -104,6 +104,7 @@ function recoveryMaterializer() {
     }),
     apply: async () => 'applied' as const,
     replayVerified: async () => 'promoted' as const,
+    invalidateVerified: async () => 'invalidated' as const,
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
   };
 }
@@ -279,8 +280,9 @@ describe('graph-scoped finalization recovery admission', () => {
     'revalidates SETTLED provenance when the same transaction moves to %s',
     async (_case, replacementBlockNumber) => {
       const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-reorg-'));
+      let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
       try {
-        const store = await openSqliteFinalizationRecoveryStore(directory);
+        store = await openSqliteFinalizationRecoveryStore(directory);
         const replacementBlockHash = `0x${'ef'.repeat(32)}`;
         let phase: 'block-a' | 'block-b' = 'block-a';
         const receiptOptions: Array<{ expectedBlockHash?: string; expectedBlockNumber?: number }> = [];
@@ -335,12 +337,27 @@ describe('graph-scoped finalization recovery admission', () => {
         }]);
 
         phase = 'block-b';
-        const replacementMessage = message({ blockNumber: replacementBlockNumber });
-        await expect(recovery.processLive({
-          rawMessage: encodeFinalizationMessage(replacementMessage),
+        await store.close();
+        store = await openSqliteFinalizationRecoveryStore(directory);
+        const reopenedRecovery = new FinalizationRecovery(
+          store,
+          chain,
+          { info: () => {}, warn: () => {} },
+          {
+            ...recoveryMaterializer(),
+            apply: async ({ blockNumber, txIndex }) => {
+              applied.push({ blockNumber, txIndex });
+              return 'applied' as const;
+            },
+          },
+        );
+        await expect(reopenedRecovery.replayMatching({
+          chainId: chain.chainId,
           contextGraphId: CONTEXT_GRAPH,
-          sourcePeerId: '12D3KooWPublisher',
-          candidate: parsedMessage(replacementMessage),
+          onChainCgId: '42',
+          ual: UAL,
+          merkleRoot: `0x${'00'.repeat(32)}`,
+          kaId: PACKED_KA_ID.toString(),
         })).resolves.toBe(true);
 
         expect(receiptOptions).toContainEqual({
@@ -361,8 +378,8 @@ describe('graph-scoped finalization recovery admission', () => {
             txIndex: 5,
           },
         }]);
-        await store.close();
       } finally {
+        await store?.close().catch(() => {});
         await rm(directory, { recursive: true, force: true });
       }
     },
@@ -420,6 +437,95 @@ describe('graph-scoped finalization recovery admission', () => {
       }]);
       await store.close();
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('backs off transient SETTLED disappearance before bounded invalidation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-missing-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let now = 1_000;
+      let missing = false;
+      let receiptCalls = 0;
+      let invalidations = 0;
+      store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptCalls += 1;
+          return missing
+            ? { status: 'not-found' as const }
+            : { status: 'confirmed' as const, receipt: confirmedReceipt() };
+        },
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          invalidateVerified: async () => {
+            invalidations += 1;
+            return 'invalidated' as const;
+          },
+        },
+      );
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      missing = true;
+      const replay = {
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      };
+
+      await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+      let [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'SETTLED',
+        attemptCount: 1,
+        lastError: 'settled canonical receipt is not-found',
+      });
+      now = deferred.nextAttemptAt!;
+      missing = false;
+      await expect(recovery.replayMatching(replay)).resolves.toBe(true);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 0,
+      }]);
+      missing = true;
+
+      for (let attempt = 1; attempt < 5; attempt += 1) {
+        await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+        [deferred] = await store.list();
+        expect(deferred).toMatchObject({
+          state: 'SETTLED',
+          attemptCount: attempt,
+          lastError: 'settled canonical receipt is not-found',
+        });
+        expect(deferred.nextAttemptAt).toBeGreaterThan(now);
+        const callsBeforeBackoffProbe = receiptCalls;
+        await expect(recovery.replayMatching(replay)).resolves.toBe(false);
+        expect(receiptCalls).toBe(callsBeforeBackoffProbe);
+        now = deferred.nextAttemptAt!;
+      }
+
+      await expect(recovery.replayMatching(replay)).resolves.toBe(true);
+      expect(invalidations).toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'REJECTED',
+        attemptCount: 4,
+        lastError: 'canonical receipt disappeared after bounded retries',
+      }]);
+    } finally {
+      await store?.close().catch(() => {});
       await rm(directory, { recursive: true, force: true });
     }
   });

@@ -96,6 +96,12 @@ export type FinalizationRecoveryReplayMaterializationOutcome =
   | 'verified-vm-metadata-pending'
   | undefined;
 
+export type FinalizationRecoveryInvalidationOutcome =
+  | 'invalidated'
+  | 'already-absent'
+  | 'stale-target'
+  | 'deferred';
+
 export interface FinalizationRecoveryMaterializer<
   Prepared extends FinalizationRecoveryPreparedMaterialization,
 > {
@@ -112,6 +118,12 @@ export interface FinalizationRecoveryMaterializer<
     candidate: ParsedGraphScopedFinalization;
     evidence: VerifiedGraphScopedFinalizationEvidence;
   }): Promise<FinalizationRecoveryReplayMaterializationOutcome>;
+  invalidateVerified(input: {
+    entry: FinalizationRecoveryEntry;
+    candidate: ParsedGraphScopedFinalization;
+    evidence: VerifiedGraphScopedFinalizationEvidence;
+    reason: string;
+  }): Promise<FinalizationRecoveryInvalidationOutcome>;
   isRetryableError(error: unknown): boolean;
 }
 
@@ -130,6 +142,10 @@ export type FinalizationCanonicalReceiptOutcome =
 interface ResolveCanonicalReceiptOptions {
   acceptCanonicalPlacement?: boolean;
 }
+
+const SETTLED_RECEIPT_RETRY_BASE_MS = 1_000;
+const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
+const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 
 export function finalizationRecoveryEntryKey(input: {
   chainId: string;
@@ -590,13 +606,43 @@ export class FinalizationRecovery<
       return undefined;
     }
     const canonical = await this.resolveCanonicalReceipt(input.candidate, evidence);
+    if (canonical.status === 'rejected') {
+      await this.invalidateSettled(
+        entry,
+        input.candidate,
+        evidence,
+        'canonical receipt permanently rejected',
+      );
+      return undefined;
+    }
+    if (canonical.status === 'pending' || canonical.status === 'not-found') {
+      if (
+        canonical.status === 'not-found'
+        && entry.attemptCount + 1 >= SETTLED_NOT_FOUND_RETRY_LIMIT
+      ) {
+        await this.invalidateSettled(
+          entry,
+          input.candidate,
+          evidence,
+          'canonical receipt disappeared after bounded retries',
+        );
+      } else {
+        await this.recordSettledRetry(
+          entry,
+          `settled canonical receipt is ${canonical.status}`,
+        );
+      }
+      return undefined;
+    }
     const placementChanged = canonical.status === 'reorged'
       || (
         canonical.status === 'confirmed'
         && !sameCanonicalFinalizationPlacement(canonical.receipt, evidence)
-      );
+    );
     if (!placementChanged) {
-      if (canonical.status !== 'confirmed') {
+      if (canonical.status === 'confirmed') {
+        await this.clearSettledRetry(entry);
+      } else {
         this.log.info(
           `Finalization recovery settled receipt is ${canonical.status} for ${entry.ual}; `
             + 'retaining prior materialization',
@@ -614,6 +660,74 @@ export class FinalizationRecovery<
       return undefined;
     }
     return this.receive(input);
+  }
+
+  private async clearSettledRetry(entry: FinalizationRecoveryEntry): Promise<void> {
+    const store = this.getStore();
+    if (!store || (entry.attemptCount === 0 && entry.nextAttemptAt === undefined)) return;
+    try {
+      await store.clearSettledRetry(entry.key, entry.generation);
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery settled retry reset failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async recordSettledRetry(
+    entry: FinalizationRecoveryEntry,
+    reason: string,
+  ): Promise<void> {
+    const store = this.getStore();
+    if (!store) return;
+    const exponent = Math.min(entry.attemptCount, 16);
+    const delayMs = Math.min(
+      SETTLED_RECEIPT_RETRY_BASE_MS * (2 ** exponent),
+      SETTLED_RECEIPT_RETRY_MAX_MS,
+    );
+    try {
+      await store.recordAttempt(
+        entry.key,
+        entry.generation,
+        reason,
+        delayMs,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery settled retry update failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async invalidateSettled(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    reason: string,
+  ): Promise<boolean> {
+    const store = this.getStore();
+    if (!store) return false;
+    const outcome = await this.materializer.invalidateVerified({
+      entry,
+      candidate,
+      evidence,
+      reason,
+    });
+    if (outcome === 'deferred') {
+      await this.recordSettledRetry(entry, 'settled canonical invalidation is deferred');
+      return false;
+    }
+    try {
+      return await store.rejectSettled(entry.key, entry.generation, reason);
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery settled rejection failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   async markUnsupported(entry: FinalizationRecoveryEntry): Promise<boolean> {
@@ -643,6 +757,15 @@ export class FinalizationRecovery<
       return [];
     }
 
+    const settled = entries.filter((entry) =>
+      entry.state === 'SETTLED'
+      && (
+        entry.targetContextGraphId === undefined
+        || entry.targetContextGraphId === input.onChainCgId
+      ));
+    const recoverable = entries.filter((entry) => entry.state !== 'SETTLED');
+    if (recoverable.length === 0) return settled;
+
     let latestRoot: Uint8Array;
     let rootCount: bigint;
     let boundContextGraphId: bigint | null | undefined;
@@ -657,12 +780,12 @@ export class FinalizationRecovery<
         `Finalization recovery chain state is not settled for ${input.ual}: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
-      return [];
+      return settled;
     }
 
     const matches: FinalizationRecoveryEntry[] = [];
     const superseded: FinalizationRecoveryEntry[] = [];
-    for (const entry of entries) {
+    for (const entry of recoverable) {
       if (
         entry.targetContextGraphId !== undefined
         && entry.targetContextGraphId !== input.onChainCgId
@@ -699,7 +822,7 @@ export class FinalizationRecovery<
         `Finalization recovery superseded assertion ${entry.assertionVersion} for ${entry.ual}`,
       );
     }));
-    return matches;
+    return [...settled, ...matches];
   }
 
   async replayMatching(
@@ -748,6 +871,99 @@ export class FinalizationRecovery<
     }
   }
 
+  private async replaySettled(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+  ): Promise<boolean> {
+    const evidence = entry.verifiedEvidence;
+    if (
+      !evidence
+      || !VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+        evidence,
+        candidate,
+        entry,
+      )
+    ) {
+      this.log.warn(
+        `Finalization recovery settled evidence does not match its envelope for ${entry.ual}`,
+      );
+      return false;
+    }
+
+    const canonical = await this.resolveCanonicalReceipt(candidate, evidence);
+    if (canonical.status === 'confirmed') {
+      if (!sameCanonicalFinalizationPlacement(canonical.receipt, evidence)) {
+        return this.recoverSettledReorg(entry, candidate);
+      }
+      await this.clearSettledRetry(entry);
+      return true;
+    }
+    if (canonical.status === 'reorged') {
+      return this.recoverSettledReorg(entry, candidate);
+    }
+    if (canonical.status === 'rejected') {
+      return this.invalidateSettled(
+        entry,
+        candidate,
+        evidence,
+        'canonical receipt permanently rejected',
+      );
+    }
+    if (canonical.status === 'not-found') {
+      if (entry.attemptCount + 1 >= SETTLED_NOT_FOUND_RETRY_LIMIT) {
+        return this.invalidateSettled(
+          entry,
+          candidate,
+          evidence,
+          'canonical receipt disappeared after bounded retries',
+        );
+      }
+      await this.recordSettledRetry(
+        entry,
+        `settled canonical receipt is ${canonical.status}`,
+      );
+      return false;
+    }
+    if (canonical.status === 'pending' || canonical.status === 'unsupported') {
+      await this.recordSettledRetry(
+        entry,
+        `settled canonical receipt is ${canonical.status}`,
+      );
+    }
+    return false;
+  }
+
+  private async recoverSettledReorg(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+  ): Promise<boolean> {
+    if (!await this.markReorged(
+      entry,
+      'settled receipt disagrees with canonical chain truth',
+    )) return false;
+    const reorged = await this.receive({
+      rawMessage: entry.rawMessage,
+      contextGraphId: entry.contextGraphId,
+      ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+      candidate,
+    });
+    if (!reorged || reorged.state !== 'REORGED') return false;
+    const outcome = await this.materialize(
+      {
+        rawMessage: entry.rawMessage,
+        contextGraphId: entry.contextGraphId,
+        ...(entry.sourcePeerId ? { sourcePeerId: entry.sourcePeerId } : {}),
+        candidate,
+      },
+      { kind: 'recovery', entry: reorged },
+    );
+    if (outcome === 'deferred') {
+      await this.recordDeferred(reorged, 'settled reorg recovery deferred');
+      return false;
+    }
+    return this.settleEntry(reorged, outcome);
+  }
+
   private replayEntry(
     entry: FinalizationRecoveryEntry,
     input: FinalizationRecoveryReplayInput,
@@ -756,6 +972,9 @@ export class FinalizationRecovery<
       try {
         const candidate = this.decodeEntry(entry);
         if (!candidate) return false;
+        if (entry.state === 'SETTLED') {
+          return this.replaySettled(entry, candidate);
+        }
 
         let outcome: FinalizationRecoveryApplyOutcome;
         if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
