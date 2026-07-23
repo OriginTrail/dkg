@@ -1496,7 +1496,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
   /** Canonical cleartext-or-hash Context Graph identity used by every index path. */
   contextGraphWireId(this: DKGAgent, contextGraphId: string): string {
-    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return contextGraphId.toLowerCase();
+    if (/^0x[0-9a-f]{64}$/i.test(contextGraphId)) return contextGraphId.toLowerCase();
     return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
   }
 
