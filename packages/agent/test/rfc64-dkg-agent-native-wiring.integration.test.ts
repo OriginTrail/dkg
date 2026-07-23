@@ -257,9 +257,10 @@ function privateCatalogPolicy(): ContextGraphPolicyV1 {
   };
 }
 
-function finalizedPublicCatalogPolicy(
-  publishPolicy: ContextGraphPolicyV1['publishPolicy'] = 1,
-): ContextGraphPolicyV1 {
+function finalizedPublicCatalogPolicy(options: Readonly<{
+  publishPolicy: ContextGraphPolicyV1['publishPolicy'];
+  publishAuthority: EvmAddressV1 | null;
+}> = { publishPolicy: 1, publishAuthority: null }): ContextGraphPolicyV1 {
   return {
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -270,8 +271,8 @@ function finalizedPublicCatalogPolicy(
     version: '0',
     previousPolicyDigest: null,
     accessPolicy: 0,
-    publishPolicy,
-    publishAuthority: publishPolicy === 0 ? AUTHOR : null,
+    publishPolicy: options.publishPolicy,
+    publishAuthority: options.publishAuthority,
     publishAuthorityAccountId: '0',
     projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
     administrativeDelegationDigest: null,
@@ -1728,7 +1729,10 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
         );
       }
     });
-    const policy = finalizedPublicCatalogPolicy(0);
+    const policy = finalizedPublicCatalogPolicy({
+      publishPolicy: 0,
+      publishAuthority: AUTHOR,
+    });
     const warmDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-release-warm-'));
     const coldDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-release-cold-'));
     tempDirs.push(warmDataDir, coldDataDir);
@@ -1896,7 +1900,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     }, { timeout: 20_000, interval: 100 });
     await expectExactReleaseState(cold);
 
-    // Both receiver roles keep their exact durable SWM head and VM graphs after restart.
+    // Prove durability before any provider or bootstrap path can repopulate the warm receiver.
     for (const receiver of [warm, cold]) {
       await receiver.stop();
       agents.splice(agents.indexOf(receiver), 1);
@@ -1905,28 +1909,26 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       'release-proof-warm',
       warmDataDir,
       warmStorePath,
-      bootstrap,
     );
+    await warm.awaitInitialChainPoll();
+    await expectExactReleaseState(warm);
+
+    // Keep a separate restart assertion for the configured cold-bootstrap role.
     cold = await startReleaseReceiver(
       'release-proof-cold',
       coldDataDir,
       coldStorePath,
       bootstrap,
     );
-    await Promise.all([
-      connectBothWays(author, warm),
-      connectBothWays(author, cold),
-    ]);
-    await Promise.all([warm.awaitInitialChainPoll(), cold.awaitInitialChainPoll()]);
+    await connectBothWays(author, cold);
+    await cold.awaitInitialChainPoll();
     await vi.waitFor(() => {
-      for (const receiver of [warm, cold]) {
-        expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
-          outcome: 'applied',
-          providerPeerId: author.peerId,
-          appliedHeadDigest: published.currentCatalogHeadDigest,
-          inventoryRowCount: '1',
-        });
-      }
+      expect(cold.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
+        outcome: 'applied',
+        providerPeerId: author.peerId,
+        appliedHeadDigest: published.currentCatalogHeadDigest,
+        inventoryRowCount: '1',
+      });
     }, { timeout: 20_000, interval: 100 });
     await Promise.all([
       expectExactReleaseState(warm),
