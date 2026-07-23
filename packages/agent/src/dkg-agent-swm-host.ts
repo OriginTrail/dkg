@@ -3532,9 +3532,51 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.pruneVmReconcileState();
   }
 
-  shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
+  vmReconcileExactBatchBackoffKey(this: DKGAgent,
+    localCgId: string,
+    targets: readonly OrdinalRecoveryTarget[],
+  ): string {
+    const digest = createHash('sha256');
+    digest.update(localCgId);
+    for (const target of targets) {
+      digest.update('\0');
+      digest.update(target.ual);
+      digest.update('\0');
+      digest.update(target.reason);
+    }
+    return `${localCgId}\0${digest.digest('hex')}`;
+  }
+
+  vmReconcileConnectedPeerTopologyKey(this: DKGAgent): string {
+    try {
+      return [...new Set(
+        this.node.libp2p.getConnections()
+          .map((connection) => connection.remotePeer?.toString())
+          .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
+      )].sort().join(',');
+    } catch {
+      return '';
+    }
+  }
+
+  shouldRunVmReconcileActiveFetch(this: DKGAgent,
+    localCgId: string,
+    exactBatchBackoffKey?: string,
+  ): boolean {
     const now = Date.now();
     this.pruneVmReconcileState(now);
+    if (exactBatchBackoffKey) {
+      const exactBatchBackoff = this.vmReconcileExactBatchBackoff.get(exactBatchBackoffKey);
+      if (exactBatchBackoff && now < exactBatchBackoff.nextRetryAt) {
+        if (exactBatchBackoff.peerTopologyKey === this.vmReconcileConnectedPeerTopologyKey()) {
+          return false;
+        }
+        // A different connected peer set is new recovery evidence. Fail open
+        // immediately instead of waiting for a stale-source retry deadline.
+        this.vmReconcileExactBatchBackoff.delete(exactBatchBackoffKey);
+        this.vmReconcileFetchCooldownAt.delete(localCgId);
+      }
+    }
     const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
     if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
       return false;
@@ -3542,6 +3584,40 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (lastFetchAt !== undefined) this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileFetchCooldownAt.set(localCgId, now);
     return true;
+  }
+
+  recordVmReconcileUnproductiveExactBatch(this: DKGAgent,
+    exactBatchBackoffKey: string,
+    localCgId: string,
+  ): number {
+    const previous = this.vmReconcileExactBatchBackoff.get(exactBatchBackoffKey);
+    const failures = (previous?.failures ?? 0) + 1;
+    const exponentialBackoff = Math.min(
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
+    );
+    const jitterSample = createHash('sha256')
+      .update(`${this.node.peerId.toString()}\0${exactBatchBackoffKey}\0${failures}`)
+      .digest()
+      .readUInt32BE(0) / 0x1_0000_0000;
+    const backoff = Math.min(
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
+    );
+    if (previous) this.vmReconcileExactBatchBackoff.delete(exactBatchBackoffKey);
+    this.vmReconcileExactBatchBackoff.set(exactBatchBackoffKey, {
+      localCgId,
+      failures,
+      nextRetryAt: Date.now() + backoff,
+      peerTopologyKey: this.vmReconcileConnectedPeerTopologyKey(),
+    });
+    getMetrics().storeRetryAttemptsTotal.add(1, {
+      scope: 'vm_reconcile',
+      reason: 'exact_batch_unproductive',
+      attempt: Math.min(failures, 16),
+    });
+    this.pruneVmReconcileState();
+    return backoff;
   }
 
   vmReconcileActiveFetchHadUsableResponse(this: DKGAgent, result: {
@@ -3575,6 +3651,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const oldestKey = this.vmReconcileFetchCooldownAt.keys().next().value;
       if (oldestKey === undefined) break;
       this.vmReconcileFetchCooldownAt.delete(oldestKey);
+    }
+
+    while (this.vmReconcileExactBatchBackoff.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileExactBatchBackoff.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.vmReconcileExactBatchBackoff.delete(oldestKey);
     }
 
     while (this.vmReconcileCatchupPeerCursor.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
@@ -3611,6 +3693,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     this.reconcileCursors.delete(localCgId);
     this.vmReconcileFetchCooldownAt.delete(localCgId);
+    for (const [key, record] of this.vmReconcileExactBatchBackoff) {
+      if (record.localCgId === localCgId) this.vmReconcileExactBatchBackoff.delete(key);
+    }
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
     this.clearRecentVmReconcileStateForContextGraph(localCgId);
@@ -3674,13 +3759,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     // Damping: the batched path deliberately skips the per-UAL negative cache
     // (consulting it primes connections to every discovered agent — the walk
-    // this path exists to avoid), so the per-CG active-fetch cooldown is the
-    // only damper between this batch and the network. A wholly unproductive
-    // batch (e.g. the curator is offline) therefore costs one bounded exact
-    // fetch per sweep interval, not one per reconcile pass. Progress clears
-    // the cooldown below so a draining backlog proceeds slice after slice.
-    if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
-      this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
+    // this path exists to avoid). Keep the short per-CG guard, then exponentially
+    // damp only the same wholly-unproductive exact target set. New targets or a
+    // changed connected-peer topology fail open, while verified progress clears
+    // both gates so a draining backlog proceeds slice after slice.
+    const exactBatchBackoffKey = this.vmReconcileExactBatchBackoffKey(localCgId, targets);
+    if (!this.shouldRunVmReconcileActiveFetch(localCgId, exactBatchBackoffKey)) {
+      this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown/backoff`);
       return new Map();
     }
 
@@ -3800,12 +3885,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Mirror the inline path's cooldown policy: an unreachable network must
     // not consume the fetch budget, and completed work resets the damper so
     // the trailing `hasMore` slice of a draining backlog fetches immediately.
-    // Only a batch that reached a peer and recovered nothing leaves the
-    // cooldown standing.
+    // A batch that reached peers but made no verified progress grows a bounded,
+    // target- and topology-scoped delay instead of re-fetching identical VM
+    // content every minute forever.
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
+      if (recoveredAny) this.vmReconcileExactBatchBackoff.delete(exactBatchBackoffKey);
+    } else {
+      const backoff = this.recordVmReconcileUnproductiveExactBatch(
+        exactBatchBackoffKey,
+        localCgId,
+      );
+      this.log.info(
+        ctx,
+        `VM exact fetch for "${localCgId}" made no verified progress; retrying this target set in ${backoff}ms`,
+      );
     }
     return outcomes;
   }

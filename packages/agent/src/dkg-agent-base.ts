@@ -990,6 +990,18 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /**
+   * Phase D/A4 — bounded retry history for exact batches that reached peers but
+   * made no verified VM progress. Keyed by the requested UAL/reason set so new
+   * work fails open; the recorded peer topology likewise invalidates the delay
+   * when a new source becomes available.
+   */
+  protected readonly vmReconcileExactBatchBackoff = new Map<string, {
+    localCgId: string;
+    failures: number;
+    nextRetryAt: number;
+    peerTopologyKey: string;
+  }>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected readonly vmReconcileCatchupPeerOrder = new Map<string, {

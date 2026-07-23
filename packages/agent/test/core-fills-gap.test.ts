@@ -736,6 +736,7 @@ describe('Phase D - VM reconcile damping', () => {
   let agent: DKGAgent | null = null;
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (agent) {
       await agent.stop().catch(() => undefined);
       agent = null;
@@ -1771,6 +1772,12 @@ describe('Phase D - VM reconcile damping', () => {
       peerTopologyKey: string;
     }>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
+    const exactBatchBackoff = (internals as any).vmReconcileExactBatchBackoff as Map<string, {
+      localCgId: string;
+      failures: number;
+      nextRetryAt: number;
+      peerTopologyKey: string;
+    }>;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
@@ -1785,6 +1792,12 @@ describe('Phase D - VM reconcile damping', () => {
         candidateNamespaces: [],
         peerTopologyKey: '',
       });
+      exactBatchBackoff.set(`exact-${i}`, {
+        localCgId: `exact-cg-${i}`,
+        failures: 1,
+        nextRetryAt: now + 60_000,
+        peerTopologyKey: '',
+      });
     }
     fetchCooldown.set('expired-cg', now - DKGAgent.VM_RECONCILE_SWEEP_INTERVAL_MS - 1);
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES + 2; i += 1) {
@@ -1796,6 +1809,7 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).pruneVmReconcileState(now);
 
     expect(negativeCache.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES);
+    expect(exactBatchBackoff.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES);
     expect(fetchCooldown.has('expired-cg')).toBe(false);
     expect(fetchCooldown.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
     expect(peerCursor.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
@@ -1812,12 +1826,19 @@ describe('Phase D - VM reconcile damping', () => {
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
     fetchCooldown.set('cleanup-cg', now);
+    exactBatchBackoff.set('cleanup-exact', {
+      localCgId: 'cleanup-cg',
+      failures: 1,
+      nextRetryAt: now + 60_000,
+      peerTopologyKey: '',
+    });
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
     recent.add('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01');
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
     expect(negativeCache.has('cleanup-cache')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
+    expect(exactBatchBackoff.has('cleanup-exact')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
     expect(peerOrder.has('cleanup-cg')).toBe(false);
     expect(recent.has('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01')).toBe(false);
@@ -1833,12 +1854,19 @@ describe('Phase D - VM reconcile damping', () => {
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
     fetchCooldown.set('hosted-cg', now);
+    exactBatchBackoff.set('hosted-exact', {
+      localCgId: 'hosted-cg',
+      failures: 1,
+      nextRetryAt: now + 60_000,
+      peerTopologyKey: '',
+    });
     peerCursor.set('hosted-cg', 3);
     peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
     recent.add('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02');
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
     expect(negativeCache.has('hosted-cache')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
+    expect(exactBatchBackoff.has('hosted-exact')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
     expect(peerOrder.has('hosted-cg')).toBe(true);
     expect(recent.has('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02')).toBe(true);
@@ -1849,6 +1877,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
   let agent: DKGAgent | null = null;
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (agent) {
       await agent.stop().catch(() => undefined);
       agent = null;
@@ -2188,6 +2217,75 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(second.size).toBe(0);
   });
 
+  it('exponentially damps the same unproductive exact batch until topology changes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-23T00:00:00.000Z'));
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmBatchBackoff', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWExactBackoffPeerA';
+    const peerB = '12D3KooWExactBackoffPeerB';
+    const connected = [{ toString: () => peerA }];
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-backoff';
+    (internals as any).node = {
+      peerId: '12D3KooWExactBackoffLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    let fetchCount = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeer = async () => {
+      fetchCount += 1;
+      return {
+        fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+        failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+      };
+    };
+    const target = {
+      ordinal: 0,
+      ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7',
+      kaId: '7',
+      reason: 'verified-vm-metadata-pending' as const,
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending',
+      recovery: target,
+    });
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const exactBackoff = (internals as any).vmReconcileExactBatchBackoff as Map<string, {
+      failures: number;
+      nextRetryAt: number;
+    }>;
+    const firstRecord = [...exactBackoff.values()][0]!;
+    expect(firstRecord.failures).toBe(1);
+    expect(fetchCount).toBe(1);
+
+    vi.setSystemTime(firstRecord.nextRetryAt - 1);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(fetchCount).toBe(1);
+
+    vi.setSystemTime(firstRecord.nextRetryAt);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const secondRecord = [...exactBackoff.values()][0]!;
+    expect(secondRecord.failures).toBe(2);
+    expect(secondRecord.nextRetryAt).toBeGreaterThan(firstRecord.nextRetryAt);
+    expect(fetchCount).toBe(2);
+
+    // A newly connected source is fresh recovery evidence and immediately
+    // bypasses both the target-set delay and the short per-CG cooldown.
+    connected.push({ toString: () => peerB });
+    vi.setSystemTime(firstRecord.nextRetryAt + 1);
+    expect(Date.now()).toBeLessThan(secondRecord.nextRetryAt);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(fetchCount).toBe(4);
+  });
+
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchProductive', chainAdapter: chain });
@@ -2227,6 +2325,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(fetchCount).toBe(1);
+    expect(((internals as any).vmReconcileExactBatchBackoff as Map<string, unknown>).size).toBe(0);
 
     // Progress cleared the cooldown: the trailing hasMore slice fetches now.
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
