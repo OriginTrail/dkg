@@ -76,7 +76,11 @@ import {
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
-import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
+import {
+  projectWorkspaceAgentRecipientFanout,
+  type WorkspaceAgentRecipientResolution,
+  type WorkspaceAgentRecipientResolver,
+} from './workspace-agent-recipients.js';
 import {
   PublisherWalletRequiredError,
   StaleWriteError,
@@ -157,6 +161,7 @@ type AssertionPromoteOptions = {
 type AssertionPromoteResult = {
   promotedCount: number;
   gossipMessage?: Uint8Array;
+  gossipFanoutSnapshot?: WorkspaceGossipFanoutSnapshot;
   promotedAllRoots: boolean;
   shareOperationId?: string;
 };
@@ -505,6 +510,8 @@ export interface WorkspaceSenderKeyEncryptInput {
   timestampMs: number;
   subGraphName?: string;
   publisherPeerId: string;
+  /** The exact validated recipients used for both encryption and transport. */
+  resolution: WorkspaceAgentRecipientResolution;
 }
 
 export type WorkspaceSenderKeyEncryptor = (
@@ -702,6 +709,18 @@ export type WriteToWorkspaceOptions = ShareOptions;
 export interface ShareResult {
   shareOperationId: string;
   message: Uint8Array;
+  gossipFanoutSnapshot?: WorkspaceGossipFanoutSnapshot;
+}
+
+export interface WorkspaceGossipFanoutSnapshot {
+  source: 'agent-roster';
+  members: string[];
+  complete: boolean;
+}
+
+interface EncodedWorkspaceGossipPayload {
+  message: Uint8Array;
+  gossipFanoutSnapshot?: WorkspaceGossipFanoutSnapshot;
 }
 
 /** @deprecated Use ShareResult */
@@ -1853,7 +1872,7 @@ export class DKGPublisher implements Publisher {
       casConditions,
       subGraphName: options.subGraphName,
     });
-    const message = await this.encodeWorkspaceGossipPayload(
+    const { message, gossipFanoutSnapshot } = await this.encodeWorkspaceGossipPayload(
       contextGraphId,
       workspaceRequestMessage,
       {
@@ -1948,7 +1967,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, message };
+    return { shareOperationId, message, gossipFanoutSnapshot };
   }
 
   private async encodeWorkspaceGossipPayload(
@@ -1963,14 +1982,14 @@ export class DKGPublisher implements Publisher {
       subGraphName?: string;
       publisherPeerId: string;
     },
-  ): Promise<Uint8Array> {
+  ): Promise<EncodedWorkspaceGossipPayload> {
     if (options.localOnly || !this.workspaceAgentRecipientResolver) {
-      return plaintext;
+      return { message: plaintext };
     }
 
     const resolution = await this.workspaceAgentRecipientResolver({ contextGraphId });
     if (!resolution.requiresEncryption) {
-      return plaintext;
+      return { message: plaintext };
     }
     if (resolution.recipients.length === 0) {
       throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
@@ -1979,30 +1998,44 @@ export class DKGPublisher implements Publisher {
       throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
     }
 
+    const projected = projectWorkspaceAgentRecipientFanout(resolution, options.publisherPeerId);
+    const gossipFanoutSnapshot: WorkspaceGossipFanoutSnapshot = {
+      source: 'agent-roster',
+      members: projected?.peerIds ?? [],
+      complete: projected?.complete ?? false,
+    };
+
     if (this.workspaceSenderKeyEncryptor) {
-      return this.workspaceSenderKeyEncryptor({
+      return {
+        message: await this.workspaceSenderKeyEncryptor({
+          contextGraphId,
+          plaintext,
+          senderAgentAddress: options.senderAgentAddress,
+          operationId: options.operationId,
+          shareOperationId: options.shareOperationId,
+          timestampMs: options.timestampMs,
+          subGraphName: options.subGraphName,
+          publisherPeerId: options.publisherPeerId,
+          resolution,
+        }),
+        gossipFanoutSnapshot,
+      };
+    }
+
+    const senderIdentity = `did:dkg:agent:${ethers.getAddress(options.senderAgentAddress)}`;
+    return {
+      message: encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
         contextGraphId,
-        plaintext,
-        senderAgentAddress: options.senderAgentAddress,
+        senderIdentity,
         operationId: options.operationId,
         shareOperationId: options.shareOperationId,
         timestampMs: options.timestampMs,
         subGraphName: options.subGraphName,
-        publisherPeerId: options.publisherPeerId,
-      });
-    }
-
-    const senderIdentity = `did:dkg:agent:${ethers.getAddress(options.senderAgentAddress)}`;
-    return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
-      contextGraphId,
-      senderIdentity,
-      operationId: options.operationId,
-      shareOperationId: options.shareOperationId,
-      timestampMs: options.timestampMs,
-      subGraphName: options.subGraphName,
-      plaintext,
-      recipients: resolution.recipients,
-    }));
+        plaintext,
+        recipients: resolution.recipients,
+      })),
+      gossipFanoutSnapshot,
+    };
   }
 
   /**
@@ -8619,6 +8652,7 @@ export class DKGPublisher implements Publisher {
     // mutations, so oversized promotions are rejected cleanly while the
     // assertion is still intact in WM.
     let gossipMessage: Uint8Array | undefined;
+    let gossipFanoutSnapshot: WorkspaceGossipFanoutSnapshot | undefined;
     const operationPublisherPeerId = operationIntent.publisherPeerId;
     if (operationPublisherPeerId) {
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
@@ -8671,19 +8705,20 @@ export class DKGPublisher implements Publisher {
         },
       ));
 
-      if (wrapped.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
+      if (wrapped.message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         const hint = 'Reduce the complete assertion payload size.';
         throw new SwmGossipPayloadTooLargeError({
-          actualBytes: wrapped.length,
+          actualBytes: wrapped.message.length,
           maxBytes: DKG_GOSSIP_MAX_MESSAGE_BYTES,
           operation: 'promote',
           message:
-            `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
+            `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.message.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
             hint,
           hint,
         });
       }
-      gossipMessage = wrapped;
+      gossipMessage = wrapped.message;
+      gossipFanoutSnapshot = wrapped.gossipFanoutSnapshot;
     }
 
     // Persist the ID and its immutable envelope in one store call before any
@@ -8886,6 +8921,7 @@ export class DKGPublisher implements Publisher {
         ? 0
         : swmQuads.length + normalizedPrivateQuads.length,
       gossipMessage,
+      gossipFanoutSnapshot,
       promotedAllRoots,
       shareOperationId: operationId,
     };

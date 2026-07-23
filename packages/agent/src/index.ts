@@ -321,9 +321,12 @@ export { monotonicTransition, versionedWrite, type MonotonicStages } from './wor
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';
 export {
   createCGMemberEnumerator,
+  createAgentAwareCGMemberEnumerator,
   type CGMemberEnumerator,
   type CGMemberEnumeration,
   type CGMemberEnumeratorDeps,
+  type AgentAwareCGMemberEnumeratorDeps,
+  type CGAgentPeerRoster,
   type CGMemberSource,
 } from './swm/enumerate-cg-members.js';
 export {

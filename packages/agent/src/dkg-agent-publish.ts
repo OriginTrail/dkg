@@ -172,6 +172,7 @@ import {
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
+  type WorkspaceGossipFanoutSnapshot,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -852,6 +853,8 @@ export class PublishMethods extends DKGAgentBase {
      * from quorum tracking too.
      */
     shareOperationId?: string,
+    /** Exact encryption-time transport projection for this payload. */
+    gossipFanoutSnapshot?: WorkspaceGossipFanoutSnapshot,
   ): Promise<void> {
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
     // publish-side boundary and use it consistently across the topic,
@@ -901,9 +904,9 @@ export class PublishMethods extends DKGAgentBase {
     // (PR-A) absorbs the resulting double-delivery cleanly and
     // PR-A's `swm.redundantApplies` gauge makes it observable.
     //
-    // Enumeration cost: at most one SPARQL query + one
-    // getSubscribers() call per CG per 60s window (enumerator
-    // caches). Independent of share rate.
+    // The normal encrypted-share path receives the exact transport projection
+    // produced while wrapping the payload. Direct or legacy callers fall back
+    // to the enumerator. Private agent rosters are never held in its TTL cache.
     //
     // Errors are intentionally NOT re-thrown — share() in the
     // caller already committed locally; transport failures here
@@ -922,21 +925,19 @@ export class PublishMethods extends DKGAgentBase {
     // contract. Wrap planning in the same swallow-and-log shell
     // as the gossip publish: on throw, fall back to a gossip-only
     // plan (exactly the pre-PR-C behaviour for this share). The
-    // next share to the same cgId pays the SPARQL retry; the
-    // 60s enumeration cache means a one-off blip is recovered on
-    // the next call.
+    // next share to the same cgId pays the planning retry.
     let plan: FanOutPlan;
     try {
-      const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
+      const enumeration = gossipFanoutSnapshot
+        ? {
+          source: 'agent-roster' as const,
+          members: gossipFanoutSnapshot.members,
+          complete: gossipFanoutSnapshot.complete,
+        }
+        : await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
       plan = chooseFanOutTier({
         enumeration,
         maxSubstrateMembers: this.swmSubstrateMaxMembers,
-        // OT-RFC-49 WS-A — for a PRIVATE allowlist CG, this flips the gossip
-        // leg OFF so curated SWM ciphertext stays off the public mesh and
-        // reaches the roster over the reliable substrate only. Resolved on
-        // the same planning path that already runs `isPrivateContextGraph`
-        // for enumeration, so no extra store round-trip beyond its cache.
-        isPrivate: await this.isPrivateContextGraph(contextGraphId),
       });
     } catch (err) {
       const errClass = err instanceof Error
@@ -1560,6 +1561,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         promoted.shareOperationId,
+        promoted.gossipFanoutSnapshot,
       );
     }
     await this.afterDurableSwmPromotionV1({
@@ -2362,7 +2364,7 @@ export class PublishMethods extends DKGAgentBase {
     // buildCuratorAckConfirmer). Undefined → legacy best-effort path.
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
 
-    const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, message, gossipFanoutSnapshot } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       subGraphName: opts?.subGraphName,
@@ -2383,7 +2385,14 @@ export class PublishMethods extends DKGAgentBase {
       // holds this write; the fan-out here is the cross-version safety net
       // + propagation to the OTHER members. A redundant curator delivery is
       // idempotent — swm.redundantApplies.)
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
+      await this.publishWorkspaceGossip(
+        contextGraphId,
+        message,
+        ctx,
+        gossipSigner,
+        shareOperationId,
+        gossipFanoutSnapshot,
+      );
     }
     return { shareOperationId };
   }
@@ -2494,7 +2503,7 @@ export class PublishMethods extends DKGAgentBase {
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
     // Strict curator-ack gate — same seam as share() (both flow through _shareImpl).
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
-    const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
+    const { shareOperationId, message, gossipFanoutSnapshot } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
@@ -2509,7 +2518,14 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
     if (!opts?.localOnly) {
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
+      await this.publishWorkspaceGossip(
+        contextGraphId,
+        message,
+        ctx,
+        gossipSigner,
+        shareOperationId,
+        gossipFanoutSnapshot,
+      );
     }
     return { shareOperationId };
   }

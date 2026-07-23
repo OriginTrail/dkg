@@ -13,7 +13,12 @@ import {
   generateWorkspaceRecipientEncryptionKey,
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
-import { resolveWorkspaceAgentRecipients } from '../src/index.js';
+import {
+  projectWorkspaceAgentRecipientPeers,
+  projectWorkspaceAgentRecipientFanout,
+  resolveWorkspaceAgentRecipients,
+  type WorkspaceAgentRecipientResolution,
+} from '../src/index.js';
 
 const CONTEXT_GRAPH_ID = 'workspace-agent-recipient-resolution';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
@@ -166,6 +171,61 @@ async function insertAgentEncryptionKeyRevocation(
   }
   await store.insert(quads);
 }
+
+describe('projectWorkspaceAgentRecipientPeers', () => {
+  it('projects the validated snapshot once, trimming, deduping, and excluding self', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        { peerId: ' peerA ' },
+        { peerId: 'peerA' },
+        { peerId: 'selfPeer' },
+        { peerId: '  ' },
+        {},
+        { peerId: 'peerB' },
+      ],
+    } as unknown as WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientPeers(resolution, 'selfPeer')).toEqual(['peerA', 'peerB']);
+  });
+
+  it('returns null for a plaintext recipient resolution', () => {
+    expect(projectWorkspaceAgentRecipientPeers({
+      requiresEncryption: false,
+      recipients: [],
+    })).toBeNull();
+  });
+
+  it('marks a mixed authorized roster incomplete while retaining known peers', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        { agentAddress: '0xaaa', peerId: 'peerA' },
+        { agentAddress: '0xbbb' },
+      ],
+    } as unknown as WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, 'selfPeer')).toEqual({
+      peerIds: ['peerA'],
+      complete: false,
+    });
+  });
+
+  it('counts the local agent as covered without adding self to remote peers', () => {
+    const resolution = {
+      requiresEncryption: true,
+      recipients: [
+        { agentAddress: '0xaaa', peerId: 'selfPeer' },
+        { agentAddress: '0xbbb', peerId: 'peerB' },
+      ],
+    } as unknown as WorkspaceAgentRecipientResolution;
+
+    expect(projectWorkspaceAgentRecipientFanout(resolution, 'selfPeer')).toEqual({
+      peerIds: ['peerB'],
+      complete: true,
+    });
+  });
+});
 
 describe('resolveWorkspaceAgentRecipients', () => {
   it.each([

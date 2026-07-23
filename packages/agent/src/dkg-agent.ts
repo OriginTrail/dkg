@@ -3013,7 +3013,13 @@ export class DKGAgent extends DKGAgentBase {
           { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
           createOperationContext('share'),
         );
-        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
+        const {
+          promotedCount,
+          gossipMessage,
+          gossipFanoutSnapshot,
+          promotedAllRoots,
+          shareOperationId,
+        } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
             ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
@@ -3034,6 +3040,7 @@ export class DKGAgent extends DKGAgentBase {
               createOperationContext('share'),
               gossipSigner,
               shareOperationId,
+              gossipFanoutSnapshot,
             );
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);

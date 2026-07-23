@@ -1245,7 +1245,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
     }
 
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId: input.contextGraphId });
+    const resolution = input.resolution;
     if (!resolution.requiresEncryption) {
       return input.plaintext;
     }

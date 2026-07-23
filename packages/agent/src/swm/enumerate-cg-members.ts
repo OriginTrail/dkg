@@ -3,7 +3,7 @@
  * Step 1a of the plan).
  *
  * Discovers the recipient set for a SWM share at fan-out time, with
- * a single uniform API across the three CG membership models that
+ * a single uniform API across the CG membership models that
  * coexist on rc.9 testnet:
  *
  *   - **curated** — CG has an on-chain (or local-meta-mirrored)
@@ -19,8 +19,16 @@
  *     observed via the heartbeat + peer-exchange protocol. Source
  *     label: `'topic-subscribers'`.
  *
+ *   - **agent-gated private** — membership is expressed through
+ *     authorized DKG agent identities instead of legacy peer-ID
+ *     allowlist triples. The Sender Key recipient resolver projects
+ *     those authorized agents to their advertised peer IDs. Source
+ *     label: `'agent-roster'`.
+ *
  *   - **legacy / unknown** — neither an allowlist nor any live
- *     subscribers. Returns an empty member set with source `'none'`
+ *     subscribers, or a private agent gate whose authorized
+ *     recipients do not currently advertise peer IDs. Returns an
+ *     empty member set with source `'none'`
  *     so the caller can fall back to gossip-only delivery (or skip
  *     the substrate top-up entirely). This is the bootstrap state for
  *     a freshly-created CG before any peer has joined the mesh.
@@ -28,14 +36,15 @@
  * The enumerator is intentionally NOT a hot-path component. Each
  * `enumerate(cgId)` call may trigger a SPARQL query against the
  * meta graph (for the allowlist resolution) — non-trivial but not
- * prohibitive. The 60s in-memory cache absorbs the burst pattern
- * typical for SWM share workloads (a burst of N shares to the same
- * CG within seconds shares a single enumeration result).
+ * prohibitive. The in-memory cache absorbs the burst pattern typical
+ * for public and peer-allowlisted workloads. Agent rosters are deliberately
+ * never retained in the TTL cache: membership/profile changes must affect the
+ * next share immediately, and a graph-wide write counter would invalidate on
+ * unrelated payload writes while still obscuring what the cache depends on.
  *
  * Cache TTL chosen to balance:
- *   - **freshness** — when a curator updates the allowlist or a
- *     subscriber joins/leaves, the change becomes visible to the
- *     fan-out path within at most TTL milliseconds.
+ *   - **freshness** — agent membership/profile changes are resolved on every
+ *     non-concurrent call; live subscriber churn remains bounded by the TTL.
  *   - **work** — N shares to the same CG within TTL only pay one
  *     SPARQL query + one `getSubscribers` call.
  *
@@ -44,11 +53,9 @@
  * `invalidate(cgId)`.
  */
 
-export type CGMemberSource = 'allowlist' | 'topic-subscribers' | 'none';
+export type CGMemberSource = 'allowlist' | 'agent-roster' | 'topic-subscribers' | 'none';
 
-export interface CGMemberEnumeration {
-  /** Which discovery path produced {@link members}. */
-  source: CGMemberSource;
+interface CGMemberEnumerationBase {
   /**
    * Peer IDs of the recipient set, with self excluded. Order is not
    * guaranteed (depends on SPARQL result ordering or GossipSub's
@@ -90,6 +97,26 @@ export interface CGMemberEnumeration {
   substrateEligibleMembers?: string[];
 }
 
+/**
+ * One coherent membership classification. An agent roster is private by
+ * definition; an allowlist carries its resolved visibility; public subscriber
+ * and empty fallback states cannot be combined with a contradictory privacy
+ * switch in the fan-out planner.
+ */
+export type CGMemberEnumeration =
+  | (CGMemberEnumerationBase & {
+    source: 'allowlist';
+    isPrivate: boolean;
+  })
+  | (CGMemberEnumerationBase & { source: 'agent-roster'; complete: boolean })
+  | (CGMemberEnumerationBase & { source: 'topic-subscribers' })
+  | (CGMemberEnumerationBase & { source: 'none'; members: [] });
+
+export interface CGAgentPeerRoster {
+  members: string[];
+  complete: boolean;
+}
+
 export interface CGMemberEnumeratorDeps {
   /**
    * Resolves a CG's peer allowlist. Returns `null` for CGs without
@@ -105,6 +132,17 @@ export interface CGMemberEnumeratorDeps {
    */
   getContextGraphAllowedPeers: (cgId: string) => Promise<string[] | null>;
   /**
+   * Resolves peer IDs advertised by the authorized DKG-agent recipients of an
+   * agent-gated private CG. This is the same recipient population used by the
+   * Sender Key setup path, projected down to its peer IDs.
+   *
+   * Returns `null` when no agent gate exists and `[]` when an agent gate exists
+   * but none of its recipients currently advertises a peer ID.
+   */
+  getContextGraphAllowedAgentPeers?: (
+    cgId: string,
+  ) => Promise<CGAgentPeerRoster | string[] | null>;
+  /**
    * Returns true for any private CG — peer-allowlisted, agent-gated,
    * or both. Same predicate the responder consults to gate sync /
    * SWM-share auth (see `DKGAgent.isPrivateContextGraph`), so
@@ -119,11 +157,10 @@ export interface CGMemberEnumeratorDeps {
    * subscribers who are NOT actually allowed members, risking a
    * metadata leak (the encrypted payload itself is still gated by
    * the per-CG key, but the bare fact that a share exists would
-   * reach unauthorized nodes). Fail closed: if the CG is private
-   * but we have no enumerable peer allowlist, return `source:
-   * 'none'` with empty members so the caller falls back to
-   * gossip-only delivery (still safe because the receiver enforces
-   * auth on the gossip path too).
+   * reach unauthorized nodes). Private CGs therefore never consult
+   * topic subscribers: they use the explicit peer allowlist, the
+   * authorized-agent roster, or `source: 'none'` when neither
+   * authoritative roster is available.
    */
   isPrivateContextGraph: (cgId: string) => Promise<boolean>;
   /**
@@ -226,12 +263,23 @@ export interface CGMemberEnumeratorDeps {
   cacheTtlMs?: number;
 }
 
+/**
+ * Strict dependency shape used by the DKG agent's production wiring. The
+ * long-standing `createCGMemberEnumerator` export remains source-compatible
+ * for external callers; production cannot accidentally omit agent resolution.
+ */
+export interface AgentAwareCGMemberEnumeratorDeps extends CGMemberEnumeratorDeps {
+  getContextGraphAllowedAgentPeers: (
+    cgId: string,
+  ) => Promise<CGAgentPeerRoster | string[] | null>;
+}
+
 const DEFAULT_CACHE_TTL_MS = 60_000;
 
 export interface CGMemberEnumerator {
   /**
-   * Resolve the current member set for {@link cgId}. Returns cached
-   * value if within TTL, otherwise recomputes (and caches).
+   * Resolve the current member set for {@link cgId}. Agent rosters bypass the
+   * resolved TTL cache; public/peer rosters may be reused within the TTL.
    */
   enumerate(cgId: string): Promise<CGMemberEnumeration>;
   /**
@@ -244,9 +292,28 @@ export interface CGMemberEnumerator {
 }
 
 export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMemberEnumerator {
+  return createCGMemberEnumeratorInternal({
+    ...deps,
+    getContextGraphAllowedAgentPeers:
+      deps.getContextGraphAllowedAgentPeers ?? (async () => null),
+  });
+}
+
+export function createAgentAwareCGMemberEnumerator(
+  deps: AgentAwareCGMemberEnumeratorDeps,
+): CGMemberEnumerator {
+  return createCGMemberEnumeratorInternal(deps);
+}
+
+function createCGMemberEnumeratorInternal(
+  deps: AgentAwareCGMemberEnumeratorDeps,
+): CGMemberEnumerator {
   const now = deps.now ?? (() => Date.now());
   const ttl = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
-  const cache = new Map<string, { computedAtMs: number; value: CGMemberEnumeration }>();
+  const cache = new Map<string, {
+    computedAtMs: number;
+    value: CGMemberEnumeration;
+  }>();
   // In-flight promise dedup so a burst of concurrent `enumerate(cgId)`
   // calls for the same cgId collapses onto a single resolution. Bug
   // fix (codex review on #571 round 1): without this, the burst
@@ -277,12 +344,19 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     return nowMs - entry.computedAtMs < ttl;
   }
 
-  async function resolve(cgId: string, gen: number, computedAtMs: number): Promise<CGMemberEnumeration> {
+  async function resolve(
+    cgId: string,
+    gen: number,
+    computedAtMs: number,
+  ): Promise<CGMemberEnumeration> {
     const result = await computeMembers(cgId);
     // Only commit to the TTL cache if no `invalidate(cgId)` has run
     // since this resolve started. Otherwise a stale resolve could
     // overwrite a fresher one (or pollute a freshly-cleared cache).
-    if (currentGen(cgId) === gen) {
+    // Agent rosters and empty/unknown states are intentionally not cached.
+    // This makes an actual membership/profile write visible to the very next
+    // share without coupling correctness to a global store-write revision.
+    if (currentGen(cgId) === gen && result.source !== 'agent-roster' && result.source !== 'none') {
       cache.set(cgId, { computedAtMs, value: result });
     }
     return result;
@@ -299,15 +373,29 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       // kicked).
       return {
         source: 'allowlist',
+        isPrivate: await deps.isPrivateContextGraph(cgId),
         members: dedupAndExcludeSelf(allowed, deps.getSelfPeerId()),
       };
     }
 
     // No peer allowlist exists. Disambiguate private (agent-gated)
     // from public via the same predicate the responder consults for
-    // sync / SWM-share auth. Fail closed for private CGs (see
-    // `isPrivateContextGraph` jsdoc on CGMemberEnumeratorDeps).
+    // sync / SWM-share auth. Private CGs use the authorized DKG-agent
+    // roster and never fall through to arbitrary topic subscribers.
     if (await deps.isPrivateContextGraph(cgId)) {
+      const resolvedRoster = await deps.getContextGraphAllowedAgentPeers(cgId);
+      const agentPeers = Array.isArray(resolvedRoster)
+        ? resolvedRoster
+        : resolvedRoster?.members;
+      if (agentPeers && (agentPeers.length > 0 || !Array.isArray(resolvedRoster))) {
+        return {
+          source: 'agent-roster',
+          members: dedupAndExcludeSelf(agentPeers, deps.getSelfPeerId()),
+          // Legacy callbacks returned only a string[]. Preserve their old
+          // authoritative semantics; production returns the explicit shape.
+          complete: Array.isArray(resolvedRoster) ? true : (resolvedRoster?.complete ?? false),
+        };
+      }
       return { source: 'none', members: [] };
     }
 
@@ -385,7 +473,9 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       }
 
       const existing = inFlight.get(cgId);
-      if (existing) return populateSubstrateEligibleMembers(await existing);
+      if (existing) {
+        return populateSubstrateEligibleMembers(await existing);
+      }
 
       const gen = currentGen(cgId);
       const promise = resolve(cgId, gen, nowMs).finally(() => {

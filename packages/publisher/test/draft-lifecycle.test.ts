@@ -612,6 +612,44 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(remaining).toHaveLength(0);
   });
 
+  it('returns the encryption-time recipient projection for promotion fan-out', async () => {
+    const name = 'promotion-recipient-snapshot';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [{
+      subject: 'urn:test:promotion-snapshot',
+      predicate: 'http://schema.org/name',
+      object: '"Snapshot"',
+    }]);
+    await finalizeAssertion(name);
+
+    let advertisedPeer = 'peer-at-encryption';
+    let resolverCalls = 0;
+    publisher.setWorkspaceAgentRecipientResolver(async () => {
+      resolverCalls += 1;
+      return {
+        requiresEncryption: true,
+        recipients: [{ agentAddress: AGENT, peerId: advertisedPeer }] as any,
+      };
+    });
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe('peer-at-encryption');
+      advertisedPeer = 'peer-after-encryption';
+      return input.plaintext;
+    });
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      publisherPeerId: PEER,
+      senderAgentAddress: AGENT,
+    });
+
+    expect(resolverCalls).toBe(1);
+    expect(result.gossipFanoutSnapshot).toEqual({
+      source: 'agent-roster',
+      members: ['peer-at-encryption'],
+      complete: true,
+    });
+  });
+
   it('rejects generated private-CG catalog floor stripping without private CG proof', async () => {
     const name = 'private-catalog-promote-reject';
     await publisher.assertionCreate(CG_ID, name, AGENT);

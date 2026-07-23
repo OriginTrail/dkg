@@ -15,8 +15,9 @@
  *   3. `handleSwmHostCatchup` — the host-mode catch-up egress serves nothing;
  *   4. `handleGetCiphertextChunk` — the LU-11 chunk peer-serve (incl. the
  *      RFC-39 node-operator authority branch) serves nothing;
- *   5. `chooseFanOutTier` — a PRIVATE allowlist CG drops the gossip leg so
- *      curated ciphertext never floods the public mesh.
+ *   5. `chooseFanOutTier` — a PRIVATE CG with an authoritative peer or agent
+ *      roster drops the gossip leg so encrypted ciphertext never floods the
+ *      public mesh.
  *
  * With the flag OFF (baseline), every path engages exactly as before — proving
  * the strip is gated and reversible via the kill-switch.
@@ -329,39 +330,52 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
   });
 });
 
-// ── 5. chooseFanOutTier — private allowlist drops the gossip leg ───────────
+// ── 5. chooseFanOutTier — private authoritative roster drops gossip ───────
 
 describe('OT-RFC-49 WS-A — chooseFanOutTier private-CG gossip gate', () => {
   const allowlist = (members: string[]): CGMemberEnumeration => ({
     members,
     source: 'allowlist',
-  } as CGMemberEnumeration);
+    isPrivate: true,
+  });
+  const agentRoster = (members: string[]): CGMemberEnumeration => ({
+    members,
+    source: 'agent-roster',
+    complete: true,
+  });
 
-  const base = (enumeration: CGMemberEnumeration, isPrivate?: boolean): ChooseFanOutTierInput => ({
+  const base = (enumeration: CGMemberEnumeration): ChooseFanOutTierInput => ({
     enumeration,
     maxSubstrateMembers: 100,
-    isPrivate,
   });
 
   it('private allowlist CG with a roster → substrate ON, gossip OFF', () => {
-    const plan = chooseFanOutTier(base(allowlist(['12D3KooWA', '12D3KooWB']), true));
+    const plan = chooseFanOutTier(base(allowlist(['12D3KooWA', '12D3KooWB'])));
     expect(plan.useSubstrate).toBe(true);
     expect(plan.useGossip).toBe(false);
     expect(plan.substrateMembers).toEqual(['12D3KooWA', '12D3KooWB']);
   });
 
   it('private allowlist CG with an EMPTY roster → keeps gossip ON (no silent drop)', () => {
-    const plan = chooseFanOutTier(base(allowlist([]), true));
+    const plan = chooseFanOutTier(base(allowlist([])));
     expect(plan.useGossip).toBe(true);
   });
 
+  it('private agent-gated CG with an authorized roster → substrate ON, gossip OFF', () => {
+    const plan = chooseFanOutTier(base(agentRoster(['12D3KooWAgentPeer'])));
+    expect(plan.useSubstrate).toBe(true);
+    expect(plan.useGossip).toBe(false);
+    expect(plan.substrateMembers).toEqual(['12D3KooWAgentPeer']);
+    expect(plan.enumerationSource).toBe('agent-roster');
+  });
+
   it('public allowlist CG (isPrivate falsey) → gossip stays ON (cross-version safety net)', () => {
-    const plan = chooseFanOutTier(base(allowlist(['12D3KooWA']), undefined));
+    const plan = chooseFanOutTier(base({ members: ['12D3KooWA'], source: 'allowlist', isPrivate: false }));
     expect(plan.useGossip).toBe(true);
   });
 
   it("private 'none' tier is NOT touched — gossip stays ON (its only transport)", () => {
-    const plan = chooseFanOutTier(base({ members: [], source: 'none' } as CGMemberEnumeration, true));
+    const plan = chooseFanOutTier(base({ members: [], source: 'none' }));
     expect(plan.useSubstrate).toBe(false);
     expect(plan.useGossip).toBe(true);
   });

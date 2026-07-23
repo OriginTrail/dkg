@@ -31,6 +31,60 @@ export interface WorkspaceAgentRecipientResolution {
   recipients: WorkspaceAgentRecipient[];
 }
 
+export interface WorkspaceAgentRecipientPeerProjection {
+  /** Remote transport peers from the validated encryption recipient snapshot. */
+  peerIds: string[];
+  /**
+   * True only when every authorized agent has at least one advertised peer
+   * (including this node). An incomplete projection must keep GossipSub as a
+   * compatibility fallback; the reliable leg alone cannot reach the agents
+   * whose profile has no usable peer id.
+   */
+  complete: boolean;
+}
+
+/**
+ * Project a validated encryption snapshot to its reliable transport roster
+ * while retaining whether the projection covers every authorized agent.
+ */
+export function projectWorkspaceAgentRecipientFanout(
+  resolution: WorkspaceAgentRecipientResolution,
+  selfPeerId?: string,
+): WorkspaceAgentRecipientPeerProjection | null {
+  if (!resolution.requiresEncryption) return null;
+
+  const peers = new Set<string>();
+  const agentsWithPeer = new Set<string>();
+  const authorizedAgents = new Set<string>();
+  for (const recipient of resolution.recipients) {
+    const agentAddress = recipient.agentAddress?.trim().toLowerCase() ?? '';
+    if (agentAddress) authorizedAgents.add(agentAddress);
+
+    const peerId = recipient.peerId?.trim();
+    if (!peerId) continue;
+    if (agentAddress) agentsWithPeer.add(agentAddress);
+    if (peerId !== selfPeerId) peers.add(peerId);
+  }
+
+  return {
+    peerIds: [...peers],
+    complete: authorizedAgents.size > 0 && agentsWithPeer.size === authorizedAgents.size,
+  };
+}
+
+/**
+ * Project the already validated Sender Key recipient snapshot to its reliable
+ * transport peer roster. Keeping this as a pure stage lets encryption and SWM
+ * fan-out consume the same membership/key resolution without rerunning the
+ * cryptographic resolver.
+ */
+export function projectWorkspaceAgentRecipientPeers(
+  resolution: WorkspaceAgentRecipientResolution,
+  selfPeerId?: string,
+): string[] | null {
+  return projectWorkspaceAgentRecipientFanout(resolution, selfPeerId)?.peerIds ?? null;
+}
+
 export interface WorkspaceAgentRecipientResolverInput {
   contextGraphId: string;
 }

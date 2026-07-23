@@ -21,9 +21,21 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  DKG_ONTOLOGY,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  createOperationContext,
+  encodeWorkspaceEncryptionKey,
+  generateWorkspaceRecipientEncryptionKey,
+} from '@origintrail-official/dkg-core';
 import { DKGAgent, FANOUT_RESPONSE_RETRYABLE } from '../src/index.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 const SELF_PEER = '12D3KooWSelfPubC';
 
@@ -116,6 +128,61 @@ async function createAgent(name: string): Promise<DKGAgent> {
   return agent;
 }
 
+async function seedVerifiedPrivateAgentRoster(
+  agent: DKGAgent,
+  contextGraphId: string,
+  peerId: string,
+): Promise<string> {
+  const wallet = ethers.Wallet.createRandom();
+  const recipientId = `did:dkg:agent:${ethers.getAddress(wallet.address)}`;
+  const key = generateWorkspaceRecipientEncryptionKey(
+    recipientId,
+    `${recipientId}#fanout-integration-x25519`,
+  );
+  const publicKeyBytes = key.publicKeyBytes!;
+  const proofPayload = computeWorkspaceAgentEncryptionKeyProofPayload({
+    agentAddress: wallet.address,
+    encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+    publicKeyBytes,
+  });
+  const proof = wallet.signingKey.sign(ethers.hashMessage(proofPayload)).serialized;
+  const store = (agent as unknown as { store: TripleStore }).store;
+
+  await store.insert([
+    {
+      subject: contextGraphDataUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${ethers.getAddress(wallet.address)}"`,
+      graph: contextGraphMetaUri(contextGraphId),
+    },
+    {
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
+      object: `"${encodeWorkspaceEncryptionKey(publicKeyBytes)}"`,
+      graph: 'did:dkg:system/agents',
+    },
+    {
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
+      object: `"${WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
+      graph: 'did:dkg:system/agents',
+    },
+    {
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
+      object: `"${proof}"`,
+      graph: 'did:dkg:system/agents',
+    },
+    {
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: `"${peerId}"`,
+      graph: 'did:dkg:system/agents',
+    },
+  ]);
+  return recipientId;
+}
+
 function installAllReachableLibp2pStub(agent: DKGAgent): void {
   const allReachableIds = (): string[] => {
     const gossip = (agent as unknown as { gossip?: { subscribers?: string[] } }).gossip;
@@ -198,6 +265,175 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
       overflow: { delivered: 0, rejected: 0, retryable: 0, queued: 0, inFlight: 0, failed: 0 },
       truncated: false,
     });
+  });
+
+  /**
+   * R2 private-SWM regression: agent-gated CGs have no legacy
+   * DKG_ALLOWED_PEER triples, but Sender Key setup already resolves
+   * each authorized agent to its advertised peer ID. Before this
+   * fix, member enumeration returned source=none and sent the
+   * encrypted body over GossipSub only. Two NATed edges could
+   * exchange the point-to-point Sender Key package yet never share
+   * a private-topic mesh path, so the key arrived and the body did
+   * not.
+   *
+   * Pin the production DKGAgent wiring here: an authorized agent
+   * roster uses /dkg/10.0.1/swm-update, preserves the sizable
+   * ciphertext bytes, and does not publish them to GossipSub.
+   */
+  it('source=agent-roster sends private SWM reliably to authorized agent peers with gossip off', async () => {
+    const agent = await createAgent('PrivateAgentRosterFanout');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const receiverPeerId = '12D3KooWPrivateReceiver';
+    const { calls, install } = stubMessengerSendReliable(new Map([
+      [receiverPeerId, {
+        delivered: true,
+        response: new Uint8Array(),
+        attempts: 1,
+        messageId: 'private-agent-roster-delivered',
+      }],
+    ]));
+    install(agent);
+
+    await seedVerifiedPrivateAgentRoster(agent, 'cg-private-agent-roster', receiverPeerId);
+
+    // Slightly larger than the 169,214-byte private-curated R2 body
+    // observed in the failed smoke test.
+    const encryptedBody = new Uint8Array(180_000).fill(0xa5);
+    await agent.publishWorkspaceGossip(
+      'cg-private-agent-roster',
+      encryptedBody,
+      createOperationContext('share'),
+      null,
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(calls).toEqual([{
+      peerId: receiverPeerId,
+      protocolId: '/dkg/10.0.1/swm-update',
+      bytes: encryptedBody.byteLength,
+    }]);
+    expect(gossip.publishes).toEqual([]);
+    expect(agent.getSwmSubstrateFanoutStats().delivered).toEqual({
+      'cg-private-agent-roster': 1,
+    });
+  });
+
+  it('refreshes the production private roster immediately after a real profile write', async () => {
+    const agent = await createAgent('PrivateAgentRosterRefresh');
+    const contextGraphId = 'cg-private-agent-roster-refresh';
+    const oldPeerId = '12D3KooWPrivateOld';
+    const newPeerId = '12D3KooWPrivateNew';
+    const recipientId = await seedVerifiedPrivateAgentRoster(agent, contextGraphId, oldPeerId);
+    const internals = agent as unknown as {
+      store: TripleStore;
+      getOrCreateCGMemberEnumerator(): { enumerate: (cgId: string) => Promise<unknown> };
+    };
+
+    await expect(internals.getOrCreateCGMemberEnumerator().enumerate(contextGraphId)).resolves.toEqual({
+      source: 'agent-roster',
+      members: [oldPeerId],
+      complete: true,
+    });
+
+    await internals.store.deleteByPattern({
+      graph: 'did:dkg:system/agents',
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+    });
+    await internals.store.insert([{
+      subject: recipientId,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: `"${newPeerId}"`,
+      graph: 'did:dkg:system/agents',
+    }]);
+
+    await expect(internals.getOrCreateCGMemberEnumerator().enumerate(contextGraphId)).resolves.toEqual({
+      source: 'agent-roster',
+      members: [newPeerId],
+      complete: true,
+    });
+  });
+
+  it('uses the exact encrypted-operation recipient snapshot without resolving membership twice', async () => {
+    const agent = await createAgent('PrivateSnapshotFanout');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const receiverPeerId = '12D3KooWPrivateSnapshotReceiver';
+    const { calls, install } = stubMessengerSendReliable(new Map([
+      [receiverPeerId, {
+        delivered: true,
+        response: new Uint8Array(),
+        attempts: 1,
+        messageId: 'private-snapshot-delivered',
+      }],
+    ]));
+    install(agent);
+
+    const ctx = createOperationContext('share');
+    const internals = agent as unknown as {
+      getOrCreateCGMemberEnumerator(): { enumerate: (cgId: string) => Promise<unknown> };
+    };
+    internals.getOrCreateCGMemberEnumerator().enumerate = async () => {
+      throw new Error('recipient membership must not be resolved twice');
+    };
+
+    const encryptedBody = new Uint8Array(2_048).fill(0x5a);
+    await agent.publishWorkspaceGossip(
+      'cg-private-operation-snapshot',
+      encryptedBody,
+      ctx,
+      null,
+      undefined,
+      { source: 'agent-roster', members: [receiverPeerId], complete: true },
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(calls).toEqual([{
+      peerId: receiverPeerId,
+      protocolId: '/dkg/10.0.1/swm-update',
+      bytes: encryptedBody.byteLength,
+    }]);
+    expect(gossip.publishes).toEqual([]);
+  });
+
+  it('uses reliable delivery and gossip together for an incomplete mixed roster', async () => {
+    const agent = await createAgent('PrivateMixedSnapshotFanout');
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const knownPeerId = '12D3KooWPrivateMixedKnown';
+    const { calls, install } = stubMessengerSendReliable(new Map([
+      [knownPeerId, {
+        delivered: true,
+        response: new Uint8Array(),
+        attempts: 1,
+        messageId: 'private-mixed-delivered',
+      }],
+    ]));
+    install(agent);
+
+    const encryptedBody = new Uint8Array(2_048).fill(0x6b);
+    await agent.publishWorkspaceGossip(
+      'cg-private-mixed-operation-snapshot',
+      encryptedBody,
+      createOperationContext('share'),
+      null,
+      undefined,
+      { source: 'agent-roster', members: [knownPeerId], complete: false },
+    );
+    await agent.awaitInFlightSubstrateFanOuts();
+
+    expect(calls).toEqual([{
+      peerId: knownPeerId,
+      protocolId: '/dkg/10.0.1/swm-update',
+      bytes: encryptedBody.byteLength,
+    }]);
+    expect(gossip.publishes).toHaveLength(1);
+    expect(gossip.publishes[0]?.bytes).toBe(encryptedBody.byteLength);
   });
 
   /**
@@ -331,6 +567,7 @@ describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {
     }).getOrCreateCGMemberEnumerator();
     enumerator.enumerate = async () => ({
       source: 'allowlist',
+      isPrivate: false,
       members: ['12D3KooWAllowedA', '12D3KooWAllowedB'],
     });
 

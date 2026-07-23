@@ -270,6 +270,77 @@ describe('Workspace: share', () => {
     }
   });
 
+  it('returns isolated encryption-time fan-out snapshots for concurrent shares', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-a' ? 'peerA' : 'peerB',
+      }] as any,
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe(
+        input.contextGraphId === 'snapshot-a' ? 'peerA' : 'peerB',
+      );
+      return input.plaintext;
+    });
+
+    const [first, second] = await Promise.all([
+      publisher.share('snapshot-a', [q('urn:test:snapshot-a', 'http://schema.org/name', '"A"')], {
+        publisherPeerId: 'selfPeer',
+        senderAgentAddress,
+      }),
+      publisher.share('snapshot-b', [q('urn:test:snapshot-b', 'http://schema.org/name', '"B"')], {
+        publisherPeerId: 'selfPeer',
+        senderAgentAddress,
+      }),
+    ]);
+
+    expect(first.gossipFanoutSnapshot).toEqual({
+      source: 'agent-roster',
+      members: ['peerA'],
+      complete: true,
+    });
+    expect(second.gossipFanoutSnapshot).toEqual({
+      source: 'agent-roster',
+      members: ['peerB'],
+      complete: true,
+    });
+  });
+
+  it('does not leak recipient state from a failed pre-commit encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-fail' ? 'peerFailed' : 'peerFresh',
+      }] as any,
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      if (input.contextGraphId === 'snapshot-fail') throw new Error('encryption failed');
+      return input.plaintext;
+    });
+
+    await expect(publisher.share(
+      'snapshot-fail',
+      [q('urn:test:snapshot-fail', 'http://schema.org/name', '"fail"')],
+      { publisherPeerId: 'selfPeer', senderAgentAddress },
+    )).rejects.toThrow('encryption failed');
+
+    const recovered = await publisher.share(
+      'snapshot-fresh',
+      [q('urn:test:snapshot-fresh', 'http://schema.org/name', '"fresh"')],
+      { publisherPeerId: 'selfPeer', senderAgentAddress },
+    );
+    expect(recovered.gossipFanoutSnapshot).toEqual({
+      source: 'agent-roster',
+      members: ['peerFresh'],
+      complete: true,
+    });
+  });
+
   // ── Strict curator-ack gate (OT-RFC-49 curator-leader) ──
   // The publisher-side hook: `confirmBeforeCommit` runs after the wire message
   // is built and BEFORE any store mutation. A non-confirmation MUST abort with

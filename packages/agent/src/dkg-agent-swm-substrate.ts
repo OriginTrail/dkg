@@ -102,6 +102,7 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
+  projectWorkspaceAgentRecipientFanout,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -146,7 +147,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
-  createCGMemberEnumerator,
+  createAgentAwareCGMemberEnumerator,
   type CGMemberEnumerator,
 } from './swm/enumerate-cg-members.js';
 import {
@@ -1013,11 +1014,14 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    *    with no `DKG_ALLOWED_PEER` allowlist triples (curated by
    *    peer-allowlist returns the array; agent-gated returns
    *    null, then `isPrivateContextGraph` discriminates).
+   *  - `getContextGraphAllowedAgentPeers` — reuses the Sender Key
+   *    recipient authority to project authorized private-CG agents
+   *    to their advertised peer IDs.
    *  - `isPrivateContextGraph` — closes the agent-gated-CG
    *    misclassification hole (codex review on #571 bug #1): a CG
    *    private via `DKG_ALLOWED_AGENT` without `DKG_ALLOWED_PEER`
-   *    falls into `source: 'none'` (fail closed) instead of
-   *    falling through to live topic subscribers.
+   *    uses that authorized agent roster (or `source: 'none'` when
+   *    empty) instead of falling through to topic subscribers.
    *  - `getTopicSubscribers` — wrapping `GossipSubManager`'s
    *    PR-B-added subscriber-snapshot accessor (best-effort, may
    *    lag by one heartbeat interval; documented in
@@ -1154,8 +1158,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
   getOrCreateCGMemberEnumerator(this: DKGAgent): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
-      this.cgMemberEnumerator = createCGMemberEnumerator({
+      this.cgMemberEnumerator = createAgentAwareCGMemberEnumerator({
         getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
+        getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
         // OT-RFC-38 / LU-6 Phase B — substrate caller passes the local
@@ -1201,6 +1206,25 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       });
     }
     return this.cgMemberEnumerator;
+  }
+
+  /**
+   * Resolve the reliable transport roster for an agent-gated private CG.
+   *
+   * Sender Key setup already resolves each authorized DKG agent to its
+   * advertised peer ID. Reusing that authority here prevents the encrypted
+   * SWM body from falling back to GossipSub-only delivery merely because the
+   * CG has no legacy peer-ID allowlist.
+   */
+  async resolvePrivateSwmAgentPeerRoster(this: DKGAgent, contextGraphId: string): Promise<{
+    members: string[];
+    complete: boolean;
+  } | null> {
+    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    const projection = projectWorkspaceAgentRecipientFanout(resolution, this.peerId);
+    return projection
+      ? { members: projection.peerIds, complete: projection.complete }
+      : null;
   }
 
   /**
@@ -1431,7 +1455,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           },
           onDeadlineExpired: (e: {
             shareOperationId: string; cgId: string; ackedCount: number; expectedCount: number; ackPct: number;
-            missingPeers: readonly string[]; enumerationSource: 'allowlist' | 'topic-subscribers' | 'none';
+            missingPeers: readonly string[];
+            enumerationSource: 'allowlist' | 'agent-roster' | 'topic-subscribers' | 'none';
           }) => {
             if (e.enumerationSource === 'topic-subscribers') {
               for (const peerId of e.missingPeers) {

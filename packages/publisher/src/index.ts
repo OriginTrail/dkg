@@ -93,6 +93,7 @@ export {
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
+  type WorkspaceGossipFanoutSnapshot,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
@@ -101,6 +102,9 @@ export {
 export {
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
+  projectWorkspaceAgentRecipientFanout,
+  projectWorkspaceAgentRecipientPeers,
+  type WorkspaceAgentRecipientPeerProjection,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolver,

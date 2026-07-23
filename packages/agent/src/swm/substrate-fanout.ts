@@ -29,11 +29,16 @@
  *          see in the subscriber view); substrate is a top-up that
  *          raises per-known-peer reliability into the same window
  *          chat enjoys.
+ *        - `{ useSubstrate: true,  useGossip: false }` — private
+ *          agent-gated CG (`source: 'agent-roster'`) with at least
+ *          one authorized agent peer. The encrypted SWM body uses
+ *          the reliable point-to-point path already used by Sender
+ *          Key setup and stays off the public gossip mesh.
  *        - `{ useSubstrate: false, useGossip: true  }` — public CG
  *          above the threshold (substrate fan-out scales
  *          poorly above ~100 peers — N round-trips per share), or
  *          `source: 'none'` (bootstrap state or agent-gated
- *          private CG without an enumerable peer roster — see
+ *          private CG without an advertised peer roster — see
  *          `enumerate-cg-members.ts` for why the latter fails
  *          closed).
  *
@@ -101,9 +106,10 @@ export interface FanOutPlan {
    * CGs this is the `CGMemberEnumeration.substrateEligibleMembers`
    * subset when an `isPeerDialable` predicate was wired —
    * potentially smaller than `enumeratedMembers`. For
-   * `allowlist` CGs the substrate target IS the full enumerated
-   * set (curated CGs deliberately track offline allowlistees so
-   * the watchdog can fire substrate top-up on reconnect).
+   * `allowlist` and `agent-roster` CGs the substrate target IS the
+   * full enumerated set (private/curated CGs deliberately retain
+   * their authoritative rosters, including temporarily offline
+   * peers).
    */
   substrateMembers: readonly string[];
   /**
@@ -151,22 +157,6 @@ export interface ChooseFanOutTierInput {
    * jsdoc for why.
    */
   maxSubstrateMembers: number;
-  /**
-   * OT-RFC-49 WS-A — is this a PRIVATE (curated) context graph? When `true`
-   * AND the enumeration came from the member roster (`source: 'allowlist'`)
-   * AND that roster is non-empty, the gossip leg is turned OFF so private SWM
-   * ciphertext is NOT flooded onto the (publicly-joinable) GossipSub mesh —
-   * it reaches the roster point-to-point over the reliable substrate only.
-   *
-   * Optional and defaults to `undefined` (← gossip stays on, exactly the
-   * pre-WS-A behaviour) so this is a purely additive input: only the publish
-   * path threads it, and every other call site / test is unaffected. The
-   * gossip cross-version safety net it removes is acceptable here — backcompat
-   * is waived for the V10 testnet strip. NOTE the `'none'` tier is deliberately
-   * NOT touched: gossip is its only transport, so flipping it off there would
-   * silently drop the share.
-   */
-  isPrivate?: boolean;
 }
 
 /**
@@ -175,12 +165,15 @@ export interface ChooseFanOutTierInput {
  * cost dominates, and the enumerator has its own 60s cache).
  *
  * Decision matrix (see RFC-003 §6 + this module's header for the
- * full rationale). After PR-C codex R2, gossip is always on; the
- * substrate is an additive per-known-peer reliability layer.
+ * full rationale). Gossip is the baseline for public membership;
+ * authoritative private rosters use reliable point-to-point fan-out.
  *
  *   | source              | members vs cap       | substrate | gossip |
  *   |---------------------|----------------------|-----------|--------|
- *   | allowlist           | (any size)           | YES       | YES    |
+ *   | allowlist private   | non-empty            | YES       | NO     |
+ *   | allowlist otherwise | (any size)           | YES       | YES    |
+ *   | agent-roster        | non-empty            | YES       | NO     |
+ *   | agent-roster        | empty                | YES       | YES    |
  *   | topic-subscribers   | <= maxSubstrateMembers | YES     | YES    |
  *   | topic-subscribers   | >  maxSubstrateMembers | NO      | YES    |
  *   | none                | (always empty)       | NO        | YES    |
@@ -196,7 +189,11 @@ export interface ChooseFanOutTierInput {
  * the throughput cost so we can decide whether to add batching
  * or sharding for rc.10).
  *
- * Why curated CGs ALSO publish to gossip (PR-C codex R2): rolling
+ * OT-RFC-49 WS-A turns gossip OFF for a private CG with a non-empty
+ * authoritative roster. An empty roster keeps gossip ON so the
+ * transport planner cannot silently choose no delivery path.
+ *
+ * Why public curated CGs ALSO publish to gossip (PR-C codex R2): rolling
  * rc.8 → rc.9 upgrades mean some allowlisted peers may not yet
  * speak `/dkg/10.0.1/swm-update`. Substrate-only delivery would
  * silently hit libp2p protocol-negotiation errors, sendReliable
@@ -211,7 +208,7 @@ export interface ChooseFanOutTierInput {
  * once a CG's roster is fully on rc.9+.
  */
 export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
-  const { enumeration, maxSubstrateMembers, isPrivate } = input;
+  const { enumeration, maxSubstrateMembers } = input;
   const enumeratedCount = enumeration.members.length;
   // PR-J round 2 (codex RED #3 on #584): substrate target may be
   // a subset of `members` when the enumerator's `isPeerDialable`
@@ -226,23 +223,29 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
 
   switch (enumeration.source) {
     case 'allowlist': {
-      // OT-RFC-49 WS-A — for a PRIVATE CG with a non-empty member roster,
-      // turn the gossip leg OFF: the curated SWM ciphertext reaches the
-      // roster point-to-point over the reliable substrate, and is NOT
-      // flooded onto the publicly-joinable GossipSub mesh. The roster is
-      // authoritative for an allowlist CG, so substrate alone delivers to
-      // everyone who should receive it. We require `members.length > 0` so a
-      // private allowlist CG with an EMPTY roster keeps gossip on rather than
-      // ending up with neither transport (substrate has nobody → silent
-      // drop). Public allowlist CGs (`isPrivate` falsey) keep gossip on as
-      // the cross-version safety net.
-      const dropGossipForPrivate = isPrivate === true && enumeration.members.length > 0;
+      const dropGossipForPrivate = enumeration.isPrivate && enumeration.members.length > 0;
       return {
         useSubstrate: true,
         useGossip: !dropGossipForPrivate,
         substrateMembers: enumeration.members,
         enumeratedMembers: enumeration.members,
-        enumerationSource: 'allowlist',
+        enumerationSource: enumeration.source,
+        enumeratedCount,
+      };
+    }
+    case 'agent-roster': {
+      // OT-RFC-49 WS-A — for a PRIVATE CG with a non-empty member roster,
+      // turn the gossip leg OFF: the curated SWM ciphertext reaches the
+      // roster point-to-point over the reliable substrate. Gossip can be
+      // disabled only when that transport projection covers every authorized
+      // agent. A mixed roster (some agents have no usable peer id) keeps the
+      // compatibility GossipSub leg so those agents are not silently excluded.
+      return {
+        useSubstrate: true,
+        useGossip: enumeration.members.length === 0 || !enumeration.complete,
+        substrateMembers: enumeration.members,
+        enumeratedMembers: enumeration.members,
+        enumerationSource: enumeration.source,
         enumeratedCount,
       };
     }
