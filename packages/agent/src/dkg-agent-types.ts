@@ -32,6 +32,7 @@ import type {
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
   CatalogSealDeploymentProfileV1,
   EvmAddressV1,
+  TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -1059,6 +1060,17 @@ export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
   ) => Promise<EvmAddressV1 | null>;
 }
 
+/**
+ * Opt-in RFC-64 author-catalog production for ordinary confirmed public KA
+ * publishes. Peer fan-out is an availability hint; the durable applied-head
+ * pointer remains the correctness source for pull discovery.
+ */
+export interface Rfc64PublicCatalogAutoPublishConfigV1 {
+  readonly peers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1078,6 +1090,8 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /** Omission preserves the existing publication and synchronization behavior. */
+  rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

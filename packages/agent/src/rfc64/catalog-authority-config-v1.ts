@@ -5,10 +5,16 @@ import {
   assertNetworkIdV1,
   type CatalogSealDeploymentProfileV1,
   type EvmAddressV1,
+  type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
-import type { Rfc64CatalogAccessPolicyAuthorityConfigV1 } from '../dkg-agent-types.js';
+import type {
+  Rfc64CatalogAccessPolicyAuthorityConfigV1,
+  Rfc64PublicCatalogAutoPublishConfigV1,
+} from '../dkg-agent-types.js';
+import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
+
 
 /** Detach a locally configured deployment tuple from caller-owned state. */
 export function snapshotRfc64CatalogDeploymentProfileV1(
@@ -89,4 +95,60 @@ export function snapshotRfc64CatalogAccessPolicyAuthorityV1(
     localAgentAddress: input.localAgentAddress.toLowerCase() as EvmAddressV1,
     resolveRemoteAgentAddress: input.resolveRemoteAgentAddress,
   });
+}
+
+/** Detach and validate the preview authoring configuration at create time. */
+export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
+  input: Rfc64PublicCatalogAutoPublishConfigV1 | undefined,
+): Readonly<Rfc64PublicCatalogAutoPublishConfigV1> | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('rfc64PublicCatalogAutoPublish must be a plain object');
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('rfc64PublicCatalogAutoPublish must be a plain object');
+  }
+  const keys = Object.keys(input).sort();
+  const allowed = new Set([
+    'catalogIssuerDelegationEffectiveAt',
+    'catalogIssuerDelegationExpiresAt',
+    'peers',
+  ]);
+  if (
+    keys.some((key) => !allowed.has(key))
+    || !keys.includes('peers')
+    || !keys.includes('catalogIssuerDelegationExpiresAt')
+  ) {
+    throw new TypeError('rfc64PublicCatalogAutoPublish has unknown or missing fields');
+  }
+  const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
+  const effectiveAt = snapshotTimestamp(
+    input.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+    'catalogIssuerDelegationEffectiveAt',
+  );
+  const expiresAt = snapshotTimestamp(
+    input.catalogIssuerDelegationExpiresAt,
+    'catalogIssuerDelegationExpiresAt',
+  );
+  if (BigInt(expiresAt) <= BigInt(effectiveAt)) {
+    throw new TypeError(
+      'rfc64PublicCatalogAutoPublish delegation expiry must be after its effective time',
+    );
+  }
+  return Object.freeze({
+    peers,
+    catalogIssuerDelegationEffectiveAt: effectiveAt,
+    catalogIssuerDelegationExpiresAt: expiresAt,
+  });
+}
+
+function snapshotTimestamp(value: unknown, label: string): TimestampMsV1 {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/u.test(value)) {
+    throw new TypeError(`rfc64PublicCatalogAutoPublish.${label} must be a canonical timestamp`);
+  }
+  if (BigInt(value) > 18_446_744_073_709_551_615n) {
+    throw new TypeError(`rfc64PublicCatalogAutoPublish.${label} exceeds uint64`);
+  }
+  return value as TimestampMsV1;
 }

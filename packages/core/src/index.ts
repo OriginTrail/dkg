@@ -361,6 +361,7 @@ export {
   MAX_SEAL_TRIPLE_COUNT_V1,
   CanonicalGraphScopedAuthorSealError,
   assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   parseCanonicalGraphScopedAuthorSealV1,

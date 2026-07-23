@@ -180,6 +180,7 @@ export {
 export {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
   snapshotRfc64CatalogDeploymentProfileV1,
+  snapshotRfc64PublicCatalogAutoPublishConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
@@ -914,13 +915,13 @@ function countToSafeInteger(value: CountV1, label: string): number {
   return parsed;
 }
 
-interface BoundedAuthorCatalogHistoryV1 {
+export interface BoundedAuthorCatalogHistoryV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
   readonly previousBucket: SignedAuthorCatalogBucketEnvelopeV1 | null;
 }
 
-async function loadBoundedAuthorCatalogHistoryV1(
+export async function loadBoundedAuthorCatalogHistoryV1(
   persistence: Rfc64PersistenceV1,
   ref: Rfc64StagedAuthorCatalogHeadRefV1,
 ): Promise<BoundedAuthorCatalogHistoryV1> {

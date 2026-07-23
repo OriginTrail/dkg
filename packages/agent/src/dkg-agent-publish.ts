@@ -98,6 +98,9 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
+  assertAssertionCoordinateV1,
+  assertContextGraphIdV1,
+  assertSubGraphNameV1,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   withSpan,
@@ -5406,6 +5409,18 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    await this.afterConfirmedGraphScopedVmPublishV1({
+      status: result.status,
+      contextGraphId: request.contextGraphId,
+      subGraphName: request.subGraphName,
+      assertionCoordinate: request.name,
+      publicQuads: snapshotQuads,
+      seal,
+      assertionUri,
+      ctx,
+      publicationLabel: 'queued publish',
+    });
+
     return { ...result, assertionUri, seal };
   }
 
@@ -5960,7 +5975,63 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    await this.afterConfirmedGraphScopedVmPublishV1({
+      status: result.status,
+      contextGraphId,
+      subGraphName: opts?.subGraphName,
+      assertionCoordinate: name,
+      publicQuads: canonicalSwmQuads,
+      seal,
+      assertionUri,
+      ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      publicationLabel: 'publish',
+    });
+
     return { ...result, assertionUri, seal };
+  }
+
+  private async afterConfirmedGraphScopedVmPublishV1(
+    this: DKGAgent,
+    input: Readonly<{
+      status: PublishResult['status'];
+      contextGraphId: string;
+      subGraphName?: string;
+      assertionCoordinate: string;
+      publicQuads: readonly Quad[];
+      seal: AssertionSeal;
+      assertionUri: string;
+      ctx: OperationContext;
+      publicationLabel: 'publish' | 'queued publish';
+    }>,
+  ): Promise<void> {
+    if (input.status !== 'confirmed') return;
+    try {
+      const contextGraphId = input.contextGraphId;
+      const assertionCoordinate = input.assertionCoordinate;
+      const subGraphName = input.subGraphName ?? null;
+      assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
+      assertAssertionCoordinateV1(
+        assertionCoordinate,
+        'confirmed publish assertionCoordinate',
+      );
+      if (subGraphName !== null) {
+        assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
+      }
+      await this.recordConfirmedRfc64PublicCatalogAssetV1({
+        contextGraphId,
+        subGraphName,
+        assertionCoordinate,
+        publicQuads: input.publicQuads,
+        seal: input.seal,
+      });
+    } catch (err) {
+      this.log.warn(
+        input.ctx,
+        `Confirmed ${input.publicationLabel} for <${input.assertionUri}> but `
+          + `RFC-64 catalog advancement failed: `
+          + (err instanceof Error ? err.message : String(err)),
+      );
+    }
   }
 
   /**
