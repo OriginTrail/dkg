@@ -815,14 +815,20 @@ export function mapOnChainPublishResultToKnowledgeAssetVmRecovery(
     chainId,
     knowledgeAssetsContract,
   );
-  if (!recovery || !result.merkleRoot || !result.authorAddress) return null;
+  if (
+    !recovery
+    || !result.merkleRoot
+    || !result.authorAddress
+    || !Number.isSafeInteger(result.txIndex)
+    || Number(result.txIndex) < 0
+  ) return null;
 
   const merkleRoot = asLiftJobHex(ethers.hexlify(result.merkleRoot));
   const authorAddress = asLiftJobHex(result.authorAddress);
   if (!merkleRoot || !authorAddress) return null;
   return {
     ...recovery,
-    publishProof: { merkleRoot, authorAddress },
+    publishProof: { merkleRoot, authorAddress, txIndex: Number(result.txIndex) },
   };
 }
 

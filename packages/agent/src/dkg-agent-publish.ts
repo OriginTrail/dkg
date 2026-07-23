@@ -4863,7 +4863,7 @@ export class PublishMethods extends DKGAgentBase {
         publisherAddress: recovered.materialization.publisherAddress,
         transactionHash: recovered.txHash,
         blockNumber: recovered.materialization.versionBlock,
-        txIndex: 0,
+        txIndex: recovered.transaction.txIndex,
         authorAddress: recovered.materialization.authorAddress,
         accessPolicy: request.accessPolicy ?? 'ownerOnly',
         allowedPeers: [...(request.allowedPeers ?? [])],

@@ -26,6 +26,7 @@ export interface RecoveredNamedKaPublish {
     readonly merkleRoot: string;
     readonly authorAddress: string;
     readonly publisherAddress: string;
+    readonly txIndex: number;
   };
   readonly materialization: {
     readonly merkleRoot: string;
@@ -171,6 +172,9 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   if (!ethers.isAddress(proof.authorAddress)) {
     throw inconsistent('chain recovery did not return the transaction author');
   }
+  if (!Number.isSafeInteger(proof.txIndex) || proof.txIndex < 0) {
+    throw inconsistent('chain recovery did not return a valid transaction index');
+  }
   const transactionAuthor = ethers.getAddress(proof.authorAddress);
   if (transactionAuthor === ethers.ZeroAddress || transactionAuthor.toLowerCase() !== sealedAuthor.toLowerCase()) {
     throw inconsistent(
@@ -209,6 +213,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       merkleRoot: ethers.hexlify(proof.merkleRoot),
       authorAddress: transactionAuthor,
       publisherAddress: transactionPublisher,
+      txIndex: proof.txIndex,
     },
     materialization: {
       merkleRoot: latestMerkleRoot,

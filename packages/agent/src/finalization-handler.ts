@@ -1743,9 +1743,12 @@ export class FinalizationHandler {
         && compareMaterializedVersion(materializedVersion, currentMaterializedVersion) < 0;
       // A verified receipt may arrive after a sweep observed this same
       // assertion at a later block. Repair that exact metadata while retaining
-      // the later ordering stamp; never overwrite a newer assertion.
+      // the later ordering stamp. Within one block, however, txIndex provides
+      // a total order and an older transaction must not rewrite provenance.
       const canRepairStaleExactMetadata = contentAlreadyMaterialized
-        && confirmedAssertionVersion === scope.assertionVersion;
+        && confirmedAssertionVersion === scope.assertionVersion
+        && currentMaterializedVersion !== null
+        && materializedVersion.blockNumber < currentMaterializedVersion.blockNumber;
       if (incomingVersionIsStale && !canRepairStaleExactMetadata) {
         return 'stale' as const;
       }

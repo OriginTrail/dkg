@@ -128,6 +128,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -204,6 +205,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {

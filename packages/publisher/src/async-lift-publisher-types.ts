@@ -173,6 +173,7 @@ export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
   readonly publishProof: {
     readonly merkleRoot: LiftJobHex;
     readonly authorAddress: LiftJobHex;
+    readonly txIndex: number;
   };
 }
 

@@ -32,6 +32,7 @@ describe('named KA publisher recovery wiring', () => {
       endKAId: kaId,
       txHash,
       blockNumber: 77,
+      txIndex: 4,
       blockTimestamp: 1_700_000_077,
       publisherAddress: walletId,
     }));
@@ -73,7 +74,7 @@ describe('named KA publisher recovery wiring', () => {
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
-      publishProof: { merkleRoot, authorAddress: walletId },
+      publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
     });
     await expect(createChainRecoveryResolver(publishers)(job)).resolves.toMatchObject({
       finalization: {
@@ -98,6 +99,7 @@ describe('named KA publisher recovery wiring', () => {
         authorAddress: walletId,
         txHash,
         blockNumber: 9,
+        txIndex: 2,
         blockTimestamp: 1_700_000_009,
         publisherAddress: walletId,
       })),
@@ -116,7 +118,7 @@ describe('named KA publisher recovery wiring', () => {
     );
   });
 
-  it('fails closed for named-KA recovery when the receipt lacks immutable proof', async () => {
+  it('fails closed for named-KA recovery when the receipt lacks a transaction index', async () => {
     const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
     const walletId = '0x1111111111111111111111111111111111111111';
     const kaId = 42n;
@@ -129,6 +131,8 @@ describe('named KA publisher recovery wiring', () => {
           knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
           startKAId: kaId,
           endKAId: kaId,
+          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+          authorAddress: walletId,
           txHash,
           blockNumber: 9,
           blockTimestamp: 1_700_000_009,
@@ -221,6 +225,7 @@ describe('named KA publisher recovery wiring', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
     });

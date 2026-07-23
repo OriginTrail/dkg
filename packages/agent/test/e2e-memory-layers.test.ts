@@ -705,6 +705,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publishProof: {
           merkleRoot: intent.sealMerkleRoot,
           authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
         },
       },
       publisher: recoveryPublisher,
@@ -1394,6 +1395,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publishProof: {
           merkleRoot: intent.sealMerkleRoot,
           authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
         },
       },
       publisher: (agent as any).publisher,
@@ -1408,10 +1410,29 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publisherAddress: processed.finalization.publisherAddress,
         authorAddress: intent.seal.authorAddress,
         blockNumber: processed.inclusion.blockNumber,
-        txIndex: 0,
+        txIndex: 4,
       }),
     }), expect.anything());
+    const recoveredInput = reconcile.mock.calls.at(-1)?.[0];
+    if (!recoveredInput?.trustedAssertionEvidence || !intent.kaUal) {
+      throw new Error('Expected trusted named-recovery evidence');
+    }
     reconcile.mockRestore();
+
+    await expect(finalizationHandler.handleChainReconciledKC({
+      ...recoveredInput,
+      trustedAssertionEvidence: {
+        ...recoveredInput.trustedAssertionEvidence,
+        transactionHash: `0x${'cd'.repeat(32)}`,
+        txIndex: 1,
+      },
+    }, createOperationContext('system'))).resolves.toBe('stale-target');
+    const recoveredVersionSurvives = await (agent as any).store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { <${intent.kaUal}> `
+        + `<http://dkg.io/ontology/materializedVersion> "${processed.inclusion.blockNumber}:4" ; `
+        + `<http://dkg.io/ontology/transactionHash> "${recoveredInput.trustedAssertionEvidence.transactionHash}" . } }`,
+    );
+    expect(recoveredVersionSurvives).toMatchObject({ type: 'boolean', value: true });
 
     const subgraphVm = await agent.query(
       `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
