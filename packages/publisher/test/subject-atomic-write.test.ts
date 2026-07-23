@@ -128,4 +128,52 @@ describe('#1938 replaceSubjectAtomicallyOrFallback', () => {
     // The bounded fallback never widened to the sibling row.
     expect(await objectsFor(inner, sibling)).toEqual(['"keep"']);
   });
+
+  // #1938 — the helper enforces the atomic path's single-subject contract on BOTH paths
+  // (assertSubjectReplacementPayload), so an out-of-contract payload throws BEFORE any
+  // deleteByPattern/insert — the fallback can never silently leak what the atomic path
+  // would reject. Each case runs in 'absent' mode (the fallback path): without the guard
+  // the delete+insert would run; with it, the throw pre-empts all store interaction.
+  it('rejects a multi-subject payload before any delete/insert (fallback path)', async () => {
+    const other = 'urn:test:subject-atomic-write:other';
+    const inner = new OxigraphStore();
+    await inner.createGraph(GRAPH);
+    const { store, counts } = countingStore(inner, 'absent');
+
+    await expect(
+      replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [quad(SUBJECT, '"a"'), quad(other, '"b"')], 'test.source'),
+    ).rejects.toThrow(/must target subject/);
+
+    expect(counts.graphDeletes).toBe(0);
+    expect(await objectsFor(inner, SUBJECT)).toEqual([]);
+    expect(await objectsFor(inner, other)).toEqual([]);
+  });
+
+  it('rejects a wrong-graph payload before any delete/insert (fallback path)', async () => {
+    const inner = new OxigraphStore();
+    await inner.createGraph(GRAPH);
+    const { store, counts } = countingStore(inner, 'absent');
+
+    await expect(
+      replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [quad(SUBJECT, '"a"', 'urn:test:other-graph')], 'test.source'),
+    ).rejects.toThrow(/must target subject/);
+
+    expect(counts.graphDeletes).toBe(0);
+    expect(await objectsFor(inner, SUBJECT)).toEqual([]);
+  });
+
+  it('rejects a blank-node payload before any delete/insert (parity with the atomic path)', async () => {
+    const inner = new OxigraphStore();
+    await inner.createGraph(GRAPH);
+    const { store, counts } = countingStore(inner, 'absent');
+
+    // subject/graph match, but a blank-node object — the atomic path rejects this, so the
+    // fallback must too (the asymmetry a subject/graph-only re-check would have left open).
+    await expect(
+      replaceSubjectAtomicallyOrFallback(store, GRAPH, SUBJECT, [{ subject: SUBJECT, predicate: PRED, object: '_:b0', graph: GRAPH }], 'test.source'),
+    ).rejects.toThrow(/blank node/);
+
+    expect(counts.graphDeletes).toBe(0);
+    expect(await objectsFor(inner, SUBJECT)).toEqual([]);
+  });
 });

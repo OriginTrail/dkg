@@ -173,7 +173,19 @@ function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): voi
   }
 }
 
-function assertSubjectReplacementPayload(
+/**
+ * The strict single-subject payload contract shared by the atomic subject-replace
+ * primitive (`buildAtomicSubjectReplaceUpdate` → `tryReplaceSubjectAtomically` →
+ * `replaceSubject`) and `buildAtomicGraphAndSubjectReplaceUpdate`: `subject` must be a
+ * canonical skolem IRI (never a blank node), and every quad must target exactly that
+ * `subject` in `graphUri` and be blank-node free. Exported so a caller that reproduces
+ * the atomic-replace orchestration WITH a non-atomic fallback (the publisher's
+ * `replaceSubjectAtomicallyOrFallback`, #1938) can enforce the IDENTICAL contract on
+ * BOTH paths — a subject/graph-only re-check would leave the fallback laxer than the
+ * atomic path on blank nodes, the exact asymmetry that guard closes. Throws on the
+ * first violation; never mutates.
+ */
+export function assertSubjectReplacementPayload(
   graphUri: string,
   subject: string,
   quads: readonly Quad[],

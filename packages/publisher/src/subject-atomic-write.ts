@@ -6,11 +6,26 @@
 // pre-insert ordering; promote's single-subject guard) and calls this for the mutable
 // subject write.
 
-import { tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  assertSubjectReplacementPayload,
+  tryReplaceSubjectAtomically,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 
 /**
  * Persist a single mutable subject as one atomic replace when the store can guarantee one
  * commit boundary, else fall through to the BOUNDED delete-then-insert.
+ *
+ * The single-subject invariant is enforced UP FRONT via the storage layer's own
+ * `assertSubjectReplacementPayload` — the SAME assertion the atomic path runs inside
+ * `buildAtomicSubjectReplaceUpdate` — so BOTH paths reject an out-of-contract payload
+ * identically (subject is a canonical skolem IRI; every quad targets exactly `subject` in
+ * `graphUri`; blank-node free). Without this, only the atomic path validated: the bounded
+ * fallback deletes only `subject`'s rows in `graphUri` and then inserts whatever it is
+ * given, so a co-located or blank-node quad would be silently leaked on the fallback path
+ * while the atomic path rejected it (#1938 — close the asymmetry rather than leave the
+ * invariant to caller discipline). The queue serializers still own record shaping.
  *
  * The atomic path routes through the storage capability `tryReplaceSubjectAtomically` (a
  * sibling of `replaceGraph` / `replaceGraphAndSubject`): the storage layer owns the
@@ -32,6 +47,8 @@ export async function replaceSubjectAtomicallyOrFallback(
   quads: Quad[],
   source: string,
 ): Promise<void> {
+  // Enforce the atomic path's single-subject contract on BOTH paths, before either runs.
+  assertSubjectReplacementPayload(graphUri, subject, quads);
   const replaced = await tryReplaceSubjectAtomically(store, graphUri, subject, quads, { source });
   if (replaced) return;
   await store.deleteByPattern({ subject, graph: graphUri });
