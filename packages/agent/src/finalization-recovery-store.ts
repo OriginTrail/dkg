@@ -55,7 +55,6 @@ export interface FinalizationRecoveryReceiveInput {
 export type FinalizationRecoveryReceiveResult =
   | { status: 'inserted'; entry: FinalizationRecoveryEntry }
   | { status: 'existing'; entry: FinalizationRecoveryEntry }
-  | { status: 'rearmed'; entry: FinalizationRecoveryEntry }
   | { status: 'conflict' }
   | { status: 'capacity' }
   | { status: 'closed' };

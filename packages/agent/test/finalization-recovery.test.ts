@@ -272,6 +272,158 @@ describe('graph-scoped finalization recovery admission', () => {
     }))).resolves.toEqual({ status: 'rejected' });
   });
 
+  it.each([
+    ['a later block', 124],
+    ['a same-height replacement block', 123],
+  ] as const)(
+    'revalidates SETTLED provenance when the same transaction moves to %s',
+    async (_case, replacementBlockNumber) => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-reorg-'));
+      try {
+        const store = await openSqliteFinalizationRecoveryStore(directory);
+        const replacementBlockHash = `0x${'ef'.repeat(32)}`;
+        let phase: 'block-a' | 'block-b' = 'block-a';
+        const receiptOptions: Array<{ expectedBlockHash?: string; expectedBlockNumber?: number }> = [];
+        const applied: Array<{ blockNumber: number; txIndex: number }> = [];
+        const chain = recoveryChain({
+          resolveCanonicalFinalizationReceipt: async (_txHash, options = {}) => {
+            receiptOptions.push(options);
+            if (phase === 'block-a') {
+              return { status: 'confirmed', receipt: confirmedReceipt() };
+            }
+            if (
+              options.expectedBlockHash?.toLowerCase() === BLOCK_HASH.toLowerCase()
+              && options.expectedBlockNumber === 123
+            ) return { status: 'reorged' };
+            return {
+              status: 'confirmed',
+              receipt: confirmedReceipt({
+                blockNumber: replacementBlockNumber,
+                blockHash: replacementBlockHash,
+                txIndex: 5,
+              }),
+            };
+          },
+        });
+        const recovery = new FinalizationRecovery(
+          store,
+          chain,
+          { info: () => {}, warn: () => {} },
+          {
+            ...recoveryMaterializer(),
+            apply: async ({ blockNumber, txIndex }) => {
+              applied.push({ blockNumber, txIndex });
+              return 'applied' as const;
+            },
+          },
+        );
+        const initialMessage = message();
+        await expect(recovery.processLive({
+          rawMessage: encodeFinalizationMessage(initialMessage),
+          contextGraphId: CONTEXT_GRAPH,
+          sourcePeerId: '12D3KooWPublisher',
+          candidate: parsedMessage(initialMessage),
+        })).resolves.toBe(true);
+        expect(await store.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 0,
+          verifiedEvidence: {
+            blockNumber: 123,
+            blockHash: BLOCK_HASH,
+            txIndex: 4,
+          },
+        }]);
+
+        phase = 'block-b';
+        const replacementMessage = message({ blockNumber: replacementBlockNumber });
+        await expect(recovery.processLive({
+          rawMessage: encodeFinalizationMessage(replacementMessage),
+          contextGraphId: CONTEXT_GRAPH,
+          sourcePeerId: '12D3KooWPublisher',
+          candidate: parsedMessage(replacementMessage),
+        })).resolves.toBe(true);
+
+        expect(receiptOptions).toContainEqual({
+          expectedBlockHash: BLOCK_HASH,
+          expectedBlockNumber: 123,
+        });
+        expect(receiptOptions.at(-1)).toEqual({});
+        expect(applied).toEqual([
+          { blockNumber: 123, txIndex: 4 },
+          { blockNumber: replacementBlockNumber, txIndex: 5 },
+        ]);
+        expect(await store.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 1,
+          verifiedEvidence: {
+            blockNumber: replacementBlockNumber,
+            blockHash: replacementBlockHash,
+            txIndex: 5,
+          },
+        }]);
+        await store.close();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails closed when a SETTLED replacement changes a non-placement field', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-conflict-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      let receiptCalls = 0;
+      let applyCalls = 0;
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => {
+            receiptCalls += 1;
+            return { status: 'confirmed', receipt: confirmedReceipt() };
+          },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            applyCalls += 1;
+            return 'applied' as const;
+          },
+        },
+      );
+      const initialMessage = message();
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(initialMessage),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(initialMessage),
+      });
+      const conflictingMessage = message({
+        blockNumber: 124,
+        publicTripleCount: 2,
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      });
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(conflictingMessage),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(conflictingMessage),
+      });
+
+      expect(receiptCalls).toBe(1);
+      expect(applyCalls).toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        generation: 0,
+        verifiedEvidence: { blockNumber: 123, blockHash: BLOCK_HASH },
+      }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('makes unsupported adapter capability explicit without fabricating ordering', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-unsupported-'));
     try {

@@ -33,6 +33,22 @@ export type {
   SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
+function sameFinalizationRecoveryIdentity(
+  existing: FinalizationRecoveryEntry,
+  input: FinalizationRecoveryReceiveInput,
+): boolean {
+  return existing.sourcePeerId === input.sourcePeerId
+    && existing.chainId === input.chainId
+    && existing.contextGraphId === input.contextGraphId
+    && existing.ual === input.ual
+    && existing.txHash.toLowerCase() === input.txHash.toLowerCase()
+    && existing.assertionVersion === input.assertionVersion
+    && existing.merkleRoot.toLowerCase() === input.merkleRoot.toLowerCase()
+    && existing.kaId === input.kaId
+    && existing.batchId === input.batchId
+    && existing.targetContextGraphId === input.targetContextGraphId;
+}
+
 export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStore {
   #closed = false;
   #closing = false;
@@ -79,53 +95,14 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       if (existingRow) {
         const existing = finalizationRecoveryRowToEntry(existingRow);
         if (existing.state === 'REORGED') {
-          if (
-            existing.sourcePeerId !== input.sourcePeerId
-            || existing.chainId !== input.chainId
-            || existing.contextGraphId !== input.contextGraphId
-            || existing.ual !== input.ual
-            || existing.txHash.toLowerCase() !== input.txHash.toLowerCase()
-            || existing.assertionVersion !== input.assertionVersion
-            || existing.merkleRoot.toLowerCase() !== input.merkleRoot.toLowerCase()
-            || existing.kaId !== input.kaId
-            || existing.batchId !== input.batchId
-            || existing.targetContextGraphId !== input.targetContextGraphId
-          ) return { status: 'conflict' };
-          if (!hasFinalizationRecoveryCapacity(
-            this.database,
-            this.#policy,
-            input,
-            input.key,
-          )) return { status: 'capacity' };
-          const now = this.#policy.now();
-          this.transaction(() => {
-            this.database.prepare(`
-              UPDATE finalization_inbox_v1
-              SET state = 'RECEIVED',
-                  envelope_sha256 = ?,
-                  raw_envelope = ?,
-                  generation = generation + 1,
-                  attempt_count = 0,
-                  next_attempt_at = NULL,
-                  last_error = NULL,
-                  updated_at = ?
-              WHERE key = ? AND state = 'REORGED' AND generation = ?
-            `).run(
-              digest,
-              Buffer.from(input.rawMessage),
-              now,
-              input.key,
-              existing.generation,
-            );
-          });
-          const rearmed = this.database.prepare(
-            'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
-          ).get(input.key);
-          if (!rearmed) throw new Error('Finalization inbox re-admission returned no row');
-          return {
-            status: 'rearmed',
-            entry: finalizationRecoveryRowToEntry(rearmed),
-          };
+          return sameFinalizationRecoveryIdentity(existing, input)
+            ? { status: 'existing', entry: existing }
+            : { status: 'conflict' };
+        }
+        if (existing.state === 'SETTLED') {
+          return sameFinalizationRecoveryIdentity(existing, input)
+            ? { status: 'existing', entry: existing }
+            : { status: 'conflict' };
         }
         if (
           existing.envelopeSha256 !== digest
@@ -259,7 +236,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
-          WHERE key = ? AND generation = ? AND state IN ('RECEIVED','VERIFIED')
+          WHERE key = ? AND generation = ? AND state IN ('RECEIVED','VERIFIED','SETTLED')
         `).run(lastError, now, key, generation);
         changed = result.changes > 0;
       });

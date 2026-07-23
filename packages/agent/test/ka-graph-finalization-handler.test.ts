@@ -1139,7 +1139,7 @@ describe('graph-scoped finalization handler', () => {
     ['a later block', 124],
     ['a same-height replacement block', 123],
   ] as const)(
-    'rearms verified recovery when the transaction is re-included in %s',
+    'recovers a durable reorg without another gossip envelope when re-included in %s',
     async (_case, replacementBlockNumber) => {
       const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
       let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -1232,17 +1232,23 @@ describe('graph-scoped finalization handler', () => {
             + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
         )).resolves.toMatchObject({ type: 'boolean', value: false });
 
-        receiptPhase = 'block-b';
-        await recoveryHandler.handleFinalizationMessage(
-          encodeFinalizationMessage(reIncludedMessage),
-          CG,
-          '12D3KooWPublisher',
+        await inbox.close();
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const reopenedHandler = new FinalizationHandler(
+          store,
+          chain,
+          recoveryOptions(inbox),
         );
+        receiptPhase = 'block-b';
+        await expect(reopenedHandler.handleChainReconciledKC(
+          reconcileInput,
+          createOperationContext('system'),
+        )).resolves.toBe('already-confirmed');
 
         expect(replacementCheckedWithoutStaleIdentity).toBe(true);
         expect(await inbox.list()).toMatchObject([{
           state: 'SETTLED',
-          generation: 2,
+          generation: 1,
           verifiedEvidence: {
             transactionHash: message.txHash,
             blockNumber: replacementBlockNumber,

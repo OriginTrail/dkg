@@ -167,7 +167,7 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('invalidates reorged evidence and rearms the same transaction at a new generation', async () => {
+  it('invalidates reorged evidence while retaining the immutable recovery envelope', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
@@ -193,15 +193,16 @@ describe('SQLite finalization recovery store', () => {
         state: 'REORGED',
         generation: 1,
       }]);
-      const rearmed = await reopened.receive(received({
+      const repeated = await reopened.receive(received({
         rawMessage: Uint8Array.from([1, 2, 3, 5]),
       }));
-      expect(rearmed).toMatchObject({
-        status: 'rearmed',
+      expect(repeated).toMatchObject({
+        status: 'existing',
         entry: {
-          state: 'RECEIVED',
-          generation: 2,
+          state: 'REORGED',
+          generation: 1,
           attemptCount: 0,
+          rawMessage: RAW,
         },
       });
       await expect(reopened.markVerified('entry-1', 0, evidence()))
@@ -211,17 +212,53 @@ describe('SQLite finalization recovery store', () => {
         blockNumber: 124,
         blockHash: `0x${'ef'.repeat(32)}`,
       });
-      expect((await reopened.markVerified('entry-1', 2, replacementEvidence)).status)
+      expect((await reopened.markVerified('entry-1', 1, replacementEvidence)).status)
         .toBe('verified');
       expect(await reopened.list()).toMatchObject([{
         state: 'VERIFIED',
-        generation: 2,
+        generation: 1,
         verifiedEvidence: {
           blockNumber: 124,
           blockHash: `0x${'ef'.repeat(32)}`,
         },
       }]);
       await reopened.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('makes a matching SETTLED identity revalidatable but rejects unrelated changes', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      await store.receive(received());
+      await store.markVerified('entry-1', 0, evidence());
+      await store.transition('entry-1', 0, 'SETTLED');
+
+      await expect(store.receive(received({
+        rawMessage: Uint8Array.from([1, 2, 3, 5]),
+      }))).resolves.toMatchObject({
+        status: 'existing',
+        entry: { state: 'SETTLED', generation: 0 },
+      });
+      await expect(store.receive(received({
+        assertionVersion: '2',
+        rawMessage: Uint8Array.from([1, 2, 3, 6]),
+      }))).resolves.toEqual({ status: 'conflict' });
+      await expect(store.markReorged(
+        'entry-1',
+        0,
+        'settled receipt disagrees with canonical chain truth',
+      )).resolves.toBe(true);
+      expect(await store.list()).toMatchObject([{
+        state: 'REORGED',
+        generation: 1,
+        rawMessage: RAW,
+        lastError: 'settled receipt disagrees with canonical chain truth',
+      }]);
+      expect((await store.list())[0]).not.toHaveProperty('verifiedEvidence');
+      await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

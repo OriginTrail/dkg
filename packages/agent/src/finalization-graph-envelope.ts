@@ -82,6 +82,7 @@ export interface BuildVerifiedGraphScopedFinalizationEvidenceInput {
   candidate: ParsedGraphScopedFinalization;
   publicQuadsDigest?: string;
   publisherPeerId: string;
+  blockNumber: number;
   blockHash: string;
   txIndex: number;
   authorAddress?: string;
@@ -189,7 +190,7 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
       publisherPeerId: input.publisherPeerId,
       publisherAddress: candidate.msg.publisherAddress,
       transactionHash: candidate.msg.txHash,
-      blockNumber: candidate.blockNumber,
+      blockNumber: input.blockNumber,
       blockHash: input.blockHash,
       txIndex: input.txIndex,
       ...(input.authorAddress ? { authorAddress: input.authorAddress } : {}),
@@ -250,6 +251,15 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
     candidate: ParsedGraphScopedFinalization,
     identity: VerifiedGraphScopedFinalizationIdentity,
   ): boolean {
+    return this.matchesImmutableEnvelope(evidence, candidate, identity)
+      && candidate.blockNumber === evidence.blockNumber;
+  }
+
+  static matchesImmutableEnvelope(
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    candidate: ParsedGraphScopedFinalization,
+    identity: VerifiedGraphScopedFinalizationIdentity,
+  ): boolean {
     const messagePrivateRoot = candidate.privateMerkleRoot
       ? ethers.hexlify(candidate.privateMerkleRoot).toLowerCase()
       : undefined;
@@ -260,7 +270,6 @@ export class VerifiedGraphScopedFinalizationEvidenceCodec {
       && ethers.hexlify(candidate.msg.kcMerkleRoot).toLowerCase() === identity.merkleRoot.toLowerCase()
       && candidate.msg.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
       && candidate.msg.publisherAddress.toLowerCase() === evidence.publisherAddress.toLowerCase()
-      && candidate.blockNumber === evidence.blockNumber
       && candidate.publicTripleCount === evidence.publicTripleCount
       && candidate.privateTripleCount === evidence.privateTripleCount
       && messagePrivateRoot === evidence.privateMerkleRoot?.toLowerCase()

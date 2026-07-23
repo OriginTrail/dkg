@@ -58,6 +58,7 @@ export interface FinalizationRecoveryPreparedMaterialization {
 export type FinalizationMaterializationVerification =
   | {
     status: 'verified';
+    blockNumber: number;
     txIndex: number;
     authorAddress?: string;
   }
@@ -101,6 +102,7 @@ export interface FinalizationRecoveryMaterializer<
   prepare(input: FinalizationRecoveryLiveInput): Promise<Prepared | undefined>;
   apply(input: {
     prepared: Prepared;
+    blockNumber: number;
     txIndex: number;
     authorAddress?: string;
   }): Promise<FinalizationRecoveryApplyOutcome>;
@@ -124,6 +126,10 @@ type FinalizationVerificationContext =
 export type FinalizationCanonicalReceiptOutcome =
   | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt }
   | { status: 'pending' | 'reorged' | 'rejected' | 'not-found' | 'unsupported' };
+
+interface ResolveCanonicalReceiptOptions {
+  acceptCanonicalPlacement?: boolean;
+}
 
 export function finalizationRecoveryEntryKey(input: {
   chainId: string;
@@ -219,10 +225,14 @@ export class FinalizationRecovery<
       || this.chain.chainId === 'none'
       || !this.chain.resolveCanonicalFinalizationReceipt
     ) return false;
-    const entry = await this.receive(input);
+    let entry = await this.receive(input);
     // A configured inbox fails closed: capacity, conflict, corruption, and
     // write failures leave Oxigraph untouched.
     if (!entry) return true;
+    if (entry.state === 'SETTLED') {
+      entry = await this.revalidateSettled(input, entry);
+      if (!entry) return true;
+    }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -289,12 +299,22 @@ export class FinalizationRecovery<
       if (
         result.status === 'inserted'
         || result.status === 'existing'
-        || result.status === 'rearmed'
       ) {
+        if (
+          (result.entry.state === 'REORGED' || result.entry.state === 'SETTLED')
+          && !this.matchesImmutableStoredEnvelope(input, result.entry)
+        ) {
+          this.log.warn(
+            `Finalization recovery inbox rejected changed immutable envelope for `
+              + `${candidate.scope.ual}`,
+          );
+          return undefined;
+        }
         if (
           result.entry.state === 'RECEIVED'
           || result.entry.state === 'VERIFIED'
           || result.entry.state === 'REORGED'
+          || result.entry.state === 'SETTLED'
         ) {
           return result.entry;
         }
@@ -316,6 +336,7 @@ export class FinalizationRecovery<
   async resolveCanonicalReceipt(
     candidate: ParsedGraphScopedFinalization,
     persisted?: VerifiedGraphScopedFinalizationEvidence,
+    options: ResolveCanonicalReceiptOptions = {},
   ): Promise<FinalizationCanonicalReceiptOutcome> {
     const resolver = this.chain?.resolveCanonicalFinalizationReceipt;
     if (!this.chain || this.chain.chainId === 'none' || !resolver) {
@@ -350,13 +371,18 @@ export class FinalizationRecovery<
       || receipt.kaId !== candidate.kaId
       || receipt.startKAId !== candidate.startKAId
       || receipt.endKAId !== candidate.endKAId
+      || !Number.isSafeInteger(receipt.blockNumber)
+      || receipt.blockNumber < 0
       || !Number.isSafeInteger(receipt.txIndex)
       || receipt.txIndex < 0
       || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash)
     ) {
       return { status: 'rejected' };
     }
-    if (receipt.blockNumber !== candidate.blockNumber) return { status: 'reorged' };
+    if (
+      !options.acceptCanonicalPlacement
+      && receipt.blockNumber !== candidate.blockNumber
+    ) return { status: 'reorged' };
     return { status: 'confirmed', receipt };
   }
 
@@ -377,13 +403,18 @@ export class FinalizationRecovery<
       }
       return {
         status: 'verified',
+        blockNumber: candidate.blockNumber,
         txIndex,
         ...(legacy.authorAddress ? { authorAddress: legacy.authorAddress } : {}),
       };
     }
 
     const { entry } = context;
-    const canonical = await this.resolveCanonicalReceipt(candidate, entry.verifiedEvidence);
+    const canonical = await this.resolveCanonicalReceipt(
+      candidate,
+      entry.verifiedEvidence,
+      { acceptCanonicalPlacement: entry.state === 'REORGED' },
+    );
     if (canonical.status === 'unsupported') {
       await this.markUnsupported(entry);
       this.log.warn(
@@ -427,6 +458,7 @@ export class FinalizationRecovery<
         ? { publicQuadsDigest: prepared.publicQuadsDigest }
         : {}),
       publisherPeerId: prepared.publisherPeerId,
+      blockNumber: canonical.receipt.blockNumber,
       blockHash: canonical.receipt.blockHash,
       txIndex: canonical.receipt.txIndex,
       ...(canonical.receipt.authorAddress
@@ -442,6 +474,7 @@ export class FinalizationRecovery<
     }
     return {
       status: 'verified',
+      blockNumber: canonical.receipt.blockNumber,
       txIndex: canonical.receipt.txIndex,
       ...(canonical.receipt.authorAddress
         ? { authorAddress: canonical.receipt.authorAddress }
@@ -469,6 +502,7 @@ export class FinalizationRecovery<
     }
     return this.materializer.apply({
       prepared,
+      blockNumber: verification.blockNumber,
       txIndex: verification.txIndex,
       ...(verification.authorAddress
         ? { authorAddress: verification.authorAddress }
@@ -534,6 +568,52 @@ export class FinalizationRecovery<
       );
       return false;
     }
+  }
+
+  private async revalidateSettled(
+    input: FinalizationRecoveryLiveInput,
+    entry: FinalizationRecoveryEntry,
+  ): Promise<FinalizationRecoveryEntry | undefined> {
+    const evidence = entry.verifiedEvidence;
+    if (
+      !evidence
+      || !VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+        evidence,
+        input.candidate,
+        entry,
+      )
+    ) {
+      this.log.warn(
+        `Finalization recovery settled evidence does not match replacement envelope for `
+          + `${entry.ual}`,
+      );
+      return undefined;
+    }
+    const canonical = await this.resolveCanonicalReceipt(input.candidate, evidence);
+    const placementChanged = canonical.status === 'reorged'
+      || (
+        canonical.status === 'confirmed'
+        && !sameCanonicalFinalizationPlacement(canonical.receipt, evidence)
+      );
+    if (!placementChanged) {
+      if (canonical.status !== 'confirmed') {
+        this.log.info(
+          `Finalization recovery settled receipt is ${canonical.status} for ${entry.ual}; `
+            + 'retaining prior materialization',
+        );
+      }
+      return undefined;
+    }
+    if (!await this.markReorged(
+      entry,
+      'settled receipt disagrees with canonical chain truth',
+    )) {
+      this.log.warn(
+        `Finalization recovery could not rearm settled receipt for ${entry.ual}`,
+      );
+      return undefined;
+    }
+    return this.receive(input);
   }
 
   async markUnsupported(entry: FinalizationRecoveryEntry): Promise<boolean> {
@@ -680,18 +760,29 @@ export class FinalizationRecovery<
         let outcome: FinalizationRecoveryApplyOutcome;
         if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
           const evidence = entry.verifiedEvidence;
-          if (!VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-            evidence,
-            candidate,
-            entry,
-          )) {
+          const evidenceMatchesEnvelope = entry.generation > 0
+            ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+                evidence,
+                candidate,
+                entry,
+              )
+            : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+                evidence,
+                candidate,
+                entry,
+              );
+          if (!evidenceMatchesEnvelope) {
             this.log.warn(
               `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
             );
             await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
             return false;
           }
-          const receiptStatus = await this.verifyPersistedReceipt(candidate, evidence);
+          const receiptStatus = await this.verifyPersistedReceipt(
+            candidate,
+            evidence,
+            entry.generation > 0,
+          );
           if (receiptStatus !== 'confirmed') {
             if (receiptStatus === 'reorged') {
               await this.markReorged(
@@ -773,6 +864,15 @@ export class FinalizationRecovery<
       );
       return undefined;
     }
+  }
+
+  private matchesImmutableStoredEnvelope(
+    input: FinalizationRecoveryLiveInput,
+    entry: FinalizationRecoveryEntry,
+  ): boolean {
+    const stored = this.decodeEntry(entry);
+    return stored !== undefined
+      && sameImmutableFinalizationCandidate(stored, input.candidate);
   }
 
   private async verifyContextGraphBinding(
@@ -913,15 +1013,19 @@ export class FinalizationRecovery<
   private async verifyPersistedReceipt(
     candidate: ParsedGraphScopedFinalization,
     evidence: VerifiedGraphScopedFinalizationEvidence,
+    acceptCanonicalPlacement: boolean,
   ): Promise<FinalizationCanonicalReceiptOutcome['status']> {
-    const outcome = await this.resolveCanonicalReceipt(candidate, evidence);
+    const outcome = await this.resolveCanonicalReceipt(
+      candidate,
+      evidence,
+      { acceptCanonicalPlacement },
+    );
     if (outcome.status !== 'confirmed') return outcome.status;
     const receipt = outcome.receipt;
     const expectedAuthor = evidence.authorAddress?.toLowerCase();
     const canonicalAuthor = receipt.authorAddress?.toLowerCase();
     return canonicalAuthor === expectedAuthor
-      && receipt.txIndex === evidence.txIndex
-      && receipt.blockHash.toLowerCase() === evidence.blockHash.toLowerCase()
+      && sameCanonicalFinalizationPlacement(receipt, evidence)
       ? 'confirmed'
       : 'rejected';
   }
@@ -930,6 +1034,49 @@ export class FinalizationRecovery<
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length
     && left.every((byte, index) => byte === right[index]);
+}
+
+function sameCanonicalFinalizationPlacement(
+  receipt: CanonicalFinalizationReceipt,
+  evidence: VerifiedGraphScopedFinalizationEvidence,
+): boolean {
+  return receipt.txHash.toLowerCase() === evidence.transactionHash.toLowerCase()
+    && receipt.blockNumber === evidence.blockNumber
+    && receipt.blockHash.toLowerCase() === evidence.blockHash.toLowerCase()
+    && receipt.txIndex === evidence.txIndex;
+}
+
+function sameImmutableFinalizationCandidate(
+  left: ParsedGraphScopedFinalization,
+  right: ParsedGraphScopedFinalization,
+): boolean {
+  // Block placement comes from the canonical receipt; timestamps and operation ids
+  // are transport correlation rather than finalization-event identity.
+  const leftPrivateRoot = left.privateMerkleRoot
+    ? ethers.hexlify(left.privateMerkleRoot).toLowerCase()
+    : undefined;
+  const rightPrivateRoot = right.privateMerkleRoot
+    ? ethers.hexlify(right.privateMerkleRoot).toLowerCase()
+    : undefined;
+  return left.scope.ual === right.scope.ual
+    && left.kaId === right.kaId
+    && left.startKAId === right.startKAId
+    && left.endKAId === right.endKAId
+    && left.batchId === right.batchId
+    && left.assertionVersion === right.assertionVersion
+    && equalBytes(left.msg.kcMerkleRoot, right.msg.kcMerkleRoot)
+    && left.msg.txHash.toLowerCase() === right.msg.txHash.toLowerCase()
+    && left.msg.publisherAddress.toLowerCase() === right.msg.publisherAddress.toLowerCase()
+    && left.publicTripleCount === right.publicTripleCount
+    && left.privateTripleCount === right.privateTripleCount
+    && leftPrivateRoot === rightPrivateRoot
+    && (left.msg.contextGraphId || undefined) === (right.msg.contextGraphId || undefined)
+    && (left.msg.targetContextGraphId || undefined)
+      === (right.msg.targetContextGraphId || undefined)
+    && (left.msg.subGraphName || undefined) === (right.msg.subGraphName || undefined)
+    && left.msg.keepRootCopyOnLabel === right.msg.keepRootCopyOnLabel
+    && left.wireAccessPolicy === right.wireAccessPolicy
+    && [...left.allowedPeers].sort().join('\0') === [...right.allowedPeers].sort().join('\0');
 }
 
 function sameBigIntValue(

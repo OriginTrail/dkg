@@ -1115,11 +1115,13 @@ export class FinalizationHandler {
   /** Atomically apply a recovery-verified graph-scoped command. */
   private async applyPreparedGraphScopedMaterialization(input: {
     prepared: PreparedGraphScopedMaterialization;
+    blockNumber: number;
     txIndex: number;
     authorAddress?: string;
   }): Promise<FinalizationRecoveryApplyOutcome> {
     const {
       prepared,
+      blockNumber: verifiedBlockNumber,
       txIndex: verifiedTxIndex,
       authorAddress: verifiedAuthorAddress,
     } = input;
@@ -1137,7 +1139,6 @@ export class FinalizationHandler {
     const { msg } = parsed;
     const {
       scope,
-      blockNumber,
       batchId,
       publicTripleCount,
       privateTripleCount,
@@ -1145,7 +1146,7 @@ export class FinalizationHandler {
     } = parsed;
     const dedupeKey = `${scope.ual}:${msg.txHash}`;
     const materializedVersion = {
-      blockNumber,
+      blockNumber: verifiedBlockNumber,
       txIndex: verifiedTxIndex,
     };
     if (vmVerification.status === 'verified') {
@@ -1178,7 +1179,7 @@ export class FinalizationHandler {
       computedMerkleRoot: layerVerification.merkleRoot,
       publisherAddress: msg.publisherAddress,
       txHash: msg.txHash,
-      blockNumber,
+      blockNumber: verifiedBlockNumber,
       batchId,
       authorAddress: verifiedAuthorAddress,
       materializedVersion,
