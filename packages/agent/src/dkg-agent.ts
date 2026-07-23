@@ -699,6 +699,12 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
+    // an impossible ephemeral configuration before constructing a store or
+    // node so start() can never fail after leaving libp2p half-running.
+    if (inputConfig.rfc64PublicCatalogBootstrap !== undefined && !inputConfig.dataDir) {
+      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
+    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const config = normalizeStorageAckConfig({
       ...inputConfig,
