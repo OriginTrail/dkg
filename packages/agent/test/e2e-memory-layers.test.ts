@@ -1351,6 +1351,67 @@ describe('rootless graph-scoped KA lifecycle', () => {
     if (processed?.status !== 'finalized') {
       throw new Error(`Expected queued sub-graph update to finalize: ${JSON.stringify((processed as any)?.failure)}`);
     }
+    if (
+      !processed.broadcast
+      || !processed.inclusion
+      || processed.finalization.mode === 'local'
+      || !processed.finalization.txHash
+      || !processed.finalization.publisherAddress
+    ) {
+      throw new Error('Expected a chain-finalized queued sub-graph update');
+    }
+
+    const finalizationHandler = agent.getOrCreateFinalizationHandler();
+    const reconcile = vi.spyOn(finalizationHandler, 'handleChainReconciledKC');
+    const recoveryChain = (agent as any).chain;
+    const recoveryReceiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      await recoveryChain.getDKGKnowledgeAssetsAddress(),
+      BigInt(intent.seal.reservedKaId!),
+    );
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      walletId: 'wallet-1',
+      request: intent,
+      job: {
+        jobId: 'subgraph-recovery-job',
+        jobSlug: 'subgraph-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: processed.broadcast,
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: processed.inclusion,
+        finalization: {
+          ...processed.finalization,
+          ual: recoveryReceiptUal,
+          batchId: intent.seal.reservedKaId,
+          startKAId: intent.seal.reservedKaId,
+          endKAId: intent.seal.reservedKaId,
+        },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+        },
+      },
+      publisher: (agent as any).publisher,
+    } as any);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      subGraphName,
+      publisherAddress: processed.finalization.publisherAddress,
+      authorAddress: intent.seal.authorAddress,
+      versionBlock: processed.inclusion.blockNumber,
+      trustedAssertionEvidence: expect.objectContaining({
+        subGraphName,
+        publisherAddress: processed.finalization.publisherAddress,
+        authorAddress: intent.seal.authorAddress,
+        blockNumber: processed.inclusion.blockNumber,
+        txIndex: 0,
+      }),
+    }), expect.anything());
+    reconcile.mockRestore();
 
     const subgraphVm = await agent.query(
       `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,

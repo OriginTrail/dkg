@@ -3,10 +3,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  encodeFinalizationMessage,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   type FinalizationMessageMsg,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
+import { DKGAgent } from '../src/index.js';
 import {
   parseGraphScopedFinalization,
 } from '../src/finalization-graph-envelope.js';
@@ -73,6 +76,47 @@ describe('graph-scoped finalization recovery admission', () => {
       message({ targetContextGraphId: '' }),
       CONTEXT_GRAPH,
     )).toMatchObject({ ok: true });
+  });
+
+  it('wires the data-directory journal through the production agent factory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-wiring-'));
+    let agent: DKGAgent | undefined;
+    try {
+      agent = await DKGAgent.create({
+        name: 'FinalizationRecoveryWiringBot',
+        dataDir: directory,
+        listenHost: '127.0.0.1',
+      });
+      await agent.start();
+      const originalQuery = agent.store.query.bind(agent.store);
+      agent.store.query = async () => {
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'normal',
+          'finalization-runtime-wiring.query',
+        );
+      };
+      try {
+        await agent.getOrCreateFinalizationHandler().handleFinalizationMessage(
+          encodeFinalizationMessage(message()),
+          CONTEXT_GRAPH,
+          '12D3KooWPublisher',
+        );
+      } finally {
+        agent.store.query = originalQuery;
+      }
+
+      expect(await new FinalizationRecoveryJournal(directory).list()).toMatchObject([{
+        state: 'raw',
+        sourcePeerId: '12D3KooWPublisher',
+        ual: UAL,
+        targetContextGraphId: '42',
+      }]);
+    } finally {
+      await agent?.stop().catch(() => {});
+      await agent?.store.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.each([

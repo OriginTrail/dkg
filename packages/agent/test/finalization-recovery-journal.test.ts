@@ -6,6 +6,7 @@ import {
   FINALIZATION_RECOVERY_JOURNAL_FILENAME,
   FinalizationRecoveryJournal,
   FinalizationRecoveryJournalCorruptError,
+  finalizationRecoveryEntryKey,
   type FinalizationRecoveryUpsert,
 } from '../src/finalization-recovery-journal.js';
 
@@ -157,6 +158,64 @@ describe('FinalizationRecoveryJournal', () => {
       state: 'raw',
       sourcePeerId: '12D3KooWPublisher',
       rawMessageBase64: Buffer.from([1]).toString('base64'),
+    }]);
+  });
+
+  it('accepts semantically equivalent evidence and rejects a conflicting receipt', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new FinalizationRecoveryJournal(directory);
+    const evidence = {
+      ...verifiedEvidence(1),
+      publisherAddress: `0x${'Aa'.repeat(20)}`,
+      transactionHash: `0x${'Bb'.repeat(32)}`,
+      authorAddress: `0x${'Cc'.repeat(20)}`,
+      accessPolicy: 'allowList' as const,
+      allowedPeers: ['peer-a', 'peer-b'],
+    };
+    const verified = entry(1, {
+      state: 'verified',
+      txHash: evidence.transactionHash,
+      verifiedEvidence: evidence,
+    });
+    expect(await journal.upsert(verified)).toBe(true);
+    expect(await journal.upsert({
+      ...verified,
+      verifiedEvidence: {
+        ...evidence,
+        publisherAddress: evidence.publisherAddress.toLowerCase(),
+        transactionHash: evidence.transactionHash.toLowerCase(),
+        authorAddress: evidence.authorAddress.toLowerCase(),
+        allowedPeers: [...evidence.allowedPeers].reverse(),
+      },
+    })).toBe(true);
+    expect(await journal.upsert({
+      ...verified,
+      verifiedEvidence: { ...evidence, blockNumber: evidence.blockNumber + 1 },
+    })).toBe(false);
+    expect(await journal.list()).toMatchObject([{
+      verifiedEvidence: { blockNumber: evidence.blockNumber },
+    }]);
+  });
+
+  it('reads legacy JSON-tuple keys and normalizes them in memory', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new FinalizationRecoveryJournal(directory);
+    const candidate = entry(1);
+    await journal.upsert(candidate);
+    const path = join(directory, FINALIZATION_RECOVERY_JOURNAL_FILENAME);
+    const document = JSON.parse(await readFile(path, 'utf8')) as {
+      entries: Array<{ key: string }>;
+    };
+    document.entries[0]!.key = JSON.stringify([
+      candidate.chainId,
+      candidate.contextGraphId,
+      candidate.ual,
+      candidate.txHash.toLowerCase(),
+    ]);
+    await writeFile(path, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+
+    expect(await new FinalizationRecoveryJournal(directory).list()).toMatchObject([{
+      key: finalizationRecoveryEntryKey(candidate),
     }]);
   });
 

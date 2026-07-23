@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   parseVerifiedGraphScopedFinalizationEvidence,
+  sameVerifiedGraphScopedFinalizationEvidence,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 
@@ -80,6 +81,17 @@ function normalizedTxHash(value: string): string {
 export function finalizationRecoveryEntryKey(
   input: Pick<FinalizationRecoveryUpsert, 'chainId' | 'contextGraphId' | 'ual' | 'txHash'>,
 ): string {
+  return `v1|${[
+    input.chainId,
+    input.contextGraphId,
+    input.ual,
+    normalizedTxHash(input.txHash),
+  ].map((part) => `${Buffer.byteLength(part, 'utf8')}:${part}`).join('|')}`;
+}
+
+function legacyFinalizationRecoveryEntryKey(
+  input: Pick<FinalizationRecoveryUpsert, 'chainId' | 'contextGraphId' | 'ual' | 'txHash'>,
+): string {
   return JSON.stringify([
     input.chainId,
     input.contextGraphId,
@@ -125,7 +137,11 @@ function parseEntry(value: unknown): FinalizationRecoveryEntry {
       || entry.verifiedEvidence.transactionHash.toLowerCase() !== entry.txHash.toLowerCase()
     )
   ) throw new Error('verified evidence does not match entry identity');
-  if (entry.key !== finalizationRecoveryEntryKey(entry)) throw new Error('entry key does not match identity');
+  const canonicalKey = finalizationRecoveryEntryKey(entry);
+  if (entry.key !== canonicalKey && entry.key !== legacyFinalizationRecoveryEntryKey(entry)) {
+    throw new Error('entry key does not match identity');
+  }
+  entry.key = canonicalKey;
   const canonicalBase64 = Buffer.from(entry.rawMessageBase64, 'base64').toString('base64');
   if (canonicalBase64 !== entry.rawMessageBase64) throw new Error('entry envelope is not canonical base64');
   return entry;
@@ -195,7 +211,10 @@ export class FinalizationRecoveryJournal {
       if (
         existing?.verifiedEvidence
         && input.verifiedEvidence
-        && JSON.stringify(existing.verifiedEvidence) !== JSON.stringify(input.verifiedEvidence)
+        && !sameVerifiedGraphScopedFinalizationEvidence(
+          existing.verifiedEvidence,
+          input.verifiedEvidence,
+        )
       ) {
         return { changed: false, value: false };
       }

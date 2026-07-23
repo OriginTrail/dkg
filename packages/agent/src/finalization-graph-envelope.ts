@@ -6,6 +6,7 @@ import {
   type FinalizationMessageMsg,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GraphScopedAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
@@ -173,23 +174,36 @@ export function verifiedEvidenceMatchesParsedEnvelope(
     && (candidate.msg.targetContextGraphId || undefined) === identity.targetContextGraphId;
 }
 
+function sameOptionalCaseInsensitive(left: string | undefined, right: string | undefined): boolean {
+  return left?.toLowerCase() === right?.toLowerCase();
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+export function sameVerifiedGraphScopedFinalizationEvidence(
+  left: VerifiedGraphScopedFinalizationEvidence,
+  right: VerifiedGraphScopedFinalizationEvidence,
+): boolean {
+  return left.assertionVersion === right.assertionVersion
+    && left.publicTripleCount === right.publicTripleCount
+    && sameOptionalCaseInsensitive(left.privateMerkleRoot, right.privateMerkleRoot)
+    && left.privateTripleCount === right.privateTripleCount
+    && sameOptionalCaseInsensitive(left.publicQuadsDigest, right.publicQuadsDigest)
+    && left.publisherPeerId === right.publisherPeerId
+    && left.publisherAddress.toLowerCase() === right.publisherAddress.toLowerCase()
+    && left.transactionHash.toLowerCase() === right.transactionHash.toLowerCase()
+    && left.blockNumber === right.blockNumber
+    && left.txIndex === right.txIndex
+    && sameOptionalCaseInsensitive(left.authorAddress, right.authorAddress)
+    && left.accessPolicy === right.accessPolicy
+    && sameStringSet(left.allowedPeers, right.allowedPeers)
+    && left.subGraphName === right.subGraphName;
+}
+
 function reject(reason: GraphScopedFinalizationRejectionReason): GraphScopedFinalizationAdmission {
   return { ok: false, reason };
-}
-
-function protoToNumber(value: number | bigint | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof value === 'bigint') return Number(value);
-  if (typeof value === 'number') return value;
-  return ((value.high >>> 0) * 0x100000000) + (value.low >>> 0);
-}
-
-function protoToBigInt(
-  value: string | number | bigint | { low: number; high: number; unsigned: boolean },
-): bigint {
-  if (typeof value === 'string') return BigInt(value);
-  if (typeof value === 'bigint') return value;
-  if (typeof value === 'number') return BigInt(value);
-  return (BigInt(value.high >>> 0) << 32n) | BigInt(value.low >>> 0);
 }
 
 /** Single typed admission boundary shared by live processing and durable replay. */
@@ -260,7 +274,7 @@ export function parseGraphScopedFinalization(
 
   try {
     const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    const blockNumber = protoToNumber(msg.blockNumber);
+    const blockNumber = protobufScalarToNumber(msg.blockNumber);
     if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
       return reject('invalid-block-number');
     }
@@ -269,9 +283,9 @@ export function parseGraphScopedFinalization(
       targetContextGraphId !== undefined
       && (!/^\d+$/.test(targetContextGraphId) || BigInt(targetContextGraphId) <= 0n)
     ) return reject('invalid-target-context-graph');
-    const startKAId = protoToBigInt(msg.startKAId);
-    const endKAId = protoToBigInt(msg.endKAId);
-    const batchId = protoToBigInt(msg.batchId);
+    const startKAId = protobufScalarToBigInt(msg.startKAId);
+    const endKAId = protobufScalarToBigInt(msg.endKAId);
+    const batchId = protobufScalarToBigInt(msg.batchId);
     if (startKAId !== kaId || endKAId !== kaId || batchId !== kaId) {
       return reject('invalid-ka-identifiers');
     }

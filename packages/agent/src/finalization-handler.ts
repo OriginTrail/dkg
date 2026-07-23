@@ -69,23 +69,24 @@ import {
   finalizationLifecycleDecision,
   type FinalizationLifecycleLogOptions,
 } from './finalization-lifecycle-logger.js';
-import { FinalizationRecoveryJournal } from './finalization-recovery-journal.js';
+import {
+  FinalizationRecoveryJournal,
+  type FinalizationRecoveryEntry,
+} from './finalization-recovery-journal.js';
 import {
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
 } from './finalization-recovery.js';
 import {
-  FinalizationRecoveryReplayer,
-  type FinalizationRecoveryReplayTarget,
-} from './finalization-recovery-replayer.js';
-import {
   buildVerifiedGraphScopedFinalizationEvidence,
   parseGraphScopedFinalization,
+  verifiedEvidenceMatchesParsedEnvelope,
   type GraphScopedFinalizationAdmission,
   type GraphScopedAccessPolicy,
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -340,7 +341,6 @@ export class FinalizationHandler {
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly recovery: FinalizationRecovery;
-  private readonly recoveryReplayer: FinalizationRecoveryReplayer;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
   private readonly processedUals = new Set<string>();
@@ -363,6 +363,8 @@ export class FinalizationHandler {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  /** Equivalent durable replay attempts share one promise until settlement. */
+  private readonly recoveryReplaySingleFlights = new Map<string, Promise<boolean>>();
 
   constructor(
     store: TripleStore,
@@ -404,35 +406,6 @@ export class FinalizationHandler {
     this.recovery = new FinalizationRecovery(
       options.recoveryJournal,
       chain,
-      {
-        info: (message) => this.log.info(createOperationContext('system'), message),
-        warn: (message) => this.log.warn(createOperationContext('system'), message),
-      },
-    );
-    this.recoveryReplayer = new FinalizationRecoveryReplayer(
-      this.recovery,
-      {
-        verifyCanonicalReceipt: ({ candidate, evidence, target }) =>
-          this.verifyRecoveryReceipt(candidate, evidence, target),
-        applyRaw: ({ entry, candidate, rawMessage }) =>
-          this.processGraphScopedFinalizationCandidate(
-            rawMessage,
-            candidate,
-            entry.contextGraphId,
-            entry.sourcePeerId,
-          ),
-        applyVerified: ({ evidence, target }) => this.reconcileGraphScopedKC({
-          contextGraphId: target.contextGraphId,
-          ual: target.ual,
-          merkleRoot: target.merkleRoot,
-          publisherAddress: evidence.publisherAddress,
-          kaId: target.kaId,
-          versionBlock: evidence.blockNumber,
-          ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
-          ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
-          trustedAssertionEvidence: evidence,
-        }, createOperationContext('system')),
-      },
       {
         info: (message) => this.log.info(createOperationContext('system'), message),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
@@ -511,6 +484,88 @@ export class FinalizationHandler {
       }
       return undefined;
     }
+  }
+
+  private async replayMatchingRecoveryEntries(
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const entries = await this.recovery.matchingEntries({
+      chainId: this.chain?.chainId ?? 'none',
+      contextGraphId: input.contextGraphId,
+      onChainCgId: input.onChainCgId,
+      ual: input.ual,
+      merkleRoot: ethers.hexlify(input.merkleRoot),
+      kaId: input.kaId.toString(),
+    });
+    let recovered = false;
+    for (const entry of entries) {
+      const existing = this.recoveryReplaySingleFlights.get(entry.key);
+      const replay = existing ?? this.replayRecoveryEntry(entry, input, ctx);
+      if (!existing) this.recoveryReplaySingleFlights.set(entry.key, replay);
+      if (await replay) recovered = true;
+    }
+    return recovered;
+  }
+
+  private replayRecoveryEntry(
+    entry: FinalizationRecoveryEntry,
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const replay = (async () => {
+      try {
+        const rawMessage = Buffer.from(entry.rawMessageBase64, 'base64');
+        const envelope = this.decodeFinalizationEnvelope(rawMessage, entry.contextGraphId);
+        if (!envelope?.graphAdmission?.ok) return false;
+        const candidate = envelope.graphAdmission.value;
+        let outcome: FinalizationRecoveryApplyOutcome;
+        if (entry.state === 'verified' && entry.verifiedEvidence) {
+          const evidence = entry.verifiedEvidence;
+          if (!verifiedEvidenceMatchesParsedEnvelope(evidence, candidate, entry)) {
+            this.log.warn(ctx, `Finalization recovery evidence does not match its envelope for ${entry.ual}`);
+            return false;
+          }
+          if (!await this.verifyRecoveryReceipt(candidate, evidence, input.onChainCgId)) {
+            this.log.info(ctx, `Finalization recovery receipt is not canonical for ${entry.ual}; keeping journal entry`);
+            return false;
+          }
+          const reconcileOutcome = await this.reconcileGraphScopedKC({
+            contextGraphId: input.contextGraphId,
+            ual: input.ual,
+            merkleRoot: input.merkleRoot,
+            publisherAddress: evidence.publisherAddress,
+            kaId: input.kaId,
+            versionBlock: evidence.blockNumber,
+            ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
+            ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
+            trustedAssertionEvidence: evidence,
+          }, ctx);
+          outcome = reconcileOutcome === 'promoted'
+            ? 'applied'
+            : reconcileOutcome === 'already-confirmed' || reconcileOutcome === 'stale-target'
+              ? 'already-confirmed'
+              : 'deferred';
+        } else {
+          outcome = await this.processGraphScopedFinalizationCandidate(
+            rawMessage,
+            candidate,
+            entry.contextGraphId,
+            entry.sourcePeerId,
+          );
+        }
+        return this.recovery.settleEntry(entry, outcome);
+      } catch (error) {
+        if (!(error instanceof StoreSchedulerBusyError)) throw error;
+        this.log.info(ctx, `Finalization recovery store remains busy for ${entry.ual}; keeping journal entry`);
+        return false;
+      }
+    })().finally(() => {
+      if (this.recoveryReplaySingleFlights.get(entry.key) === replay) {
+        this.recoveryReplaySingleFlights.delete(entry.key);
+      }
+    });
+    return replay;
   }
 
   private async resolveFinalizationContextGraphId(
@@ -687,11 +742,11 @@ export class FinalizationHandler {
         return 'deferred';
       }
 
-      const blockNumber = protoToNumber(msg.blockNumber);
-      const startKAId = protoToBigInt(msg.startKAId);
-      const endKAId = protoToBigInt(msg.endKAId);
+      const blockNumber = protobufScalarToNumber(msg.blockNumber);
+      const startKAId = protobufScalarToBigInt(msg.startKAId);
+      const endKAId = protobufScalarToBigInt(msg.endKAId);
       let batchIdForResolve = 0n;
-      try { batchIdForResolve = protoToBigInt(msg.batchId); } catch { batchIdForResolve = 0n; }
+      try { batchIdForResolve = protobufScalarToBigInt(msg.batchId); } catch { batchIdForResolve = 0n; }
       const ctxGraphId = await this.resolveFinalizationContextGraphId(
         contextGraphId,
         msg.targetContextGraphId || undefined,
@@ -756,7 +811,7 @@ export class FinalizationHandler {
 
       if (sharedMemoryQuads.length > 0) {
         if (merkleMatchedQuads) {
-          const batchId = protoToBigInt(msg.batchId);
+          const batchId = protobufScalarToBigInt(msg.batchId);
           // PR #845 review #9: derive `txIndex` from the verified receipt
           // (via `verifyOnChain`), NOT from gossip-supplied `msg.txIndex`.
           // The latter is trust-based; a peer can forge an inflated index
@@ -827,7 +882,7 @@ export class FinalizationHandler {
               blockNumber,
               startKAId,
               endKAId,
-              batchId: protoToBigInt(msg.batchId),
+              batchId: protobufScalarToBigInt(msg.batchId),
               ctxGraphId,
               subGraphName,
               authorAddress,
@@ -891,7 +946,7 @@ export class FinalizationHandler {
           swmStatementCount: sharedMemoryQuads.length,
           subGraphName,
           blockNumber,
-          batchId: protoToBigInt(msg.batchId),
+          batchId: protobufScalarToBigInt(msg.batchId),
           outcome: 'deferred',
           retryable: true,
           reason: 'shared memory merkle root mismatch',
@@ -906,7 +961,7 @@ export class FinalizationHandler {
           swmStatementCount: 0,
           subGraphName,
           blockNumber,
-          batchId: protoToBigInt(msg.batchId),
+          batchId: protobufScalarToBigInt(msg.batchId),
           outcome: 'deferred',
           retryable: true,
           reason: 'no shared memory data',
@@ -924,7 +979,7 @@ export class FinalizationHandler {
         swmStatementCount: sharedMemoryQuads.length,
         subGraphName,
         blockNumber,
-        batchId: protoToBigInt(msg.batchId),
+        batchId: protobufScalarToBigInt(msg.batchId),
         outcome: 'deferred',
         retryable: true,
         reason: 'no matching SWM snapshot',
@@ -2521,14 +2576,7 @@ export class FinalizationHandler {
       return 'unverified';
     }
 
-    const recoveredFromJournal = await this.recoveryReplayer.replayMatching({
-      chainId: this.chain?.chainId ?? 'none',
-      contextGraphId,
-      onChainCgId,
-      ual,
-      merkleRoot,
-      kaId,
-    });
+    const recoveredFromJournal = await this.replayMatchingRecoveryEntries(input, ctx);
     if (recoveredFromJournal) return 'already-confirmed';
 
     // V2 recovery is O(1) in the number of prior workspace operations: the
@@ -3026,7 +3074,7 @@ export class FinalizationHandler {
   private async verifyRecoveryReceipt(
     candidate: ParsedGraphScopedFinalization,
     evidence: VerifiedGraphScopedFinalizationEvidence,
-    target: FinalizationRecoveryReplayTarget,
+    onChainCgId: string,
   ): Promise<boolean> {
     const receipt = await this.verifyOnChain(
       evidence.transactionHash,
@@ -3036,7 +3084,7 @@ export class FinalizationHandler {
       candidate.startKAId,
       candidate.endKAId,
       createOperationContext('system'),
-      target.onChainCgId,
+      onChainCgId,
       candidate.batchId,
     );
     if (!receipt.verified) return false;
@@ -3572,17 +3620,4 @@ export class FinalizationHandler {
       }
     }
   }
-}
-
-function protoToNumber(val: number | bigint | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof val === 'bigint') return Number(val);
-  if (typeof val === 'number') return val;
-  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
-}
-
-function protoToBigInt(val: string | number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
-  if (typeof val === 'string') return BigInt(val);
-  if (typeof val === 'bigint') return val;
-  if (typeof val === 'number') return BigInt(val);
-  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
