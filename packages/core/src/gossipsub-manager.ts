@@ -8,7 +8,7 @@ export type GossipMessageHandler = (
   topic: string,
   data: Uint8Array,
   from: string,
-) => void;
+) => void | Promise<void>;
 
 export interface GossipSubManagerOptions {
   networkId?: string;
@@ -58,7 +58,13 @@ export class GossipSubManager {
       if (handlers) {
         for (const handler of handlers) {
           try {
-            handler(topic, data, from);
+            const result = handler(topic, data, from);
+            void Promise.resolve(result).catch((err: unknown) => {
+              console.error(
+                `[GossipSub] handler error on topic "${topic}":`,
+                err instanceof Error ? err.message : err,
+              );
+            });
           } catch (err) {
             console.error(`[GossipSub] handler error on topic "${topic}":`, err instanceof Error ? err.message : err);
           }

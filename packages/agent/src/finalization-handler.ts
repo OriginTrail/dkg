@@ -23,6 +23,8 @@ import {
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteGenSource,
   tryReplaceGraphAtomically,
+  tryReplaceGraphAndSubjectAtomically,
+  StoreSchedulerBusyError,
   type GraphWriteGenSource,
   type SharedMemoryResultBudget,
   type SwmKaGraphBound,
@@ -41,7 +43,8 @@ import {
   generateSubGraphRegistration,
   splitTrustedGeneratedCatalogRootMap,
   compareMaterializedVersion, readMaterializedVersion,
-  shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock,
+  shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad,
+  withMaterializationLock,
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
@@ -66,6 +69,24 @@ import {
   finalizationLifecycleDecision,
   type FinalizationLifecycleLogOptions,
 } from './finalization-lifecycle-logger.js';
+import {
+  FinalizationRecovery,
+  type FinalizationRecoveryApplyOutcome,
+  type FinalizationCanonicalReceiptOutcome,
+} from './finalization-recovery.js';
+import type {
+  FinalizationRecoveryEntry,
+  FinalizationRecoveryStore,
+} from './finalization-recovery-store.js';
+import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
+  parseGraphScopedFinalization,
+  type GraphScopedFinalizationAdmission,
+  type GraphScopedAccessPolicy,
+  type ParsedGraphScopedFinalization,
+  type VerifiedGraphScopedFinalizationEvidence,
+} from './finalization-graph-envelope.js';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -171,8 +192,6 @@ type ExactGraphScopedLayerVerification =
       graphUri: string;
     };
 
-type GraphScopedAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
-
 type GraphScopedMaterializationEnvelope = Pick<
   KnowledgeAssetWorkspaceHead,
   | 'publicTripleCount'
@@ -184,13 +203,7 @@ type GraphScopedMaterializationEnvelope = Pick<
 >;
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
-interface TrustedGraphScopedAssertionEvidence extends GraphScopedMaterializationEnvelope {
-  assertionVersion: string;
-  publicQuadsDigest?: string;
-  transactionHash: string;
-  accessPolicy: GraphScopedAccessPolicy;
-  allowedPeers: string[];
-}
+type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
 
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
@@ -269,12 +282,65 @@ type NegativeSnapshotMemoEntry = {
   allowGeneratedCatalogFloor: boolean;
 };
 
+export interface FinalizationHandlerOptions {
+  eventBus?: EventBus;
+  resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
+  markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
+  lifecycleLogOptions?: FinalizationLifecycleLogOptions;
+  recoveryStore?: FinalizationRecoveryStore;
+}
+
+function normalizeFinalizationHandlerOptions(
+  optionsOrEventBus: FinalizationHandlerOptions | EventBus | undefined,
+  resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined,
+  markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined,
+  lifecycleLogOptions: FinalizationLifecycleLogOptions | undefined,
+  recoveryStore: FinalizationRecoveryStore | undefined,
+): FinalizationHandlerOptions {
+  const hasLegacyTail = resolveContextGraphOnChainId !== undefined
+    || markContextGraphMetaDirtyFromQuads !== undefined
+    || lifecycleLogOptions !== undefined
+    || recoveryStore !== undefined;
+  const looksLikeEventBus = optionsOrEventBus !== undefined
+    && typeof (optionsOrEventBus as EventBus).emit === 'function';
+  if (hasLegacyTail || looksLikeEventBus) {
+    return {
+      ...(optionsOrEventBus ? { eventBus: optionsOrEventBus as EventBus } : {}),
+      ...(resolveContextGraphOnChainId ? { resolveContextGraphOnChainId } : {}),
+      ...(markContextGraphMetaDirtyFromQuads ? { markContextGraphMetaDirtyFromQuads } : {}),
+      ...(lifecycleLogOptions ? { lifecycleLogOptions } : {}),
+      ...(recoveryStore ? { recoveryStore } : {}),
+    };
+  }
+  return (optionsOrEventBus as FinalizationHandlerOptions | undefined) ?? {};
+}
+
+interface DecodedFinalizationEnvelope {
+  rawMessage: Uint8Array;
+  msg: FinalizationMessageMsg;
+  graphAdmission?: GraphScopedFinalizationAdmission;
+}
+
+interface ChainReconciledKCInput {
+  contextGraphId: string;
+  onChainCgId: string;
+  ual: string;
+  merkleRoot: Uint8Array;
+  publisherAddress: string;
+  kaId: bigint;
+  versionBlock: number;
+  authorAddress?: string;
+  subGraphName?: string;
+  trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
+}
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly recovery: FinalizationRecovery;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
   private readonly processedUals = new Set<string>();
@@ -297,7 +363,14 @@ export class FinalizationHandler {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  /** Equivalent durable replay attempts share one promise until settlement. */
+  private readonly recoveryReplaySingleFlights = new Map<string, Promise<boolean>>();
 
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    options?: FinalizationHandlerOptions,
+  );
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
@@ -305,14 +378,39 @@ export class FinalizationHandler {
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
     markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
     lifecycleLogOptions?: FinalizationLifecycleLogOptions,
+    recoveryStore?: FinalizationRecoveryStore,
+  );
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter | undefined,
+    optionsOrEventBus?: FinalizationHandlerOptions | EventBus,
+    legacyResolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    legacyMarkContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    legacyLifecycleLogOptions?: FinalizationLifecycleLogOptions,
+    legacyRecoveryStore?: FinalizationRecoveryStore,
   ) {
+    const options = normalizeFinalizationHandlerOptions(
+      optionsOrEventBus,
+      legacyResolveContextGraphOnChainId,
+      legacyMarkContextGraphMetaDirtyFromQuads,
+      legacyLifecycleLogOptions,
+      legacyRecoveryStore,
+    );
     this.store = store;
     this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
-    this.eventBus = eventBus;
-    this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
-    this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
-    this.lifecycle = new FinalizationLifecycleLogger(this.log, lifecycleLogOptions);
+    this.eventBus = options.eventBus;
+    this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
+    this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
+    this.lifecycle = new FinalizationLifecycleLogger(this.log, options.lifecycleLogOptions);
+    this.recovery = new FinalizationRecovery(
+      options.recoveryStore,
+      chain,
+      {
+        info: (message) => this.log.info(createOperationContext('system'), message),
+        warn: (message) => this.log.warn(createOperationContext('system'), message),
+      },
+    );
   }
 
   async handleFinalizationMessage(
@@ -320,111 +418,389 @@ export class FinalizationHandler {
     contextGraphId: string,
     sourcePeerId?: string,
   ): Promise<void> {
-    let ctx = createOperationContext('gossip');
-    let decodedMsg: FinalizationMessageMsg | undefined;
-    let resolvedTargetContextGraphId: string | undefined;
+    const envelope = this.decodeFinalizationEnvelope(data, contextGraphId);
+    if (!envelope) return;
+    const candidate = envelope.graphAdmission?.ok
+      ? envelope.graphAdmission.value
+      : undefined;
+    const recoveryEntry = candidate && this.recovery.enabled
+      ? await this.recovery.receive({
+        rawMessage: data,
+        contextGraphId,
+        ...(sourcePeerId ? { sourcePeerId } : {}),
+        candidate,
+      })
+      : undefined;
+    // A configured inbox is a hard write-ahead boundary. Capacity, conflict,
+    // corruption, and I/O failures defer without touching Oxigraph.
+    if (candidate && this.recovery.enabled && !recoveryEntry) return;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const outcome = await this.processFinalizationEnvelope(
+          envelope,
+          contextGraphId,
+          sourcePeerId,
+          recoveryEntry,
+        );
+        if (recoveryEntry) {
+          if (outcome === 'deferred') {
+            await this.recovery.recordDeferred(recoveryEntry, 'finalization processing deferred');
+          } else {
+            await this.recovery.settleEntry(recoveryEntry, outcome);
+          }
+        }
+        return;
+      } catch (error) {
+        if (!(error instanceof StoreSchedulerBusyError)) throw error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          continue;
+        }
+        this.log.warn(
+          candidate?.msg.operationId
+            ? createOperationContext('gossip', candidate.msg.operationId)
+            : createOperationContext('gossip'),
+          `Finalization: store remained busy after retry; `
+            + `${recoveryEntry
+              ? `durable inbox retains ${candidate!.scope.ual}`
+              : 'no durable recovery envelope is configured'}`,
+        );
+        if (!recoveryEntry) throw error;
+        await this.recovery.recordDeferred(recoveryEntry, 'store scheduler remained busy');
+        return;
+      }
+    }
+  }
+
+  private decodeFinalizationEnvelope(
+    rawMessage: Uint8Array,
+    contextGraphId: string,
+  ): DecodedFinalizationEnvelope | undefined {
     try {
-      const msg = decodeFinalizationMessage(data);
-      decodedMsg = msg;
+      const msg = decodeFinalizationMessage(rawMessage);
+      return {
+        rawMessage,
+        msg,
+        ...(msg.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+          ? { graphAdmission: parseGraphScopedFinalization(msg, contextGraphId) }
+          : {}),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/wire type|index out of range|offset|unexpected tag/i.test(message)) {
+        this.log.warn(
+          createOperationContext('gossip'),
+          `Finalization: failed to decode message: ${message}`,
+        );
+      }
+      return undefined;
+    }
+  }
+
+  private async replayMatchingRecoveryEntries(
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const entries = await this.recovery.matchingEntries({
+      chainId: this.chain?.chainId ?? 'none',
+      contextGraphId: input.contextGraphId,
+      onChainCgId: input.onChainCgId,
+      ual: input.ual,
+      merkleRoot: ethers.hexlify(input.merkleRoot),
+      kaId: input.kaId.toString(),
+    });
+    let recovered = false;
+    for (const entry of entries) {
+      const existing = this.recoveryReplaySingleFlights.get(entry.key);
+      const replay = existing ?? this.replayRecoveryEntry(entry, input, ctx);
+      if (!existing) this.recoveryReplaySingleFlights.set(entry.key, replay);
+      if (await replay) recovered = true;
+    }
+    return recovered;
+  }
+
+  private replayRecoveryEntry(
+    entry: FinalizationRecoveryEntry,
+    input: ChainReconciledKCInput,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    const replay = (async () => {
+      try {
+        const rawMessage = entry.rawMessage;
+        const envelope = this.decodeFinalizationEnvelope(rawMessage, entry.contextGraphId);
+        if (!envelope?.graphAdmission?.ok) return false;
+        const candidate = envelope.graphAdmission.value;
+        let outcome: FinalizationRecoveryApplyOutcome;
+        if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
+          const evidence = entry.verifiedEvidence;
+          if (!VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+            evidence,
+            candidate,
+            entry,
+          )) {
+            this.log.warn(ctx, `Finalization recovery evidence does not match its envelope for ${entry.ual}`);
+            await this.recovery.rejectEntry(entry, 'verified evidence does not match immutable envelope');
+            return false;
+          }
+          const receiptStatus = await this.verifyRecoveryReceipt(
+            candidate,
+            evidence,
+            input.onChainCgId,
+          );
+          if (receiptStatus !== 'confirmed') {
+            if (receiptStatus === 'reorged' || receiptStatus === 'rejected') {
+              await this.recovery.rejectEntry(
+                entry,
+                'persisted receipt disagrees with canonical chain truth',
+              );
+            } else if (receiptStatus === 'unsupported') {
+              await this.recovery.markUnsupported(entry);
+            } else {
+              await this.recovery.recordDeferred(
+                entry,
+                `persisted receipt is ${receiptStatus}`,
+              );
+            }
+            this.log.info(
+              ctx,
+              `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
+            );
+            return false;
+          }
+          const reconcileOutcome = await this.reconcileGraphScopedKC({
+            contextGraphId: input.contextGraphId,
+            ual: input.ual,
+            merkleRoot: input.merkleRoot,
+            publisherAddress: evidence.publisherAddress,
+            kaId: input.kaId,
+            versionBlock: evidence.blockNumber,
+            ...(evidence.authorAddress ? { authorAddress: evidence.authorAddress } : {}),
+            ...(evidence.subGraphName ? { subGraphName: evidence.subGraphName } : {}),
+            trustedAssertionEvidence: evidence,
+          }, ctx);
+          outcome = reconcileOutcome === 'promoted'
+            ? 'applied'
+            : reconcileOutcome === 'already-confirmed' || reconcileOutcome === 'stale-target'
+              ? 'already-confirmed'
+              : 'deferred';
+        } else {
+          outcome = await this.processGraphScopedFinalizationCandidate(
+            rawMessage,
+            candidate,
+            entry.contextGraphId,
+            entry.sourcePeerId,
+            entry,
+          );
+        }
+        if (outcome === 'deferred') {
+          await this.recovery.recordDeferred(entry, 'replay processing deferred');
+          return false;
+        }
+        return this.recovery.settleEntry(entry, outcome);
+      } catch (error) {
+        if (!(error instanceof StoreSchedulerBusyError)) throw error;
+        this.log.info(ctx, `Finalization recovery store remains busy for ${entry.ual}; keeping inbox entry`);
+        await this.recovery.recordDeferred(entry, 'replay store scheduler remained busy');
+        return false;
+      }
+    })().finally(() => {
+      if (this.recoveryReplaySingleFlights.get(entry.key) === replay) {
+        this.recoveryReplaySingleFlights.delete(entry.key);
+      }
+    });
+    return replay;
+  }
+
+  private async resolveFinalizationContextGraphId(
+    contextGraphId: string,
+    targetContextGraphId: string | undefined,
+    batchId: bigint,
+    ctx: OperationContext,
+  ): Promise<string | undefined> {
+    let ctxGraphId = targetContextGraphId;
+    if (ctxGraphId) return ctxGraphId;
+
+    const cacheKey = batchId > 0n ? batchId.toString() : '';
+    if (cacheKey && this.chainCgIdByBatchId.has(cacheKey)) {
+      return this.chainCgIdByBatchId.get(cacheKey);
+    }
+    if (
+      cacheKey
+      && this.chain
+      && this.chain.chainId !== 'none'
+      && typeof this.chain.getKAContextGraphId === 'function'
+    ) {
+      try {
+        const boundCg = await this.chain.getKAContextGraphId(batchId);
+        if (boundCg !== null && boundCg !== undefined && BigInt(boundCg) > 0n) {
+          ctxGraphId = boundCg.toString();
+          this.chainCgIdByBatchId.set(cacheKey, ctxGraphId);
+          this.log.info(
+            ctx,
+            `Finalization: resolved cgId from chain truth getKAContextGraphId(${batchId})=${ctxGraphId}`,
+          );
+        }
+      } catch (error) {
+        this.log.info(
+          ctx,
+          `Finalization: chain getKAContextGraphId(${batchId}) failed (RPC lag?), `
+            + `falling back to local resolve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (!ctxGraphId && this.resolveContextGraphOnChainId) {
+      try {
+        const resolved = await this.resolveContextGraphOnChainId(contextGraphId);
+        if (resolved !== null && resolved !== undefined && String(resolved).length > 0) {
+          ctxGraphId = String(resolved);
+          this.log.info(
+            ctx,
+            `Finalization: gossip omitted targetContextGraphId; `
+              + `resolved locally to ${ctxGraphId} (defensive lookup)`,
+          );
+        }
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Finalization: defensive on-chain CG id lookup failed for ${contextGraphId}: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return ctxGraphId;
+  }
+
+  private async processGraphScopedFinalizationCandidate(
+    rawMessage: Uint8Array,
+    candidate: ParsedGraphScopedFinalization,
+    contextGraphId: string,
+    sourcePeerId?: string,
+    recoveryEntry?: FinalizationRecoveryEntry,
+  ): Promise<FinalizationRecoveryApplyOutcome> {
+    const { msg } = candidate;
+    const ctx = msg.operationId
+      ? createOperationContext('gossip', msg.operationId)
+      : createOperationContext('gossip');
+    let resolvedTargetContextGraphId = msg.targetContextGraphId || undefined;
+    try {
+      const dedupeKey = `${candidate.scope.ual}:${msg.txHash}`;
+      if (this.processedUals.has(dedupeKey)) {
+        this.log.info(ctx, `Finalization: already processed ${candidate.scope.ual}, skipping duplicate`);
+        return 'already-confirmed';
+      }
+      resolvedTargetContextGraphId = await this.resolveFinalizationContextGraphId(
+        contextGraphId,
+        resolvedTargetContextGraphId,
+        candidate.batchId,
+        ctx,
+      );
+      const outcome = await this.handleGraphScopedFinalization({
+        rawMessage,
+        candidate,
+        contextGraphId,
+        ...(resolvedTargetContextGraphId ? { ctxGraphId: resolvedTargetContextGraphId } : {}),
+        ...(msg.subGraphName ? { subGraphName: msg.subGraphName } : {}),
+        ...(sourcePeerId ? { sourcePeerId } : {}),
+        ...(recoveryEntry ? { recoveryEntry } : {}),
+        ctx,
+      });
+      if (outcome === 'applied' || outcome === 'already-confirmed') this.markProcessed(dedupeKey);
+      return outcome;
+    } catch (error) {
+      if (error instanceof StoreSchedulerBusyError) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_failed', {
+        ...msg,
+        contextGraphId: msg.contextGraphId || contextGraphId,
+        targetContextGraphId: resolvedTargetContextGraphId ?? msg.targetContextGraphId,
+        rootEntityCount: msg.rootEntities.length,
+        outcome: 'failed',
+        retryable: true,
+        reason,
+        level: 'warn',
+      }));
+      this.log.warn(ctx, `Finalization: failed to process message: ${reason}`);
+      return 'deferred';
+    }
+  }
+
+  private async processFinalizationEnvelope(
+    envelope: DecodedFinalizationEnvelope,
+    contextGraphId: string,
+    sourcePeerId?: string,
+    recoveryEntry?: FinalizationRecoveryEntry,
+  ): Promise<FinalizationRecoveryApplyOutcome> {
+    let ctx = createOperationContext('gossip');
+    let resolvedTargetContextGraphId: string | undefined;
+    const { rawMessage, msg, graphAdmission } = envelope;
+    try {
       resolvedTargetContextGraphId = msg.targetContextGraphId || undefined;
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
+      }
+
+      const isGraphScoped = msg.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
+      if (isGraphScoped) {
+        if (!graphAdmission?.ok) {
+          this.log.warn(
+            ctx,
+            `Finalization: invalid graph-scoped envelope for ${msg.ual || '(missing UAL)'}: `
+              + `${graphAdmission?.reason ?? 'decode-failed'}`,
+          );
+          return 'deferred';
+        }
+        return this.processGraphScopedFinalizationCandidate(
+          rawMessage,
+          graphAdmission.value,
+          contextGraphId,
+          sourcePeerId,
+          recoveryEntry,
+        );
       }
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
         // #1100: same guard as GossipPublishHandler — frames of other gossip
         // message types decode "successfully" with garbage in this field, so
         // only WARN when the mismatched value is a plausible CG id.
-        if (!validateContextGraphId(msg.contextGraphId).valid) return;
+        if (!validateContextGraphId(msg.contextGraphId).valid) return 'deferred';
         this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
-        return;
+        return 'deferred';
       }
 
       // Deduplicate: skip if we already successfully processed this UAL
       const dedupeKey = `${msg.ual}:${msg.txHash}`;
       if (this.processedUals.has(dedupeKey)) {
         this.log.info(ctx, `Finalization: already processed ${msg.ual}, skipping duplicate`);
-        return;
+        return 'already-confirmed';
       }
 
-      const isGraphScoped = msg.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
       if (
         msg.contentScopeVersion !== undefined
         && msg.contentScopeVersion !== 0
-        && !isGraphScoped
       ) {
         this.log.warn(
           ctx,
           `Finalization: unsupported content scope version ${msg.contentScopeVersion}, ignoring`,
         );
-        return;
+        return 'deferred';
       }
-      if (!msg.ual || !msg.txHash || (!isGraphScoped && msg.rootEntities.length === 0)) {
+      if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
         this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}, scope=${msg.contentScopeVersion ?? 0}), ignoring`);
-        return;
+        return 'deferred';
       }
 
-      const blockNumber = protoToNumber(msg.blockNumber);
-      const startKAId = protoToBigInt(msg.startKAId);
-      const endKAId = protoToBigInt(msg.endKAId);
-
-      // The publisher's `cd68fa689` fix threads the resolved on-chain CG id
-      // into `targetContextGraphId` so receivers route SWM promotion into
-      // the per-cgId `<cgName>/context/<cgId>/_meta` graph that the RS
-      // prover reads from. Pre-fix publishers (or any publisher whose
-      // `getContextGraphOnChainId` lookup returns null at gossip time) emit
-      // `targetContextGraphId: undefined`, which used to silently downgrade
-      // the receiver to legacy `<cgName>/_meta` promotion — leaving the
-      // prover stuck on `kc-not-synced` until every publisher in the mesh
-      // ships the fix. As a belt-and-braces for rolling upgrades we resolve
-      // the id locally when the wire is empty; resolver failures or
-      // not-on-chain CGs fall back to legacy behavior unchanged.
-      let ctxGraphId = msg.targetContextGraphId || undefined;
+      const blockNumber = protobufScalarToNumber(msg.blockNumber);
+      const startKAId = protobufScalarToBigInt(msg.startKAId);
+      const endKAId = protobufScalarToBigInt(msg.endKAId);
+      let batchIdForResolve = 0n;
+      try { batchIdForResolve = protobufScalarToBigInt(msg.batchId); } catch { batchIdForResolve = 0n; }
+      const ctxGraphId = await this.resolveFinalizationContextGraphId(
+        contextGraphId,
+        msg.targetContextGraphId || undefined,
+        batchIdForResolve,
+        ctx,
+      );
       resolvedTargetContextGraphId = ctxGraphId;
-      if (!ctxGraphId) {
-        // Forward-prevention (RS cgId-race): resolve from CHAIN TRUTH first.
-        // `getKAContextGraphId(batchId)` is authoritative and immune to the
-        // local ontology-binding lag that strands KCs in legacy `/_meta` — the
-        // root cause the heal-sweep exists to repair. Caching POSITIVE results
-        // only (never a 0/miss) keeps a finalization that races ahead of its
-        // on-chain KA->CG binding from being pinned to legacy forever.
-        let batchIdForResolve = 0n;
-        try { batchIdForResolve = protoToBigInt(msg.batchId); } catch { batchIdForResolve = 0n; }
-        const cacheKey = batchIdForResolve > 0n ? batchIdForResolve.toString() : '';
-        if (cacheKey && this.chainCgIdByBatchId.has(cacheKey)) {
-          ctxGraphId = this.chainCgIdByBatchId.get(cacheKey);
-          resolvedTargetContextGraphId = ctxGraphId;
-        } else if (
-          cacheKey && this.chain && this.chain.chainId !== 'none'
-          && typeof this.chain.getKAContextGraphId === 'function'
-        ) {
-          try {
-            const boundCg = await this.chain.getKAContextGraphId(batchIdForResolve);
-            if (boundCg !== null && boundCg !== undefined && BigInt(boundCg) > 0n) {
-              ctxGraphId = boundCg.toString();
-              resolvedTargetContextGraphId = ctxGraphId;
-              this.chainCgIdByBatchId.set(cacheKey, ctxGraphId); // POSITIVE-only
-              this.log.info(ctx, `Finalization: resolved cgId from chain truth getKAContextGraphId(${batchIdForResolve})=${ctxGraphId}`);
-            }
-          } catch (err) {
-            this.log.info(ctx, `Finalization: chain getKAContextGraphId(${batchIdForResolve}) failed (RPC lag?), falling back to local resolve: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        // Local name-based resolver — the existing belt-and-braces for rolling
-        // upgrades when the chain method is absent/lagging.
-        if (!ctxGraphId && this.resolveContextGraphOnChainId) {
-          try {
-            const resolved = await this.resolveContextGraphOnChainId(contextGraphId);
-            if (resolved !== null && resolved !== undefined && String(resolved).length > 0) {
-              ctxGraphId = String(resolved);
-              resolvedTargetContextGraphId = ctxGraphId;
-              this.log.info(ctx, `Finalization: gossip omitted targetContextGraphId; resolved locally to ${ctxGraphId} (defensive lookup)`);
-            }
-          } catch (err) {
-            this.log.warn(ctx, `Finalization: defensive on-chain CG id lookup failed for ${contextGraphId}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-      }
 
       // Validate sub-graph name from gossip — reject invalid names entirely
       let subGraphName: string | undefined;
@@ -434,7 +810,7 @@ export class FinalizationHandler {
           subGraphName = msg.subGraphName;
         } else {
           this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
-          return;
+          return 'deferred';
         }
       }
 
@@ -444,21 +820,6 @@ export class FinalizationHandler {
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
         : `did:dkg:context-graph:${contextGraphId}/_meta`;
-      if (isGraphScoped) {
-        const graphOutcome = await this.handleGraphScopedFinalization({
-          msg,
-          contextGraphId,
-          ctxGraphId,
-          subGraphName,
-          blockNumber,
-          sourcePeerId,
-          ctx,
-        });
-        if (graphOutcome === 'applied' || graphOutcome === 'already-confirmed') {
-          this.markProcessed(dedupeKey);
-        }
-        return;
-      }
       const alreadyPromoted = await this.isAlreadyConfirmed(
         msg.ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`,
       );
@@ -469,7 +830,7 @@ export class FinalizationHandler {
           targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
         }));
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
-        return;
+        return 'already-confirmed';
       }
 
       // #1549: read this KA's per-author SWM under-graphs first, widening to today's
@@ -497,7 +858,7 @@ export class FinalizationHandler {
 
       if (sharedMemoryQuads.length > 0) {
         if (merkleMatchedQuads) {
-          const batchId = protoToBigInt(msg.batchId);
+          const batchId = protobufScalarToBigInt(msg.batchId);
           // PR #845 review #9: derive `txIndex` from the verified receipt
           // (via `verifyOnChain`), NOT from gossip-supplied `msg.txIndex`.
           // The latter is trust-based; a peer can forge an inflated index
@@ -568,7 +929,7 @@ export class FinalizationHandler {
               blockNumber,
               startKAId,
               endKAId,
-              batchId: protoToBigInt(msg.batchId),
+              batchId: protobufScalarToBigInt(msg.batchId),
               ctxGraphId,
               subGraphName,
               authorAddress,
@@ -592,7 +953,7 @@ export class FinalizationHandler {
                 reason: 'newer update already materialized',
               }));
               this.log.info(ctx, `Finalization: a newer update is already materialised for ${msg.ual}, skipping stale publish promotion`);
-              return;
+              return 'already-confirmed';
             }
             this.markProcessed(dedupeKey);
             this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_applied', {
@@ -607,7 +968,7 @@ export class FinalizationHandler {
               retryable: false,
             }));
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
-            return;
+            return 'applied';
           }
           this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_verification_failed', {
             ...msg,
@@ -623,7 +984,7 @@ export class FinalizationHandler {
             level: 'warn',
           }));
           this.log.info(ctx, `Finalization: on-chain verification failed for ${msg.ual}, will retry via ChainEventPoller`);
-          return;
+          return 'deferred';
         }
         this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_merkle_mismatch', {
           ...msg,
@@ -632,7 +993,7 @@ export class FinalizationHandler {
           swmStatementCount: sharedMemoryQuads.length,
           subGraphName,
           blockNumber,
-          batchId: protoToBigInt(msg.batchId),
+          batchId: protobufScalarToBigInt(msg.batchId),
           outcome: 'deferred',
           retryable: true,
           reason: 'shared memory merkle root mismatch',
@@ -647,7 +1008,7 @@ export class FinalizationHandler {
           swmStatementCount: 0,
           subGraphName,
           blockNumber,
-          batchId: protoToBigInt(msg.batchId),
+          batchId: protobufScalarToBigInt(msg.batchId),
           outcome: 'deferred',
           retryable: true,
           reason: 'no shared memory data',
@@ -665,31 +1026,29 @@ export class FinalizationHandler {
         swmStatementCount: sharedMemoryQuads.length,
         subGraphName,
         blockNumber,
-        batchId: protoToBigInt(msg.batchId),
+        batchId: protobufScalarToBigInt(msg.batchId),
         outcome: 'deferred',
         retryable: true,
         reason: 'no matching SWM snapshot',
         level: 'warn',
       }));
       this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching SWM snapshot)`);
+      return 'deferred';
     } catch (err) {
+      if (err instanceof StoreSchedulerBusyError) throw err;
       const errMsg = err instanceof Error ? err.message : String(err);
-      // Protobuf decode errors (wire type / index out of range) happen when receiving
-      // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
-      if (/wire type|index out of range|offset|unexpected tag/i.test(errMsg)) return;
-      if (decodedMsg) {
-        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_failed', {
-          ...decodedMsg,
-          contextGraphId: decodedMsg.contextGraphId || contextGraphId,
-          targetContextGraphId: resolvedTargetContextGraphId ?? decodedMsg.targetContextGraphId,
-          rootEntityCount: decodedMsg.rootEntities.length,
-          outcome: 'failed',
-          retryable: true,
-          reason: errMsg,
-          level: 'warn',
-        }));
-      }
+      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_failed', {
+        ...msg,
+        contextGraphId: msg.contextGraphId || contextGraphId,
+        targetContextGraphId: resolvedTargetContextGraphId ?? msg.targetContextGraphId,
+        rootEntityCount: msg.rootEntities.length,
+        outcome: 'failed',
+        retryable: true,
+        reason: errMsg,
+        level: 'warn',
+      }));
       this.log.warn(ctx, `Finalization: failed to process message: ${errMsg}`);
+      return 'deferred';
     }
   }
 
@@ -699,105 +1058,40 @@ export class FinalizationHandler {
    * commitment; the physical SWM/VM graph names are derived locally.
    */
   private async handleGraphScopedFinalization(input: {
-    msg: FinalizationMessageMsg;
+    rawMessage: Uint8Array;
+    candidate: ParsedGraphScopedFinalization;
     contextGraphId: string;
     ctxGraphId?: string;
     subGraphName?: string;
-    blockNumber: number;
     sourcePeerId?: string;
+    recoveryEntry?: FinalizationRecoveryEntry;
     ctx: OperationContext;
-  }): Promise<'applied' | 'already-confirmed' | 'deferred'> {
+  }): Promise<FinalizationRecoveryApplyOutcome> {
     const {
-      msg,
+      candidate: parsed,
       contextGraphId,
       ctxGraphId,
       subGraphName,
-      blockNumber,
       sourcePeerId,
+      recoveryEntry,
       ctx,
     } = input;
-    if (msg.rootEntities.length !== 0) {
-      this.log.warn(ctx, `Finalization: graph-scoped message for ${msg.ual} carries legacy root entities, ignoring`);
-      return 'deferred';
-    }
-    const assertionVersion = String(msg.assertionVersion ?? '').trim();
-    if (!assertionVersion) {
-      this.log.warn(ctx, `Finalization: graph-scoped message for ${msg.ual} is missing assertionVersion`);
-      return 'deferred';
-    }
-    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    try {
-      scope = createGraphKnowledgeAssetScope(msg.ual, assertionVersion);
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Finalization: invalid graph-scoped identity: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return 'deferred';
-    }
-    if (scope.ual !== msg.ual) {
-      this.log.warn(ctx, `Finalization: non-canonical graph-scoped UAL ${msg.ual}, ignoring`);
-      return 'deferred';
-    }
-
-    const publicTripleCount = Number(msg.publicTripleCount ?? 0);
-    const privateTripleCount = Number(msg.privateTripleCount ?? 0);
-    const privateMerkleRoot = msg.privateMerkleRoot?.length
-      ? new Uint8Array(msg.privateMerkleRoot)
-      : undefined;
-    if (
-      !Number.isSafeInteger(publicTripleCount)
-      || publicTripleCount < 0
-      || !Number.isSafeInteger(privateTripleCount)
-      || privateTripleCount < 0
-      || (publicTripleCount === 0 && privateTripleCount === 0)
-      || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
-      || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-    ) {
-      this.log.warn(ctx, `Finalization: invalid graph-scoped content envelope for ${scope.ual}, ignoring`);
-      return 'deferred';
-    }
-    const rawAllowedPeers = msg.allowedPeers ?? [];
-    const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
-    const wireAccessPolicy = msg.accessPolicy || undefined;
-    if (
-      (wireAccessPolicy !== undefined
-        && wireAccessPolicy !== 'public'
-        && wireAccessPolicy !== 'ownerOnly'
-        && wireAccessPolicy !== 'allowList')
-      || allowedPeers.length !== rawAllowedPeers.length
-      || (wireAccessPolicy === 'allowList' && allowedPeers.length === 0)
-      || (wireAccessPolicy !== 'allowList' && allowedPeers.length > 0)
-    ) {
-      this.log.warn(ctx, `Finalization: invalid graph-scoped access envelope for ${scope.ual}`);
-      return 'deferred';
-    }
-
-    const packedKaId =
-      (BigInt(scope.agentAddress) << 96n)
-      | BigInt(scope.kaNumber);
-    let startKAId: bigint;
-    let endKAId: bigint;
-    let batchId: bigint;
-    try {
-      startKAId = protoToBigInt(msg.startKAId);
-      endKAId = protoToBigInt(msg.endKAId);
-      batchId = protoToBigInt(msg.batchId);
-    } catch {
-      this.log.warn(ctx, `Finalization: invalid on-chain identifiers for graph-scoped KA ${scope.ual}`);
-      return 'deferred';
-    }
-    if (startKAId !== packedKaId || endKAId !== packedKaId) {
-      this.log.warn(
-        ctx,
-        `Finalization: UAL-derived kaId ${packedKaId} does not match wire range ${startKAId}..${endKAId}`,
-      );
-      return 'deferred';
-    }
+    const { msg } = parsed;
+    const {
+      scope,
+      assertionVersion,
+      blockNumber,
+      startKAId,
+      endKAId,
+      batchId,
+      publicTripleCount,
+      privateTripleCount,
+      privateMerkleRoot,
+      wireAccessPolicy,
+      allowedPeers,
+    } = parsed;
 
     const graphManager = new GraphManager(this.store);
-    await graphManager.ensureContextGraph(contextGraphId);
-    if (subGraphName) await graphManager.ensureSubGraph(contextGraphId, subGraphName);
     let head;
     try {
       head = await resolveKnowledgeAssetWorkspaceHead({
@@ -884,7 +1178,27 @@ export class FinalizationHandler {
       }
     }
 
-    const verified = await this.verifyOnChain(
+    const canonical = recoveryEntry
+      ? await this.recovery.resolveCanonicalReceipt(parsed, recoveryEntry.verifiedEvidence)
+      : undefined;
+    if (canonical?.status === 'unsupported') {
+      await this.recovery.markUnsupported(recoveryEntry!);
+      this.log.warn(ctx, `Finalization: canonical receipt recovery is unsupported for ${scope.ual}`);
+      return 'deferred';
+    }
+    if (canonical?.status === 'reorged' || canonical?.status === 'rejected') {
+      const reason = canonical.status === 'reorged'
+        ? 'canonical receipt mismatch or reorg'
+        : 'transaction failed or contains no finalization event';
+      await this.recovery.rejectEntry(recoveryEntry!, reason);
+      this.log.warn(ctx, `Finalization: canonical receipt ${canonical.status} for graph-scoped KA ${scope.ual}`);
+      return 'deferred';
+    }
+    if (canonical && canonical.status !== 'confirmed') {
+      this.log.info(ctx, `Finalization: canonical receipt ${canonical.status} for graph-scoped KA ${scope.ual}`);
+      return 'deferred';
+    }
+    const legacyVerified = canonical ? undefined : await this.verifyOnChain(
       msg.txHash,
       blockNumber,
       msg.kcMerkleRoot,
@@ -895,20 +1209,49 @@ export class FinalizationHandler {
       ctxGraphId,
       batchId,
     );
-    if (!verified.verified) {
+    if (!canonical && !legacyVerified?.verified) {
       this.log.info(ctx, `Finalization: on-chain verification pending for graph-scoped KA ${scope.ual}`);
       return 'deferred';
     }
+    const verifiedTxIndex = canonical?.receipt.txIndex ?? legacyVerified?.txIndex;
+    if (verifiedTxIndex === undefined || !Number.isSafeInteger(verifiedTxIndex) || verifiedTxIndex < 0) {
+      this.log.info(ctx, `Finalization: canonical receipt ordering is unavailable for graph-scoped KA ${scope.ual}`);
+      return 'deferred';
+    }
+    const verifiedAuthorAddress = canonical?.receipt.authorAddress ?? legacyVerified?.authorAddress;
+    const verifiedBlockHash = canonical?.receipt.blockHash;
+    const verifiedAccess = resolveGraphScopedAccessEnvelope(
+      head,
+      requestedAccessPolicy,
+      requestedAllowedPeers,
+    );
+    if (recoveryEntry) {
+      if (!verifiedBlockHash) {
+        await this.recovery.rejectEntry(recoveryEntry, 'canonical receipt block hash is missing');
+        return 'deferred';
+      }
+      const verifiedEvidence = VerifiedGraphScopedFinalizationEvidenceCodec.build({
+        candidate: parsed,
+        ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
+        publisherPeerId: head.publisherPeerId,
+        blockHash: verifiedBlockHash,
+        txIndex: verifiedTxIndex,
+        ...(verifiedAuthorAddress ? { authorAddress: verifiedAuthorAddress } : {}),
+        accessPolicy: verifiedAccess.accessPolicy,
+        allowedPeers: verifiedAccess.allowedPeers,
+        workspaceSubGraphName: subGraphName,
+      });
+      const committed = await this.recovery.recordVerified(recoveryEntry, verifiedEvidence);
+      if (!committed) {
+        this.log.warn(ctx, `Finalization: VERIFIED inbox commit failed for ${scope.ual}; deferring`);
+        return 'deferred';
+      }
+    }
     const materializedVersion = {
       blockNumber,
-      txIndex: verified.txIndex ?? 0,
+      txIndex: verifiedTxIndex,
     };
     if (vmVerification.status === 'verified') {
-      const access = resolveGraphScopedAccessEnvelope(
-        head,
-        requestedAccessPolicy,
-        requestedAllowedPeers,
-      );
       const metadataState = await this.graphScopedMetadataState({
         contextGraphId,
         scope,
@@ -917,9 +1260,9 @@ export class FinalizationHandler {
         batchId,
         expectedTxHash: msg.txHash,
         materializedVersion,
-        accessPolicy: access.accessPolicy,
-        allowedPeers: access.allowedPeers,
-        authorAddress: verified.authorAddress,
+        accessPolicy: verifiedAccess.accessPolicy,
+        allowedPeers: verifiedAccess.allowedPeers,
+        authorAddress: verifiedAuthorAddress,
         subGraphName,
       });
       if (metadataState === 'matching') {
@@ -939,10 +1282,10 @@ export class FinalizationHandler {
       txHash: msg.txHash,
       blockNumber,
       batchId,
-      authorAddress: verified.authorAddress,
+      authorAddress: verifiedAuthorAddress,
       materializedVersion,
-      accessPolicy: requestedAccessPolicy,
-      allowedPeers: requestedAllowedPeers,
+      accessPolicy: verifiedAccess.accessPolicy,
+      allowedPeers: verifiedAccess.allowedPeers,
       subGraphName,
       source: 'finalization',
       contentAlreadyMaterialized: vmVerification.status === 'verified',
@@ -1172,6 +1515,12 @@ export class FinalizationHandler {
           allowedPeers: [...trustedAssertionEvidence.allowedPeers],
         }
       : workspaceHead!;
+    const evidencePublisherAddress = trustedAssertionEvidence?.publisherAddress ?? publisherAddress;
+    const evidenceAuthorAddress = trustedAssertionEvidence?.authorAddress ?? authorAddress;
+    const evidenceBlockNumber = trustedAssertionEvidence?.blockNumber ?? versionBlock;
+    const materializedVersion = trustedAssertionEvidence
+      ? { blockNumber: trustedAssertionEvidence.blockNumber, txIndex: trustedAssertionEvidence.txIndex }
+      : { blockNumber: versionBlock, txIndex: 0 };
     const preserveNewerWorkspaceLifecycle = trustedAssertionEvidence !== undefined
       && workspaceHead !== undefined
       && BigInt(workspaceHead.assertionVersion)
@@ -1211,7 +1560,6 @@ export class FinalizationHandler {
       subGraphName,
     });
     if (vmVerification.status === 'verified') {
-      const materializedVersion = { blockNumber: versionBlock, txIndex: 0 };
       const access = resolveGraphScopedAccessEnvelope(
         head,
         trustedAssertionEvidence?.accessPolicy,
@@ -1226,7 +1574,7 @@ export class FinalizationHandler {
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
-        authorAddress,
+        authorAddress: evidenceAuthorAddress,
         subGraphName,
       });
       if (metadataState === 'matching') {
@@ -1282,11 +1630,11 @@ export class FinalizationHandler {
         head,
         privateMerkleRoot,
         computedMerkleRoot: vmVerification.merkleRoot,
-        publisherAddress,
+        publisherAddress: evidencePublisherAddress,
         txHash: trustedAssertionEvidence.transactionHash,
-        blockNumber: versionBlock,
+        blockNumber: evidenceBlockNumber,
         batchId: kaId,
-        authorAddress,
+        authorAddress: evidenceAuthorAddress,
         materializedVersion,
         accessPolicy: trustedAssertionEvidence?.accessPolicy,
         allowedPeers: trustedAssertionEvidence?.allowedPeers,
@@ -1362,12 +1710,12 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      publisherAddress,
+      publisherAddress: evidencePublisherAddress,
       txHash: trustedAssertionEvidence.transactionHash,
-      blockNumber: versionBlock,
+      blockNumber: evidenceBlockNumber,
       batchId: kaId,
-      authorAddress,
-      materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+      authorAddress: evidenceAuthorAddress,
+      materializedVersion,
       accessPolicy: trustedAssertionEvidence?.accessPolicy,
       allowedPeers: trustedAssertionEvidence?.allowedPeers,
       subGraphName,
@@ -1472,9 +1820,12 @@ export class FinalizationHandler {
         && compareMaterializedVersion(materializedVersion, currentMaterializedVersion) < 0;
       // A verified receipt may arrive after a sweep observed this same
       // assertion at a later block. Repair that exact metadata while retaining
-      // the later ordering stamp; never overwrite a newer assertion.
+      // the later ordering stamp. Within one block, however, txIndex provides
+      // a total order and an older transaction must not rewrite provenance.
       const canRepairStaleExactMetadata = contentAlreadyMaterialized
-        && confirmedAssertionVersion === scope.assertionVersion;
+        && confirmedAssertionVersion === scope.assertionVersion
+        && currentMaterializedVersion !== null
+        && materializedVersion.blockNumber < currentMaterializedVersion.blockNumber;
       if (incomingVersionIsStale && !canRepairStaleExactMetadata) {
         return 'stale' as const;
       }
@@ -1487,26 +1838,28 @@ export class FinalizationHandler {
       const metadataAllowedPeers = metadataAccessPolicy === 'allowList'
         ? effectiveAllowedPeers
         : [];
-      if (!contentAlreadyMaterialized) {
-        const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
-        const replaced = await tryReplaceGraphAtomically(
-          this.store,
-          vmGraph,
-          vmQuads,
-          { source: 'agent.finalization.graphScopedReplace' },
-        );
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped VM finalization requires atomic TripleStore.update() support'),
-            { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
-      }
       // A chain sweep knows the latest root, but not which assertion version or
       // access envelope produced it. Identical-content updates share a root and
       // physical VM graph, so a newer mutable head must not broaden confirmed
       // access metadata without assertion-specific finalization evidence.
-      if (preserveConfirmedMetadata) return 'preserved-metadata' as const;
+      if (preserveConfirmedMetadata) {
+        if (!contentAlreadyMaterialized) {
+          const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
+          const replaced = await tryReplaceGraphAtomically(
+            this.store,
+            vmGraph,
+            vmQuads,
+            { source: 'agent.finalization.graphScopedPreserveMetadata' },
+          );
+          if (!replaced) {
+            throw Object.assign(
+              new Error('Graph-scoped VM finalization requires atomic TripleStore.update() support'),
+              { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+            );
+          }
+        }
+        return 'preserved-metadata' as const;
+      }
 
       let blockTimestamp = Math.floor(Date.now() / 1000);
       if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
@@ -1548,14 +1901,25 @@ export class FinalizationHandler {
           confirmation: { kind: 'transaction', provenance },
         },
       );
-      await this.store.deleteByPattern({ graph: metaGraph, subject: scope.ual });
-      await this.store.insert(metadata);
-      await writeMaterializedVersion(
+      const effectiveVersion = incomingVersionIsStale
+        ? currentMaterializedVersion
+        : materializedVersion;
+      const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
+      const replaced = await tryReplaceGraphAndSubjectAtomically(
         this.store,
+        vmGraph,
+        vmQuads,
         metaGraph,
         scope.ual,
-        incomingVersionIsStale ? currentMaterializedVersion : materializedVersion,
+        [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)],
+        { source: 'agent.finalization.graphScopedAtomicCommit' },
       );
+      if (!replaced) {
+        throw Object.assign(
+          new Error('Graph-scoped VM finalization requires atomic graph-and-metadata replacement support'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
       return 'applied' as const;
     });
     if (outcome !== 'applied') return outcome;
@@ -2269,24 +2633,7 @@ export class FinalizationHandler {
    *                            reorg / no chain wired); caller leaves cursor.
    *   - `'stale-target'`    — a newer update is already materialised.
    */
-  async handleChainReconciledKC(input: {
-    /** Local CG id (topic/name), e.g. the value in `subscribedContextGraphs`. */
-    contextGraphId: string;
-    /** On-chain numeric CG id as a string. Required — drives the binding check + per-cgId meta routing. */
-    onChainCgId: string;
-    ual: string;
-    merkleRoot: Uint8Array;
-    publisherAddress: string;
-    kaId: bigint;
-    /** Chain head block at reconcile time — stamped as the materialization version. */
-    versionBlock: number;
-    /** Optional EIP-712 author recovered from chain (KnowledgeAssetCreated.author). */
-    authorAddress?: string;
-    /** Optional sub-graph the publish targeted (defaults to root workspace). */
-    subGraphName?: string;
-    /** Receipt/seal-validated assertion policy supplied only by named recovery. */
-    trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
-  }, ctx: OperationContext): Promise<
+  async handleChainReconciledKC(input: ChainReconciledKCInput, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
     | 'no-swm'
@@ -2311,6 +2658,9 @@ export class FinalizationHandler {
       this.log.info(ctx, `Chain-reconcile: chain CG binding for ${ual} (ka=${kaId}) not confirmed against cg ${onChainCgId}; deferring to sweep retry`);
       return 'unverified';
     }
+
+    const recoveredFromJournal = await this.replayMatchingRecoveryEntries(input, ctx);
+    if (recoveredFromJournal) return 'already-confirmed';
 
     // V2 recovery is O(1) in the number of prior workspace operations: the
     // durable per-KA head names one exact assertion graph and carries its
@@ -2802,6 +3152,23 @@ export class FinalizationHandler {
       } catch { /* best-effort self-heal */ }
     }
     return null;
+  }
+
+  private async verifyRecoveryReceipt(
+    candidate: ParsedGraphScopedFinalization,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+    _onChainCgId: string,
+  ): Promise<FinalizationCanonicalReceiptOutcome['status']> {
+    const outcome = await this.recovery.resolveCanonicalReceipt(candidate, evidence);
+    if (outcome.status !== 'confirmed') return outcome.status;
+    const receipt = outcome.receipt;
+    const expectedAuthor = evidence.authorAddress?.toLowerCase();
+    const canonicalAuthor = receipt.authorAddress?.toLowerCase();
+    return canonicalAuthor === expectedAuthor
+      && receipt.txIndex === evidence.txIndex
+      && receipt.blockHash.toLowerCase() === evidence.blockHash.toLowerCase()
+      ? 'confirmed'
+      : 'rejected';
   }
 
   private async verifyOnChain(
@@ -3330,17 +3697,4 @@ export class FinalizationHandler {
       }
     }
   }
-}
-
-function protoToNumber(val: number | bigint | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof val === 'bigint') return Number(val);
-  if (typeof val === 'number') return val;
-  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
-}
-
-function protoToBigInt(val: string | number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
-  if (typeof val === 'string') return BigInt(val);
-  if (typeof val === 'bigint') return val;
-  if (typeof val === 'number') return BigInt(val);
-  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }

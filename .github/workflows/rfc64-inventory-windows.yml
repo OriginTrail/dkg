@@ -102,10 +102,11 @@ jobs:
           packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts
           packages/agent/test/fixtures/rfc64-inventory-v1-child.ts
 
-      - name: Run RFC-64 inventory tests
+      - name: Run SQLite persistence tests
         run: >-
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
+          test/finalization-recovery-sqlite-store.test.ts
           test/rfc64-inventory-v1
           test/rfc64-agent-inventory-lifecycle.test.ts
           test/rfc64-author-catalog-producer.test.ts

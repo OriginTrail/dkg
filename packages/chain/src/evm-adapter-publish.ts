@@ -11,7 +11,20 @@
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
 import { ethers, Wallet, Contract } from 'ethers';
-import type { ChainReadOptions, ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
+import type {
+  BatchMintParams,
+  BatchMintResult,
+  CanonicalFinalizationReceiptReadOptions,
+  CanonicalFinalizationReceiptResolution,
+  ChainReadOptions,
+  KAUpdateVerification,
+  OnChainPublishResult,
+  PublisherPublishPlan,
+  PublisherPublishPlanRequest,
+  ReservedRange,
+  TxResult,
+  V10UpdateKAParams,
+} from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveQuotedPublisherCandidatePricing,
@@ -464,6 +477,73 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       throw err;
     }
+  }
+
+  async resolveCanonicalFinalizationReceipt(
+    txHash: string,
+    options: CanonicalFinalizationReceiptReadOptions = {},
+  ): Promise<CanonicalFinalizationReceiptResolution> {
+    await this.init();
+    const receipt = await this.getTransactionReceiptWithFailover(txHash, {
+      signal: options.signal,
+      logLabel: 'canonical finalization receipt',
+    });
+    if (!receipt) {
+      const transaction = await this.getTransactionWithFailover(txHash, options);
+      return transaction ? { status: 'pending' } : { status: 'not-found' };
+    }
+    if (receipt.status !== 1) return { status: 'rejected' };
+    if (
+      (options.expectedBlockHash !== undefined
+        && receipt.blockHash.toLowerCase() !== options.expectedBlockHash.toLowerCase())
+      || (options.expectedBlockNumber !== undefined
+        && receipt.blockNumber !== options.expectedBlockNumber)
+    ) {
+      return { status: 'reorged' };
+    }
+
+    const publish = this.contracts.knowledgeAssetStorage
+      ? await this.parseV10PublishReceipt(receipt, options)
+      : null;
+    const legacyPublish = publish ?? (
+      this.contracts.knowledgeAssetsStorage
+        ? await this.parseV9PublishReceipt(receipt, options)
+        : null
+    );
+    if (
+      !legacyPublish
+      || !legacyPublish.merkleRoot
+      || !legacyPublish.publisherAddress
+      || !Number.isSafeInteger(receipt.index)
+      || receipt.index < 0
+      || !receipt.blockHash
+    ) {
+      return { status: 'rejected' };
+    }
+    const kaId = legacyPublish.kaId ?? legacyPublish.batchId;
+    const startKAId = legacyPublish.startKAId ?? kaId;
+    const endKAId = legacyPublish.endKAId ?? kaId;
+    return {
+      status: 'confirmed',
+      receipt: {
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        blockHash: receipt.blockHash,
+        txIndex: receipt.index,
+        merkleRoot: legacyPublish.merkleRoot,
+        publisherAddress: legacyPublish.publisherAddress,
+        ...(legacyPublish.authorAddress
+          ? { authorAddress: legacyPublish.authorAddress }
+          : {}),
+        batchId: legacyPublish.batchId,
+        kaId,
+        startKAId,
+        endKAId,
+        ...(legacyPublish.knowledgeAssetsContract
+          ? { knowledgeAssetsContract: legacyPublish.knowledgeAssetsContract }
+          : {}),
+      },
+    };
   }
 
   async parseV10PublishReceipt(

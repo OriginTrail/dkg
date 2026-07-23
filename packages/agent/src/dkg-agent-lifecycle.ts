@@ -1048,6 +1048,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // network consumer. No dataDir intentionally leaves the feature dormant.
     await this.prepareRfc64PersistenceV1();
     try {
+      await this.prepareFinalizationRecoveryStore();
       // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
       // so the local store is clean before this node serves or syncs anything.
       // Marker-gated (runs once per data dir), never throws, no-op on stores
@@ -1062,15 +1063,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       await this.node.start();
     } catch (cause) {
+      const failures: unknown[] = [cause];
+      try {
+        await this.closeFinalizationRecoveryStore();
+      } catch (closeCause) {
+        failures.push(closeCause);
+      }
       try {
         await this.closeRfc64PersistenceV1();
       } catch (closeCause) {
-        throw new AggregateError(
-          [cause, closeCause],
-          'DKG node startup and RFC-64 inventory cleanup both failed',
-        );
+        failures.push(closeCause);
       }
-      throw cause;
+      if (failures.length === 1) throw cause;
+      throw new AggregateError(
+        failures,
+        'DKG node startup and persistence cleanup failed',
+      );
     }
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);

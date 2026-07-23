@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -11,8 +14,10 @@ import {
 import {
   GraphManager,
   OxigraphStore,
+  StoreSchedulerBusyError,
   type Quad,
 } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   computePrivateRootV10,
@@ -21,6 +26,12 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import {
+  openSqliteFinalizationRecoveryStore,
+  type SqliteFinalizationRecoveryStore,
+} from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
+import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -29,6 +40,30 @@ const UAL = `did:dkg:otp:20430/${AUTHOR}/7`;
 const SHARE_ID = 'graph-finalization-share';
 const VERSION = '1';
 const PACKED_KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
+const RECOVERY_BLOCK_HASH = `0x${'cd'.repeat(32)}`;
+
+function canonicalReceipt(message: FinalizationMessageMsg, txIndex = 4) {
+  return {
+    status: 'confirmed' as const,
+    receipt: {
+      txHash: message.txHash,
+      blockNumber: Number(message.blockNumber),
+      blockHash: RECOVERY_BLOCK_HASH,
+      txIndex,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: message.publisherAddress,
+      authorAddress: AUTHOR,
+      batchId: protobufScalarToBigInt(message.batchId),
+      kaId: PACKED_KA_ID,
+      startKAId: PACKED_KA_ID,
+      endKAId: PACKED_KA_ID,
+    },
+  };
+}
+
+async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): Promise<void> {
+  await inbox?.close().catch(() => {});
+}
 
 describe('graph-scoped finalization handler', () => {
   let store: OxigraphStore;
@@ -51,7 +86,7 @@ describe('graph-scoped finalization handler', () => {
   async function stageGraph(durableAccess?: {
     accessPolicy: 'ownerOnly' | 'allowList';
     allowedPeers?: string[];
-  }): Promise<{
+  }, subGraphName?: string): Promise<{
     message: FinalizationMessageMsg;
     swmGraph: string;
     vmGraph: string;
@@ -61,11 +96,13 @@ describe('graph-scoped finalization handler', () => {
       CG,
       MemoryLayer.SharedWorkingMemory,
       scope,
+      subGraphName,
     );
     const vmGraph = knowledgeAssetLayerGraphUri(
       CG,
       MemoryLayer.VerifiableMemory,
       scope,
+      subGraphName,
     );
     const publicQuads: Quad[] = [
       { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: swmGraph },
@@ -101,6 +138,7 @@ describe('graph-scoped finalization handler', () => {
       publisherPeerId: '12D3KooWPublisher',
       accessPolicy: durableAccess?.accessPolicy,
       allowedPeers: durableAccess?.allowedPeers,
+      subGraphName,
     });
     await storeKnowledgeAssetWorkspaceHead({
       store,
@@ -109,6 +147,7 @@ describe('graph-scoped finalization handler', () => {
       shareOperationId: SHARE_ID,
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
+      subGraphName,
     });
 
     return {
@@ -134,6 +173,7 @@ describe('graph-scoped finalization handler', () => {
         publicTripleCount: publicQuads.length,
         privateMerkleRoot,
         privateTripleCount: privateQuads.length,
+        subGraphName,
       },
     };
   }
@@ -189,6 +229,10 @@ describe('graph-scoped finalization handler', () => {
     accessPolicy: 'public' | 'ownerOnly' | 'allowList' = 'ownerOnly',
     allowedPeers: string[] = [],
   ) {
+    const txIndex = Number(message.txIndex);
+    if (!Number.isSafeInteger(txIndex) || txIndex < 0) {
+      throw new Error('trusted test evidence requires an exact transaction index');
+    }
     return {
       assertionVersion: message.assertionVersion!,
       publicTripleCount: message.publicTripleCount!,
@@ -197,7 +241,12 @@ describe('graph-scoped finalization handler', () => {
         : {}),
       privateTripleCount: message.privateTripleCount!,
       publisherPeerId: '12D3KooWPublisher',
+      publisherAddress: message.publisherAddress,
       transactionHash: message.txHash,
+      blockNumber: Number(message.blockNumber),
+      blockHash: RECOVERY_BLOCK_HASH,
+      txIndex,
+      authorAddress: AUTHOR,
       accessPolicy,
       allowedPeers,
     };
@@ -253,6 +302,39 @@ describe('graph-scoped finalization handler', () => {
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('accepts adapter batch metadata when the singleton KA range matches the UAL', async () => {
+    const { message, vmGraph } = await stageGraph();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      batchId: 42n,
+    }), CG, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('does not borrow named-subgraph workspace evidence for a root finalization', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-scope-binding-'));
+    try {
+      const { message, swmGraph, vmGraph } = await stageGraph(undefined, 'named-scope');
+      const scopedHandler = new FinalizationHandler(store, undefined);
+      (scopedHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+
+      await scopedHandler.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        subGraphName: undefined,
+        operationId: 'root-finalization-cannot-borrow-named-head',
+      }), CG, '12D3KooWPublisher');
+
+      expect(await store.countQuads(swmGraph)).toBe(2);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('finalizes a fully private KA without requiring a public root or placeholder triple', async () => {
@@ -354,21 +436,547 @@ describe('graph-scoped finalization handler', () => {
 
   it('keeps the old VM graph and remains retryable when the atomic swap fails', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const replaceGraph = store.replaceGraph?.bind(store);
-    if (!replaceGraph) throw new Error('Oxigraph replaceGraph unavailable');
-    store.replaceGraph = async (graphUri, quads, options) => {
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.insert([{
+      subject: UAL,
+      predicate: 'urn:test:old-metadata',
+      object: '"preserved"',
+      graph: metaGraph,
+    }]);
+    const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+    if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+    store.replaceGraphAndSubject = async (graphUri, quads, metadataGraph, subject, metadata, options) => {
       if (graphUri === vmGraph) throw new Error('injected graph finalization failure');
-      return replaceGraph(graphUri, quads, options);
+      return replaceGraphAndSubject(graphUri, quads, metadataGraph, subject, metadata, options);
     };
 
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> <urn:test:old-metadata> "preserved" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
 
-    store.replaceGraph = replaceGraph;
+    store.replaceGraphAndSubject = replaceGraphAndSubject;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('resolves an omitted graph-scoped target context graph id', async () => {
+    const { message, vmGraph } = await stageGraph();
+    let resolverCalls = 0;
+    const resolvingHandler = new FinalizationHandler(
+      store,
+      undefined,
+      undefined,
+      async () => {
+        resolverCalls += 1;
+        return '42';
+      },
+    );
+    (resolvingHandler as unknown as {
+      verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+    }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+
+    await resolvingHandler.handleFinalizationMessage(
+      encodeFinalizationMessage({ ...message, targetContextGraphId: undefined }),
+      CG,
+    );
+
+    expect(resolverCalls).toBe(1);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('applies after one transient scheduler timeout without journaling', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    const query = store.query.bind(store);
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const retryingHandler = new FinalizationHandler(store, undefined);
+      (retryingHandler as unknown as {
+        verifyOnChain: () => Promise<{ verified: boolean; authorAddress: string; txIndex: number }>;
+      }).verifyOnChain = async () => ({ verified: true, authorAddress: AUTHOR, txIndex: 4 });
+      let busyReads = 1;
+      store.query = async (sparql, options) => {
+        if (busyReads > 0) {
+          busyReads -= 1;
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'sparql-http.query',
+          );
+        }
+        return query(sparql, options);
+      };
+
+      await retryingHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(busyReads).toBe(0);
+      expect(await store.countQuads(vmGraph)).toBe(2);
+    } finally {
+      store.query = query;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers adapter-batch provenance after a pre-verification store timeout and restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const staged = await stageGraph();
+      const message = { ...staged.message, batchId: 42n };
+      const { vmGraph } = staged;
+      const wire = encodeFinalizationMessage(message);
+      let currentRootCount = 0n;
+      let receiptVerified = false;
+      let receiptTxIndex: number | undefined;
+      let verifyCalls = 0;
+      const contextGraphBindingLookups: bigint[] = [];
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => currentRootCount,
+        getKAContextGraphId: async (kaId: bigint) => {
+          contextGraphBindingLookups.push(kaId);
+          return kaId === PACKED_KA_ID ? 42n : 43n;
+        },
+        resolveCanonicalFinalizationReceipt: async () => {
+          verifyCalls += 1;
+          return receiptVerified && receiptTxIndex !== undefined
+            ? canonicalReceipt(message, receiptTxIndex)
+            : { status: 'pending' as const };
+        },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const pressured = new FinalizationHandler(
+        store,
+        chain,
+        { recoveryStore: inbox },
+      );
+
+      const query = store.query.bind(store);
+      let busyReads = 2;
+      store.query = async (sparql, options) => {
+        if (busyReads > 0) {
+          busyReads -= 1;
+          throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+        }
+        return query(sparql, options);
+      };
+      await pressured.handleFinalizationMessage(wire, CG, '12D3KooWPublisher');
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 1,
+        lastError: 'store scheduler remained busy',
+        sourcePeerId: '12D3KooWPublisher',
+        txHash: message.txHash,
+        kaId: PACKED_KA_ID.toString(),
+        batchId: '42',
+      }]);
+      store.query = query;
+
+      await inbox.close();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const restarted = new FinalizationHandler(
+        store,
+        chain,
+        { recoveryStore: inbox },
+      );
+      const internals = restarted as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyChainCgBinding = async () => true;
+
+      const reconcileInput = {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      };
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await inbox.list()).toHaveLength(1);
+
+      currentRootCount = 1n;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(verifyCalls).toBe(1);
+      expect(await inbox.list()).toMatchObject([{ state: 'RECEIVED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      receiptVerified = true;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await inbox.list()).toMatchObject([{ state: 'RECEIVED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      receiptTxIndex = 4;
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'normal',
+          'sparql-http.update',
+        );
+      };
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+      expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      await expect(restarted.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('already-confirmed');
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+      expect(contextGraphBindingLookups.length).toBeGreaterThan(0);
+      expect(contextGraphBindingLookups.every((kaId) => kaId === PACKED_KA_ID)).toBe(true);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + '<http://dkg.io/ontology/materializedVersion> "123:4" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mutate Oxigraph when the VERIFIED transaction cannot commit', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const chain = {
+        chainId: 'base:84532',
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const failingVerifiedStore: FinalizationRecoveryStore = {
+        databasePath: inbox.databasePath,
+        get closed() { return inbox!.closed; },
+        receive: inbox.receive.bind(inbox),
+        markVerified: async () => ({ status: 'closed' }),
+        listForKnowledgeAsset: inbox.listForKnowledgeAsset.bind(inbox),
+        transition: inbox.transition.bind(inbox),
+        recordAttempt: inbox.recordAttempt.bind(inbox),
+        health: inbox.health.bind(inbox),
+        close: inbox.close.bind(inbox),
+      };
+      const recoveryHandler = new FinalizationHandler(store, chain, {
+        recoveryStore: failingVerifiedStore,
+      });
+      const createGraph = store.createGraph.bind(store);
+      let createGraphCalls = 0;
+      store.createGraph = async (graphUri) => {
+        createGraphCalls += 1;
+        return createGraph(graphUri);
+      };
+      const internals = recoveryHandler as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyChainCgBinding = async () => true;
+
+      try {
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+      } finally {
+        store.createGraph = createGraph;
+      }
+
+      expect(createGraphCalls).toBe(0);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 1,
+      }]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a terminal recovery record after chain truth supersedes it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      let latestRoot = message.kcMerkleRoot;
+      let rootCount = 1n;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => latestRoot,
+        getMerkleRootCount: async () => rootCount,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+      const internals = recoveryHandler as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyChainCgBinding = async () => true;
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
+
+      latestRoot = Uint8Array.from(message.kcMerkleRoot, (byte) => byte ^ 0xff);
+      rootCount = 2n;
+      await recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: latestRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 124,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'));
+
+      expect(await inbox.list()).toMatchObject([{ state: 'SUPERSEDED' }]);
+      expect(await store.countQuads(vmGraph)).toBe(1);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs verified metadata after a newer SWM assertion replaces the mutable head', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      const staged = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      );
+      if (staged.type !== 'quads') throw new Error('expected staged graph-scoped quads');
+      await store.dropGraph(vmGraph);
+      await store.insert(staged.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+      const internals = recoveryHandler as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+      };
+      internals.verifyChainCgBinding = async () => true;
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await inbox.list()).toMatchObject([{
+        state: 'VERIFIED',
+        verifiedEvidence: {
+          assertionVersion: '1',
+          transactionHash: message.txHash,
+          blockHash: RECOVERY_BLOCK_HASH,
+          txIndex: 4,
+        },
+      }]);
+
+      await stageNewerWorkspaceAssertion(
+        swmGraph,
+        message.privateMerkleRoot,
+        message.privateTripleCount,
+      );
+      await expect(recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 999,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+      expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
+      const currentHead = await resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      });
+      expect(currentHead?.assertionVersion).toBe('2');
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" ; `
+          + '<http://dkg.io/ontology/materializedVersion> "123:4" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query(
+        `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+          + '<urn:predicate:value> "newer" } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects verified recovery when the persisted receipt is no longer canonical', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message } = await stageGraph();
+      let receiptCanonical = true;
+      let receiptChecks = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptChecks += 1;
+          return receiptCanonical
+            ? canonicalReceipt(message)
+            : { status: 'reorged' as const };
+        },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const recoveryHandler = new FinalizationHandler(store, chain, { recoveryStore: inbox });
+
+      const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+      if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+      store.replaceGraphAndSubject = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+      };
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+      expect(await inbox.list()).toMatchObject([{ state: 'VERIFIED' }]);
+
+      const reconcileInput = {
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      };
+      receiptCanonical = false;
+      await expect(recoveryHandler.handleChainReconciledKC(
+        reconcileInput,
+        createOperationContext('system'),
+      )).resolves.toBe('verified-vm-metadata-pending');
+
+      expect(receiptChecks).toBeGreaterThanOrEqual(2);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'REJECTED',
+        lastError: 'persisted receipt disagrees with canonical chain truth',
+      }]);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
+          + `<http://dkg.io/ontology/transactionHash> "${message.txHash}" . } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('never persists structurally invalid or legacy envelopes under store pressure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message } = await stageGraph();
+      inbox = await openSqliteFinalizationRecoveryStore(directory);
+      const pressured = new FinalizationHandler(
+        store,
+        undefined,
+        { recoveryStore: inbox },
+      );
+      await pressured.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        startKAId: PACKED_KA_ID + 1n,
+      }), CG);
+      expect(await inbox.list()).toEqual([]);
+
+      const query = store.query.bind(store);
+      store.query = async () => {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+      };
+      await expect(pressured.handleFinalizationMessage(encodeFinalizationMessage({
+        ...message,
+        contentScopeVersion: 0,
+        rootEntities: ['urn:legacy:root'],
+      }), CG)).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      store.query = query;
+      expect(await inbox.list()).toEqual([]);
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a scheduler timeout observable when durable recovery is unavailable', async () => {
+    const { message } = await stageGraph();
+    const pressured = new FinalizationHandler(store, undefined);
+    const query = store.query.bind(store);
+    store.query = async () => {
+      throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+    };
+
+    await expect(pressured.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    store.query = query;
   });
 
   it('does not delete a newer SWM assertion staged after source verification', async () => {
@@ -767,7 +1375,7 @@ describe('graph-scoped finalization handler', () => {
           <http://dkg.io/ontology/privateTripleCount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/privateMerkleRoot> "${Buffer.from(message.privateMerkleRoot).toString('hex')}" ;
           <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" .
+          <http://dkg.io/ontology/materializedVersion> "123:4" .
       } }`,
     );
     expect(repaired).toMatchObject({ type: 'boolean', value: true });
@@ -810,7 +1418,7 @@ describe('graph-scoped finalization handler', () => {
 
     const repairedVersion = await store.query(
       `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <${materializedVersionPredicate}> "123:0" .
+        <${UAL}> <${materializedVersionPredicate}> "123:4" .
       } }`,
     );
     expect(repairedVersion).toMatchObject({ type: 'boolean', value: true });
@@ -995,7 +1603,7 @@ describe('graph-scoped finalization handler', () => {
           <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
           <http://dkg.io/ontology/assertionGraph> <${vmGraph}> ;
           <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" .
+          <http://dkg.io/ontology/materializedVersion> "123:4" .
       } }`,
     );
     expect(repaired).toMatchObject({ type: 'boolean', value: true });

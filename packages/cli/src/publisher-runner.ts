@@ -6,6 +6,7 @@ import {
   NoChainAdapter,
   buildKnowledgeAssetUal,
   mergeRpcUsageWindows,
+  type CanonicalFinalizationReceipt,
   type ChainAdapter,
   type OnChainPublishResult,
   type RpcUsageWindow,
@@ -735,10 +736,10 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
   return async (job) => {
-    const recovered = await resolveOnChainPublish(job, publishers);
+    const recovered = await resolveCanonicalOnChainPublish(job, publishers);
     if (!recovered) return null;
-    const evidence = mapOnChainPublishResultToKnowledgeAssetVmRecovery(
-      recovered.result,
+    const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+      recovered.receipt,
       recovered.chain.chainId,
       recovered.knowledgeAssetsContract,
     );
@@ -767,6 +768,40 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
       },
     };
   };
+}
+
+async function resolveCanonicalOnChainPublish(
+  job: LiftJobBroadcast | LiftJobIncluded,
+  publishers: Map<string, DKGPublisher>,
+): Promise<{
+  receipt: CanonicalFinalizationReceipt;
+  chain: ChainAdapter;
+  knowledgeAssetsContract: string;
+} | null> {
+  const publisher = publishers.get(job.broadcast.walletId);
+  if (!publisher) return null;
+  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  if (!chain?.resolveCanonicalFinalizationReceipt) return null;
+
+  let resolution;
+  try {
+    resolution = await chain.resolveCanonicalFinalizationReceipt(job.broadcast.txHash);
+  } catch {
+    return null;
+  }
+  if (resolution.status !== 'confirmed') return null;
+
+  let knowledgeAssetsContract = resolution.receipt.knowledgeAssetsContract;
+  if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
+    try {
+      knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+    } catch {
+      return null;
+    }
+  }
+  return knowledgeAssetsContract
+    ? { receipt: resolution.receipt, chain, knowledgeAssetsContract }
+    : null;
 }
 
 function asLiftJobHex(value: string): LiftJobHex | null {
@@ -805,24 +840,49 @@ export function mapOnChainPublishResultToLiftRecovery(
   };
 }
 
-export function mapOnChainPublishResultToKnowledgeAssetVmRecovery(
-  result: OnChainPublishResult,
+function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+  receipt: CanonicalFinalizationReceipt,
   chainId: string,
   knowledgeAssetsContract: string,
 ): AsyncKnowledgeAssetVmPublishRecoveryEvidence | null {
-  const recovery = mapOnChainPublishResultToLiftRecovery(
-    result,
-    chainId,
-    knowledgeAssetsContract,
-  );
-  if (!recovery || !result.merkleRoot || !result.authorAddress) return null;
-
-  const merkleRoot = asLiftJobHex(ethers.hexlify(result.merkleRoot));
-  const authorAddress = asLiftJobHex(result.authorAddress);
-  if (!merkleRoot || !authorAddress) return null;
+  const txHash = asLiftJobHex(receipt.txHash);
+  const blockHash = asLiftJobHex(receipt.blockHash);
+  const merkleRoot = asLiftJobHex(ethers.hexlify(receipt.merkleRoot));
+  const publisherAddress = asLiftJobHex(receipt.publisherAddress);
+  const authorAddress = receipt.authorAddress
+    ? asLiftJobHex(receipt.authorAddress)
+    : null;
+  if (
+    !txHash
+    || !blockHash
+    || !merkleRoot
+    || !publisherAddress
+    || !authorAddress
+    || !ethers.isHexString(blockHash, 32)
+    || !ethers.isHexString(merkleRoot, 32)
+    || !ethers.isAddress(publisherAddress)
+    || !ethers.isAddress(authorAddress)
+    || !Number.isSafeInteger(receipt.blockNumber)
+    || receipt.blockNumber < 0
+    || !Number.isSafeInteger(receipt.txIndex)
+    || receipt.txIndex < 0
+  ) return null;
   return {
-    ...recovery,
-    publishProof: { merkleRoot, authorAddress },
+    inclusion: {
+      txHash,
+      blockNumber: receipt.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash,
+      ual: buildKnowledgeAssetUal(chainId, knowledgeAssetsContract, receipt.kaId),
+      batchId: receipt.batchId.toString() as `${bigint}`,
+      startKAId: receipt.startKAId.toString() as `${bigint}`,
+      endKAId: receipt.endKAId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex },
   };
 }
 

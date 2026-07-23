@@ -15,6 +15,11 @@ import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
 } from './rfc64/persistence-v1.js';
+import {
+  openSqliteFinalizationRecoveryStore,
+  type SqliteFinalizationRecoveryStore,
+} from './finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -1035,6 +1040,8 @@ export class DKGAgentBase {
    * protected by it. Agents without dataDir remain deliberately dormant.
    */
   protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /** Durable graph-finalization control state, isolated from Oxigraph and RFC-64 inventory. */
+  protected finalizationRecoveryStore?: SqliteFinalizationRecoveryStore;
   /**
    * RFC-64 Gate 1 public author-catalog service, wired onto the production
    * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
@@ -1631,6 +1638,17 @@ export class DKGAgentBase {
     });
   }
 
+  /** Open after RFC-64 ownership and before networking starts. */
+  protected async prepareFinalizationRecoveryStore(): Promise<void> {
+    if (!this.config.dataDir || this.finalizationRecoveryStore !== undefined) return;
+    this.finalizationRecoveryStore = await openSqliteFinalizationRecoveryStore(
+      this.config.dataDir,
+    );
+    // A caller may inspect the handler before start(). Do not let that
+    // pre-lifecycle instance remain the network consumer without the inbox.
+    this.finalizationHandler = undefined;
+  }
+
   /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
   protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1644,6 +1662,45 @@ export class DKGAgentBase {
     const persistence = this.rfc64PersistenceV1;
     this.rfc64PersistenceV1 = undefined;
     await persistence?.close();
+  }
+
+  /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
+  protected async closeFinalizationRecoveryStore(): Promise<void> {
+    const store = this.finalizationRecoveryStore;
+    this.finalizationRecoveryStore = undefined;
+    await store?.close();
+  }
+
+  async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {
+    if (!this.finalizationRecoveryStore) {
+      return {
+        available: false,
+        closed: false,
+        ready: false,
+        canonicalReceiptCapability: 'not-configured',
+        degradedReason: 'not-configured',
+        stateCounts: {},
+        livePayloadBytes: 0,
+      };
+    }
+    const health = await this.finalizationRecoveryStore.health();
+    const canonicalReceiptCapability = this.chain.chainId !== 'none'
+      && typeof this.chain.resolveCanonicalFinalizationReceipt === 'function'
+      ? 'supported'
+      : 'unsupported';
+    return {
+      ...health,
+      ready: (health.ready ?? health.available)
+        && canonicalReceiptCapability === 'supported',
+      canonicalReceiptCapability,
+      ...(
+        canonicalReceiptCapability === 'unsupported' && health.available
+          ? {
+              degradedReason: 'canonical-finalization-receipt-unsupported',
+            }
+          : {}
+      ),
+    };
   }
 
   /**

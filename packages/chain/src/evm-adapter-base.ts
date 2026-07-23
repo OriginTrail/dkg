@@ -1356,6 +1356,21 @@ export class EVMChainAdapterBase {
     return this.rpcFailover.getReceipt(txHash, options);
   }
 
+  /** Nullable transaction lookup used to distinguish pending from unknown. */
+  protected getTransactionWithFailover(
+    txHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<ethers.TransactionResponse | null> {
+    return this.readProvider(
+      'transaction lookup',
+      (provider) => provider.getTransaction(txHash),
+      {
+        signal: options.signal,
+        isEmptyResult: (value) => value === null,
+      },
+    );
+  }
+
   /**
    * Common point-view CONTRACT read — the chain-concept surface the domain mixins
    * call: a `contract`, a `label`, a string `method` name, and its args, run with

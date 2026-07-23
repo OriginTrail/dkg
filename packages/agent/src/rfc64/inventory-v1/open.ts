@@ -36,6 +36,7 @@ import {
   resolveRfc64PersistenceRootV1,
 } from '../persistence-layout-v1.js';
 import { registerRfc64PersistenceRootOwnershipV1 } from '../persistence-root-ownership-v1-internal.js';
+import { loadOwnedSqliteModuleV1 } from '../../sqlite/module-loader-v1.js';
 
 import {
   INVENTORY_V1_APPLICATION_ID,
@@ -601,8 +602,7 @@ function reopenVerifiedOwnedDatabase(
 
 async function loadSqliteModule(): Promise<SqliteModuleV1> {
   try {
-    const moduleName = 'node:sqlite';
-    return await import(moduleName);
+    return await loadOwnedSqliteModuleV1('RFC-64 SQL-1');
   } catch (cause) {
     throw new InventoryV1OpenError(
       'sqlite-unavailable',

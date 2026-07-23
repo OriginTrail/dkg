@@ -170,9 +170,13 @@ export interface AsyncLiftPublisherRecoveryResult {
 /** Required immutable transaction evidence for named-KA lifecycle recovery. */
 export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
   extends AsyncLiftPublisherRecoveryResult {
+  readonly inclusion: LiftJobInclusionMetadata & {
+    readonly blockHash: LiftJobHex;
+  };
   readonly publishProof: {
     readonly merkleRoot: LiftJobHex;
     readonly authorAddress: LiftJobHex;
+    readonly txIndex: number;
   };
 }
 
