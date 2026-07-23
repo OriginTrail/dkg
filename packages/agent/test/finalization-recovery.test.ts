@@ -385,6 +385,65 @@ describe('graph-scoped finalization recovery admission', () => {
     },
   );
 
+  it.each([
+    ['a different Merkle root', `0x${'ff'.repeat(32)}`],
+    ['the same Merkle root at a newer assertion version', `0x${'00'.repeat(32)}`],
+  ] as const)(
+    'does not let an older canonical SETTLED entry mask %s',
+    async (_case, reconciledMerkleRoot) => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-update-'));
+      let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+      try {
+        store = await openSqliteFinalizationRecoveryStore(directory);
+        let rootCount = 1n;
+        let receiptCalls = 0;
+        const chain = recoveryChain({
+          getMerkleRootCount: async () => rootCount,
+          resolveCanonicalFinalizationReceipt: async () => {
+            receiptCalls += 1;
+            return { status: 'confirmed', receipt: confirmedReceipt() };
+          },
+        });
+        const recovery = new FinalizationRecovery(
+          store,
+          chain,
+          { info: () => {}, warn: () => {} },
+          recoveryMaterializer(),
+        );
+        await expect(recovery.processLive({
+          rawMessage: encodeFinalizationMessage(message()),
+          contextGraphId: CONTEXT_GRAPH,
+          sourcePeerId: '12D3KooWPublisher',
+          candidate: parsedMessage(),
+        })).resolves.toBe(true);
+        expect(await store.list()).toMatchObject([{
+          state: 'SETTLED',
+          assertionVersion: '1',
+        }]);
+
+        rootCount = 2n;
+        await expect(recovery.replayMatching({
+          chainId: chain.chainId,
+          contextGraphId: CONTEXT_GRAPH,
+          onChainCgId: '42',
+          ual: UAL,
+          merkleRoot: reconciledMerkleRoot,
+          kaId: PACKED_KA_ID.toString(),
+        })).resolves.toBe(false);
+
+        expect(receiptCalls).toBe(2);
+        expect(await store.list()).toMatchObject([{
+          state: 'SETTLED',
+          assertionVersion: '1',
+          generation: 0,
+        }]);
+      } finally {
+        await store?.close().catch(() => {});
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('fails closed when a SETTLED replacement changes a non-placement field', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-conflict-'));
     try {

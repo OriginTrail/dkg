@@ -874,6 +874,7 @@ export class FinalizationRecovery<
   private async replaySettled(
     entry: FinalizationRecoveryEntry,
     candidate: ParsedGraphScopedFinalization,
+    input: FinalizationRecoveryReplayInput,
   ): Promise<boolean> {
     const evidence = entry.verifiedEvidence;
     if (
@@ -890,24 +891,25 @@ export class FinalizationRecovery<
       return false;
     }
 
+    const matchesReplayTarget = await this.settledMatchesReplayTarget(entry, input);
     const canonical = await this.resolveCanonicalReceipt(candidate, evidence);
     if (canonical.status === 'confirmed') {
       if (!sameCanonicalFinalizationPlacement(canonical.receipt, evidence)) {
-        return this.recoverSettledReorg(entry, candidate);
+        return await this.recoverSettledReorg(entry, candidate) && matchesReplayTarget;
       }
       await this.clearSettledRetry(entry);
-      return true;
+      return matchesReplayTarget;
     }
     if (canonical.status === 'reorged') {
-      return this.recoverSettledReorg(entry, candidate);
+      return await this.recoverSettledReorg(entry, candidate) && matchesReplayTarget;
     }
     if (canonical.status === 'rejected') {
-      return this.invalidateSettled(
+      return await this.invalidateSettled(
         entry,
         candidate,
         evidence,
         'canonical receipt permanently rejected',
-      );
+      ) && matchesReplayTarget;
     }
     if (canonical.status === 'not-found') {
       if (entry.attemptCount + 1 >= SETTLED_NOT_FOUND_RETRY_LIMIT) {
@@ -931,6 +933,27 @@ export class FinalizationRecovery<
       );
     }
     return false;
+  }
+
+  private async settledMatchesReplayTarget(
+    entry: FinalizationRecoveryEntry,
+    input: FinalizationRecoveryReplayInput,
+  ): Promise<boolean> {
+    try {
+      if (!equalBytes(
+        ethers.getBytes(entry.merkleRoot),
+        ethers.getBytes(input.merkleRoot),
+      )) return false;
+      if (!this.chain?.getMerkleRootCount) return false;
+      const rootCount = await this.chain.getMerkleRootCount(BigInt(input.kaId));
+      return rootCount === BigInt(entry.assertionVersion);
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery could not compare settled assertion version for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   private async recoverSettledReorg(
@@ -973,7 +996,7 @@ export class FinalizationRecovery<
         const candidate = this.decodeEntry(entry);
         if (!candidate) return false;
         if (entry.state === 'SETTLED') {
-          return this.replaySettled(entry, candidate);
+          return this.replaySettled(entry, candidate, input);
         }
 
         let outcome: FinalizationRecoveryApplyOutcome;
