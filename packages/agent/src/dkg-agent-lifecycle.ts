@@ -5446,18 +5446,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return runCatchupPlanesWithPolicy({
           mode,
           includeSharedMemory,
-          syncDurable: ({ priority }) => this.syncFromPeerDetailed(
-            remotePeerId,
-            [contextGraphId],
-            undefined,
-            undefined,
-            undefined,
-            priority === undefined ? undefined : { priority },
+          syncDurable: ({ priority }) => (
+            priority === undefined
+              ? this.syncFromPeerDetailed(remotePeerId, [contextGraphId])
+              : this.syncFromPeerDetailed(
+                  remotePeerId,
+                  [contextGraphId],
+                  undefined,
+                  undefined,
+                  undefined,
+                  { priority },
+                )
           ).catch(() => createFailedPeerDurableSyncResult()),
-          syncSharedMemory: ({ priority }) => this.syncSharedMemoryFromPeerDetailed(
-            remotePeerId,
-            [contextGraphId],
-            priority === undefined ? undefined : { priority },
+          syncSharedMemory: ({ priority }) => (
+            priority === undefined
+              ? this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId])
+              : this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId], { priority })
           ).catch(emptyShared),
         });
       },
