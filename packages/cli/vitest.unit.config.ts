@@ -70,6 +70,9 @@ export default defineConfig({
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
+          // Pure HTTP classification coverage for chain transport failures,
+          // including preserving a known transaction hash on endpoint exhaustion.
+          'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',

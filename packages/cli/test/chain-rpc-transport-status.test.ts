@@ -11,6 +11,16 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     ).toEqual({ status: 503, body: { error: 'all endpoints failed', code: 'RPC_ENDPOINTS_EXHAUSTED' } });
   });
 
+  it('preserves the known txHash on a broadcast RPC_ENDPOINTS_EXHAUSTED response', () => {
+    const r = classifyChainRpcTransportStatus({
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+      message: 'broadcast endpoints failed',
+      txHash: '0xabc',
+    });
+    expect(r?.status).toBe(503);
+    expect(r?.body).toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED', txHash: '0xabc' });
+  });
+
   it('maps RPC_RECEIPT_LOOKUP_FAILED -> 503 (+code, +txHash)', () => {
     const r = classifyChainRpcTransportStatus({ code: 'RPC_RECEIPT_LOOKUP_FAILED', message: 'm', txHash: '0xabc' });
     expect(r?.status).toBe(503);
