@@ -86,6 +86,7 @@ export {
   quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,

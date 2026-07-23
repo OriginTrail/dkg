@@ -1125,21 +1125,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * rather than a user-chosen cleartext id that merely looks hash-shaped.
    *
    * Host-only auto-subscribe paths (chain-event + discovery-beacon) stage the
-   * wire id AS the local id and record `onChainHash === id` (and the reverse
-   * index `wireIdToLocalCgId[id] === id`). Only that self-referential local
-   * commitment licenses {@link localCgMatchesOnChainSlot} to accept the verbatim
-   * id against the on-chain name-hash; without it the id is treated as cleartext
-   * and must match `keccak256(utf8(id))`, so a reused slot cannot impersonate a
-   * wire-keyed CG just by sharing a hash-shaped string.
+   * wire id AS the local id and explicitly record `onChainHash === id`. Only
+   * that self-referential subscription commitment licenses
+   * {@link localCgMatchesOnChainSlot} to accept the verbatim id against the
+   * on-chain name-hash. The general reverse index is deliberately insufficient:
+   * every subscription is indexed there, including hash-shaped cleartext ids.
    */
   isWireIdKeyedSubscription(this: DKGAgent, localId: string): boolean {
     if (!/^0x[0-9a-fA-F]{64}$/.test(localId)) return false;
     const lower = localId.toLowerCase();
     const sub =
       this.subscribedContextGraphs?.get(localId) ?? this.subscribedContextGraphs?.get(lower);
-    if (sub?.onChainHash && sub.onChainHash.toLowerCase() === lower) return true;
-    const reverse = this.wireIdToLocalCgId?.get(lower);
-    return !!reverse && reverse.toLowerCase() === lower;
+    return !!sub?.onChainHash && sub.onChainHash.toLowerCase() === lower;
   }
 
   /**

@@ -13,6 +13,60 @@ export * from './sparql-operation.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
+export * from './sync-control-object.js';
+export * from './cg-policy-objects.js';
+export * from './administrative-authority-objects.js';
+export * from './author-catalog-authority-objects.js';
+export {
+  MAX_DECIMAL_U64,
+  MAX_DECIMAL_U256,
+  assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalHexBytes,
+  assertCanonicalKaId,
+  assertCanonicalTimestampMs,
+  parseCanonicalDecimalU64,
+  parseCanonicalDecimalU256,
+} from './sync-wire-scalars.js';
+export type {
+  BatchIdV1,
+  BlockNumberV1,
+  ByteLengthV1,
+  ChainIdV1,
+  CountV1,
+  DecimalU64V1,
+  DecimalU256V1,
+  Digest32V1,
+  EndKaIdV1,
+  EvmAddressV1,
+  IndexV1,
+  KaIdV1,
+  ReservedKaIdV1,
+  StartKaIdV1,
+  TimestampMsV1,
+} from './sync-wire-scalars.js';
+export * from './ka-transfer-descriptor.js';
+export * from './ka-bundle-v1.js';
+export * from './ka-chunk-tree.js';
+export * from './ka-chunk-proof.js';
+export * from './cg-shared-projection.js';
+export {
+  FinalizedVmSetAccumulatorV1,
+  FinalizedVmSetV1Error,
+  computeFinalizedVmSetEvidenceV1,
+  computeFinalizedVmSetLeafDigestV1,
+  type FinalizedVmLaneV1,
+  type FinalizedVmSetEvidenceV1,
+  type FinalizedVmSetRowV1,
+  type FinalizedVmSetScopeV1,
+  type FinalizedVmSetV1ErrorCode,
+} from './finalized-vm-set-v1.js';
+export * from './author-catalog-codec.js';
+export * from './author-catalog-objects.js';
+export * from './author-catalog-directory.js';
 export * from './event-bus.js';
 export {
   Logger,
@@ -301,3 +355,38 @@ export {
   type AssertionSealBuildArgs,
   type AssertionSeal,
 } from './assertion-seal.js';
+export {
+  CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1,
+  MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
+  MAX_SEAL_TRIPLE_COUNT_V1,
+  CanonicalGraphScopedAuthorSealError,
+  assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  canonicalizeCanonicalGraphScopedAuthorSealV1,
+  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
+  parseCanonicalGraphScopedAuthorSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
+  assertCanonicalGraphScopedAuthorSealCoordinateV1,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectCanonicalGraphScopedAuthorSealStoreRowsV1,
+  renderCanonicalAuthorSealStoreRowV1,
+  decodeCanonicalGraphScopedAuthorSealRowsV1,
+  classifyCanonicalGraphScopedAuthorSealRowsV1,
+  type Hex32V1,
+  type PositiveDecimalU64V1,
+  type SealTripleCountV1,
+  type CanonicalIsoUtcMillisV1,
+  type CanonicalDeterministicUalV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealRowV1,
+  type CanonicalAuthorSealStoreObjectV1,
+  type CanonicalAuthorSealStoreRowV1,
+  type CanonicalGraphScopedAuthorSealPlacementV1,
+  type DecodedCanonicalGraphScopedAuthorSealRowsV1,
+  type ClassifiedCanonicalGraphScopedAuthorSealRowsV1,
+  type CanonicalGraphScopedAuthorSealErrorCode,
+} from './canonical-graph-scoped-author-seal.js';
+export * from './catalog-seal-binding.js';
+export * from './transferred-catalog-bundle.js';

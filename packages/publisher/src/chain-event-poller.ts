@@ -206,6 +206,12 @@ export class ChainEventPoller {
       .finally(() => { this.inFlightPoll = null; });
   }
 
+  /** Wait for the startup/current poll without exposing poller internals. */
+  async waitForCurrentPoll(): Promise<void> {
+    const pending = this.inFlightPoll;
+    if (pending) await pending;
+  }
+
   /**
    * Stop the interval and wait for any in-flight poll to settle.
    *

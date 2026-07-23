@@ -30,6 +30,16 @@ import type {
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
+  CatalogSealDeploymentProfileV1,
+  ContextGraphIdV1,
+  ContextGraphPolicyV1,
+  DecimalU64V1,
+  Digest32V1,
+  EvmAddressV1,
+  NetworkIdV1,
+  SubGraphNameV1,
+  TimestampMsV1,
+  UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -1050,12 +1060,80 @@ export interface ReplicationEvent {
 
 export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
+export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
+  readonly localAgentAddress: EvmAddressV1;
+  /** Exact authenticated libp2p-peer to agent-wallet binding. */
+  readonly resolveRemoteAgentAddress: (
+    remotePeerId: string,
+  ) => Promise<EvmAddressV1 | null>;
+}
+
+/**
+ * Opt-in RFC-64 author-catalog production for ordinary confirmed public KA
+ * publishes. Peer fan-out is an availability hint; the durable applied-head
+ * pointer remains the correctness source for pull discovery.
+ */
+export interface Rfc64PublicCatalogAutoPublishConfigV1 {
+  readonly peers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
+export interface Rfc64PublicCatalogBootstrapScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
+}
+
+export interface Rfc64PublicCatalogBootstrapTargetV1 {
+  readonly authorAddress: EvmAddressV1;
+  /** Ordered provider failover candidates for this exact author catalog. */
+  readonly providers: readonly string[];
+}
+
+export interface Rfc64PublicCatalogBootstrapPolicyV1 {
+  /** Exact verified control object; its digest is recomputed during snapshotting. */
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  /** Author catalogs under the policy graph/era. */
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+}
+
+/**
+ * Explicit V1 cold-start manifest. Policies are operator-pinned outputs of an
+ * independent finality/administrative verifier; the catalog lane only consumes
+ * them. A zero retry interval performs one startup pass, which is useful for
+ * deterministic harnesses. Omission defaults to a 30-second refresh pass.
+ */
+export interface Rfc64PublicCatalogBootstrapConfigV1 {
+  readonly acceptedPublicPolicies: readonly Rfc64PublicCatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */
   networkIdentity?: DkgNetworkIdentity;
+  /**
+   * Locally trusted RFC-64 catalog-seal deployment tuple. This deterministic
+   * override is intended for chain-free devnets; production nodes normally
+   * derive the same tuple from their configured chain adapter. It is snapshotted
+   * and validated during `DKGAgent.create()` and is never accepted from catalog
+   * announcement wire data.
+   */
+  rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
+  /**
+   * Explicit agent-identity authority required before accepting a private
+   * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
+   */
+  rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /** Omission preserves the existing publication and synchronization behavior. */
+  rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  /** Omission preserves manual RFC-64 current-head discovery. */
+  rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

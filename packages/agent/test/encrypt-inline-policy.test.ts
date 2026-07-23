@@ -764,13 +764,14 @@ const QUEUED_TEST_LIFECYCLE = '0x2222222222222222222222222222222222222222';
 function makeQueuedAgentHarness(options: {
   peerId: string;
   ual: string;
+  publishStatus?: 'tentative' | 'confirmed';
   chain?: Record<string, unknown>;
   onChainContextGraphId?: string | null;
   encryptInlinePayload?: unknown;
   encryptInlineChunked?: unknown;
 }) {
   const publisherPublish = recorder(async (_opts: any) => ({
-    status: 'tentative' as const,
+    status: options.publishStatus ?? 'tentative',
     ual: options.ual,
   }));
   const agentLike: any = {
@@ -797,6 +798,8 @@ function makeQueuedAgentHarness(options: {
     _resolveEncryptInlineChunked: recorder(async () => options.encryptInlineChunked),
     _stampPointer: recorder(async () => undefined),
   };
+  agentLike.afterConfirmedGraphScopedVmPublishV1 =
+    (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   if (options.onChainContextGraphId !== undefined) {
     agentLike.getContextGraphOnChainId = recorder(
       async () => options.onChainContextGraphId,
@@ -853,6 +856,82 @@ async function makeQueuedPublishRequest(options: {
 }
 
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
+  it('hands one confirmed queued public publish to the RFC-64 catalog bridge', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-catalog',
+      ual: 'did:dkg:local/queued-catalog',
+      publishStatus: 'confirmed',
+    });
+    const catalogAdvance = recorder(async () => null);
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = catalogAdvance;
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-public',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka',
+      shareOperationId: 'share-op-catalog',
+      intentByte: 'ad',
+      quads: snapshotQuads,
+    });
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+
+    expect(catalogAdvance.calls).toHaveLength(1);
+    expect(catalogAdvance.calls[0]?.[0]).toMatchObject({
+      contextGraphId: 'public-cg',
+      assertionCoordinate: 'queued-public-ka',
+      publicQuads: snapshotQuads,
+      seal: {
+        authorAddress: QUEUED_TEST_AUTHOR,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      },
+    });
+  });
+
+  it('keeps a confirmed queued publish successful when catalog advancement fails', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-catalog-failure',
+      ual: 'did:dkg:local/queued-catalog-failure',
+      publishStatus: 'confirmed',
+    });
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = recorder(async () => {
+      throw new Error('simulated RFC-64 catalog failure');
+    });
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-public-failure',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-public-ka-failure',
+      shareOperationId: 'share-op-catalog-failure',
+      intentByte: 'ae',
+      quads: snapshotQuads,
+    });
+
+    const result = await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+
+    expect(result).toMatchObject({ status: 'confirmed' });
+    expect(agentLike.log.warn.calls.some((call: unknown[]) => (
+      String(call[1]).includes('RFC-64 catalog advancement failed')
+      && String(call[1]).includes('simulated RFC-64 catalog failure')
+    ))).toBe(true);
+  });
+
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {
     const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
     const realChunked = recorder(async () => ({

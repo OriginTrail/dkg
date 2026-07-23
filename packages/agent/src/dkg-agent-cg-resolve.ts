@@ -1490,8 +1490,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   gossipWireIdFor(this: DKGAgent, localId: string): string {
     const sub = this.subscribedContextGraphs.get(localId);
-    if (sub?.onChainHash) return sub.onChainHash;
-    if (/^0x[0-9a-fA-F]{64}$/.test(localId)) return localId.toLowerCase();
+    if (sub?.onChainHash) return this.contextGraphWireId(sub.onChainHash);
+    return this.contextGraphWireId(localId);
+  }
+
+  /** Canonical cleartext-or-hash Context Graph identity used by every index path. */
+  contextGraphWireId(this: DKGAgent, contextGraphId: string): string {
+    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return contextGraphId.toLowerCase();
+    return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+  }
+
+  /**
+   * Derive the curator commitment for a LOCAL cleartext identifier.
+   *
+   * This deliberately hashes every string, including values that happen to
+   * look like a 32-byte wire id. A hash-shaped user-chosen CG name is still
+   * cleartext and its on-chain commitment is keccak256(utf8(name)). Host-only
+   * subscriptions carry an explicit `onChainHash`, so callers never need to
+   * guess which interpretation applies from the string shape alone.
+   */
+  contextGraphNameCommitment(this: DKGAgent, localId: string): string {
     return ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
   }
 
@@ -1600,32 +1618,45 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     return lower;
   }
 
+  /** Bind a name-hash event to its indexed cleartext or hash-only subscription. */
+  bindOnChainContextGraphIdFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    // Chain events may only enrich a subscription that explicitly indexed this
+    // commitment. Falling back to `localId === wireId` is ambiguous: a user may
+    // legitimately choose a cleartext id that itself looks like a 32-byte hash.
+    // Host-only records are indexed under their explicit `onChainHash`, so the
+    // reverse map covers both safe cases without a shape-based fallback.
+    const localId = this.wireIdToLocalCgId.get(wireId);
+    if (localId === undefined) return null;
+    const current = this.subscribedContextGraphs.get(localId);
+    if (current === undefined) return null;
+    const next = { ...current };
+    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
+    next.onChainHash = wireId;
+    this.setContextGraphSubscription(localId, next, options);
+    return localId;
+  }
+
   /**
-   * Record the curator-committed wire id for a local CG. Keeps the
-   * forward (subscribedContextGraphs) and reverse (wireIdToLocalCgId)
-   * mappings in lockstep. Idempotent.
+   * Compatibility adapter for callers that only enrich an existing
+   * subscription's wire id. The canonical subscription mutator owns both the
+   * forward record and reverse index update.
    *
-   * Pass `null` to clear the mapping (rare — used when a CG is
-   * deactivated and we want to free the reverse-index slot).
+   * Pass `null` to clear the curator commitment and restore the canonical
+   * local-id-derived reverse mapping.
    */
   recordCgWireId(this: DKGAgent, localId: string, wireId: string | null): void {
     const sub = this.subscribedContextGraphs.get(localId);
-    const lower = wireId ? wireId.toLowerCase() : null;
-    if (sub) {
-      sub.onChainHash = lower ?? undefined;
-    }
-    // Drop any stale reverse entry that pointed at this localId under
-    // a different hash (curator rotated the wire id — currently
-    // unsupported but cheap to defend against).
-    if (sub?.onChainHash && (!lower || sub.onChainHash !== lower)) {
-      const prev = sub.onChainHash;
-      if (this.wireIdToLocalCgId.get(prev) === localId) {
-        this.wireIdToLocalCgId.delete(prev);
-      }
-    }
-    if (lower) {
-      this.wireIdToLocalCgId.set(lower, localId);
-    }
+    if (sub === undefined) return;
+    this.setContextGraphSubscription(localId, {
+      ...sub,
+      onChainHash: wireId ? this.contextGraphWireId(wireId) : undefined,
+    }, { persist: false });
   }
 
   /**

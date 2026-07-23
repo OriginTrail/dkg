@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
+
 // generic-sql-source.test.ts uses `import('node:sqlite')`, which is
 // `--experimental-sqlite`-gated on Node 22.5–23.x. The flag is a
 // process-level toggle, so mirror `vitest.config.ts`: switch to the
@@ -13,6 +15,7 @@ const SQLITE_EXEC_ARGV = [
 export default defineConfig({
   test: {
     include: [
+      ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",

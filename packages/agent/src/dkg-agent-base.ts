@@ -11,6 +11,13 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import {
+  openRfc64PersistenceV1,
+  type Rfc64PersistenceV1,
+} from './rfc64/persistence-v1.js';
+import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
+import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1003,6 +1010,25 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  /**
+   * One OT-RFC-64 persistence owner for the inventory lease and every resource
+   * protected by it. Agents without dataDir remain deliberately dormant.
+   */
+  protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /**
+   * RFC-64 Gate 1 public author-catalog service, wired onto the production
+   * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
+   * while dormant (no dataDir) or after `stop()`.
+   */
+  protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** Exact process-local post-verification evidence, keyed by applied head. */
+  protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
+    new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
+  /** Bounded process-local terminal receiver failures, keyed by announced head. */
+  protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
+    new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+  /** Serialize local author-head construction/CAS independently per exact scope. */
+  protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
@@ -1572,6 +1598,32 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  /**
+   * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
+   * open the inherited-owner control-object tree before network consumers.
+   */
+  protected async prepareRfc64PersistenceV1(): Promise<void> {
+    if (!this.config.dataDir || this.rfc64PersistenceV1 !== undefined) return;
+    this.rfc64PersistenceV1 = await openRfc64PersistenceV1(this.config.dataDir, {
+      yieldAfterPurgeBatch: () => this.yieldRfc64InventoryV1StartupBatch(),
+    });
+  }
+
+  /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
+  protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  /**
+   * Relinquish the control store and single inventory foundation. Clear local
+   * references before closing so fail-stop cleanup cannot be retried.
+   */
+  protected async closeRfc64PersistenceV1(): Promise<void> {
+    const persistence = this.rfc64PersistenceV1;
+    this.rfc64PersistenceV1 = undefined;
+    await persistence?.close();
   }
 
   /**
