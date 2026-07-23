@@ -17,9 +17,10 @@
  * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
  */
 
-import { tryReplaceSubjectAtomically, type TripleStore } from '@origintrail-official/dkg-storage';
+import { type TripleStore } from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -48,7 +49,6 @@ import {
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
   PROMOTE_UNIQUENESS_KEY,
-  assertPromoteJobRecordSingleSubject,
   classifyJobPayload,
   comparePromoteJobs,
   defaultBackoffMs,
@@ -60,7 +60,7 @@ import {
   parseJobPayload,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
-  serializeJob,
+  serializeJobRecord,
   uniquenessKey,
   uniquenessLookupKeys,
   type PromoteUniquenessInput,
@@ -608,7 +608,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * #1933 — persist a job transition as a single-subject atomic replace so a crash between
    * the delete and the insert can never lose the job row (delete-then-insert is two separate
    * commits; a crash after the delete commits but before the insert commits permanently
-   * strands the subject empty). Routed through the storage capability
+   * strands the subject empty). Routed through the shared writer
+   * `replaceSubjectAtomicallyOrFallback` (#1938), which uses the storage capability
    * `tryReplaceSubjectAtomically` (one commit boundary — the storage layer owns literal
    * externalization, graph-set-index, changelog, and reserved-plane bookkeeping structurally,
    * rather than a raw `update()` string that ChangelogStore would scan and false-reject).
@@ -617,28 +618,26 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * the lift sibling needs is N/A.
    *
    * A store that cannot guarantee one commit boundary (no `replaceSubject`, or a
-   * non-transactional endpoint that refuses it) takes the BOUNDED pre-#1933 delete-then-insert
-   * fallback — still safe here because every same-process transition and read serializes under
-   * `withMutationLock`, so the transient window is masked in-process. `cancel` routes through
-   * this path (it retains the row as a `failed`/`cancelled` replace, never a delete), so the
-   * atomic replace preserves its retain semantics by construction.
+   * non-transactional endpoint that refuses it) takes the shared writer's BOUNDED pre-#1933
+   * delete-then-insert fallback — still safe here because every same-process transition and
+   * read serializes under `withMutationLock`, so the transient window is masked in-process.
+   * `cancel` routes through this path (it retains the row as a `failed`/`cancelled` replace,
+   * never a delete), so the atomic replace preserves its retain semantics by construction.
    */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
-    const jobRef = jobSubject(job.jobId);
-    const jobQuads = serializeJob(job, this.graphUri);
-    // Fail loud if the record is ever not EXACTLY the job subject (see the guard) before it
-    // reaches the STRICT single-subject replace / the jobRef-only fallback delete.
-    assertPromoteJobRecordSingleSubject(job.jobId, jobRef, jobQuads);
-    const replaced = await tryReplaceSubjectAtomically(
+    // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if
+    // the record is ever not EXACTLY the job subject, before it reaches the STRICT
+    // single-subject replace / the jobRef-only fallback delete).
+    const { jobRef, jobQuads } = serializeJobRecord(job, this.graphUri);
+    // Persist via the shared writer (#1938), which owns the atomic-capable-vs-bounded-fallback
+    // policy for both queues (fallback delete scoped to EXACTLY jobRef).
+    await replaceSubjectAtomicallyOrFallback(
       this.store,
       this.graphUri,
       jobRef,
       jobQuads,
-      { source: 'publisher.asyncPromote.writeJob' },
+      'publisher.asyncPromote.writeJob',
     );
-    if (replaced) return;
-    await this.store.deleteByPattern({ subject: jobRef, graph: this.graphUri });
-    await this.store.insert(jobQuads);
   }
 
   // #1837 — subject-scoped record removal (the delete half of writeJob, no re-insert).

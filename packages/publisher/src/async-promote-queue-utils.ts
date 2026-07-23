@@ -207,14 +207,15 @@ export function serializeJob(job: PromoteJob, graphUri: string): Quad[] {
 }
 
 /**
- * #1933 — fail-loud guard that a promote-job record is EXACTLY one subject. Called by the
- * writer (`persistJobRecord`) on `serializeJob`'s output before the atomic replace. Unlike the
- * lift publisher, a promote job has NO immutable request subject to partition, so there is no
- * `serializeJobRecord`-style wrapper — just this focused assertion. `serializeJob` emits rows
- * for only the job subject today, so this never fires in prod; it is a future-proofing tripwire
- * (and a unit-testable seam): if a new field ever emits a second subject it throws HERE rather
- * than being rejected by the STRICT single-subject `replaceSubject` in prod, or silently leaked
- * by the delete-then-insert fallback (which deletes only `jobRef`).
+ * #1933 — fail-loud guard that a promote-job record is EXACTLY one subject. Run by
+ * {@link serializeJobRecord} on `serializeJob`'s output before the atomic replace. Unlike the
+ * lift publisher, a promote job has NO immutable request subject to partition, so
+ * `serializeJobRecord` is a thin single-subject wrapper around this focused assertion (rather
+ * than a two-subject split). `serializeJob` emits rows for only the job subject today, so this
+ * never fires in prod; it is a future-proofing tripwire (and a unit-testable seam): if a new
+ * field ever emits a second subject it throws HERE rather than being rejected by the STRICT
+ * single-subject `replaceSubject` in prod, or silently leaked by the delete-then-insert
+ * fallback (which deletes only `jobRef`).
  */
 export function assertPromoteJobRecordSingleSubject(jobId: string, jobRef: string, jobQuads: Quad[]): void {
   const stray = jobQuads.find((q) => q.subject !== jobRef);
@@ -224,6 +225,28 @@ export function assertPromoteJobRecordSingleSubject(jobId: string, jobRef: strin
         `— it would be rejected by the atomic replace / leaked by the fallback`,
     );
   }
+}
+
+/** The single subject group a promote-job record serializes into. */
+export interface SerializedPromoteJobRecord {
+  readonly jobRef: string;
+  readonly jobQuads: Quad[];
+}
+
+/**
+ * #1938 — the grouping the atomic write path needs, owned by the serializer rather than
+ * re-derived at the write site. Mirrors the async-lift sibling's `serializeJobRecord`, adapted
+ * to the promote job's SINGLE subject: there is no immutable request subject to partition, so
+ * the record is just the job subject and its quads. Runs
+ * {@link assertPromoteJobRecordSingleSubject} internally, so the fail-loud single-subject guard
+ * still fires on the write path (before the STRICT single-subject atomic replace / the
+ * jobRef-only fallback delete) without the writer re-asserting it.
+ */
+export function serializeJobRecord(job: PromoteJob, graphUri: string): SerializedPromoteJobRecord {
+  const jobRef = jobSubject(job.jobId);
+  const jobQuads = serializeJob(job, graphUri);
+  assertPromoteJobRecordSingleSubject(job.jobId, jobRef, jobQuads);
+  return { jobRef, jobQuads };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

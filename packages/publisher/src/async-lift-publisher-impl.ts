@@ -1,5 +1,5 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, PrivateContentStore, tryReplaceSubjectAtomically } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -45,6 +45,7 @@ import type {
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
@@ -1120,7 +1121,8 @@ export class TripleStoreAsyncLiftPublisher
    * false `kind:'none'` intent-lookup miss / dedup gap that hinges on that index
    * row disappearing mid-write cannot occur.
    *
-   * Routed through the storage capability `tryReplaceSubjectAtomically` (a
+   * Routed through the shared writer `replaceSubjectAtomicallyOrFallback` (#1938),
+   * which uses the storage capability `tryReplaceSubjectAtomically` (a
    * sibling of `replaceGraph` / `replaceGraphAndSubject`) rather than a raw
    * `update()` string: the storage layer owns the transaction boundary, literal
    * externalization, graph-set-index and changelog bookkeeping, and — crucially —
@@ -1153,17 +1155,15 @@ export class TripleStoreAsyncLiftPublisher
     const { jobRef, jobQuads, requestQuads } = serializeJobRecord(job, this.graphUri);
     // (1) Request present BEFORE the job subject is observable — ordering matters.
     await this.store.insert(requestQuads);
-    // (2) Atomically replace the mutable job subject.
-    const replaced = await tryReplaceSubjectAtomically(
+    // (2) Atomically replace the mutable job subject via the shared writer (#1938),
+    //     which owns the atomic-capable-vs-bounded-fallback policy for both queues.
+    await replaceSubjectAtomicallyOrFallback(
       this.store,
       this.graphUri,
       jobRef,
       jobQuads,
-      { source: 'publisher.asyncLift.writeJob' },
+      'publisher.asyncLift.writeJob',
     );
-    if (replaced) return;
-    await this.store.deleteByPattern({ subject: jobRef, graph: this.graphUri });
-    await this.store.insert(jobQuads);
   }
 
   /**
