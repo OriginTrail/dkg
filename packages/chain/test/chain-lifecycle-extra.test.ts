@@ -43,6 +43,7 @@ import {
   HARDHAT_KEYS,
 } from './evm-test-context.js';
 import { mintTokens } from './hardhat-harness.js';
+import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
@@ -92,10 +93,26 @@ async function publishOneKCV10(opts: {
   // OT-RFC-43 Option-1: explicit packed reservedKaId. When omitted the helper
   // allocates a fresh `(author<<96)|number` for the CORE_OP author.
   reservedKaId?: bigint;
-} = {}): Promise<{ kaId: bigint; txHash: string; contextGraphId: bigint; merkleRoot: Uint8Array; reservedKaId: bigint }> {
+  timestampTransportFailure?: boolean;
+} = {}): Promise<{
+  kaId: bigint;
+  txHash: string;
+  contextGraphId: bigint;
+  merkleRoot: Uint8Array;
+  reservedKaId: bigint;
+  blockTimestamp: number;
+}> {
   const provider = createProvider();
   const { hubAddress, coreProfileId } = getSharedContext();
   const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  if (opts.timestampTransportFailure) {
+    (adapter as unknown as { getBlockTimestamp: () => Promise<number> }).getBlockTimestamp = async () => {
+      throw new ChainRpcTransportError(
+        'RPC_ENDPOINTS_EXHAUSTED',
+        'getBlock read failed on all configured RPC endpoints: 429 Too Many Requests',
+      );
+    };
+  }
   await mintTokens(
     provider,
     hubAddress,
@@ -202,6 +219,7 @@ async function publishOneKCV10(opts: {
     contextGraphId,
     merkleRoot,
     reservedKaId,
+    blockTimestamp: result.blockTimestamp,
   };
 }
 
@@ -227,6 +245,19 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
   // --------------------------------------------------------------------
 
   describe('V10 lifecycle: createKnowledgeAssets + updateKnowledgeCollectionV10 + verifyKAUpdate + resolvePublishByTxHash [CH-3]', () => {
+    it('keeps a mined publish confirmed when every RPC rejects timestamp enrichment', async () => {
+      const result = await publishOneKCV10({
+        kaCount: 1,
+        byteSize: 256n,
+        epochs: 2,
+        timestampTransportFailure: true,
+      });
+
+      expect(result.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+      expect(result.kaId).toBe(result.reservedKaId);
+      expect(result.blockTimestamp).toBe(0);
+    });
+
     it('publishes, updates, verifies the update, and round-trips the publish receipt', async () => {
       const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
 

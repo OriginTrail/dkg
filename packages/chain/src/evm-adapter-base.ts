@@ -28,7 +28,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError, isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
@@ -53,6 +53,37 @@ type ContractWriteSender = (
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
 };
+
+/**
+ * A successful receipt is authoritative for transaction inclusion. Fetching
+ * its block timestamp is enrichment only and must not turn an already-mined
+ * write into a failed publish when every RPC endpoint is temporarily
+ * throttled or unavailable.
+ *
+ * Deterministic and non-transport failures still propagate so malformed block
+ * references and programmer errors are never hidden.
+ */
+export async function resolveConfirmedReceiptBlockTimestamp(
+  receipt: Pick<ethers.TransactionReceipt, 'hash' | 'blockNumber'>,
+  readTimestamp: () => Promise<number>,
+): Promise<number> {
+  try {
+    return await readTimestamp();
+  } catch (error) {
+    if (
+      !isChainRpcTransportError(error)
+      || error.code !== 'RPC_ENDPOINTS_EXHAUSTED'
+    ) {
+      throw error;
+    }
+    console.warn(
+      `[chain] Transaction ${receipt.hash} is confirmed in block ${receipt.blockNumber}, ` +
+      `but its timestamp is temporarily unavailable (${error.code}); ` +
+      'continuing with blockTimestamp=0.',
+    );
+    return 0;
+  }
+}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -3692,7 +3723,10 @@ export class EVMChainAdapterBase {
     // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await resolveConfirmedReceiptBlockTimestamp(
+      receipt,
+      () => this.getBlockTimestamp(receipt.blockNumber),
+    );
 
     return {
       batchId: kaId,

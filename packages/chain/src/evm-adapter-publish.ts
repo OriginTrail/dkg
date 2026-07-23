@@ -9,7 +9,11 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import {
+  EVMChainAdapterBase,
+  decodeConvictionCostCovered,
+  resolveConfirmedReceiptBlockTimestamp,
+} from './evm-adapter-base.js';
 import { ethers, Wallet, Contract } from 'ethers';
 import type { ChainReadOptions, ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult, PublisherPublishPlan, PublisherPublishPlanRequest } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -513,7 +517,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
+    const blockTimestamp = await resolveConfirmedReceiptBlockTimestamp(
+      receipt,
+      () => this.getBlockTimestamp(receipt.blockNumber, options),
+    );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {

@@ -8,11 +8,12 @@
  * exercised on the CI devnet @mutating lane; here we pin the decode itself by
  * round-tripping a synthesized log through the same interface.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Interface } from 'ethers';
 import { decodeConvictionCostCovered } from '../src/evm-adapter-base.js';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';
+import { ChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 
 function costCoveredLog(values: bigint[]): { topics: string[]; data: string } {
   const iface = getPcaLogicInterface();
@@ -98,5 +99,75 @@ describe('decodeConvictionCostCovered (B8)', () => {
       drawnFromEpoch: 500n,
       drawnFromTopUp: 200n,
     });
+  });
+
+  it('keeps a confirmed V10 publish when timestamp enrichment exhausts every RPC', async () => {
+    const parser = Object.create(PublishMethods.prototype) as PublishMethods & {
+      contracts: Record<string, unknown>;
+      getBlockTimestamp: () => Promise<number>;
+    };
+    parser.contracts = {
+      knowledgeAssetStorage: {
+        target: KAS,
+        interface: new Interface([
+          'event KnowledgeAssetCreated(uint256 id, address author)',
+        ]),
+      },
+    };
+    parser.getBlockTimestamp = async () => {
+      throw new ChainRpcTransportError(
+        'RPC_ENDPOINTS_EXHAUSTED',
+        'getBlock read failed on all configured RPC endpoints: 429 Too Many Requests',
+      );
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const out = await parser.parseV10PublishReceipt({
+        hash: '0xconfirmed',
+        blockNumber: 12,
+        index: 3,
+        from: '0x3333333333333333333333333333333333333333',
+        logs: [kaCreatedLog()],
+      } as any);
+
+      expect(out).toMatchObject({
+        txHash: '0xconfirmed',
+        blockNumber: 12,
+        blockTimestamp: 0,
+        kaId: 55n,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('continuing with blockTimestamp=0'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still rejects deterministic timestamp parsing failures', async () => {
+    const parser = Object.create(PublishMethods.prototype) as PublishMethods & {
+      contracts: Record<string, unknown>;
+      getBlockTimestamp: () => Promise<number>;
+    };
+    parser.contracts = {
+      knowledgeAssetStorage: {
+        target: KAS,
+        interface: new Interface([
+          'event KnowledgeAssetCreated(uint256 id, address author)',
+        ]),
+      },
+    };
+    parser.getBlockTimestamp = async () => {
+      throw Object.assign(new Error('invalid block tag'), { code: 'INVALID_ARGUMENT' });
+    };
+
+    await expect(parser.parseV10PublishReceipt({
+      hash: '0xinvalid',
+      blockNumber: 12,
+      index: 3,
+      from: '0x3333333333333333333333333333333333333333',
+      logs: [kaCreatedLog()],
+    } as any)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 });
