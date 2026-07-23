@@ -117,8 +117,8 @@ interface DurableSyncContext {
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     verifiedGraphScopedDataGraphs?: string[];
-    droppedSyncControlTriples?: number;
-    droppedNonIriSubjectTriples?: number;
+    /** Worker-owned aggregate of meta rows deliberately consumed but not persisted. */
+    consumedUnpersistedMetaTriples?: number;
     totalFetchedDataQuads: number;
     totalFetchedMetaQuads: number;
     rejectedKcs: number;
@@ -473,21 +473,20 @@ export async function runDurableSync(
       };
 
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const droppedSyncControlTriples = processed.droppedSyncControlTriples ?? 0;
-      // Rows the verifier deliberately consumed but did not persist: unverified
-      // sync controls (existing) plus non-IRI `_meta` subjects dropped at ingest
-      // (#1921). A metadata-only page discarded ENTIRELY by these guards carries
-      // no verifiedMeta, so — like the all-controls case — the meta cursor only
-      // advances if we still count the page as consumed. Summing both kinds also
-      // covers a MIXED all-discarded page (some controls + some non-IRI), which
-      // otherwise pins because neither count alone equals the fetched total.
-      const deliberatelyDroppedMeta =
-        droppedSyncControlTriples + (processed.droppedNonIriSubjectTriples ?? 0);
+      // The worker reports, as ONE reason-agnostic count, how many fetched meta
+      // rows the verifier deliberately consumed but did NOT persist — unverified
+      // sync controls plus non-IRI `_meta` subjects (#1921). A metadata-only page
+      // discarded ENTIRELY this way carries no verifiedMeta, so the meta cursor
+      // must still advance or durable sync pins on the same page. Depending on the
+      // aggregate (not per-reason counters) keeps checkpoint orchestration
+      // decoupled from verifier discard policy; the per-reason counts remain as
+      // verifier-side diagnostics only.
+      const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples ?? 0;
       const discardedOnlyMetadataResponse = metadataOnlyResponse
         && processed.verifiedData.length === 0
         && processed.verifiedMeta.length === 0
-        && deliberatelyDroppedMeta > 0
-        && deliberatelyDroppedMeta === processed.totalFetchedMetaQuads;
+        && consumedUnpersistedMetaTriples > 0
+        && consumedUnpersistedMetaTriples === processed.totalFetchedMetaQuads;
       const updateMetaCheckpoint = batchVerifiedCleanly
         && processed.dataRejectedMissingMeta === 0
         && (

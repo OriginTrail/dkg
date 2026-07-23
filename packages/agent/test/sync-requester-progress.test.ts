@@ -57,7 +57,7 @@ function durableProcessResult() {
   return {
     verifiedData: [] as Quad[],
     verifiedMeta: [] as Quad[],
-    droppedSyncControlTriples: 0,
+    consumedUnpersistedMetaTriples: 0,
     totalFetchedDataQuads: 0,
     totalFetchedMetaQuads: 0,
     rejectedKcs: 0,
@@ -515,7 +515,9 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 3,
+        // Pure-sync-control page: worker aggregates 3 discarded controls into
+        // consumedUnpersistedMetaTriples. Regression guard for the shipped path.
+        consumedUnpersistedMetaTriples: 3,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert,
@@ -556,7 +558,7 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 2,
+        consumedUnpersistedMetaTriples: 2,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert: async () => {},
@@ -572,11 +574,10 @@ describe('sync requester progress accounting', () => {
   });
 
   it('advances the meta cursor when the whole page is non-IRI subjects dropped at ingest (#1921)', async () => {
-    // A metadata-only page consisting solely of non-IRI `_meta` rows is fully
-    // discarded by the #1921 guard: verifiedMeta=[] and droppedSyncControlTriples=0,
-    // but droppedNonIriSubjectTriples === totalFetchedMetaQuads. The meta cursor
-    // must still advance (the rows were deliberately consumed) or durable sync
-    // pins on the same poisoned page. Fails before the propagate fix.
+    // All-non-IRI metadata-only page: the worker aggregates every dropped row
+    // into consumedUnpersistedMetaTriples === totalFetchedMetaQuads and no meta
+    // is persisted. The requester must still advance the meta cursor (the rows
+    // were deliberately consumed) or durable sync pins on the same poisoned page.
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -600,8 +601,7 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 0,
-        droppedNonIriSubjectTriples: 3,
+        consumedUnpersistedMetaTriples: 3,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert,
@@ -620,9 +620,9 @@ describe('sync requester progress accounting', () => {
   });
 
   it('advances the meta cursor when a mixed page is fully discarded by controls + non-IRI drops (#1921)', async () => {
-    // A mixed all-discarded page (some unverified controls + some non-IRI rows)
-    // also pins today because neither count alone equals the fetched total. The
-    // summed deliberate-drop check advances the cursor. Fails before the fix.
+    // A mixed all-discarded page (some unverified controls + some non-IRI rows):
+    // the worker sums both reasons into consumedUnpersistedMetaTriples === the
+    // fetched total, so the requester advances the cursor rather than pinning.
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_quads: Quad[]) => {});
@@ -646,8 +646,7 @@ describe('sync requester progress accounting', () => {
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
-        droppedSyncControlTriples: 1,
-        droppedNonIriSubjectTriples: 2,
+        consumedUnpersistedMetaTriples: 3,
         totalFetchedMetaQuads: 3,
       }),
       storeInsert,

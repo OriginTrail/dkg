@@ -334,6 +334,9 @@ describe('durable sync worker result transport', () => {
 
     expect(wireResult.verifiedMetaIndexes).toEqual([]);
     expect(wireResult.droppedSyncControlTriples).toBe(meta.length);
+    // Pure-sync-control page: the requester-facing aggregate equals the
+    // sync-control diagnostic count, preserving the shipped checkpoint semantics.
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
     expect(wireResult.metaOnlyResponses).toBe(1);
     expect(wireResult.rejectedKcs).toBe(0);
   });
@@ -364,6 +367,35 @@ describe('durable sync worker result transport', () => {
 
     expect(wireResult.verifiedMetaIndexes).toEqual([]);
     expect(wireResult.droppedNonIriSubjectTriples).toBe(meta.length);
+    // All-non-IRI page: the aggregate equals the non-IRI diagnostic count.
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
+  });
+
+  it('aggregates mixed control + non-IRI drops into consumedUnpersistedMetaTriples (#1921)', () => {
+    // Worker-level guard for the consolidated checkpoint contract: the single
+    // requester-facing aggregate equals the SUM of the per-reason diagnostic
+    // counts for a page mixing unverified sync controls and non-IRI subjects.
+    // Neutralizing the worker sum breaks this; the per-reason counts remain as
+    // diagnostics.
+    const control = 'urn:orphaned:sync-control';
+    const meta: Quad[] = [
+      { subject: control, predicate: 'http://dkg.io/ontology/batchId', object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META_GRAPH },
+      { subject: control, predicate: 'http://dkg.io/ontology/assertionGraph', object: 'urn:attacker:graph', graph: META_GRAPH },
+      { subject: '_:injected', predicate: 'http://dkg.io/ontology/status', object: '"drop"', graph: META_GRAPH },
+      { subject: '"literal-subject"', predicate: 'http://dkg.io/ontology/status', object: '"drop-too"', graph: META_GRAPH },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedSyncControlTriples).toBe(2);
+    expect(wireResult.droppedNonIriSubjectTriples).toBe(2);
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(
+      wireResult.droppedSyncControlTriples + wireResult.droppedNonIriSubjectTriples,
+    );
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
     expect(wireResult.metaOnlyResponses).toBe(1);
     expect(wireResult.rejectedKcs).toBe(0);
   });
