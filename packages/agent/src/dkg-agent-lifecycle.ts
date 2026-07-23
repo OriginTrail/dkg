@@ -3536,21 +3536,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
-      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
+      syncFromPeer: (peerId, contextGraphIds, options) => this.syncFromPeerDetailed(
         peerId,
         contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
         undefined,
         undefined,
         undefined,
-        { stopOnBackoffWorthyFailure: true },
+        {
+          stopOnBackoffWorthyFailure: true,
+          priority: options?.priority,
+        },
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
+      syncSharedMemoryFromPeer: async (peerId, contextGraphIds, options) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
         stopOnBackoffWorthyFailure: true,
         sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+        priority: options?.priority,
       }),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
+      isolateSystemContextGraphs: true,
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);

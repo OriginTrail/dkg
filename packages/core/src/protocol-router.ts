@@ -1,6 +1,7 @@
 import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
+import { isPublicLikeAddress } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
 import {
   MessageStreamPool,
@@ -908,19 +909,28 @@ export class ProtocolRouter {
           protocolId,
           attemptSignal,
           {
-            // Probe peerStore for non-circuit (direct) addresses; the
+            // Probe peerStore for remotely usable non-circuit (direct)
+            // addresses; the
             // fast path uses this to gate whether reusing a LIMITED
             // (circuit-relay-v2) connection is safe or whether
             // libp2p's CM is about to auto-upgrade and prune it
             // mid-stream. See the JSDoc inside
             // `tryReuseExistingConnection` + the PR #537 CI
             // postmortem for the DCUtR upgrade race detail.
+            //
+            // A peerStore record can also contain the remote peer's
+            // loopback/LAN/CGNAT listen addresses. Those are not viable
+            // upgrade targets from this node and must not suppress reuse of
+            // the only healthy relay circuit. The profile publisher already
+            // uses the same public-address classifier to avoid advertising
+            // these addresses in the first place; applying it here also
+            // handles stale and identify-learned peerStore records.
             peerHasDirectAddrs: async (): Promise<boolean> => {
               const peer = await libp2p.peerStore.get(peerId);
               const addrs = peer.addresses ?? [];
               for (const a of addrs) {
                 const ma = a.multiaddr?.toString?.() ?? '';
-                if (ma && !ma.includes('/p2p-circuit')) return true;
+                if (ma && !ma.includes('/p2p-circuit') && isPublicLikeAddress(ma)) return true;
               }
               return false;
             },

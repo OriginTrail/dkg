@@ -3,6 +3,7 @@ import {
   classifyDurableProgress,
   type DurableProgressSummary,
 } from '../durable-progress.js';
+import { FOREGROUND_CATCHUP_SYNC_PRIORITY } from '../catchup-policy.js';
 
 type SyncProgressSummary = DurableProgressSummary & { insertedTriples: number };
 
@@ -21,11 +22,26 @@ interface SyncOnConnectContext {
   knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
+  syncFromPeer: (
+    peerId: string,
+    contextGraphIds?: string[],
+    options?: { priority?: number },
+  ) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
+  syncSharedMemoryFromPeer: (
+    peerId: string,
+    contextGraphIds: string[],
+    options?: { priority?: number },
+  ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
+  /**
+   * Run already-subscribed user graphs as foreground work before the large
+   * discovery/system graphs. System-graph pressure remains observable and is
+   * retried on the ordinary freshness interval, but cannot invalidate a clean
+   * user-graph round or block its shared-memory catch-up.
+   */
+  isolateSystemContextGraphs?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
@@ -120,6 +136,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
+    isolateSystemContextGraphs = false,
     logInfo,
   } = context;
 
@@ -219,6 +236,126 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       logInfo(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
       context.onPeerSkippedNoSync?.(remotePeer, protocols);
       return 'skipped-no-sync';
+    }
+
+    const configuredContextGraphIds = [...new Set(getSyncContextGraphs() ?? [])];
+    if (isolateSystemContextGraphs && configuredContextGraphIds.length > 0) {
+      logInfo(
+        ctx,
+        `Syncing ${configuredContextGraphIds.length} subscribed user CG(s) from ${shortPeer} before background system discovery`,
+      );
+      const userSynced = await syncFromPeer(
+        remotePeer,
+        configuredContextGraphIds,
+        { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
+      );
+      const userAccounting = recordSyncAccounting(userSynced, 'durable');
+      logInfo(
+        ctx,
+        `Synced ${userAccounting.insertedTriples} subscribed-user data triples from peer ${shortPeer}`,
+      );
+      if (userAccounting.deferredByBackpressure) {
+        logInfo(ctx, `Stopping sync-on-connect user fanout for peer ${shortPeer} after local admission deferral`);
+        return finishSyncAccounting();
+      }
+      if (userAccounting.backoffWorthyFailure) {
+        logInfo(ctx, `Stopping sync-on-connect user fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
+        return finishSyncAccounting();
+      }
+
+      await runNonTransportStep(() => refreshMetaSyncedFlags(configuredContextGraphIds));
+      durableSyncCompleted = true;
+
+      const wsContextGraphIds = getSharedMemorySyncContextGraphs
+        ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
+        : configuredContextGraphIds;
+      if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
+        const wsSynced = await syncSharedMemoryFromPeer(
+          remotePeer,
+          wsContextGraphIds,
+          { priority: FOREGROUND_CATCHUP_SYNC_PRIORITY },
+        );
+        const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
+        logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} foreground shared memory triples from peer ${shortPeer}`);
+        if (sharedAccounting.deferredByBackpressure) {
+          logInfo(ctx, `Foreground shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
+          return finishSyncAccounting();
+        }
+        if (sharedAccounting.backoffWorthyFailure) {
+          logInfo(ctx, `Stopping sync-on-connect after foreground shared-memory pressure from peer ${shortPeer}`);
+          return finishSyncAccounting();
+        }
+      } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
+        logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
+      }
+
+      // System graphs are still maintained: they simply leave the critical
+      // user-CG path. Their failure is intentionally scope-local. A clean user
+      // round writes the ordinary peer freshness marker, so relay churn cannot
+      // immediately re-enqueue the same large AGENTS/ONTOLOGY work; the
+      // periodic reconciler retries it after the normal staleness interval.
+      const systemContextGraphIds = [
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      ];
+      try {
+        logInfo(ctx, `Syncing system discovery graphs from peer ${shortPeer} in the background lane`);
+        const systemSynced = await syncFromPeer(remotePeer, systemContextGraphIds);
+        const systemComplete = typeof systemSynced !== 'number'
+          && 'complete' in systemSynced
+          && typeof systemSynced.complete === 'boolean'
+            ? systemSynced.complete
+            : undefined;
+        const systemAccounting = classifySyncResult(systemSynced, systemComplete);
+        logInfo(ctx, `Synced ${systemAccounting.insertedTriples} background system triples from peer ${shortPeer}`);
+        if (
+          systemComplete === false
+          || systemAccounting.failed
+          || systemAccounting.deferredByBackpressure
+          || systemAccounting.backoffWorthyFailure
+        ) {
+          logInfo(
+            ctx,
+            `Deferring system discovery from peer ${shortPeer} without invalidating the clean user-CG round`,
+          );
+          return finishSyncAccounting();
+        }
+
+        await refreshMetaSyncedFlags(systemContextGraphIds);
+        const knownCgsBeforeDiscovery = new Set(configuredContextGraphIds);
+        await discoverContextGraphsFromStore();
+        const newlyDiscovered = (getSyncContextGraphs() ?? [])
+          .filter((id) => !knownCgsBeforeDiscovery.has(id));
+        if (newlyDiscovered.length > 0) {
+          logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — scheduling one background durable pass from ${shortPeer}`);
+          const discoveredSynced = await syncFromPeer(remotePeer, newlyDiscovered);
+          const discoveredComplete = typeof discoveredSynced !== 'number'
+            && 'complete' in discoveredSynced
+            && typeof discoveredSynced.complete === 'boolean'
+              ? discoveredSynced.complete
+              : undefined;
+          const discoveredAccounting = classifySyncResult(discoveredSynced, discoveredComplete);
+          logInfo(
+            ctx,
+            `Synced ${discoveredAccounting.insertedTriples} background triples for newly discovered CG(s) from ${shortPeer}`,
+          );
+          if (
+            discoveredComplete !== false
+            && !discoveredAccounting.failed
+            && !discoveredAccounting.deferredByBackpressure
+            && !discoveredAccounting.backoffWorthyFailure
+          ) {
+            await refreshMetaSyncedFlags(newlyDiscovered);
+          }
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logInfo(
+          ctx,
+          `Background system discovery from peer ${shortPeer} failed without blocking subscribed user CGs: ${detail}`,
+        );
+      }
+      return finishSyncAccounting();
     }
 
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);

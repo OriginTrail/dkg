@@ -1502,6 +1502,40 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(0);
     });
 
+    it('uses a limited candidate when peerStore direct addresses are loopback or private', async () => {
+      let limitedUsed = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedUsed += 1;
+              return makeStubStream(new Uint8Array([0x89])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({
+          addresses: [
+            { multiaddr: { toString: () => '/ip4/127.0.0.1/tcp/4001' } },
+            { multiaddr: { toString: () => '/ip4/192.168.1.60/tcp/4001' } },
+            { multiaddr: { toString: () => '/ip4/100.99.142.87/tcp/4001' } },
+            { multiaddr: { toString: () => '/ip6/fd00::1/tcp/4001' } },
+          ],
+        }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('dialProtocol must not be called for unusable direct addresses');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x89]));
+      expect(limitedUsed).toBe(1);
+      expect(dialCalls).toBe(0);
+    });
+
     it('skips connections whose status is not "open"', async () => {
       let openCalls = 0;
       let closedCalls = 0;

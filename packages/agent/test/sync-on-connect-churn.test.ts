@@ -3,7 +3,10 @@ import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnect,
+  type SyncOnConnectPeerOutcome,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -76,6 +79,102 @@ describe('sync-on-connect churn gates', () => {
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       configuredGraph,
     ]);
+  });
+
+  it('finishes foreground user durable and shared sync before a pressured system-graph lane', async () => {
+    const calls: Array<{
+      lane: 'durable' | 'shared';
+      contextGraphIds: string[];
+      priority?: number;
+    }> = [];
+    const syncedPeers: SyncOnConnectPeerOutcome[] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['current-user-cg'],
+      getSharedMemorySyncContextGraphs: () => ['current-user-cg'],
+      syncFromPeer: async (_peerId, contextGraphIds = [], options) => {
+        calls.push({ lane: 'durable', contextGraphIds, priority: options?.priority });
+        if (contextGraphIds.includes(SYSTEM_CONTEXT_GRAPHS.AGENTS)) {
+          return emptyDetailedSync({
+            timedOutPhases: 1,
+            backoffWorthyFailures: 1,
+          });
+        }
+        return emptyDetailedSync({ completedPhases: 1, checkpointAdvances: 1 });
+      },
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds, options) => {
+        calls.push({ lane: 'shared', contextGraphIds, priority: options?.priority });
+        return emptyDetailedSync({ completedPhases: 1, checkpointAdvances: 1 });
+      },
+      isolateSystemContextGraphs: true,
+      logInfo: noopLog,
+      onPeerSynced: (_peerId, syncOutcome) => {
+        if (syncOutcome) syncedPeers.push(syncOutcome);
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(calls).toEqual([
+      {
+        lane: 'durable',
+        contextGraphIds: ['current-user-cg'],
+        priority: 2_000,
+      },
+      {
+        lane: 'shared',
+        contextGraphIds: ['current-user-cg'],
+        priority: 2_000,
+      },
+      {
+        lane: 'durable',
+        contextGraphIds: [
+          SYSTEM_CONTEXT_GRAPHS.AGENTS,
+          SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        ],
+        priority: undefined,
+      },
+    ]);
+    expect(syncedPeers).toEqual([{ fresh: true, progress: true }]);
+  });
+
+  it('does not let a system-graph transport failure invalidate a clean user-CG round', async () => {
+    const sharedRuns: string[][] = [];
+    const syncedPeers: SyncOnConnectPeerOutcome[] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['current-user-cg'],
+      syncFromPeer: async (_peerId, contextGraphIds = []) => {
+        if (contextGraphIds.includes(SYSTEM_CONTEXT_GRAPHS.AGENTS)) {
+          throw new Error('system responder timed out');
+        }
+        return emptyDetailedSync({ completedPhases: 1, checkpointAdvances: 1 });
+      },
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        sharedRuns.push(contextGraphIds);
+        return emptyDetailedSync({ completedPhases: 1, checkpointAdvances: 1 });
+      },
+      isolateSystemContextGraphs: true,
+      logInfo: noopLog,
+      onPeerSynced: (_peerId, syncOutcome) => {
+        if (syncOutcome) syncedPeers.push(syncOutcome);
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(sharedRuns).toEqual([['current-user-cg']]);
+    expect(syncedPeers).toEqual([{ fresh: true, progress: true }]);
   });
 
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
