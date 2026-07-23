@@ -11,6 +11,12 @@ import {
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_SIZE,
+} from '../src/dkg-agent-constants.js';
+import {
   DKG_NS,
   lineGraphsFromNquads,
   linesFromNquads,
@@ -447,10 +453,14 @@ describe('sync responder pagination interleaving', () => {
     const cgId = 'oversized-durable-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
-    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    // Three DISTINCT admitted subjects (one row each), so the page boundary
+    // falls on a subject boundary and the fallback pages 2 + 1. Since #1788 a
+    // single subject is emitted atomically and would never split across pages,
+    // so distinct subjects are required to exercise paging here. Activity-prefix
+    // subjects survive readDurableMetaRows filtering.
     await store.insert(Array.from({ length: 3 }, (_, i) => ({
       graph: metaGraph,
-      subject: cgPrefix,
+      subject: `did:dkg:activity:${cgId}-${i}`,
       predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
       object: `"meta-${i.toString().padStart(3, '0')}"`,
     })));
@@ -477,6 +487,84 @@ describe('sync responder pagination interleaving', () => {
     expect(linesFromNquads(first)).toHaveLength(2);
     expect(linesFromNquads(second)).toHaveLength(1);
     expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  // Handler-level (through registerSyncHandler): the durable-meta wire branch
+  // handles an oversized admitted subject DIFFERENTLY by negotiation, and both
+  // outcomes are frame-safe with no silent metadata loss (#1788/#1916):
+  //  - NEGOTIATED (byte-budget pageMode): the subject-atomic byte-fit chunks the
+  //    oversized subject under the frame and pages to completion (empty=EOF, so a
+  //    short page is not EOF). A regression returning the whole >4 MiB subject
+  //    would fail (pageCount 1 + over-budget bytes).
+  //  - LEGACY (no pageMode): a legacy requester reads a short page as EOF, so
+  //    byte-fitting would silently drop the rest of the subject; instead the
+  //    responder FAILS LOUD. A regression byte-fitting it would fail (no throw).
+  const oversizedMetaStore = (cgId: string): { store: OxigraphStore; rows: Quad[]; subject: string } => {
+    const store = new OxigraphStore();
+    const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
+    const subject = `did:dkg:activity:${cgId}-big`;
+    const bigLiteral = `"${'y'.repeat(60_000)}"`; // ~60 KB per row (under the 65535 literal cap)
+    const rows: Quad[] = Array.from({ length: 80 }, (_, i) => ({
+      graph: metaGraph,
+      subject,
+      predicate: `${DKG_NS}p${String(i).padStart(3, '0')}`,
+      object: bigLiteral,
+    })); // ~4.8 MB total > the 4 MiB budget
+    return { store, rows, subject };
+  };
+
+  it('durable-meta handler byte-caps an oversized subject under the frame and pages to completion — negotiated (byte-budget pageMode) (#1916)', async () => {
+    const cgId = 'oversized-meta-frame-neg';
+    const { store, rows } = oversizedMetaStore(cgId);
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta' as const,
+      limit: SYNC_PAGE_SIZE,
+      syncSessionId: `${cgId}-session`,
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_BYTE_BUDGET_MAX_ROWS,
+    };
+
+    const enc = new TextEncoder();
+    let offset = 0;
+    let delivered = 0;
+    let pageCount = 0;
+    for (let guard = 0; guard < 100; guard += 1) {
+      const resp = await cap.invoke({ ...base, offset });
+      const n = resp === '' ? 0 : linesFromNquads(resp).length;
+      if (n === 0) break;
+      // Frame-safety: every response stays within the byte budget.
+      expect(enc.encode(resp).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      pageCount += 1;
+      delivered += n;
+      offset += n;
+    }
+    // Chunked (byte cap engaged, not one oversized frame) and every row delivered.
+    expect(pageCount).toBeGreaterThan(1);
+    expect(delivered).toBe(rows.length);
+    await store.close();
+  });
+
+  it('durable-meta handler FAILS LOUD on an oversized subject for a legacy (no pageMode) requester, never a silent short page (#1788)', async () => {
+    const cgId = 'oversized-meta-frame-legacy';
+    const { store, rows } = oversizedMetaStore(cgId);
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+    // No pageMode ⇒ non-negotiated legacy requester. Byte-fitting would return a
+    // short page it reads as EOF (silent loss + #1788 split); the responder must
+    // instead surface a hard, explicit failure — not a successful short response.
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      limit: SYNC_PAGE_SIZE,
+      offset: 0,
+      syncSessionId: `${cgId}-session`,
+    })).rejects.toThrow(/cannot be served frame-safe/);
+    await store.close();
   });
 
   it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
@@ -700,11 +788,15 @@ describe('sync responder pagination interleaving', () => {
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const metaGraph = `${cgPrefix}/_meta`;
     const rows: Quad[] = [];
+    // 100 DISTINCT admitted subjects (one row each): since #1788 a single
+    // subject is emitted atomically, so a deep window into ONE subject is no
+    // longer meaningful — distinct subjects let the deep page address a subject
+    // boundary. Activity-prefix subjects survive durable-meta admission.
     for (let index = 0; index < 100; index++) {
       const padded = index.toString().padStart(3, '0');
       rows.push({
         graph: metaGraph,
-        subject: cgPrefix,
+        subject: `did:dkg:activity:m${padded}`,
         predicate: `http://schema.org/p${padded}`,
         object: `"meta-${padded}"`,
       });
@@ -717,9 +809,12 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    // The durable-meta read is now store-bounded (subject-membership filter
-    // pushed into the store via EXISTS), so a deep page is a paged store query.
-    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
+    // The durable-meta read is store-bounded (subject-membership filter pushed
+    // into the store via EXISTS), so a deep page is a paged store query. Durable
+    // meta reads `limit + 1` rows to detect a subject straddling the page
+    // boundary (#1788) and serves at most `limit` when the boundary is clean, so
+    // the store query's LIMIT is 6 here while the served page stays 5.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 6);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,

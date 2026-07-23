@@ -803,7 +803,7 @@ describe('sync responder snapshot cache and budget', () => {
     expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0, bytesEstimate: 0 });
   });
 
-  it('extracts a cached page without iterating or copying the complete snapshot', async () => {
+  it('extracts a cached page with only a bounded subject-boundary lookahead', async () => {
     const source = Array.from({ length: 2_000 }, (_, index) => ({
       s: `urn:row:${index}`,
       p: `${DKG_NS}label`,
@@ -813,23 +813,25 @@ describe('sync responder snapshot cache and budget', () => {
     const pageStart = 1_000;
     const pageEnd = 1_500; // offset 1000 + limit 500
     let wholeSnapshotIterations = 0;
-    let outOfPageIndexReads = 0;
+    // Durable meta is subject-atomic (#1788): the reader peeks the single row at
+    // the page boundary to detect whether a subject straddles it. That is a
+    // bounded one-subject-horizon lookahead, NOT a full-array copy. Reading any
+    // index BEFORE the page (an indexed clone / `rows.slice()` of the whole
+    // array) or iterating the whole snapshot remains a HARD failure, so a
+    // full-scan regression still fails this test.
+    let boundaryLookAheadReads = 0;
     const snapshot = new Proxy(source, {
       get(target, property, receiver) {
         if (property === Symbol.iterator) {
           wholeSnapshotIterations += 1;
           throw new Error('complete snapshot must not be iterated while extracting one page');
         }
-        // A correct slice(offset, offset+limit) reads only in-page element
-        // indices (plus non-index props like `length`). Reading any index
-        // outside the page is a full-array copy (e.g. `rows.slice()` then slice
-        // again, or an indexed clone), which the iterator guard alone misses.
         if (typeof property === 'string' && /^\d+$/.test(property)) {
           const index = Number(property);
-          if (index < pageStart || index >= pageEnd) {
-            outOfPageIndexReads += 1;
-            throw new Error(`page extraction must not read out-of-page index ${index}`);
+          if (index < pageStart) {
+            throw new Error(`page extraction must not read pre-page index ${index} (full-array copy)`);
           }
+          if (index >= pageEnd) boundaryLookAheadReads += 1;
         }
         return Reflect.get(target, property, receiver);
       },
@@ -849,9 +851,13 @@ describe('sync responder snapshot cache and budget', () => {
       rowListCacheKey: 'cached-page',
     });
 
+    // Every source subject is distinct, so the boundary subject does not
+    // straddle: the page stays exactly one limit wide and the reader peeks the
+    // boundary row exactly once, never extending.
     expect(page).toHaveLength(500);
     expect(page[0]?.s).toBe('urn:row:1000');
+    expect(page[499]?.s).toBe('urn:row:1499');
     expect(wholeSnapshotIterations).toBe(0);
-    expect(outOfPageIndexReads).toBe(0);
+    expect(boundaryLookAheadReads).toBe(1);
   });
 });

@@ -182,7 +182,15 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   const requestedLimit = Number.isSafeInteger(limit)
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
-  const useByteBudgetPage = !includeSharedMemory && phase === 'data' && requestedLimit > SYNC_PAGE_SIZE;
+  // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
+  // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
+  // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
+  // and a NEW responder treats a request WITHOUT meta pageMode as non-negotiated
+  // (plain meta serializer). The signed `limit` still rides the 500-row legacy
+  // cap below, so digests stay wire-compatible.
+  const useByteBudgetPage = !includeSharedMemory
+    && (phase === 'data' || phase === 'meta')
+    && requestedLimit > SYNC_PAGE_SIZE;
   const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
 
   if (!needsAuth) {
