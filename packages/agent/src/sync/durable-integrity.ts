@@ -1093,8 +1093,14 @@ function selectAdmittedMetadataIndexes(
     // #1921 — a durable `_meta` subject must be a conforming IRI. Drop a
     // blank-node/literal subject here, BEFORE the merkle/marker admission
     // branch below: `indexIntegrityMetadata` adds ANY merkleRoot-bearing
-    // subject to `merkleSubjects` with no IRI check, so a forged-integrity
-    // blank node would otherwise reach that branch.
+    // subject to `merkleSubjects` without validating the subject term, so a
+    // forged-integrity blank node would otherwise fall into that branch and be
+    // persisted. The ordering is load-bearing — the check must run before the
+    // branch, not inside it: a blank node has no stable identity, and once
+    // persisted the responder must serve it back, where #1916's store-paged
+    // subject-atomic lane only stays sound for it via Oxigraph's per-query
+    // relabel. Rejecting at the loop top preserves the store invariant that
+    // every durable `_meta` subject is a conforming IRI.
     if (!isIriMetaSubject(quad.subject)) {
       droppedNonIriSubjects += 1;
       continue;
