@@ -9,7 +9,11 @@
 // aggregation keeps its one-result-per-peer input-order shape, and one peer's
 // failure stays isolated instead of failing the whole run.
 import { describe, expect, it, vi } from 'vitest';
-import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '@origintrail-official/dkg-agent';
+import {
+  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  FOREGROUND_CATCHUP_SYNC_PRIORITY,
+} from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
 // The worker impl wires itself to `parentPort` at module load, so a
@@ -128,6 +132,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     let peakSyncs = 0;
     const durableOrder: string[] = [];
     const sharedSeen: string[] = [];
+    const syncPriorities: Array<number | undefined> = [];
     const finalizeCalls: unknown[][] = [];
 
     const result = await runWorkerCatchup({ contextGraphId: 'cg-storm', includeSharedMemory: true }, async (method, args) => {
@@ -143,6 +148,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
         }
         case 'syncDurable': {
           durableOrder.push(args[0] as string);
+          syncPriorities.push(args[2] as number | undefined);
           inFlightSyncs += 1;
           peakSyncs = Math.max(peakSyncs, inFlightSyncs);
           await delay(4);
@@ -151,6 +157,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
         }
         case 'syncSharedMemory': {
           sharedSeen.push(args[0] as string);
+          syncPriorities.push(args[2] as number | undefined);
           inFlightSyncs += 1;
           peakSyncs = Math.max(peakSyncs, inFlightSyncs);
           await delay(2);
@@ -175,6 +182,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     // order (the bounded mapper's shared cursor hands out work in order).
     expect(durableOrder).toEqual(peerIds);
     expect([...sharedSeen].sort()).toEqual([...peerIds].sort());
+    expect(syncPriorities).toEqual(
+      Array.from({ length: peerIds.length * 2 }, () => FOREGROUND_CATCHUP_SYNC_PRIORITY),
+    );
 
     // Aggregation unchanged from the unbounded Promise.all shape.
     expect(result.selectedPeers).toBe(peerIds.length);
@@ -233,8 +243,10 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.diagnostics?.durable.failedPeers).toBe(1);
   });
 
-  it('surfaces partial progress followed by local deferral without finalizing the catch-up', async () => {
+  it('retries only SWM after durable progress and finalizes when local pressure clears', async () => {
     const finalizeCalls: unknown[][] = [];
+    let durableCalls = 0;
+    let sharedCalls = 0;
     const result = await runWorkerCatchup({ contextGraphId: 'cg-deferred', includeSharedMemory: true }, async (method) => {
       switch (method) {
         case 'prepareCatchup':
@@ -242,17 +254,22 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
         case 'waitForSyncProtocol':
           return true;
         case 'syncDurable':
+          durableCalls += 1;
           return durableResult();
-        case 'syncSharedMemory':
-          return {
-            ...sharedResult(),
-            insertedTriples: 0,
-            fetchedDataTriples: 0,
-            insertedDataTriples: 0,
-            bytesReceived: 0,
-            completedPhases: 0,
-            deferredBackpressure: 1,
-          };
+        case 'syncSharedMemory': {
+          sharedCalls += 1;
+          return sharedCalls === 1
+            ? {
+                ...sharedResult(),
+                insertedTriples: 0,
+                fetchedDataTriples: 0,
+                insertedDataTriples: 0,
+                bytesReceived: 0,
+                completedPhases: 0,
+                deferredBackpressure: 1,
+              }
+            : sharedResult();
+        }
         case 'finalizeCatchup':
           finalizeCalls.push([]);
           return null;
@@ -262,11 +279,100 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
 
     expect(result.peersResponded).toBe(1);
-    expect(result.peersSucceeded).toBe(0);
-    expect(result.deferredBackpressure).toBe(1);
+    expect(result.peersSucceeded).toBe(1);
+    expect(result.deferredBackpressure).toBe(0);
     expect(result.dataSynced).toBe(1);
-    expect(result.sharedMemorySynced).toBe(0);
-    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(1);
+    expect(result.sharedMemorySynced).toBe(1);
+    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(0);
+    expect(durableCalls).toBe(1);
+    expect(sharedCalls).toBe(2);
+    expect(finalizeCalls).toEqual([[]]);
+  });
+
+  it('finishes deferred durable sync before starting SWM', async () => {
+    let durableCalls = 0;
+    let sharedCalls = 0;
+    const callOrder: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-durable-deferred', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds: ['peer-1'], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls += 1;
+            callOrder.push(`durable-${durableCalls}`);
+            return durableCalls === 1
+              ? {
+                  ...durableResult(),
+                  insertedTriples: 0,
+                  insertedDataTriples: 0,
+                  completedPhases: 0,
+                  deferredBackpressure: 1,
+                }
+              : durableResult();
+          case 'syncSharedMemory':
+            sharedCalls += 1;
+            callOrder.push('shared');
+            return sharedResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result.deferredBackpressure).toBe(0);
+    expect(durableCalls).toBe(2);
+    expect(sharedCalls).toBe(1);
+    expect(callOrder).toEqual(['durable-1', 'durable-2', 'shared']);
+  });
+
+  it('returns deferred after a bounded durable retry budget and never starts dependent SWM', async () => {
+    let durableCalls = 0;
+    let sharedCalls = 0;
+    const finalizeCalls: unknown[][] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-persistently-deferred', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds: ['peer-1'], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls += 1;
+            return {
+              ...durableResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 0,
+              deferredBackpressure: 1,
+            };
+          case 'syncSharedMemory':
+            sharedCalls += 1;
+            return sharedResult();
+          case 'finalizeCatchup':
+            finalizeCalls.push([]);
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(durableCalls).toBe(CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS.length + 1);
+    expect(sharedCalls).toBe(0);
+    expect(result.deferredBackpressure).toBe(1);
+    expect(result.peersResponded).toBe(0);
+    expect(result.peersSucceeded).toBe(0);
     expect(finalizeCalls).toEqual([]);
   });
 
