@@ -652,8 +652,15 @@ export class FinalizationRecovery<
       );
       return undefined;
     }
+    const publisherAuthority = await this.prepareSettledPublisherUpgrade(input, evidence);
+    if (publisherAuthority.status === 'deferred') return undefined;
+    const publisherUpgrade = publisherAuthority.status === 'upgrade'
+      ? publisherAuthority.prepared
+      : undefined;
     const store = this.getStore();
-    if (!store?.isAttemptDue(entry)) return undefined;
+    // A current publisher delivery is new authoritative information, so it
+    // must not be hidden behind receipt backoff inherited by the settled row.
+    if (!publisherUpgrade && !store?.isAttemptDue(entry)) return undefined;
     const canonical = await this.resolveCanonicalReceipt(
       input.candidate,
       evidence,
@@ -694,6 +701,14 @@ export class FinalizationRecovery<
     );
     if (!placementChanged) {
       if (canonical.status === 'confirmed') {
+        if (publisherUpgrade) {
+          return this.rearmSettledWithTrustedPublisher(
+            input,
+            entry,
+            publisherUpgrade.publisherPeerId,
+            'trusted publisher access semantics arrived after settlement',
+          );
+        }
         await this.clearSettledRetry(entry);
       } else {
         this.log.info(
@@ -702,6 +717,14 @@ export class FinalizationRecovery<
         );
       }
       return undefined;
+    }
+    if (publisherUpgrade) {
+      return this.rearmSettledWithTrustedPublisher(
+        input,
+        entry,
+        publisherUpgrade.publisherPeerId,
+        'trusted publisher access semantics and canonical placement changed after settlement',
+      );
     }
     if (!await this.markReorged(
       entry,
@@ -713,6 +736,68 @@ export class FinalizationRecovery<
       return undefined;
     }
     return this.receive(input);
+  }
+
+  private async prepareSettledPublisherUpgrade(
+    input: FinalizationRecoveryLiveInput,
+    evidence: VerifiedGraphScopedFinalizationEvidence,
+  ): Promise<
+    | { status: 'upgrade'; prepared: Prepared }
+    | { status: 'none' | 'deferred' }
+  > {
+    if (!input.sourcePeerId) return { status: 'none' };
+    let prepared: Prepared | undefined;
+    try {
+      prepared = await this.materializer.prepare(input);
+    } catch (error) {
+      if (!this.materializer.isRetryableError(error)) throw error;
+      this.log.info(
+        `Finalization recovery publisher authority check is deferred for `
+          + `${input.candidate.scope.ual}`,
+      );
+      return { status: 'deferred' };
+    }
+    if (
+      !prepared
+      || input.sourcePeerId !== prepared.publisherPeerId
+      || sameGraphScopedAccessSemantics(prepared, evidence)
+    ) return { status: 'none' };
+    return { status: 'upgrade', prepared };
+  }
+
+  private async rearmSettledWithTrustedPublisher(
+    input: FinalizationRecoveryLiveInput,
+    entry: FinalizationRecoveryEntry,
+    publisherPeerId: string,
+    reason: string,
+  ): Promise<FinalizationRecoveryEntry | undefined> {
+    const store = this.getStore();
+    if (!store) return undefined;
+    try {
+      await store.rearmSettledWithTrustedPublisher(
+        entry.key,
+        entry.generation,
+        publisherPeerId,
+        reason,
+      );
+      // Reload even after a lost compare-and-set: another identical delivery
+      // may already have performed the same rearm.
+      const rearmed = await this.receive(input);
+      if (
+        rearmed?.state === 'REORGED'
+        && rearmed.generation === entry.generation + 1
+        && rearmed.trustedPublisherPeerId === publisherPeerId
+      ) return rearmed;
+      this.log.warn(
+        `Finalization recovery inbox refused trusted publisher rearm for ${entry.ual}`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery trusted publisher rearm failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return undefined;
   }
 
   private async clearSettledRetry(entry: FinalizationRecoveryEntry): Promise<void> {
@@ -1392,6 +1477,15 @@ function sameCanonicalFinalizationPlacement(
     && receipt.blockNumber === evidence.blockNumber
     && receipt.blockHash.toLowerCase() === evidence.blockHash.toLowerCase()
     && receipt.txIndex === evidence.txIndex;
+}
+
+function sameGraphScopedAccessSemantics(
+  prepared: FinalizationRecoveryPreparedMaterialization,
+  evidence: VerifiedGraphScopedFinalizationEvidence,
+): boolean {
+  return prepared.accessPolicy === evidence.accessPolicy
+    && [...prepared.allowedPeers].sort().join('\0')
+      === [...evidence.allowedPeers].sort().join('\0');
 }
 
 function sameImmutableFinalizationCandidate(

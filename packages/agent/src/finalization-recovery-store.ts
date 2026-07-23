@@ -86,6 +86,13 @@ export interface FinalizationRecoveryStore {
     generation: number,
     publisherPeerId: string,
   ): Promise<boolean>;
+  /** Caller-validated authority upgrade; SQLite only enforces monotonic CAS state. */
+  rearmSettledWithTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+    lastError: string,
+  ): Promise<boolean>;
   markVerified(
     key: string,
     generation: number,

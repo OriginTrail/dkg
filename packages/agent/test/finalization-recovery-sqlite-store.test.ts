@@ -268,6 +268,59 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('atomically rearms settled evidence for the already trusted publisher', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      expect((await store.receive(received({
+        sourcePeerId: '12D3KooWUntrustedRelay',
+      }))).status).toBe('inserted');
+      expect(await store.recordTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).toBe(true);
+      expect((await store.markVerified('entry-1', 0, evidence())).status).toBe('verified');
+      expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
+      await store.recordAttempt('entry-1', 0, 'old settled retry', 1_000);
+
+      await expect(store.rearmSettledWithTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWAttacker',
+        'untrusted late authority',
+      )).resolves.toBe(false);
+      await expect(store.rearmSettledWithTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+        'trusted publisher access semantics arrived after settlement',
+      )).resolves.toBe(true);
+      await expect(store.rearmSettledWithTrustedPublisher(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+        'stale generation',
+      )).resolves.toBe(false);
+
+      const [rearmed] = await store.list();
+      expect(rearmed).toMatchObject({
+        state: 'REORGED',
+        generation: 1,
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+        rawMessage: RAW,
+        attemptCount: 0,
+        lastError: 'trusted publisher access semantics arrived after settlement',
+      });
+      expect(rearmed).not.toHaveProperty('verifiedEvidence');
+      expect(rearmed).not.toHaveProperty('nextAttemptAt');
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('invalidates reorged evidence while retaining the immutable recovery envelope', async () => {
     const directory = await temporaryDirectory();
     try {

@@ -178,6 +178,57 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
+  rearmSettledWithTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+    lastError: string,
+  ): Promise<boolean> {
+    if (
+      this.#closed
+      || this.#closing
+      || publisherPeerId.length === 0
+      || publisherPeerId.trim() !== publisherPeerId
+    ) return Promise.resolve(false);
+    return this.mutate(() => {
+      if (this.#closed) return false;
+      let changed = false;
+      this.transaction(() => {
+        const now = this.#policy.now();
+        const result = this.database.prepare(`
+          UPDATE finalization_inbox_v1
+          SET state = 'REORGED',
+              trusted_publisher_peer_id = ?,
+              block_number = NULL,
+              block_hash = NULL,
+              tx_index = NULL,
+              publisher_address = NULL,
+              author_address = NULL,
+              verified_evidence_json = NULL,
+              generation = generation + 1,
+              attempt_count = 0,
+              next_attempt_at = NULL,
+              last_error = ?,
+              updated_at = ?
+          WHERE key = ? AND generation = ? AND state = 'SETTLED'
+            AND (
+              trusted_publisher_peer_id IS NULL
+              OR trusted_publisher_peer_id = ?
+            )
+        `).run(
+          publisherPeerId,
+          lastError,
+          now,
+          key,
+          generation,
+          publisherPeerId,
+        );
+        changed = result.changes > 0;
+      });
+      return changed;
+    });
+  }
+
   markVerified(
     key: string,
     generation: number,
