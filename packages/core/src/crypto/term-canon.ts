@@ -204,11 +204,17 @@ function canonBoolean(lex: string): string {
 }
 
 // ── xsd:decimal ────────────────────────────────────────────────────────────────
+function trimTrailingAsciiZeros(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 48 /* 0 */) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 function canonDecimal(lex: string): string {
   const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(lex);
   if (!m || (m[2] === '' && (m[3] === undefined || m[3] === ''))) throw new Error(`invalid xsd:decimal: ${lex}`);
   const intRaw = m[2].replace(/^0+/, '');
-  const frac = (m[3] ?? '').replace(/0+$/, '');
+  const frac = trimTrailingAsciiZeros(m[3] ?? '');
   // oxigraph stores xsd:decimal as the SAME i128 / 10^18 fixed-point as duration
   // seconds: a value needing more than 18 fractional digits, or whose 10^18-scaled
   // magnitude overflows i128, fails to parse and is kept VERBATIM.
@@ -563,7 +569,7 @@ function canonDuration(lex: string, dt: string): string {
       sWhole = sTok;
     } else {
       sWhole = sTok.slice(0, dot) || '0';
-      const fracDigits = sTok.slice(dot + 1).replace(/0+$/, '');
+      const fracDigits = trimTrailingAsciiZeros(sTok.slice(dot + 1));
       if (fracDigits.length > 18) throw new Error('sub-1e-18 seconds');
       fracScaled = fracDigits === '' ? 0n : BigInt(fracDigits.padEnd(18, '0'));
     }
