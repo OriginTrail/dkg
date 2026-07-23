@@ -506,13 +506,16 @@ function indexIntegrityMetadata(
 
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
-  // #1921 — callers pass IRI-only `_meta` quads: both selectVerifiedDurableSyncQuads
-  // and planBoundedGraphScopedDurableBatch sanitize non-IRI subjects at their
-  // boundary before indexing. So no blank-node/literal subject reaches candidacy
-  // OR the metaBySubject-based verification scans (readIntegrityMetadata's PART_OF
-  // scan, parseGraphScopedDescriptor), meaning a non-IRI subject can neither
-  // authenticate data nor poison a valid batch. Admission (the selectors) runs on
-  // the ORIGINAL metaQuads and is where non-IRI rows are dropped + counted.
+  // #1921 PRECONDITION: callers MUST pass IRI-sanitized `_meta` quads. Both
+  // current callers do — selectVerifiedDurableSyncQuads and
+  // planBoundedGraphScopedDurableBatch filter non-IRI subjects at their boundary
+  // before indexing — and any NEW caller MUST too. This function no longer
+  // filters internally, so a non-IRI subject reaching here would re-enter
+  // candidacy AND the metaBySubject-based verification scans
+  // (readIntegrityMetadata's PART_OF scan, parseGraphScopedDescriptor), letting a
+  // peer's blank-node/literal subject authenticate data OR poison a valid batch.
+  // Admission (the selectors) deliberately runs on the ORIGINAL metaQuads and is
+  // where non-IRI rows are dropped + counted.
   for (const quad of metaQuads) {
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
@@ -1113,17 +1116,13 @@ function selectAdmittedMetadataIndexes(
   let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
-    // #1921 — a durable `_meta` subject must be a conforming IRI. Drop a
-    // blank-node/literal subject here, BEFORE the merkle/marker admission
-    // branch below: `indexIntegrityMetadata` adds ANY merkleRoot-bearing
-    // subject to `merkleSubjects` without validating the subject term, so a
-    // forged-integrity blank node would otherwise fall into that branch and be
-    // persisted. The ordering is load-bearing — the check must run before the
-    // branch, not inside it: a blank node has no stable identity, and once
-    // persisted the responder must serve it back, where #1916's store-paged
-    // subject-atomic lane only stays sound for it via Oxigraph's per-query
-    // relabel. Rejecting at the loop top preserves the store invariant that
-    // every durable `_meta` subject is a conforming IRI.
+    // #1921 — admission runs on the ORIGINAL metaQuads (verification already ran
+    // on the IRI-sanitized set at the boundary). A non-IRI descriptive row would
+    // otherwise reach the descriptive fall-through below and be persisted, so
+    // drop + count it here — that keeps it out of the store AND feeds the
+    // meta-cursor consumed-row count (checkpoint advance). It could not reach the
+    // merkle/marker branch regardless: the boundary sanitize keeps non-IRI
+    // subjects out of `merkleSubjects`/`markerSubjects`.
     if (!isIriMetaSubject(quad.subject)) {
       droppedNonIriSubjectTriples += 1;
       continue;
