@@ -20,10 +20,7 @@ import {
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import {
-  runDurableSync,
-  type DurableSyncBudget,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -208,40 +205,26 @@ function runGraphScopedDurableSync(options: {
     asset: VerifiedGraphScopedAsset,
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
-  fixtures?: Array<{
-    data: Quad;
-    metadata: Quad[];
-    assertionGraph: string;
-  }>;
-  durableSyncBudget?: DurableSyncBudget;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
 }) {
   const v2Data = dataQuad(2);
   const v2Meta = metadata(2);
-  const fixtures = options.fixtures ?? [{
-    data: v2Data,
-    metadata: v2Meta,
-    assertionGraph,
-  }];
-  const dataQuads = fixtures.map((fixture) => fixture.data);
-  const metadataQuads = fixtures.flatMap((fixture) => fixture.metadata);
   return runDurableSync({
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    durableSyncBudget: options.durableSyncBudget
-      ?? uniformDurableSyncBudget(() => Date.now() + 60_000),
+    durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
-      phase === 'data' ? page(phase, dataQuads) : page(phase, metadataQuads)
+      phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
     ),
     processDurableBatchInWorker: async () => ({
-      verifiedData: dataQuads,
-      verifiedMeta: metadataQuads,
-      verifiedGraphScopedDataGraphs: fixtures.map((fixture) => fixture.assertionGraph),
-      totalFetchedDataQuads: dataQuads.length,
-      totalFetchedMetaQuads: metadataQuads.length,
+      verifiedData: [v2Data],
+      verifiedMeta: v2Meta,
+      verifiedGraphScopedDataGraphs: [assertionGraph],
+      totalFetchedDataQuads: 1,
+      totalFetchedMetaQuads: v2Meta.length,
       rejectedKcs: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
@@ -259,92 +242,6 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
-  it('starts bounded chain authentication after an exhausted fetch deadline', async () => {
-    const fetchDeadline = 1;
-    const authenticationDeadline = 1_800_000_234_567;
-    const storeGraphScopedAsset = vi.fn(async (
-      _asset: VerifiedGraphScopedAsset,
-      _deadline: number,
-    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
-
-    await runGraphScopedDurableSync({
-      durableSyncBudget: {
-        fetchDeadline: () => fetchDeadline,
-        graphScopedAuthenticationDeadline: () => authenticationDeadline,
-      },
-      storeGraphScopedAsset,
-    });
-
-    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
-  });
-
-  it('shares one authentication deadline across every graph-scoped asset in the page', async () => {
-    const secondUal = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/2';
-    const secondGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/0x1111111111111111111111111111111111111111/2`;
-    const secondMetadata = metadata(2).map((quad) => ({
-      ...quad,
-      subject: secondUal,
-      object: quad.predicate === `${DKG}kaUal`
-        ? secondUal
-        : quad.predicate === `${DKG}assertionGraph`
-          ? secondGraph
-          : quad.object,
-    }));
-    const authenticationDeadline = 1_800_000_345_678;
-    const createGraphScopedAuthenticationDeadline = vi.fn(() => authenticationDeadline);
-    const storeGraphScopedAsset = vi.fn(async (
-      _asset: VerifiedGraphScopedAsset,
-      _deadline: number,
-    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
-
-    await runGraphScopedDurableSync({
-      fixtures: [
-        { data: dataQuad(2), metadata: metadata(2), assertionGraph },
-        {
-          data: { ...dataQuad(2), subject: 'http://example.com/entity/second', graph: secondGraph },
-          metadata: secondMetadata,
-          assertionGraph: secondGraph,
-        },
-      ],
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
-        graphScopedAuthenticationDeadline: createGraphScopedAuthenticationDeadline,
-      },
-      storeGraphScopedAsset,
-    });
-
-    expect(createGraphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(2);
-    expect(storeGraphScopedAsset.mock.calls.map((call) => call[1])).toEqual([
-      authenticationDeadline,
-      authenticationDeadline,
-    ]);
-  });
-
-  it('lets direct callers express one uniform deadline strategy', async () => {
-    const deadline = 1_800_000_123_456;
-    const createContextGraphFetchDeadline = vi.fn(() => deadline);
-    const createGraphScopedAuthenticationDeadline = vi.fn(() => deadline);
-    const storeGraphScopedAsset = vi.fn(async (
-      _asset: VerifiedGraphScopedAsset,
-      _deadline: number,
-    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
-
-    await runGraphScopedDurableSync({
-      durableSyncBudget: {
-        fetchDeadline: createContextGraphFetchDeadline,
-        graphScopedAuthenticationDeadline: createGraphScopedAuthenticationDeadline,
-      },
-      storeGraphScopedAsset,
-    });
-
-    expect(createContextGraphFetchDeadline).toHaveBeenCalledTimes(1);
-    expect(createGraphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
-  });
-
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {

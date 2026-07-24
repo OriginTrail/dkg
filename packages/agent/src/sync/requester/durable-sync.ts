@@ -91,7 +91,14 @@ interface DurableSyncContext {
    */
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
-  durableSyncBudget: DurableSyncBudget;
+  /** Preferred deadline model for new callers. */
+  durableSyncBudget?: DurableSyncBudget;
+  /**
+   * @deprecated Compatibility boundary for deep-import callers from before
+   * durable sync split fetch and authentication into separate bounded phases.
+   * The one deadline created for a CG remains shared by both phases.
+   */
+  createContextGraphSyncDeadline?: (remainingContextGraphs: number) => number;
   fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -154,6 +161,31 @@ interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
+function resolveDurableSyncBudget(context: DurableSyncContext): DurableSyncBudget {
+  if (context.durableSyncBudget) return context.durableSyncBudget;
+
+  const createLegacyDeadline = context.createContextGraphSyncDeadline;
+  if (!createLegacyDeadline) {
+    throw new TypeError(
+      'runDurableSync requires durableSyncBudget or createContextGraphSyncDeadline',
+    );
+  }
+
+  let currentContextGraphDeadline: number | undefined;
+  return {
+    fetchDeadline: (remainingContextGraphs) => {
+      currentContextGraphDeadline = createLegacyDeadline(remainingContextGraphs);
+      return currentContextGraphDeadline;
+    },
+    graphScopedAuthenticationDeadline: () => {
+      if (currentContextGraphDeadline === undefined) {
+        throw new Error('legacy durable-sync deadline requested before Context Graph fetch');
+      }
+      return currentContextGraphDeadline;
+    },
+  };
+}
+
 /**
  * Rolling-upgrade guard: an old responder may ignore the additive exact-asset
  * filter and return the whole CG. Keep only requested descriptor subjects and
@@ -197,7 +229,7 @@ export async function runDurableSync(
     onPhase,
     onAccessDenied,
     syncAgentsMeta = true,
-    durableSyncBudget,
+    durableSyncBudget: configuredDurableSyncBudget,
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
@@ -212,6 +244,7 @@ export async function runDurableSync(
     logWarn,
     logDebug,
   } = context;
+  const durableSyncBudget = configuredDurableSyncBudget ?? resolveDurableSyncBudget(context);
 
   const accumulator = createDurableSyncAccumulator();
 

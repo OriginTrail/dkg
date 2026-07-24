@@ -2143,6 +2143,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     // Revalidation runs only for requested targets, in request order.
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
     expect(result.outcomes.size).toBe(2);
+    expect(result.nextRecoveryOrdinal).toBe(2);
   });
 
   it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
@@ -2192,12 +2193,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchCount).toBe(1);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
+    expect(first.nextRecoveryOrdinal).toBeUndefined();
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchCount).toBe(1);
     expect(second.outcomes.size).toBe(0);
+    expect(second.nextRecoveryOrdinal).toBeUndefined();
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {

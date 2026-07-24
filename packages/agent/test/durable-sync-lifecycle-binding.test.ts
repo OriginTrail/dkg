@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -68,6 +68,7 @@ function graphScopedAsset(
 async function captureGraphScopedStore(
   chain: ChainAdapter,
   warn: ReturnType<typeof vi.fn> = vi.fn(),
+  totalTimeoutMs?: number,
 ) {
   const agentLike: any = {
     config: {},
@@ -104,6 +105,12 @@ async function captureGraphScopedStore(
     'peer-remote',
     contextGraphId,
     1,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    totalTimeoutMs,
   );
   return mockedRunDurableSync.mock.calls[0]![0].storeGraphScopedAsset!;
 }
@@ -112,6 +119,10 @@ describe('durable sync lifecycle chain binding', () => {
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
     mockedMaterialize.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('starts a fresh bounded authentication phase after network fetch', async () => {
@@ -124,6 +135,19 @@ describe('durable sync lifecycle chain binding', () => {
     vi.mocked(Date.now).mockReturnValue(1_800_000_300_000);
     expect(syncContext.durableSyncBudget.graphScopedAuthenticationDeadline())
       .toBe(1_800_000_420_000);
+  });
+
+  it('threads a caller-supplied authentication budget through the lifecycle', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    await captureGraphScopedStore(
+      { chainId: 'none' } as ChainAdapter,
+      vi.fn(),
+      299_000,
+    );
+
+    const syncContext = mockedRunDurableSync.mock.calls[0]![0];
+    expect(syncContext.durableSyncBudget.graphScopedAuthenticationDeadline())
+      .toBe(1_800_000_299_000);
   });
 
   it('gives exact VM recovery a full standard transfer phase', async () => {

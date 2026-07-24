@@ -284,6 +284,7 @@ describe('reconcileContextGraph — sweep', () => {
             ordinal,
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
+          nextRecoveryOrdinal: ordinals[3],
         };
       },
     });

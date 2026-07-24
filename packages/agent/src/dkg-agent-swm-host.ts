@@ -3800,7 +3800,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    return { outcomes };
+    const nextRecoveryTarget = recoveredAny ? remaining[0] : undefined;
+    return nextRecoveryTarget
+      ? { outcomes, nextRecoveryOrdinal: nextRecoveryTarget.ordinal }
+      : { outcomes };
   }
 
   /**
